@@ -1,0 +1,1579 @@
+# yaml-language-server: $schema=./workflow.schema.json
+#
+# ==============================================================================
+# persistence-thread-sqlquery-chunked
+#
+# The golden-master workflow definition for the ASYNCHRONOUS SQL query path:
+# chunked retrieval, the caller-side / worker-side PROXY PAIR, and the cross-thread
+# transfer of DataWindow buffer state.
+#
+# THE KEY INSIGHT, stated first because every member below is shaped by it. Each
+# concurrency class in this capability area exists TWICE - a caller-side
+# `n_cst_threading_task_*` half and a worker-side `n_cst_thread_task_*` half - and
+# the legacy encodes each half's required execution context in that object's OWN
+# export comment on its second line. Six of the SQL classes are annotated as
+# running on the worker thread, exactly one on the main thread, and four are
+# calling-thread proxies. That duality is a CONTRACT, not an implementation detail.
+# This capture therefore records the marshalling boundary AS OBSERVABLE - which
+# task ran where, and what crossed between them - rather than flattening the pair
+# into a single asynchronous call. A port that collapses the pair passes a naive
+# round-trip test and diverges on exactly the cases the boundary exists to handle.
+#
+# This is a declarative data file. It contains no code, no test and no executable
+# step. It SPECIFIES a paired capture that has NOT been run - see `executionStatus`
+# at the foot of the file, whose only legal value says so.
+#
+# Every legacy path below is cited, never touched. `ws_objects/**` is read-only and
+# is the behavioural oracle: no fixture is edited, moved, renamed, reformatted,
+# re-encoded or copied into this tree, and this file holds no fixture content for
+# exactly that reason - a vendored copy is a second master, and a second master
+# drifts.
+#
+# NO TIMING IS ASSERTED ANYWHERE IN THIS FILE. This workflow is asynchronous, which
+# is precisely what makes a timing assertion tempting, and it is forbidden:
+# COMPLETION ORDERING IS BEHAVIOUR, COMPLETION TIMING IS NOT. No elapsed value, no
+# wait duration and no row rate is recorded or compared. The repository publishes no
+# service-level agreement, no latency budget, no throughput target and no
+# availability commitment to assert one against, and the only quantitative gate in
+# the brief - 80% per-service line coverage - is measured in CI from
+# `coverage.cobertura.xml`, never from this store.
+#
+# Conventions this store owns elsewhere are CITED here, never restated:
+#   - the shared-volume capture rule ....... characterization/README.md section 2.1
+#   - recording-file conventions ........... characterization/README.md section 3.4
+#   - the ignored-extension trap ........... characterization/README.md section 3.5
+#   - newline normalization ................ characterization/README.md section 3.7
+#   - what must never be recorded .......... characterization/README.md section 6.2
+#   - the determinism-seam register ........ docs/PARITY.md section 5.1
+#   - the four cross-thread defects ........ docs/PARITY.md section 7.5
+#   - the C-05 query contract .............. docs/CONTRACTS.md section 8
+#
+# There are NO user-specified rules: the project's rules document returns exactly
+# one line reporting that none were provided. No rule is invented in its place and
+# nothing in this file exists because of one. Enterprise-standard best practice
+# applies instead, and the binding constraints are the migration plan's own -
+# C-B, C-C, C-E, C-F, C-K and C-L, each honoured at the point it bites below.
+# ==============================================================================
+
+# Quoted: the schema fixes this as the STRING "1". Unquoted it would load as an
+# integer and fail validation against the constant.
+schemaVersion: "1"
+
+# The pairing key, and the only thing that makes two recordings comparable. It
+# names both
+# characterization/recordings/legacy/persistence-thread-sqlquery-chunked/ and
+# characterization/recordings/dotnet/persistence-thread-sqlquery-chunked/, and it
+# is traceable to its oracle window `w_test_thread_sqlquery` with that name's
+# underscores rendered as hyphens, which is the derivation the schema prescribes.
+# Never renamed once a recording exists under it: a rename orphans both halves of
+# every pair already captured, and nothing reports that it happened.
+workflowId: persistence-thread-sqlquery-chunked
+
+title: Asynchronous chunked SQL retrieval and cross-thread DataWindow buffer transfer
+
+capabilityArea: >-
+  Asynchronous chunked retrieval and cross-thread buffer transfer - the query task
+  proxy pair, the chunked changeset and full-state transfer styles, and the paging
+  triple the caller-side proxy reports.
+
+# Closed enum. Persistence is the only service that generates or executes SQL and
+# the only one holding a storage provider, so it is the only legal candidate for
+# this workflow's target half.
+targetService: Persistence
+
+description: >-
+  The golden master for the asynchronous SQL query path. Its oracle is the
+  framework's own threaded-query test window, which creates a threading host,
+  registers one query task by CLASS NAME, subscribes to that task's start and stop
+  events, dispatches it, and - in its stop handler - moves the finished result out
+  of the task's caller-side carrier and into a DataWindow. Four things make this
+  workflow worth a pair of its own rather than an appendix to the retrieve triple.
+  First, the marshalling boundary is real and observable: the worker half calls
+  back into its caller-side proxy for every notification and for every chunk, and
+  the legacy annotates the required execution context of each half in the object's
+  own export comment. Second, the transfer has TWO STYLES that are not
+  interchangeable optimizations - a chunked changeset style and a whole-state
+  style, selected by the DataWindow's processing mode - and they differ in what
+  they carry, in what must be synchronized first, and in which defects they
+  exhibit. Third, this is the workflow that carries the transaction descriptor, so
+  it is the workflow whose mask owns the transaction pool's clock seam. Fourth,
+  the four documented cross-thread transfer defects all live on this path, and
+  proving they SURVIVED is the reason this pair exists. The seed phase is declared
+  separately from the capture phase because the oracle's own storage setup is
+  destructive, and re-running it to start clean between the two halves of a pair is
+  exactly the reseed the capture rule forbids. The seed therefore runs once; the
+  capture phase is what runs twice. This workflow characterizes SQLite and nothing
+  else - no other engine is provisioned, required or reachable - and it does not
+  characterize the byte-exact paging rewrites, which are pure string transforms
+  owned by the sibling workflow persistence-sql-paging-rewrite.
+
+# ------------------------------------------------------------------------------
+# oracleFixtures - what this workflow is captured FROM.
+#
+# All read-only (C-C). Cited by repository-root-relative path with line locators so
+# a reviewer can check every claim below instead of taking it on trust. The
+# specification entries are the framework library objects read as the authoritative
+# statement of the behaviour under characterization; the store's own roster names
+# `n_cst_thread_task_sqlquery.sru` as this workflow's service object, and it is the
+# object every defect below is anchored in.
+# ------------------------------------------------------------------------------
+oracleFixtures:
+
+  - path: ws_objects/pfw.tests.pbl.src/w_test_thread_sqlquery.srw
+    role: oracle-window
+    # 288 lines. Drives the whole workflow. Its DataWindow control declares BOTH
+    # task events and carries NO DataObject of its own, which is why the capture
+    # supplies one - see preconditions.
+    locators:
+      - "L80"         # open: the threading host is created here
+      - "L83"         # close: the threading host is destroyed here
+      - "L116"        # the page-index field's default text, "1"
+      - "L155"        # dw_1 declares the stop event: task, exit code, last error info
+      - "L156"        # dw_1 declares the start event, typed long - the veto channel
+      - "L169"        # the stop handler opens; its own comment calls it a task notification
+      - "L170"        # EARLY RETURN on the cancelled code - nothing else is recorded on that path
+      - "L171"        # the success arm is selected by the OK code
+      - "L173"        # comment: rows may instead be moved to save memory when the shapes agree
+      - "L174"        # full state read OUT of the task's caller-side carrier
+      - "L175"        # full state applied INTO the window's own DataWindow
+      - "L176"        # comment: with paging on, the count is the whole query's row count
+      - "L177"        # the record count is read here
+      - "L178"        # the paged branch is selected from the task's own paged property
+      - "L180"        # the page size, from the task's property
+      - "L182"        # the page count, from the task's accessor
+      - "L184"        # the page index, from the task's property
+      - "L186"        # end of the paged branch
+      - "L188"        # the database-error arm: the database-error and invalid-transaction codes
+      - "L189"        # the structured error descriptor is declared here
+      - "L190"        # the descriptor is read from the caller-side proxy's accessor
+      - "L191"        # only its error-text field is surfaced by the oracle
+      - "L192"        # comment: other errors, where the string argument may carry the detail
+      - "L193"        # the general-exception arm formats the code and the last error info
+      - "L198-L202"   # the start handler returns zero; its comment records that ONE PREVENTS
+      - "L219-L221"   # the cancel path: stop the thread and cancel all current tasks
+      - "L238"        # the query button declares the caller-side task variable
+      - "L240"        # first-run test on the host's task count
+      - "L242"        # the task is added BY CLASS NAME - the caller-side class
+      - "L244-L245"   # the start and stop subscriptions, by event name onto the DataWindow
+      - "L247"        # COMMENTED, AUTHORITATIVE: the six-field transaction descriptor call
+      - "L249"        # COMMENTED: the statement setter
+      - "L250"        # COMMENTED: the data-object setter
+      - "L255"        # COMMENTED: the positional parameter-array setter
+      - "L257"        # COMMENTED: the named parameter setter
+      - "L259"        # COMMENTED: paging enabled
+      - "L261"        # subsequent runs fetch task index one instead of adding a task
+      - "L264"        # COMMENTED: the page-size setter, read from the page-size field
+      - "L266"        # COMMENTED: the page-index setter, read from the page-index field
+      - "L268"        # the host dispatches the run
+      - "L285"        # the page-size field's default text, "500"
+
+  - path: ws_objects/pfw.tests.pbl.src/n_test_threading_task.sru
+    role: supporting-fixture
+    # 21 lines, and the shortest proof of the proxy pair in the repository: a
+    # CALLER-SIDE task subclass whose only override NAMES its worker-side
+    # counterpart class. The two halves are related by class name, resolved at run
+    # time, which is why the recording carries both names rather than one handle.
+    locators:
+      - "L3"          # derives from the caller-side task base
+      - "L7"          # the same derivation in the body
+      - "L11"         # the class-name override returns the WORKER-SIDE class name
+
+  - path: ws_objects/pfw.tests.pbl.src/dw_sqlite.srd
+    role: supporting-fixture
+    # 37 lines, release 12.5. Supplies the ROW SHAPE this workflow retrieves and
+    # the declared table sort that makes the multi-block transfer branch reachable.
+    # It is this workflow's supporting fixture rather than its primary one: the
+    # sibling persistence-sqlite-retrieve-update is built around its update
+    # settings, while this workflow reads it for its columns, its sort and its
+    # retrieve statement.
+    locators:
+      - "L2"          # release 12.5
+      - "L3"          # processing mode 1 - NOT a crosstab or composite, see blockedBehaviours
+      - "L8-L13"      # the six columns in declaration order: id, name, age, address, salary, birth
+      - "L14"         # retrieve statement, update table, sort "age A salary A "
+      - "L27"         # the footer aggregate over the page
+
+  - path: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru
+    role: specification
+    # 883 lines, the WORKER-SIDE half and this workflow's service object. Read as
+    # the authoritative statement of the behaviour under characterization, and the
+    # source of all six defects below.
+    locators:
+      - "L2"          # export comment: RUNS ON THE WORKER THREAD - affinity as contract
+      - "L20"         # derives from the worker-side SQL task base
+      - "L21"         # declares the data-received event over the worker-side carrier
+      - "L34"         # chunk size defaults to 10000; its comment says min 1000, the guard says otherwise
+      - "L73"         # the data-received handler opens
+      - "L77"         # declares the CALLER-SIDE proxy type - the other half of the pair
+      - "L81"         # obtains the caller-side half from the parent-tasking property
+      - "L83"         # first crossing: the row count is notified to the caller side
+      - "L85"         # explicit main-thread test - the affinity gate
+      - "L86-L89"     # with no receiver and no cache the carrier itself is handed over, then nulled
+      - "L93-L94"     # the transfer style is chosen on the processing mode: 4 and 5 are crosstab and composite
+      - "L95-L97"     # FULL-STATE style: read whole state, reset, cross once with the full-state flag TRUE
+      - "L103-L104"   # the caller side is asked whether it must create its carrier first
+      - "L109"        # filtered rows are moved into the primary buffer before transfer
+      - "L112-L141"   # child data for auto-retrieving drop-down columns crosses separately
+      - "L145"        # the chunk count: rows plus filtered rows over the chunk size, rounded up
+      - "L147-L149"   # DEFECT 2 - sorted multi-block changeset row loss, and the temp-carrier workaround
+      - "L150-L151"   # the workaround gate: more than one chunk AND a non-empty declared sort
+      - "L160"        # rows moved into the temporary carrier, primary buffer
+      - "L162"        # row-level status stamped at column zero, primary buffer
+      - "L166"        # rows moved into the temporary carrier, filter buffer
+      - "L168"        # row-level status stamped at column zero, filter buffer
+      - "L171"        # the changeset is extracted from the temporary carrier
+      - "L175-L176"   # DEFECT 3 - a reset must not clear the data; rows are discarded instead
+      - "L178"        # primary rows discarded rather than reset
+      - "L181"        # filter rows discarded rather than reset
+      - "L183"        # the chunk crosses to the caller side with the full-state flag FALSE
+      - "L189"        # the inter-chunk cancellation checkpoint
+      - "L194-L227"   # the direct variant: no temporary carrier, and the final chunk resets
+      - "L205"        # the changeset is extracted from the carrier itself
+      - "L217"        # the FINAL chunk resets - the one place a reset is correct here
+      - "L219"        # the chunk crosses to the caller side
+      - "L229-L231"   # the zero-row case still crosses once, with an empty payload
+      - "L271"        # the where-clause setter's guard: zero index or empty clause is refused
+      - "L288"        # the order-by-clause setter's guard, the same shape
+      - "L303-L310"   # the paged-statement builder refuses a non-positive size or index
+      - "L320"        # paging dispatches on the transaction's own database type
+      - "L396-L398"   # the unimplemented arm - unreachable, see blockedBehaviours
+      - "L410"        # DEFECT 5 - the chunk-size guard refuses a value at or below 1000
+      - "L445"        # the paging flag setter
+      - "L450"        # the page-index setter's guard
+      - "L462"        # the page-size setter's guard
+      - "L559"        # the affinity gate that decides whether sort and filter are touched at all
+      - "L562-L563"   # DEFECT 1 - the full-state style REQUIRES sort and filter synchronization
+      - "L564-L575"   # both are applied, and a rejected application fails with the argument code
+      - "L577-L578"   # DEFECT 1, counterpart - the changeset style does not require them
+      - "L579-L580"   # both are CLEARED in the changeset arm - the observable half
+      - "L582-L596"   # the main-thread arm applies them instead
+      - "L672-L673"   # DEFECT 4 - the whole-state transfer crash when a crosstab has too many columns
+      - "L674-L676"   # the workaround: suppress the interactive prompt before transferring
+      - "L684-L700"   # the clause modifications are issued in array order - the ordering seam
+      - "L723-L724"   # the paged statement is built only when paging is on
+      - "L813-L814"   # the carrier MAY BECOME INVALID once the data-received event has run
+      - "L818-L823"   # the page-count short circuit on a partial final page
+      - "L830"        # DEFECT 6 - the count wrapper replaces the projection with a single aliased literal
+      - "L834"        # the count statement itself, with its own sentinel table alias
+      - "L851-L853"   # success is tested as the value 1; the page count is derived from the record count
+      - "L855"        # the database-error event is raised WITH THE WHOLE GENERATED STATEMENT
+
+  - path: ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlquery.sru
+    role: specification
+    # 532 lines, the CALLER-SIDE half of the pair, and the object the oracle window
+    # actually holds. It owns the paging properties the stop handler reads, the
+    # notification codes that cross the boundary, and the receiving end of every
+    # chunk. Without this half cited, the boundary is invisible in the recording.
+    locators:
+      - "L2"          # export comment: RUNS ON THE CALLING THREAD
+      - "L23"         # the task-type constant, "sqlquery"
+      - "L28-L33"     # the six notification codes, with their word-packed payload conventions
+      - "L37-L40"     # the paged flag, page size, page index and the page-counting flag, default true
+      - "L42"         # the caller-side carrier the stop handler reads the full state out of
+      - "L180"        # the chunk receiver opens, with count, current and the full-state flag
+      - "L182"        # a cancelled task makes the receiver answer zero and stop
+      - "L190"        # full-state application onto a DataWindow receiver
+      - "L195-L197"   # the FIRST chunk resets the receiver, then applies the changeset
+      - "L198-L205"   # the LAST chunk clears update state, recalculates groups and restores redraw
+      - "L207-L210"   # an empty payload answers one and resets the receiver
+      - "L216-L224"   # the same three-step shape for a datastore receiver
+      - "L233-L241"   # and again for the proxy's own carrier when no receiver is registered
+      - "L287-L289"   # the three paging properties are reset together
+
+  - path: ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlbase.sru
+    role: specification
+    # The caller-side SQL task base. It declares the SIX-FIELD transaction
+    # descriptor setter the oracle's commented call matches exactly, and it is where
+    # the structured database error is captured and later read from.
+    locators:
+      - "L2"          # export comment: RUNS ON THE CALLING THREAD
+      - "L9"          # the database-error event, taking the structured descriptor
+      - "L17"         # the last database error is held here
+      - "L30"         # the six-field descriptor setter: dbms, servername, database, logid, logpass, dbparm
+      - "L31"         # the whole-structure overload, carrying all nine fields
+      - "L44"         # the event stores the descriptor verbatim
+      - "L47"         # the accessor the oracle's stop handler calls
+
+  - path: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru
+    role: specification
+    # 736 lines, the WORKER-SIDE SQL task base. Two things in it matter here: the
+    # transaction pool reference it takes and releases, which is the pool seam this
+    # workflow's mask owns, and the connection-parameter parsing that decides
+    # whether generated statements carry bind parameters or interpolated literals.
+    locators:
+      - "L2"          # export comment: RUNS ON THE WORKER THREAD
+      - "L121-L125"   # the pooled transaction reference is released and the handle nulled
+      - "L128-L129"   # the connection parameters are parsed for the bind-disabling and wide-character flags
+
+  - path: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase_ds.sru
+    role: specification
+    # The MAIN-THREAD half of the result carrier pair. Exactly one object in this
+    # library is annotated for the main thread and this is it, which is what makes
+    # the carrier a marshalling boundary rather than a plain datastore.
+    locators:
+      - "L2"          # export comment: RUNS ON THE MAIN THREAD
+
+  - path: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase_ds_mt.sru
+    role: specification
+    # The WORKER-THREAD half of the same carrier pair. Same responsibility, opposite
+    # affinity - the two are not interchangeable and the recording names which one
+    # produced the state it holds.
+    locators:
+      - "L2"          # export comment: RUNS ON THE WORKER THREAD
+
+  - path: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru
+    role: specification
+    # 240 lines. Cited because THIS workflow carries the transaction descriptor, so
+    # this workflow's mask is where the pool's clock seam is declared - the store's
+    # roster records that the pool has no oracle window of its own and that its seam
+    # is masked here rather than in a workflow named after it.
+    locators:
+      - "L14"         # the idle-start stamp field on the pooled entry
+      - "L22"         # the idle hook the pool subscribes with
+      - "L53"         # the keep-alive expiry constant, 30000 milliseconds
+      - "L58-L59"     # the two keep-alive settings: the enable flag and the expiry
+      - "L76-L80"     # both are read from thread-scoped configuration, seconds multiplied to milliseconds
+      - "L97"         # the idle stamp is taken from the PROCESSOR clock
+      - "L149"        # the stamp is cleared when the entry is referenced again
+      - "L215"        # the reuse-or-discard decision: zero references AND elapsed at or past the expiry
+
+  - path: ws_objects/pfw.thread.ext.pbl.src/dberrordata.srs
+    role: specification
+    # 10 lines, read as the authoritative statement of the database-error payload
+    # shape. Five fields, and the third of them is the one that must never be
+    # recorded as it stands.
+    locators:
+      - "L4-L8"       # sqldbcode, sqlerrtext, sqlsyntax, buffer, row
+
+  - path: ws_objects/pfw.thread.ext.pbl.src/transactiondata.srs
+    role: specification
+    # 14 lines, read as the authoritative statement of the transaction descriptor.
+    # Nine fields; the fifth is write-only and is never recorded.
+    locators:
+      - "L4-L12"      # dbms, servername, database, logid, logpass, dbparm, lock, autocommit, userparm
+
+  - path: ws_objects/pfw.thread.pbl.src/n_cst_threading.sru
+    role: specification
+    # 1084 lines, the threading substrate the oracle window creates and destroys. It
+    # owns the task roster, the dispatch, the stop-and-cancel path and the event
+    # subscription the oracle uses.
+    locators:
+      - "L94-L97"     # the start event's contract: zero continues, ONE PREVENTS
+      - "L99-L104"    # the stop event's contract: source, exit code, last error info, no return
+      - "L167"        # the task-count accessor the oracle's first-run test reads
+      - "L182"        # the subscription entry point
+      - "L187"        # the task accessor by one-based index
+      - "L215"        # the task-adding overload the oracle calls, by caller-side class name
+      - "L219-L220"   # the two stop overloads
+      - "L398"        # the task count is the array's upper bound
+      - "L461"        # the dispatch body
+      - "L532"        # subscription delegates to the event broker
+      - "L547"        # an out-of-range task index answers the out-of-bound code
+      - "L844"        # the stop body: every running task is cancelled
+      - "L873"        # the no-argument stop overload
+
+  - path: ws_objects/pfw.thread.pbl.src/n_cst_threading_task.sru
+    role: specification
+    # 627 lines, the caller-side task base that declares the event vocabulary the
+    # oracle subscribes to. Cited for the veto contract specifically: the start
+    # event's return value is documented here, not in the oracle window.
+    locators:
+      - "L80-L83"     # the task-level start event: zero continues, ONE PREVENTS
+      - "L85-L90"     # the task-level stop event: source, exit code, last error info, no return
+
+  - path: ws_objects/pfw.thread.pbl.src/n_cst_thread_task.sru
+    role: specification
+    # The worker-side task base, and the object that makes the pair mechanical
+    # rather than conventional: it holds a typed handle on its caller-side half and
+    # reaches back across the boundary through it for the veto, for errors and for
+    # notifications.
+    locators:
+      - "L76"         # the typed handle on the caller-side half
+      - "L165"        # the veto is evaluated by CROSSING BACK and testing the prevented predicate
+      - "L175"        # the handle is taken into a local before the notification crossings
+      - "L213"        # the POSTED notification - a message-pump idiom with no headless analogue
+      - "L224"        # the handle is nulled when the worker side is torn down
+
+# ------------------------------------------------------------------------------
+# seedPhase - everything that establishes the starting state.
+#
+# WHY IT IS DECLARED SEPARATELY, stated here because the schema has no member for it
+# and because getting it wrong is silent: the oracle's storage setup is DESTRUCTIVE.
+# The sibling window's connect handler deletes the database file before opening it
+# and then recreates the table. Running that a second time to "start clean" is
+# exactly the reseed the shared-volume capture rule forbids between the two halves
+# of a pair. The seed therefore runs ONCE, before the pair begins; the capture phase
+# below is what runs TWICE.
+#
+# WHY THIS WORKFLOW REUSES THE SIBLING'S SEED SEQUENCE RATHER THAN DECLARING A
+# PRIVATE ONE (the seed-sharing decision, with its reason, per C-K): this workflow
+# retrieves from the SAME table through the SAME binding as
+# persistence-sqlite-retrieve-update, and that table's only creation site in the
+# whole repository is the one delete-then-create sequence cited below. Declaring a
+# second, differently worded seed for the same table would produce two starting
+# states that look identical and are not - and a divergence between them would
+# surface as a parity finding in whichever workflow was captured second. One
+# sequence, cited from one place, is the only arrangement in which both workflows'
+# recordings mean what they claim. What this workflow ADDS to that sequence is
+# declared as its own steps, with the arithmetic that forces each.
+#
+# THIS WORKFLOW MUST NOT RESEED. It runs against the state the seed left. That is
+# restated as a precondition rather than left to this comment.
+# ------------------------------------------------------------------------------
+seedPhase:
+
+  steps:
+
+    - action: >-
+        Delete the database file so the starting state is built from nothing. This
+        is the destructive step: it establishes the pair's starting state and must
+        never run again while that pair is open.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L450"
+
+    - action: >-
+        Open the database in read-write-create mode through the SQLite binding. The
+        grammar is recorded under connectionUri below; no password value exists
+        anywhere in the repository to supply, and where one is supplied it comes
+        from configuration injection and never from this definition.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L456"
+
+    - action: Turn autocommit on for the duration of schema creation.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L461"
+
+    - action: >-
+        Create the COMPANY table if it does not already exist, with six columns in
+        this order: an auto-increment integer primary key that is not null; a
+        required text name; a required integer age; a fixed-width character address;
+        a real salary; and a text birth field. This is the only schema-creating
+        statement in the repository, and the DataWindow this workflow retrieves
+        through declares three of those column types differently - that
+        disagreement is preserved rather than harmonized, and the sibling workflow
+        persistence-sqlite-retrieve-update is where it is pinned. The statement
+        spells its column names in upper case while the DataWindow's database names
+        are lower case.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469"
+
+    - action: >-
+        Turn autocommit off, which is the state the capture then begins from. The
+        oracle leaves it off deliberately, so any commit on the capture path is
+        explicit rather than implicit.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L473"
+
+    - action: >-
+        Seed four rows with one multi-statement batch call, the statements separated
+        by semicolons inside a single execution.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L381-L388"
+
+    - action: >-
+        Seed ten further rows through the leading-at-sign statement-cache execution
+        mode with positional parameter binding, one row per iteration.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L396-L400"
+
+    # THE ARITHMETIC THAT FORCES THIS STEP, written down because it is the one place
+    # this workflow's seed differs from its sibling's and because the number is not
+    # arbitrary. The chunk count is the row count plus the filtered count divided by
+    # the chunk size and rounded up
+    # [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L145]. The
+    # chunk-size guard refuses any value AT OR BELOW 1000 [:L410], so the smallest
+    # chunk size the legacy will accept is 1001 and the default is 10000 [:L34]. The
+    # fourteen rows the two steps above seed therefore produce EXACTLY ONE CHUNK at
+    # any legal chunk size, and a single-chunk capture cannot exercise the
+    # sorted-multi-block branch at :L151 at all - which is the branch DEFECT 2 and
+    # DEFECT 3 both live on. Seeding past the smallest legal chunk is the only way
+    # this pair proves the defects it exists to prove.
+    - action: >-
+        Extend the seeded row population to at least 1,002 rows in total, using the
+        same leading-at-sign statement-cache execution mode and positional binding
+        as the step above, so that the retrieval spans MORE THAN ONE CHUNK at the
+        smallest chunk size the legacy accepts. The exact row count is recorded in
+        the recording and is identical on both sides; what matters is that it
+        exceeds one chunk, because the sorted-multi-block transfer branch - and with
+        it two of the four cross-thread transfer defects - is unreachable at a
+        single chunk.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L396-L400"
+
+    # No locator on this step: the ORACLE never performs it. The descriptor call in
+    # the oracle window is COMMENTED OUT, which is precisely why the descriptor is
+    # supplied here by the seed rather than driven for us by the window - and
+    # precisely why the transaction pool's clock seam has to be DECLARED in the mask
+    # below instead of being assumed to be exercised. The cited locator on the
+    # oracle side is the commented call itself, which is authoritative for the
+    # descriptor's shape and for nothing else.
+    - action: >-
+        Supply the transaction descriptor to the query task, identically for both
+        halves of the pair. Its field names are dbms, servername, database, logid,
+        logpass, dbparm, lock, autocommit and userparm; the six-field call form
+        carries the first six of them. THE PASSWORD FIELD IS WRITE-ONLY - accepted
+        inbound, never populated outbound, never echoed in a response, never logged
+        and therefore NEVER RECORDED - and its value comes from configuration
+        injection. No field value is reproduced in this definition; only the field
+        names are.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_thread_sqlquery.srw:L247"
+
+    # No locator on this step either: it has no legacy counterpart. The target side
+    # provisions the schema through the migration path rather than through a
+    # statement issued by a test window, and that path is idempotent and
+    # non-destructive - re-running it reports the database already up to date and
+    # leaves existing rows untouched, which is what makes it safe to re-run at all.
+    # It is still part of the seed and still runs before the pair begins.
+    - action: >-
+        On the target side, provision the COMPANY schema with the idempotent,
+        non-destructive migration path described in docs/BUILD.md, against the same
+        volume state the legacy half is to be captured from.
+
+  # Always true, both of them. The seed runs once, before the pair begins, and
+  # nothing in it runs between the two halves. These are assertions rather than
+  # settings: the schema pins both to a constant so that the one arrangement which
+  # voids a pair cannot be written down in the document defining the pair.
+  runsOncePerPair: true
+  neverBetweenCaptures: true
+
+  # The connection grammar exactly as the sibling fixture documents it in its own
+  # comments, which cite the SQLite URI specification. GRAMMAR ONLY. No member here
+  # can hold a value, and none does.
+  connectionUri:
+
+    template: "test.db?mode=rwc"
+
+    # Only read-write-create is declared, because it is the only mode the fixture
+    # opens and therefore the only one this workflow relies on. Declaring the modes
+    # the URI specification admits generally would assert support this repository
+    # does not demonstrate for this binding, and the mode is observable.
+    modeOptions:
+      - rwc
+
+    # The integrity-check extension: the bare form performs the full check, the
+    # quick form performs the quick variant.
+    checkOptions:
+      - "check"
+      - "check=quick"
+
+    # The six journal modes the fixture documents. Every one is quoted because YAML
+    # 1.1 loads a bare OFF as the boolean false - unquoted, this would silently stop
+    # being a list of journal modes.
+    journalOptions:
+      - "DELETE"
+      - "TRUNCATE"
+      - "PERSIST"
+      - "MEMORY"
+      - "WAL"
+      - "OFF"
+
+    # The mode that applies when the extension is omitted, which is what this
+    # workflow relies on: the fixture omits it. Recorded because the journal mode is
+    # observable, so a capture taken under a different one is not comparable.
+    defaultJournal: "DELETE"
+
+    # A boolean and nothing else. The grammar admits a password parameter in the
+    # same position - it appears in the oracle only inside an inline comment - and
+    # the repository carries no value for it. Where a password IS supplied the
+    # assembled URI is itself a credential: never logged, never returned in an error
+    # payload, and never captured into a recording. That is why this records that
+    # the parameter position exists and stops there.
+    passwordSupported: true
+
+# ------------------------------------------------------------------------------
+# capturePhase - the behaviour under characterization, and nothing else.
+# Runs TWICE, both times against the state the seed phase already established.
+#
+# THE DECISIVE CONSEQUENCE OF THIS ORACLE, stated once here and enforced by the
+# observedOutputs below: the interesting behaviour is NOT "a query returned rows".
+# It is what crossed the thread boundary, in what order, in how many pieces, and
+# which half of each proxy pair produced it. The oracle window holds only the
+# CALLER-SIDE half of the task; the worker-side half calls back into it once per
+# notification and once per chunk, and the legacy annotates each half's required
+# execution context in that object's own export comment. A recording that carries
+# only the final row set would compare cleanly while proving nothing about the
+# boundary - and the boundary is where all four documented transfer defects live.
+# ------------------------------------------------------------------------------
+capturePhase:
+
+  behaviourUnderTest: >-
+    Create the threading host, register one query task by its caller-side class
+    name, subscribe to that task's start and stop events, supply the statement or
+    data object, and dispatch it - then capture everything that crosses the
+    marshalling boundary until the stop handler has run. Specifically: the veto
+    channel on the start event, where zero continues and one prevents; the
+    worker-side selection of a transfer style from the DataWindow's processing mode,
+    and the sort-and-filter synchronization that style dictates; the chunked
+    changeset transfer, in both its temporary-carrier variant and its direct
+    variant, including the row-status stamping, the chunk count and index carried
+    with every crossing, the discard-versus-reset choice between chunks and on the
+    final chunk, and the zero-row crossing that still happens with an empty payload;
+    the caller-side application of each chunk onto its receiver, with its
+    first-chunk reset and its last-chunk update clear; the stop handler branch by
+    branch - the early return on the cancelled code, the success arm that moves the
+    whole state out of the caller-side carrier and reads the record count and, when
+    the task reports paged, the page size, page count and page index, the
+    database-error arm that reads the structured error descriptor, and the
+    general-exception arm that formats the return code with the last error info; the
+    chunk-size guard at its boundary values; the paging count wrapper's generated
+    statement fragment; and the cancel path that stops the thread and cancels every
+    current task. The capture covers the SQLite path only; no other database engine
+    is provisioned, required or reachable. It does not cover the byte-exact paging
+    rewrites, which are pure string transforms owned by a sibling workflow.
+
+  observedOutputs:
+
+    - name: task.roster
+      description: >-
+        The task roster after registration: the one-based task index, the
+        CALLER-SIDE class name the host was asked for, and the WORKER-SIDE class
+        name resolved from it. Both names are recorded because the pair is related
+        by name at run time rather than by a single handle, so a target that keeps
+        only one of them has lost half the contract. The first-run branch is
+        distinguished from the subsequent-run branch, since the oracle adds a task
+        only when the roster is empty and otherwise fetches index one.
+      format: >-
+        Canonical JSON, one object per task, with the index, the caller-side class
+        name, the worker-side class name and which branch registered it
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_thread_sqlquery.srw:L240-L242"
+
+    - name: marshalling.sideOfEachStep
+      description: >-
+        Which side of the boundary executed each recorded step - worker, main or
+        calling thread. THIS IS THE OUTPUT THE KEY INSIGHT LIVES IN: the legacy
+        annotates the required context of each half in the object's own export
+        comment, and the worker half additionally tests the main-thread predicate at
+        run time to choose between two arms. A recording that omits the side turns a
+        contract into an implementation detail, and a port that flattens the pair
+        then passes.
+      format: >-
+        CSV with one line per recorded step: the step name, the object that ran it
+        and the annotated side, with the run-time main-thread test's result recorded
+        separately from the annotation
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L85"
+
+    - name: callback.sequencePerTask
+      description: >-
+        The ORDERED sequence of callbacks the worker half makes into its caller-side
+        half, per task, with each notification's code and its word-packed payload
+        decoded into its two halves. The codes are the max-rows, data-received,
+        page-received, data-chunk, child-received and child-query notifications.
+        Within one task this ordering is behaviour and is compared position by
+        position; across tasks it is not - see the interleaving mask entry.
+      format: >-
+        JSON Lines, one object per callback in arrival order within its task,
+        carrying the task index, the notification code by its legacy constant name,
+        and the decoded payload fields
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlquery.sru:L28-L33"
+
+    - name: start.vetoOutcome
+      description: >-
+        The value the start handler returned and what the task did as a result. The
+        alphabet is exactly two values - zero continues, ONE PREVENTS - and the
+        worker side evaluates it by crossing back into the caller-side half and
+        applying the prevented predicate to the result. The capture records the
+        continue case AND the prevent case as two distinct cases, because a
+        prevented task produces no chunk, no record count and no stop-handler
+        success arm at all, and a recording that only ever exercises the continue
+        case cannot tell a working veto from a missing one.
+      format: >-
+        The integer the handler returned, plus whether the task ran, recorded once
+        per case
+      locator: "ws_objects/pfw.thread.pbl.src/n_cst_threading_task.sru:L80-L83"
+
+    - name: stop.exitCode
+      description: >-
+        The raw numeric exit code the stop event carries, recorded as the NUMBER and
+        never as a boolean projection of it. The return algebra is tri-state - a
+        prevention reads as a success, and cancelled and null are neither succeeded
+        nor failed - so a boolean projection collapses exactly the distinction a
+        divergence would show up in. The oracle branches on this value four ways,
+        and the recorded code is what says which branch a reader should expect.
+      format: The integer code verbatim, with null recorded as null rather than as zero
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_thread_sqlquery.srw:L169-L171"
+
+    - name: stop.cancelledEarlyReturn
+      description: >-
+        On the cancelled code the stop handler RETURNS IMMEDIATELY and does nothing
+        else: no state is moved, no record count is read, no paging is reported and
+        no dialog is raised. The recording carries the fact of the early return and
+        the ABSENCE of every other output on that path, because "nothing else
+        happened" is the behaviour here and a recording that simply omits the fields
+        cannot distinguish it from a capture that failed to collect them.
+      format: >-
+        A single object naming the branch taken and listing the outputs deliberately
+        absent on it
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_thread_sqlquery.srw:L170"
+
+    - name: transfer.styleSelected
+      description: >-
+        Which of the two transfer styles the worker half selected, and the
+        processing-mode value it selected on. The whole-state style is chosen for
+        crosstab and composite processing modes; every other mode takes the chunked
+        changeset style. THE TWO ARE NOT INTERCHANGEABLE - they differ in what they
+        carry, in what must be synchronized first and in which defects they exhibit
+        - so the selected style is recorded as an output in its own right rather
+        than inferred from the payload's shape.
+      format: The processing-mode value verbatim, and the style name it selected
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L93-L94"
+
+    - name: transfer.chunkVariantSelected
+      description: >-
+        Within the changeset style, which of the two chunk variants ran: the
+        temporary-carrier variant, gated on MORE THAN ONE CHUNK together with a
+        non-empty declared sort, or the direct variant that operates on the carrier
+        itself. The gate's two inputs are recorded alongside the outcome - the
+        computed chunk count and the sort specification the worker read - so a
+        divergence in the gate is attributable rather than merely visible.
+      format: >-
+        The chunk count, the sort specification as read, and the variant name,
+        recorded as one object
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L150-L151"
+
+    - name: transfer.chunkSequence
+      description: >-
+        Every chunk crossing, in order, with the chunk count, the one-based chunk
+        index and the full-state flag exactly as the worker passed them - plus, per
+        chunk, the primary and filter row counts it carried and whether the rows were
+        DISCARDED or the carrier was RESET afterwards. The discard-versus-reset
+        choice is the observable that proves two of the four transfer defects
+        survived, so it is recorded per chunk rather than summarised.
+      format: >-
+        JSON Lines, one object per crossing in emission order, positions significant
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L183"
+
+    - name: carrier.sortAndFilterState
+      description: >-
+        The sort and filter specifications on the worker-side carrier at the moment
+        of transfer. In the changeset arm BOTH ARE CLEARED; in the whole-state arm
+        both are applied, and a rejected application fails with the invalid-argument
+        code. This is the observable half of the first transfer defect, and the
+        DataWindow this workflow retrieves through declares a sort of its own, so
+        the cleared state is a real change from the declared one rather than a
+        vacuous match.
+      format: >-
+        The two specification strings exactly as the carrier reports them, empty
+        recorded as an empty string rather than as null, plus the arm that set them
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L579-L580"
+
+    - name: carrier.ownershipTransfer
+      description: >-
+        Whether the worker half handed the carrier ITSELF across the boundary rather
+        than a payload extracted from it, which it does when no receiver is
+        registered and caching is off - and which it follows by nulling its own
+        reference. The legacy warns in its own comment that the carrier may become
+        INVALID once the data-received event has run. The recording carries which
+        arm was taken and the state of the worker's own reference afterwards, because
+        a port that keeps using the carrier after handing it over is a use-after-free
+        in a managed disguise.
+      format: >-
+        The arm taken, whether a receiver was registered, whether caching was on,
+        and whether the worker's reference was cleared
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L86-L89"
+
+    - name: changeset.payloadProjection
+      description: >-
+        The changeset each chunk carried, rendered as a STABLE TEXTUAL PROJECTION.
+        The legacy payload is a binary block and a binary capture cannot be reviewed
+        - a reviewer sees that two files differ and never what differed - so the
+        recording holds the decoded structure instead, and the raw block is never
+        stored.
+      format: >-
+        JSON Lines, one object per row in the payload's own order, each carrying the
+        buffer it belongs to, its column values in the fixture's declaration order
+        and its item statuses by their legacy names; produced by decoding the
+        payload into rows, columns and statuses and rendering it with a stable key
+        order; the undecoded block is not written to the recording
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L171"
+
+    - name: fullState.payloadProjection
+      description: >-
+        The whole-state payload, rendered as the same kind of stable textual
+        projection. Two distinct crossings produce one: the worker's single
+        whole-state chunk on the crosstab-and-composite arm, and - on EVERY arm -
+        the stop handler's own move of the finished result out of the caller-side
+        carrier and into the window's DataWindow. The recording distinguishes the
+        two by naming the crossing, because they have different producers and
+        different failure modes.
+      format: >-
+        The same decoded row, column and status projection as the changeset output,
+        with the crossing named; the undecoded block is not written to the recording
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_thread_sqlquery.srw:L174-L175"
+
+    - name: buffer.rowStatusStamps
+      description: >-
+        The item status stamped on every transferred row AT COLUMN ZERO, per buffer.
+        The worker sets the row-level status explicitly before extracting each
+        payload - in the primary buffer and, when a chunk has room, in the filter
+        buffer too - and that stamping is what makes the payload carry the rows at
+        all. Both the modified and the new-modified statuses are distinguished and
+        never collapsed into a single dirty flag.
+      format: >-
+        CSV with one line per row and buffer pair, the status recorded by its legacy
+        name, column zero present as its own line
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L162"
+
+    - name: receiver.applicationSequence
+      description: >-
+        The ORDERED caller-side operations applied to the receiver as chunks arrive:
+        the reset on the FIRST chunk, the payload application on every chunk, and the
+        update clear and group recalculation on the LAST chunk, with the redraw
+        suspension and restoration around them for a DataWindow receiver. The
+        first-and-last conditions are computed from the chunk index against the
+        chunk count, so an off-by-one in either shows up here and nowhere else.
+      format: >-
+        JSON Lines, one object per operation in application order, naming the
+        operation, the chunk index that triggered it and the receiver kind
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlquery.sru:L195-L205"
+
+    - name: retrieve.recordCount
+      description: >-
+        The record count the stop handler reads after applying the whole state. The
+        oracle's own comment records that WITH PAGING ON this is the total row count
+        of the whole query rather than the count of the page in hand, so the same
+        field means two different things depending on the paging flag - and the
+        recording therefore carries the paging flag beside it.
+      format: The integer verbatim, with the paging flag recorded alongside it
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_thread_sqlquery.srw:L176-L177"
+
+    - name: paging.triple
+      description: >-
+        The three paging values the oracle reports when the task says it is paged -
+        the page size, the page count from the caller-side accessor, and the page
+        index - recorded as three separate fields in that order. NOT MASKED: all
+        three are behaviour. The page-counting flag defaults to on, and it is
+        recorded too, because with it off the count is never computed and the triple
+        means something different.
+      format: >-
+        Three integers, named, plus the paged flag and the page-counting flag
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_thread_sqlquery.srw:L178-L186"
+
+    - name: paging.shortCircuitArm
+      description: >-
+        Which arm of the page-count computation ran. The legacy SHORT-CIRCUITS when
+        the page in hand is not full or is empty at the first page: it then takes the
+        page count from the current index and derives the record count arithmetically
+        from the index, the page size and the rows in hand, and it forces the page
+        count to zero when that record count is zero. Otherwise it issues a separate
+        counting statement. The arm is recorded because the two arms produce the same
+        two numbers by entirely different means, and only one of them touches the
+        database.
+      format: >-
+        The arm name, the three inputs it decided on, and the resulting page and
+        record counts
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L818-L823"
+
+    - name: paging.countWrapperStatement
+      description: >-
+        The counting statement the legacy generates, as TEXT. Its projection is
+        replaced with a single aliased literal, its order-by clause is dropped when
+        one is present, and the whole thing is wrapped in a count with its own
+        sentinel table alias. This fragment is observable generated SQL and must
+        match byte for byte; it is recorded with its parameter values split out
+        rather than interpolated - see redaction below.
+      format: >-
+        Statement text with parameter placeholders, byte-exact, in a stable emission
+        order
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L830"
+
+    - name: chunkSize.guardOutcome
+      description: >-
+        The code the chunk-size setter returns at its boundary values - the largest
+        refused value, the smallest accepted value, and the default in force when the
+        setter is never called. The refusal carries A BARE CODE AND NO MESSAGE
+        WHATEVER, which is the whole body of the guard, so the recording carries the
+        code and no diagnostic text: inventing text here would put a message on the
+        wire that the legacy never produced. The two clause setters refuse the same
+        way, and their codes are recorded on the same terms.
+      format: >-
+        One object per attempted value, carrying the value, the returned integer code
+        and an explicit null where the legacy produced no message
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L410"
+
+    - name: zeroRow.chunkNotification
+      description: >-
+        The crossing that still happens when the query returns NO ROWS: the worker
+        crosses once with an empty payload, a chunk count and index of one and the
+        full-state flag off, and the caller side answers success and resets its
+        receiver rather than applying anything. Recorded as its own case because a
+        target that skips the crossing entirely leaves the receiver holding the
+        PREVIOUS result, and a row-count comparison alone would not notice.
+      format: >-
+        The crossing's count, index and flag, the payload length as zero, the
+        caller-side answer and whether the receiver was reset
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L229-L231"
+
+    - name: cancellation.chunkBoundaryObserved
+      description: >-
+        Where cancellation was observed and what the task did about it. The worker
+        checks for cancellation at defined points - after the child-data loop, before
+        the chunk loop and BETWEEN CHUNKS - and answers the cancelled code from
+        whichever point saw it; the caller-side chunk receiver independently answers
+        zero and stops when the task is already cancelled. The recording carries the
+        observation point and the chunk index it was seen at. IT CARRIES NO DURATION:
+        the inter-chunk checkpoint waits, and how long it waited is not behaviour,
+        while WHERE the cancellation landed is.
+      format: >-
+        The observation point by name, the chunk index in hand, and the code
+        returned; no elapsed value is recorded
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L189"
+
+    - name: dbError.payload
+      description: >-
+        The structured database-error descriptor FIELD BY FIELD as the caller-side
+        proxy hands it back - the driver code, the error text, the statement field,
+        the offending buffer and the offending row - on the arm the oracle selects
+        for the database-error and invalid-transaction codes. The oracle itself
+        surfaces only the error text, but the descriptor carries five fields and all
+        five are recorded, because the buffer and row are what make an error
+        attributable to a specific row. The statement field is SPLIT rather than
+        recorded as it stands - see redaction below.
+      format: >-
+        Canonical JSON, one object per error, all five fields present, the statement
+        field split into its text and its parameters
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_thread_sqlquery.srw:L188-L191"
+
+    - name: exception.formattedMessage
+      description: >-
+        The general-exception arm's formatted message: the return code rendered
+        through the framework's own code formatter, and the last-error-info string
+        the stop event carried, composed across a line break. Recorded because the
+        FORMATTING is behaviour - the formatter's rendering of a code is part of the
+        observable surface - and because the arm is selected for every code that is
+        neither success, nor cancelled, nor one of the two database codes, which
+        makes it the catch-all a divergence is most likely to land in.
+      format: >-
+        The composed string verbatim after newline normalization, plus the raw code
+        and the raw last-error-info string recorded separately
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_thread_sqlquery.srw:L193"
+
+    - name: transactionDescriptor.fieldsSupplied
+      description: >-
+        WHICH FIELDS of the transaction descriptor were supplied, by NAME ONLY, and
+        which call form carried them - the six-field form or the whole-structure
+        form. No value is recorded for any field. This output exists to make the
+        write-only treatment of the password field auditable rather than assumed: the
+        recording shows the field was supplied and shows no value for it, which is
+        the only shape in which "it was set and never echoed" is checkable.
+      format: >-
+        An ordered list of field names and the call form, with no value member of any
+        kind
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlbase.sru:L30-L31"
+
+    - name: transactionPool.reuseDecision
+      description: >-
+        Whether the pooled transaction was REUSED or DISCARDED, and the reference
+        count and expiry setting the decision was taken against. The decision is
+        observable - a discarded entry is rebuilt and a reused one is not - even
+        though the elapsed time that triggers it is never asserted and never
+        recorded. This is the output the pool's clock seam exists to make
+        reproducible; see the mask entry below.
+      format: >-
+        The decision, the reference count, the keep-alive enable flag and the expiry
+        setting in milliseconds; NO elapsed value and no timestamp
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L215"
+
+  # NOTE ON TIMING, recorded because its absence is a decision rather than an
+  # oversight: THIS ORACLE EMITS NO TIMING FIELD OF ITS OWN. The oracle window
+  # contains no clock read at all - its stop handler reports a record count and, when
+  # paged, three paging numbers, and nothing else - so no output above carries
+  # maskedAsNonBehavioural and none needs to. That is worth stating explicitly here
+  # because this workflow is asynchronous, which is exactly the shape in which a
+  # timing assertion looks natural. Two adjacent facts, so neither is mistaken for a
+  # licence: the worker waits between chunks, and the transaction pool compares a
+  # processor-clock difference against an expiry. NEITHER value is recorded. What is
+  # recorded is where cancellation landed and which arm the pool took - ORDERING AND
+  # OUTCOME, not duration. Completion ordering is behaviour; completion timing is
+  # not. Should a future capture surface a timing field from the oracle, it is
+  # recorded WITH maskedAsNonBehavioural set true - present in the recording,
+  # explicitly excluded from the comparison - rather than quietly dropped.
+
+  # ----------------------------------------------------------------------------
+  # redaction - fields recorded with their value withheld, declared rather than
+  # assumed so a reviewer can see each was handled deliberately. docs/SECRETS.md is
+  # the authority for which treatment a specific field takes.
+  # ----------------------------------------------------------------------------
+  redaction:
+
+    # REASON: the statement field of the database-error descriptor is filled with the
+    # COMPLETE GENERATED STATEMENT - the counting path passes its own generated
+    # statement straight into the error event - and the legacy logger performs no
+    # redaction whatever. Where the connection's bind-disabling parameter suppresses
+    # bind variables the runtime interpolates values directly, so every value the
+    # failing statement touched is present in that text as a literal. Splitting keeps
+    # the statement TEXT comparable, which is the point of recording it at all, while
+    # the values it carried are held apart from the text and withheld from the
+    # recording rather than travelling inside it.
+    - field: dbError.sqlsyntax
+      treatment: split-statement-and-parameters
+
+    # REASON: same exposure, same treatment. The counting statement's byte-exact text
+    # is exactly what this pair needs to prove; its parameter values are not part of
+    # the statement's shape and are not recorded inside it.
+    - field: paging.countWrapperStatement
+      treatment: split-statement-and-parameters
+
+    # REASON: the transaction descriptor's password field is WRITE-ONLY - accepted
+    # inbound, never populated outbound, never echoed in a response, never logged and
+    # therefore never recorded. OMITTED rather than redacted, because a redaction
+    # placeholder would still assert that a value was present and how long it was.
+    # The field NAME still appears in transactionDescriptor.fieldsSupplied, which is
+    # what makes the omission auditable instead of indistinguishable from an
+    # oversight.
+    - field: transactionDescriptor.logpass
+      treatment: omitted
+
+    # REASON: where a password parameter is supplied in its position the assembled
+    # URI IS a credential in its entirety, so it cannot be recorded even in part. The
+    # grammar is declared under seedPhase.connectionUri instead, which is a
+    # description of the shape and holds no value.
+    - field: connection.assembledUri
+      treatment: omitted
+
+  # ----------------------------------------------------------------------------
+  # recordingArtifacts - what each side writes into its own recording directory.
+  #
+  # Text-based and diffable only, so a parity failure is legible in review rather
+  # than merely detectable. Every extension below is one of the seven this store
+  # admits. NONE of the six extensions the root .gitignore carries UNANCHORED can
+  # appear here - a capture named that way is silently untracked: it exists on the
+  # machine that produced it, git reports nothing, and it is simply absent from
+  # review and from CI, so the comparison looks taken and cannot be found. The root
+  # .gitignore is not modified to accommodate a name; the name is correct instead.
+  #
+  # NOTE THE BLOB: both transfer styles produce a binary payload, and NO artifact
+  # below is a dump of one. Each carries the decoded row, column and status
+  # projection described in the two payload outputs above, which is what makes a
+  # difference reviewable rather than merely detectable.
+  # ----------------------------------------------------------------------------
+  recordingArtifacts:
+    - filename: task-roster.json
+    - filename: marshalling-sides.csv
+    - filename: callback-sequence.jsonl
+    - filename: transfer-style.json
+    - filename: chunk-sequence.jsonl
+    - filename: changeset-payload-rows.jsonl
+    - filename: full-state-payload-rows.jsonl
+    - filename: row-status-stamps.csv
+    - filename: receiver-application-sequence.jsonl
+    - filename: paging-report.json
+    - filename: paging-count-statement.sql
+    - filename: paging-count-statement-parameters.json
+    - filename: chunk-size-guard.json
+    - filename: cancellation-observation.json
+    - filename: db-error-payload.json
+    - filename: exception-message.txt
+    - filename: transaction-descriptor-fields.json
+    - filename: transaction-pool-decision.json
+
+  # ----------------------------------------------------------------------------
+  # preconditions - what must already hold before the capture is taken, so the second
+  # half of the pair is taken under the same conditions as the first.
+  # ----------------------------------------------------------------------------
+  preconditions:
+
+    - >-
+      The seed phase has run exactly once for this workflow identifier and has not
+      run again since, on either side. THIS WORKFLOW DOES NOT RESEED: it runs against
+      the state the seed left, and it neither deletes the database file nor reissues
+      the schema-creating statement.
+
+    - >-
+      The volume state is identical for both halves of the pair and the volume is
+      neither recreated nor reseeded between them. The shared-volume capture rule in
+      characterization/README.md section 2.1 carries the canonical text and is the
+      authority for it; it is cited here rather than reproduced, because a further
+      copy would be a further thing to drift. This workflow retrieves from a real
+      SQLite file, so the rule governs it in full and no exemption applies.
+
+    - >-
+      Every determinism mask entry below is configured ONCE for this workflow and
+      that same configuration is used for both captures. Determinism is a property of
+      the pair, not of a run: a single reproducible run proves nothing.
+
+    - >-
+      The query task is given its statement or its data object explicitly by the
+      capture. The oracle window's DataWindow control carries NO data object of its
+      own and both setter calls are commented out in the fixture, so the capture
+      supplies the row shape - the six-column definition cited above, whose own
+      retrieve statement selects every column of the COMPANY table - and records
+      which of the two setters it used.
+
+    - >-
+      The seeded row population exceeds one chunk at the configured chunk size, and
+      the configured chunk size is recorded. The smallest value the guard accepts is
+      one above its refusal threshold, and the default is ten thousand; a capture
+      taken at a chunk size that leaves the whole result in a single chunk cannot
+      reach the sorted-multi-block branch and therefore cannot prove two of the four
+      transfer defects.
+
+    - >-
+      The data object's declared sort is in force and is not overridden before the
+      transfer-style decision is taken. It is what makes the sort-clearing observable
+      in the changeset arm and what satisfies the second input of the
+      temporary-carrier gate; a capture taken with no sort declared silently takes the
+      direct variant.
+
+    - >-
+      Autocommit is off when the capture begins, which is the state the seed phase
+      leaves behind, and the transaction descriptor supplied by the seed is in force
+      unchanged for both halves.
+
+    - >-
+      The connection is open through the framework's own binding against the
+      unencrypted SQLite path. No other database engine is provisioned, required or
+      reachable. Note the consequence for the paged case, which is a property of the
+      oracle rather than of the capture: the transaction's own type resolution has NO
+      unknown arm - it answers Oracle when the connection's dialect name contains
+      that word and SQL Server in every other case - so a SQLite connection is
+      classified as SQL Server and a paged statement is generated in that dialect. The
+      capture records what the engine actually answers and never assumes a page; see
+      blockedBehaviours below.
+
+    - >-
+      Both halves of the pair are captured from one working tree, against one Compose
+      project and one volume. Where several clones run concurrently each needs its
+      own, so that one clone's teardown cannot invalidate another clone's half-taken
+      pair.
+
+# ------------------------------------------------------------------------------
+# determinismMask - INLINE, and deliberately not a pointer to a shared catalogue.
+#
+# A mask that drifts away from its workflow silently invalidates every pair captured
+# under it, so it is versioned beside the workflow it applies to. docs/PARITY.md
+# section 5.1 is the authoritative register of seams and carries each one's injection
+# point; it is PROVENANCE for the entries below, never a substitute for them, and the
+# schema offers no reference member by which this mask could be delegated.
+#
+# EVERY entry applies to BOTH sides. That is the golden-master technique's one hard
+# prerequisite and it admits no workaround: masking only the candidate leaves the
+# master holding a value that can never be matched, and masking only the master
+# inverts the same problem. A one-sided mask is worse than no mask at all, because it
+# manufactures a passing comparison out of mismatched data.
+#
+# Seaming is preferred to masking throughout: masking removes a field from the
+# comparison, seaming makes the field reproducible, and only the second leaves the
+# comparison able to detect anything in that field.
+# ------------------------------------------------------------------------------
+determinismMask:
+
+  - seam: >-
+      Every clock read that reaches a recorded output or a decision on this path -
+      any timestamp reachable through the connection, any date value derived rather
+      than seeded, and any clock the task lifecycle consults.
+    method: >-
+      Inject the clock as a dependency and substitute one fixed instant on both sides
+      for the whole capture. Seamed rather than masked, so the field stays in the
+      comparison and a genuine divergence in a date value is still detectable.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      A clock read differs between the two captures BY DEFINITION rather than by
+      behaviour, and the two halves of a pair are taken at different times by
+      construction. Left alone it reports a difference on every run, which trains a
+      reviewer to ignore the one run where the difference was real.
+
+  - seam: >-
+      The transaction pool's idle expiry, which the legacy derives from a PROCESSOR
+      clock and keys on its two keep-alive settings - the enable flag and the idle
+      lifetime, whose constant default is 30000 milliseconds and whose configured
+      form is expressed in seconds and multiplied up, falling back to that same
+      default whenever the result is not positive.
+    method: >-
+      Seam the clock behind the pool and hold its notion of the current instant fixed
+      for the capture, so the reuse-or-discard decision is reproducible on both
+      sides. The elapsed value itself is never recorded and never asserted; only the
+      decision it produces is, together with the reference count and the expiry
+      setting it was taken against.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      THIS IS THE WORKFLOW THAT CARRIES THE TRANSACTION DESCRIPTOR, which is why the
+      pool's seam is declared in this mask rather than in a workflow named after the
+      pool - the pool has no oracle window of its own anywhere in the fixture corpus,
+      so no capture would otherwise own it. Whether a pooled transaction is reused or
+      discarded IS observable: a discarded one is rebuilt and a reused one is not,
+      even though the elapsed time that triggers the decision is not behaviour and is
+      never compared. Unseamed, the two sides would take different arms of that
+      decision for reasons unrelated to the code under test, perturbing pool reuse
+      across the pair. The descriptor reaching this path through the seed rather than
+      through the oracle is exactly why the seam must be DECLARED here instead of
+      assumed to be driven for us.
+
+  - seam: >-
+      The order in which the query path issues its clause modifications onto the
+      statement and its property modifications onto the carrier - the where and
+      order-by clauses applied from their arrays, the sort and filter applications or
+      clearings, and the prompt-suppression modification that precedes a whole-state
+      transfer.
+    method: >-
+      Route every such call through one injected surface and compare the ORDERED list
+      of calls, with the emission order pinned once and used identically on both
+      sides. Whether a modification was issued at all is carried separately from the
+      state it produced, because a port that emits a modification the legacy would
+      not have made is a divergence even when the resulting state agrees.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      The clauses are applied in array order rather than in a canonical order, and two
+      orderings that arrive at the same final state can emit different intermediate
+      output and different generated statement text. An unpinned order therefore
+      surfaces as a difference where no behaviour changed - and on this path the
+      generated statement text is one of the things the pair most needs to compare.
+
+  - seam: >-
+      Worker-thread interleaving: the arrival order of callbacks ACROSS tasks, and
+      the interleaving of one task's chunk crossings with another's, both of which the
+      operating system's scheduler decides.
+    method: >-
+      Compare the ordered callback sequence PER TASK, keyed by the task's own index,
+      rather than the global arrival order across tasks. Within one task the sequence
+      is compared position by position and an out-of-order arrival is a hard error;
+      across tasks no order is asserted at all. Applied identically on both sides, so
+      neither side is compared on a stricter footing than the other.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      WITHIN-TASK ORDERING IS BEHAVIOUR AND MUST BE PRESERVED - the first chunk resets
+      the receiver, the last clears its update state, and both conditions are computed
+      from the chunk index against the chunk count, so a reordering inside a task
+      changes what the receiver ends up holding. CROSS-TASK ARRIVAL ORDER IS NOT
+      behaviour: it is scheduler-dependent, it differs between two runs on one
+      machine, and asserting it would fail for a reason unrelated to the code under
+      test. Masking the wrong one of these two would either hide a real regression or
+      manufacture a permanent false failure, which is why the boundary between them is
+      written down rather than left to a reader's judgement.
+
+  - seam: >-
+      Line endings in every multi-line recorded output on this path - the formatted
+      exception message the general-exception arm composes across a line break, and
+      every multi-line textual projection of a transferred payload.
+    method: >-
+      Normalize to one declared convention on both sides at comparison time, before
+      any diff is taken. Normalization is a comparison-time convention only: it never
+      licenses rewriting a stored master.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      A PLATFORM ARTIFACT RATHER THAN A BEHAVIOUR - the master is produced on Windows
+      by PowerBuilder while the candidate runs in a Linux container. The difference is
+      visible on this path rather than theoretical: the oracle's own exception arm
+      composes its message across a line break with PowerScript's newline escape, and
+      the specification objects this workflow cites carry carriage-return-plus-newline
+      escapes in their own export comments, so both conventions occur in the material
+      being characterized. The repository's root .gitattributes declares only
+      linguist-language mappings and carries NO text or eol rule, so Git performs no
+      translation here and nothing normalizes them on the way into version control.
+      Unmasked, a byte-exact comparison reports a difference on every single line of
+      every multi-line recording. That file is not in scope to change, and changing it
+      would be solving this in the wrong place.
+
+  - seam: >-
+      The literal values interpolated into generated statement text, on the path where
+      the connection's bind-disabling parameter suppresses bind variables so that
+      values are spliced into the statement instead of bound to it - and therefore
+      into the statement field of any database-error payload the path produces.
+    method: >-
+      Split every recorded statement into its text and its parameter values, compare
+      the text as text, and withhold the values from the recording rather than
+      carrying them inside it. Applied identically on both sides so the statement
+      shape stays byte-comparable.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      Two reasons, both binding. First, an interpolated statement carries row data
+      into a tracked recording and the legacy logger performs no redaction whatever,
+      so no value may be recorded inside the text (C-F) - and on this path the
+      counting statement is passed straight into the error event, so the exposure is
+      concrete rather than hypothetical. Second, the target uses parameterized
+      commands internally where the legacy interpolates - a change that is
+      deliberately unobservable in the generated statement's shape - so comparing raw
+      text without splitting would report that safety improvement as a parity failure.
+
+# WHAT IS DELIBERATELY NOT MASKED, listed because every masked field is a field a
+# regression can hide in, so the boundary belongs in writing:
+#   - the record count, and the paging triple - the page size, the page count and the
+#     page index - together with the paging and page-counting flags;
+#   - the item statuses, including the row-level status stamped at column zero;
+#   - the buffer contents of every transferred payload;
+#   - the structure of the changeset and whole-state payloads, and which transfer
+#     style and which chunk variant produced them;
+#   - the chunk count, every chunk index, and the full-state flag on every crossing;
+#   - the discard-versus-reset choice between chunks and on the final chunk;
+#   - the veto outcome on the start event;
+#   - the PER-TASK callback order, compared position by position;
+#   - the caller-side application order onto the receiver;
+#   - the byte-exact text of the counting statement, its sentinel alias and its
+#     single aliased projection;
+#   - the pool's reuse-or-discard decision, which is masked in its TRIGGER and
+#     compared in its OUTCOME.
+# Every one of those is behaviour. Masking any of them would produce a pair that
+# compares cleanly while proving nothing, which is the precise failure this store
+# exists to prevent.
+
+# ------------------------------------------------------------------------------
+# provesDefects - the legacy behaviours this pair exists to prove SURVIVED.
+#
+# The inversion here is counter-intuitive and load-bearing: a capture that shows
+# CORRECTED behaviour is a parity FAILURE, not an improvement. Where the target
+# produces output that looks more correct than the oracle, the finding is a divergence
+# in the target and is filed as a defect against it. A legacy defect is reproduced and
+# annotated at its point of reproduction, never repaired.
+#
+# THE FIRST FOUR ARE THE FOUR DOCUMENTED CROSS-THREAD TRANSFER DEFECTS, and proving
+# they survived is the chief reason this workflow exists. All four are recorded in the
+# legacy's OWN comments, in one object, on the path this pair captures.
+# docs/PARITY.md section 7.5 is the authoritative catalogue of the four; this member
+# records that THIS pair is the one that pins them.
+# ------------------------------------------------------------------------------
+provesDefects:
+
+  - defect: >-
+      Full-state transfer REQUIRES the sort and filter conditions to be synchronized
+      before the state crosses, and the legacy applies both explicitly on that arm -
+      failing with the invalid-argument code if either application is rejected. The
+      changeset arm does not require them and CLEARS BOTH instead, so the same
+      workflow leaves the carrier in two different states depending on which style was
+      selected.
+    locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L563"
+    note: >-
+      The note carrying the requirement is at :L562-L563, the two applications at
+      :L564-L575, and the counterpart note for the changeset arm at :L577-L578 with
+      the clearing at :L579-L580. ONLY THE BEHAVIOURAL HALF OF THAT COUNTERPART IS
+      CARRIED ACROSS - that the two are cleared, and that the clearing is observable
+      in the transferred state. The comment volunteers a further rationale about cost
+      which is deliberately NOT restated and NOT recorded, because no performance
+      objective may be asserted anywhere in this store and a characterization pair
+      compares observable outputs, never execution time. The practical consequence for
+      a port: the two styles are not interchangeable optimizations to be unified. A
+      port that implements one and routes both through it passes a naive round-trip
+      test and diverges on precisely the cases these comments exist to describe. The
+      whole arm is additionally gated on the affinity test at :L559, so which side is
+      running decides whether the conditions are touched at all.
+
+  - defect: >-
+      Changeset application MAY LOSE ROWS when the DataWindow is sorted and the result
+      spans more than one block, and the legacy routes around it by moving the rows
+      through a temporary carrier instead of extracting them from the live one. The
+      workaround is conditional on BOTH a multi-block result and a non-empty declared
+      sort, so the plain path and the worked-around path are two different code paths
+      producing two different chunk sequences.
+    locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L148"
+    note: >-
+      The marker and the comment are at :L147-L149, the gate at :L150-L151 and the
+      temporary carrier's creation at :L152. THE ROW ARITHMETIC IS WHY THIS PAIR
+      SEEDS AS MANY ROWS AS IT DOES: the chunk count is rows plus filtered rows over
+      the chunk size rounded up [:L145], and the chunk-size guard refuses any value at
+      or below 1000 [:L410], so a fourteen-row fixture yields exactly one chunk at
+      every legal chunk size and this branch is UNREACHABLE - the defect would be
+      declared and never demonstrated. A capture that quietly runs at a single chunk
+      is the failure mode to watch for here, because it passes.
+
+  - defect: >-
+      A RESET MUST NOT BE USED to clear the data between chunk extractions, because
+      doing so makes the changeset fail to apply to rows. The legacy discards the rows
+      explicitly instead - and it does so in the temporary-carrier variant, while the
+      direct variant discards between chunks and resets ONLY on the final chunk, once
+      nothing further will be extracted.
+    locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L176"
+    note: >-
+      The marker and the comment are at :L175-L176, the two discards at :L178 and
+      :L181, and the final-chunk reset in the direct variant at :L217. THE BOUNDARY IS
+      THE WHOLE POINT AND IT IS EASY TO GET BACKWARDS IN EITHER DIRECTION: a reset
+      between extractions breaks the transfer, a reset after the last extraction does
+      not, and the caller side legitimately resets its RECEIVER once before applying
+      the first chunk
+      [ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlquery.sru:L195].
+      Three resets, one of them forbidden - a port that unifies them, in either
+      direction, produces a transfer that silently drops rows while the chunk count
+      still matches. That is why the recording carries the discard-versus-reset choice
+      per chunk rather than only the assembled result.
+
+  - defect: >-
+      Full-state transfer CRASHES when a crosstab has too many columns, and the legacy
+      works around it by suppressing the interactive prompt on the carrier before the
+      state crosses - a modification whose only purpose is to avoid the crash, and
+      which is issued only when the property is not already set.
+    locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L673"
+    note: >-
+      The marker and the comment are at :L672-L673 and the workaround at :L674-L676.
+      Two things a reader must not conclude. First, the prompt suppression is NOT a
+      user-experience decision to be reconsidered on a headless service - it is a
+      crash workaround, and removing it because "a service has no prompts" removes the
+      workaround while leaving the crash. Second, this defect and the full-state half
+      of the first one are NOT REACHABLE from the fixture corpus, because no crosstab
+      or composite DataWindow definition exists in it - see blockedBehaviours below.
+      They are declared here because they are what the pair EXISTS to prove and
+      because the target must reproduce them; the honest statement of what the corpus
+      can currently demonstrate is carried in blockedBehaviours rather than softened
+      here.
+
+  - defect: >-
+      The chunk-size setter REFUSES ANY VALUE AT OR BELOW 1000 with the
+      invalid-argument code, and its own declaration comment says the minimum is 1000
+      - so the comment and the guard disagree by one, and the guard wins. The refusal
+      answers a BARE CODE with no message whatever. This is a legacy limit preserved
+      exactly, not a tunable to be relaxed.
+    locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L410"
+    note: >-
+      The guard is the entire body of the setter at :L410; the contradicting comment
+      and the default of ten thousand are at :L34, and the same default is restored on
+      reset at :L256. THE SMALLEST ACCEPTED VALUE IS 1001, NOT 1000, and a port that
+      trusts the comment over the guard accepts 1000 and diverges on exactly one
+      value - the kind of divergence a range test misses and a boundary test catches,
+      which is why both boundary values are recorded. A SECOND LEGACY LIMIT MUST NOT
+      BE CONFUSED WITH THIS ONE: the arity ceilings the legacy imposes on parameter
+      forwarding - the positional argument lists it unrolls case by case before
+      falling back to dynamic invocation - exist only because PowerScript cannot
+      forward an arbitrary-length argument list, and they have no analogue in the
+      target language. Those ceilings are legacy LIMITS that the target contract may
+      exceed without behavioural regression, so a capture must NOT treat a higher
+      ceiling as a divergence. This guard is the opposite kind of number: it is
+      observable behaviour at its boundary and it is preserved to the value.
+
+  - defect: >-
+      The count wrapper REPLACES THE PROJECTION with a single aliased literal before
+      counting, drops the order-by clause when one is present, and wraps the result in
+      a count with its own sentinel table alias. Every part of that is observable
+      generated SQL and must match byte for byte, including the alias spellings.
+    locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L830"
+    note: >-
+      The projection replacement is at :L830, the conditional order-by removal at
+      :L831-L833 and the assembled counting statement with its sentinel alias at
+      :L834. The counting path additionally tests success as THE VALUE 1 rather than
+      the return algebra's success constant [:L851], and it passes the statement it
+      just generated straight into the database-error event [:L855] - which is the
+      exact mechanism that makes the statement-field split of the redaction section
+      necessary rather than precautionary. Byte-exactness here is not pedantry: the
+      alias identifiers are the only thing distinguishing the wrapper's output from a
+      plausible rewrite of it, and the sibling workflow
+      persistence-sql-paging-rewrite is where the rest of the generated paging text is
+      pinned. ONE FIELD-LEVEL RULE TRAVELS WITH THIS STATEMENT AND IS RECORDED HERE
+      BECAUSE THIS IS THE ENTRY THAT SENDS GENERATED TEXT INTO AN ERROR PAYLOAD: the
+      transaction descriptor that opened the connection the statement ran against
+      carries a PASSWORD FIELD THAT IS WRITE-ONLY. The legacy in-process accessor
+      moves it in both directions; across a boundary the outbound half would place a
+      database password into a response body and therefore into any log of one, so it
+      is accepted inbound and NEVER populated outbound - never echoed in a response,
+      never logged, and therefore NEVER RECORDED. Its field name appears in this
+      definition and in the recording; its value appears in neither, and the
+      redaction section above declares it omitted rather than redacted so that no
+      placeholder asserts a value was there.
+
+# ------------------------------------------------------------------------------
+# blockedBehaviours - what this pair CANNOT prove, declared rather than approximated.
+# A known gap is reportable; an approximation is an unknown one. Both entries below
+# were found by inspection while verifying this definition's own locators, and both
+# are stated with the evidence that produced them so a reader can check them.
+# ------------------------------------------------------------------------------
+blockedBehaviours:
+
+  - behaviour: >-
+      The WHOLE-STATE TRANSFER ARM of the worker-side style selection - and with it
+      the sort-and-filter synchronization the first transfer defect requires and the
+      crosstab column-count crash the fourth one works around.
+    reason: >-
+      The arm is selected only for the crosstab and composite processing modes
+      [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L93-L94], and
+      NO CROSSTAB OR COMPOSITE DATAWINDOW DEFINITION EXISTS IN THE FIXTURE CORPUS:
+      every one of the repository's twelve declares a processing mode of 0 or 1 and
+      none carries a crosstab specification at all, the definition this workflow
+      retrieves through included
+      [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L3]. There is therefore no oracle
+      input from which the arm can be driven, and the legacy tree is read-only, so
+      one cannot be added: authoring a crosstab fixture would be editing the oracle
+      and would produce a master with no provenance. What this pair CAN demonstrate on
+      the whole-state codec is the stop handler's own move of the finished result out
+      of the caller-side carrier, which every arm performs
+      [ws_objects/pfw.tests.pbl.src/w_test_thread_sqlquery.srw:L174-L175]; the
+      style-selected arm is not among them. The two defects remain declared in
+      provesDefects because the target must reproduce them and because a future
+      corpus - or a documented, non-oracle synthetic input introduced under its own
+      review - could reach them; they are reported BLOCKED here rather than
+      approximated by driving a tabular definition through the whole-state path and
+      calling the result equivalent.
+    disposition: blocked-report-not-approximate
+
+  - behaviour: >-
+      A SUCCESSFUL PAGED RETRIEVE against SQLite, and therefore the paging triple as
+      the product of a page that was actually fetched rather than as the three values
+      the caller-side proxy reports.
+    reason: >-
+      The paged statement builder dispatches on the transaction's own database type
+      [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L320], and
+      that type resolution has NO UNKNOWN ARM: it answers Oracle when the connection's
+      dialect name contains that word and SQL SERVER IN EVERY OTHER CASE
+      [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L356-L360]. SQLite is
+      not a member of that two-value enumeration at all, so a SQLite connection is
+      classified as SQL Server and the paged statement is emitted in SQL-Server
+      dialect - which also makes the builder's own unimplemented arm
+      [:L396-L398] unreachable through that resolution. The capture therefore records
+      what the engine actually answers on the paged case, and the recording's paged
+      values are the caller-side proxy's own properties plus its page-count accessor,
+      which is exactly what the oracle reads. The byte-exact paged statement text is
+      characterized by the sibling workflow persistence-sql-paging-rewrite as a PURE
+      STRING TRANSFORM needing no instance of either dialect, and the page-count
+      short-circuit arm - the one that computes both numbers arithmetically without
+      touching the database - is fully reachable here and IS captured. No instance of
+      SQL Server or Oracle is provisioned, required or reachable to close this gap
+      (C-E), and none is fabricated to close it.
+    disposition: blocked-report-not-approximate
+
+# ------------------------------------------------------------------------------
+# sharedVolume
+#
+# THE CITATION, which belongs in a comment because the schema deliberately gives this
+# member no prose field: the paired-capture shared-volume rule is stated canonically,
+# word for word, in characterization/README.md section 2.1, which is the authority for
+# it. It is CITED here and NOT reproduced - the same text is already owned word for
+# word by characterization/README.md, docs/PARITY.md and orchestration/README.md, and
+# a fourth copy would simply be a fourth thing to drift, which is the failure this
+# store exists to prevent rather than to commit. One of the preconditions above
+# carries the same citation at the point of use.
+#
+# It APPLIES here, and emphatically so. This workflow retrieves from a real SQLite
+# file on the persistence volume - the seed phase creates that file and seeds its rows
+# - so it is not the pure-string-transform case the one narrow exemption covers. That
+# case is the paging rewrites, which mount no volume and are characterized by the
+# sibling workflow named below. Because applies is true, no exemptionReason is
+# required and none is given: stating one would imply an exemption that does not
+# exist.
+#
+# Two operational corollaries follow for THIS workflow specifically, and both are
+# consequences of the cited rule rather than additions to it. The row population this
+# workflow seeds is larger than its sibling's, so a reseed between halves is both more
+# tempting and more damaging. And a plain teardown between the two halves is safe while
+# a teardown that removes named volumes is not - it discards the provisioned schema and
+# every seeded row, and therefore voids the pair.
+# ------------------------------------------------------------------------------
+sharedVolume:
+  applies: true
+
+# The honest state of this workflow, and the schema's enum has exactly one member so
+# that nothing here can imply otherwise. NO capture has been taken on either side. The
+# legacy half needs a PowerBuilder toolchain that is not present, and the environment
+# this store was authored in had no Docker daemon available, so the compose bring-up
+# the capture rule is expressed against could not have been exercised there in any
+# case; no health gate is claimed as passed. Nothing above is a verified result - every
+# statement in this file is either a citation of read-only legacy source or a
+# specification of a capture still to be run.
+executionStatus: specified-not-executed
+
+# Cross-references only. Naming a sibling never merges two workflows: each pair stays
+# independently comparable under its own identifier, against its own volume state,
+# under its own inline mask.
+relatedWorkflows:
+  # Seeds the same table through the same binding with the same delete-then-create
+  # sequence this workflow's seed phase reuses, and characterizes the synchronous
+  # retrieve, validate and update triple against it. It is also where the fixture's
+  # own type mismatches and its update-path defects are pinned.
+  - persistence-sqlite-retrieve-update
+  # The byte-exact paging rewrites, deliberately NOT characterized here: they are PURE
+  # STRING TRANSFORMS - statement plus page size and index in, statement text out -
+  # needing no instance of either dialect, which is what makes that workflow the one
+  # narrow case exempt from the shared-volume rule that governs this one. It is where
+  # the sentinel identifiers and the rest of the generated paging text are pinned.
+  - persistence-sql-paging-rewrite
+  # The threading substrate in its own right: the task lifecycle event ordering and the
+  # three deliberate non-ports - the affinity mask, and thread suspend and resume. This
+  # workflow captures one SQL task's crossings; that one captures the lifecycle the
+  # crossings sit inside.
+  - persistence-thread-task-lifecycle

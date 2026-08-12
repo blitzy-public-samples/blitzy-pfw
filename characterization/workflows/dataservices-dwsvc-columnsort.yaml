@@ -1,0 +1,1007 @@
+# yaml-language-server: $schema=./workflow.schema.json
+# ==================================================================================================
+#  dataservices-dwsvc-columnsort - THE HEADLESS HALF OF THE COLUMN-SORT SERVICE
+#  ------------------------------------------------------------------------------------------------
+#  THIS FILE SPECIFIES A CAPTURE. IT CONTAINS NO CODE.
+#  It conforms to `./workflow.schema.json`, which is authoritative for shape. Store-wide conventions -
+#  the capture rule's canonical text, the recording-file conventions, the seam register, the defect
+#  roster and what must never enter a recording - belong to `../README.md` and to `../../docs/PARITY.md`
+#  and are CITED here, never restated. A copy of a rule those files already own word for word would be
+#  one more thing to drift.
+#
+#  ---- THE SPLIT IS THIS WORKFLOW'S DEFINING FEATURE ---------------------------------------------
+#  The closure analysis found this service PARTLY presentational: it reaches for a resolution-dependent
+#  unit conversion purely to place its sort indicator - the two evidence locators are cited exactly once,
+#  in `deferredCapabilities` below. The resolution is a split. The HEADLESS HALF - sort-expression
+#  construction and sort state - ships in DataServices and is what this pair characterizes. The
+#  indicator geometry is DEFERRED and named as a reserved gateway extension point, declared under
+#  `deferredCapabilities` below. That is a DOCUMENTED CAPABILITY GAP, and it is deliberately preferred
+#  to a partial implementation: where the choice is between a half-built rendering path and a gap a
+#  reader can enumerate, the gap wins, because a gap can be audited and a half-built path cannot.
+#  `../../docs/DEFERRED.md` section 6 owns the split's full statement across all three affected
+#  services; this file records only what the split means FOR THIS CAPTURE.
+#
+#  ---- WHAT IS NOT HERE, AND WHY EACH ABSENCE IS DELIBERATE --------------------------------------
+#    * `blockedBehaviours` - OMITTED. This workflow blocks nothing. The store's two blocked cases both
+#      belong to siblings: pinyin first-letter matching to `dataservices-dwsvc-dropdownsearch` and
+#      cross-session foreign expression variables to `dataservices-dwsvc-columnexp`. Neither is
+#      reachable from the sort path, and claiming either here would misattribute a known gap. Stated so
+#      the member's absence is not read as an oversight.
+#    * `redaction` - OMITTED. Nothing this capture records is sensitive. Every value that reaches a
+#      recording originates in the read-only fixture's own nine inline rows - three small decimals and
+#      three status codes per row - or in the fixture's own declared sort metadata. NO KEY, NO PASSWORD,
+#      NO CERTIFICATE, NO TOKEN AND NO CONNECTION STRING IS READ, EMITTED OR RECORDED HERE (C-F). This
+#      service issues no SQL, so the redacted-statement rule has no field to act on.
+#    * `seedPhase.connectionUri` - OMITTED. This workflow opens no storage. The fixture declares no
+#      retrieval statement, no update table and no schema; its rows are inline in the definition, so
+#      there is no URI to record a grammar for.
+#
+#  ---- ORDER AND EXPRESSION TEXT, NEVER SPEED (C-K, and `../README.md` section 6.4) --------------
+#  Sorting invites a throughput claim and this file makes none. NO ELAPSED VALUE AND NO
+#  ROWS-PER-UNIT-TIME FIGURE IS RECORDED, COMPARED OR IMPLIED ANYWHERE BELOW. The repository publishes
+#  no service-level agreement, no latency budget, no throughput target and no availability commitment,
+#  so there is nothing a timing assertion could be measured against. The only quantitative gate in the
+#  brief is 80% per-service line coverage, and it is read from `coverage.cobertura.xml` in CI - not
+#  from this store. What IS compared is the constructed expression text, byte for byte, and the row
+#  order it produces.
+#
+#  ---- GOVERNING CONSTRAINTS -------------------------------------------------------------------
+#  NO USER-SPECIFIED RULES EXIST. The project's rules document returns exactly one line reporting that
+#  none were provided, so no rule is invented, inferred or back-filled, and nothing in this file exists
+#  because of one. Enterprise-standard best practice applies in their place. The binding constraints are
+#  the migration plan's own: C-B (defects reproduced, never corrected - a corrected capture is a parity
+#  FAILURE), C-C (the legacy tree is read-only and is the oracle; every claim carries a locator), C-D
+#  (nothing for a deferred capability area - and a routing declaration is not a stub of one), C-F (no
+#  secret value), C-K (every decision carries its reason) and C-L (the shared-volume capture rule).
+# ==================================================================================================
+
+schemaVersion: "1"
+
+workflowId: dataservices-dwsvc-columnsort
+
+title: >-
+  Column sort, headless half: three-state cycle, multi-column composition order, and restoration of the
+  fixture's own declared sort rule
+
+capabilityArea: >-
+  Headless sort-expression construction and sort state in the service class `n_cst_dwsvc_columnsort` -
+  the per-column three-state cycle, the ordered set of columns participating in a multi-column sort, the
+  clause grammar each participating column contributes, the comma-joined expression the service builds
+  from them, and the restoration of the DataWindow definition's own declared sort rule when no column is
+  left sorted. The sort indicator's geometry is NOT part of this capability area; it is the deferred half
+  declared under `deferredCapabilities` below.
+
+targetService: DataServices
+
+description: >-
+  ONE CLICK MATRIX, CAPTURED TWICE. The pair proves that the expression text the service constructs, the
+  per-column sort state it holds, the order in which columns participate, and the row order that results
+  are identical on the legacy master and on the .NET candidate after identical masking.
+
+
+  THE HEADLESS/RENDERING SPLIT, AND WHY THE GAP IS PREFERRED TO A PARTIAL IMPLEMENTATION. This service
+  is partly presentational: it performs a resolution-dependent unit conversion purely to place its sort
+  indicator on the column header, and the two locators evidencing that are cited in
+  `deferredCapabilities` below rather than repeated here. Rather than ship an approximation of that
+  placement, the capability is split - the sort
+  model ships and is characterized here, and the indicator geometry is deferred and named as a reserved
+  extension point. The reasoning is the migration plan's own and it is not a matter of taste: a
+  half-built deferred capability is WORSE than a documented gap, because the gap is enumerable and
+  auditable while the half-built path silently invites callers to depend on behaviour nobody
+  characterized. `deferredCapabilities` below names precisely what does not ship, and
+  `../../docs/DEFERRED.md` section 6.2 carries the same split for all three affected services.
+
+
+  THE PRESENTATIONAL COUPLING HERE IS NARROW, WHICH IS WHY THE WHOLE SORT MODEL SHIPS. Two
+  unit-conversion calls, both inside the indicator-placement routine, are the entire coupling. That is
+  the contrast that justifies splitting this service rather than deferring it: its two presentational
+  siblings, `dataservices-dwsvc-contextmenu` and `dataservices-dwsvc-dropdownsearch`, are coupled far
+  more broadly - window positioning, font construction, a popup-menu-typed API surface - and their
+  headless halves are correspondingly smaller. Here the headless half is nearly the whole object.
+
+
+  THIS WORKFLOW RUNS INSIDE THE EVENT CHAIN, NOT BESIDE IT. The oracle window declares its DataWindow
+  control as the service-extension class itself
+  [`ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnsort.srw:L5`, `:L44`], so every mouse event this
+  service observes arrives through the 22-event surface that `dataservices-dw-event-chain`
+  characterizes. That definition owns the ordering contract; this one cites it rather than re-deriving
+  it, and records only the returns the sort path itself produces.
+
+
+  ONE-BASED THROUGHOUT, DECLARED RATHER THAN ASSUMED. Every column number and every row number in every
+  recording produced by this workflow is a ONE-BASED legacy index. The legacy's upper-bound function
+  returns the LAST VALID INDEX where the target's array length is one past the end, and the service
+  appends a newly clicked column at upper-bound-plus-one. A silent off-by-one in that translation is
+  indistinguishable from a behavioural regression, so the basis is stated here, restated as a
+  precondition, and pinned as a defect below.
+
+
+  NO DATA VALUE RECORDED HERE IS SENSITIVE. Every captured value originates in the read-only fixture's
+  own inline rows or its own declared metadata; nothing is read from a credential, a key store or a
+  connection string (C-F).
+
+oracleFixtures:
+  # THE DRIVING ORACLE WINDOW. 53 lines in total, and the whole of the behaviour it drives lives in the
+  # service object below it - which is exactly why both are cited. The window alone would under-specify
+  # this capture: it enables the service and binds a definition, and that is all it does.
+  # Read, never edited, moved, renamed, reformatted, re-encoded or copied into this tree (C-C).
+  - path: ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnsort.srw
+    role: oracle-window
+    locators:
+      - "L5"          # the control is forward-declared as the service-extension class itself
+      - "L34-L39"     # THE AUTHORITATIVE STATE SPECIFICATION - see the three claims it makes, below
+      - "L36"         # modifier-plus-left-click multi-column sort; clicking again restores the original rule
+      - "L38"         # the three sort states, with not-sorted named as the DEFAULT RULE
+      - "L40"         # the source comment introducing the enablement
+      - "L41"         # THE ENABLEMENT: the column-sort service is switched on here, and only this one
+      - "L44"         # the control's type definition, deriving from the service-extension class
+      - "L50"         # THE BINDING: the sample definition is bound as the control's data object
+
+  # THE DEFINITION THE WORKFLOW IS BUILT AROUND, and the seed in its entirety - its rows are INLINE in
+  # the definition itself, so binding it IS the seed. It is also the reason two of the four defects
+  # below are checkable at all: it declares a base sort rule for the restore path to return to, and it
+  # declares its column controls OUT of identifier order, which is what makes composition order
+  # observable rather than coincidental.
+  - path: ws_objects/pfw.tests.pbl.src/dw_svc_sample.srd
+    role: primary-fixture
+    locators:
+      - "L2"          # release 19
+      - "L3"          # the grid presentation style the service requires, and the declared unit system
+      - "L8-L13"      # six columns, every one carrying updatewhereclause=yes
+      - "L11"         # the status code table on the first character column - Chinese DISPLAY values
+      - "L14"         # THE BASE SORT METADATA - the restore target, recorded in the seed phase below
+      - "L15"         # THE NINE INLINE ROWS - the seed, carried by the read-only definition itself
+      - "L16-L21"     # the six header text objects, each named for its column with the "_t" suffix
+      - "L22-L27"     # the column controls, DECLARED OUT OF IDENTIFIER ORDER
+      - "L27"         # the drop-down list-box column, whose clause takes the display-lookup form
+      - "L28"         # the computed control evaluating the current row number
+
+  # THE OBJECT UNDER CHARACTERIZATION. 450 lines, and the locators below are the ones this definition's
+  # observed outputs, preconditions and defects cite. Every one was read in the source rather than
+  # copied forward.
+  - path: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru
+    role: service-object
+    locators:
+      - "L4"          # it derives from the DataWindow service base
+      - "L10-L13"     # the per-column sort record: a column name and a sort state, and nothing else
+      - "L16-L19"     # the four mouse events, including the posted one that does the work
+      - "L26"         # the indicator object's name suffix
+      - "L29"         # THE ORDERED PARTICIPATING SET - insertion-ordered, and the array is one-based
+      - "L31"         # the constructed expression - the primary recorded artifact of this workflow
+      - "L32"         # the retained ORIGINAL rule - the restore target, captured lazily at :L176-L178
+      - "L34"         # the retained click point, which the determinism mask below seams
+      - "L37-L39"     # THE THREE SORT STATES as their raw numeric values: 0, 1 and 2
+      - "L53-L54"     # the click point is recorded on button-down
+      - "L61"         # THE GRID-STYLE GATE - a non-grid presentation style sorts nothing at all
+      - "L63"         # the grouping gate - a grouped definition sorts nothing either
+      - "L70-L73"     # the movement tolerance, and THE POSTED CONTINUATION that performs the sort
+      - "L83-L85"     # the clicked object must be in the header band, or the handler returns zero
+      - "L94-L102"    # the column name is the header object's name minus its two-character suffix
+      - "L104-L105"   # the resolved name must be a column in the detail band
+      - "L107-L110"   # two edit styles are excluded from sorting entirely
+      - "L112-L123"   # ONE-BASED SEARCH, AND THE APPEND AT UPPER-BOUND-PLUS-ONE that fixes insertion order
+      - "L125-L132"   # THE THREE-STATE CYCLE: not-sorted to ascending to descending and back
+      - "L134"        # THE MODIFIER TEST - the control key, read at click time
+      - "L135-L145"   # the modifier branch: sort, then drop the column that cycled out of the sort
+      - "L141"        # the one-based append idiom again, rebuilding the participating set
+      - "L146-L162"   # the plain branch: clear every other column first, then sort, then collapse the set
+      - "L168"        # a double-click re-enters the button-down handler rather than sorting directly
+      - "L171-L199"   # THE EXPRESSION BUILD
+      - "L174"        # the expression is rebuilt from scratch on every transition
+      - "L176-L178"   # THE LAZY BASELINE CAPTURE - the original rule is read from the definition once
+      - "L180-L185"   # the count of participating columns, which decides whether an index badge applies
+      - "L187-L199"   # THE COMPOSITION LOOP - insertion order, and the comma join
+      - "L196-L197"   # the separator: a comma, inserted only between non-empty clauses
+      - "L201-L207"   # THE RESTORE PATH - an empty expression falls back to the retained original rule
+      - "L211"        # the constructed or restored expression is applied here
+      - "L236"        # the reset entry point reports failure when nothing is sorted
+      - "L290-L339"   # THE CLAUSE GRAMMAR, one clause per participating column
+      - "L292"        # a not-sorted column contributes an EMPTY clause and so leaves the expression
+      - "L294-L295"   # a computed column contributes its own name
+      - "L297-L311"   # the display-lookup forms for the drop-down edit styles
+      - "L307-L310"   # and for a plain code table
+      - "L313-L328"   # the null-coalescing forms, per column type
+      - "L329"        # the fallback: the column's own name
+      - "L331-L336"   # THE DIRECTION SUFFIX: a single letter, space-separated from the clause
+      - "L353"        # a not-sorted column's indicator is destroyed and not recreated
+
+  # THE STRUCTURAL HOST. The oracle window's control is this class, so every mouse event the sort
+  # service sees arrives through its 22-event surface. Cited for the surface and for the returns the
+  # sort path produces into it - NOT re-characterized here. `dataservices-dw-event-chain` owns that.
+  - path: ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru
+    role: service-object
+    locators:
+      - "L11-L32"     # the 22-event surface the sort service's mouse events arrive through
+      - "L80-L84"     # the sub-service members, one of which is the column-sort service
+      - "L109-L111"   # the event gate, which must be in a known state for this capture
+
+  # READ AS THE AUTHORITATIVE STATEMENT of what the two gates at `:L61` and `:L63` actually test. The
+  # presentation-style constants are declared here and the gate resolves a describe result against
+  # them, so the fixture's declared style is checkable rather than assumed. This workflow characterizes
+  # none of this class's own behaviour - `dataservices-dwsvc-contextmenu` cites it as a service object.
+  - path: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc.sru
+    role: specification
+    locators:
+      - "L18-L24"     # the presentation-style constants, of which only the grid value admits sorting
+      - "L143-L152"   # the style gate's own resolution of the describe result
+
+# ==================================================================================================
+#  THE SEED PHASE - SEPARATE FROM THE CAPTURE PHASE, AND IT RUNS ONCE
+#  ------------------------------------------------------------------------------------------------
+#  THE SEED SHAPE HERE IS THE INLINE-FIXTURE SHAPE, NOT THE DATABASE SHAPE. The persistence workflows
+#  seed storage: their oracle deletes the database file, recreates the schema and inserts rows, which is
+#  precisely the destructive reseed the capture rule forbids between the two halves of a pair. THIS
+#  workflow seeds nothing of the kind. Its nine rows are declared INLINE IN THE READ-ONLY DATAWINDOW
+#  DEFINITION ITSELF [`dw_svc_sample.srd:L15`], so BINDING THE DEFINITION IS THE SEED: there is NO FILE
+#  DELETE, NO DDL, NO INSERT AND NO CONNECTION anywhere in this phase. The two assertions the schema
+#  requires are still both true and still both required - the seed happens once per pair, and nothing
+#  here runs between the two captures.
+#
+#  ONE SEED STEP EXISTS PURELY TO MAKE A DEFECT VERIFIABLE. The restore path returns to the fixture's
+#  OWN declared sort rule rather than to an arbitrary unsorted order, and the service reads that rule
+#  lazily, once, on the first sort it performs. A capture that did not record the baseline first could
+#  observe the restore happening and still not be able to say whether it restored to the RIGHT rule. The
+#  baseline is therefore recorded in the seed phase, before any click is synthesized.
+# ==================================================================================================
+seedPhase:
+  steps:
+    - action: >-
+        Bind the sample DataWindow definition the oracle window names as its control's data object. On
+        the legacy side that is the definition the window declares; on the target side it is the
+        transcribed definition registered under the same column model. Binding loads the definition's own
+        inline rows - this step performs NO file delete, NO schema creation, NO row insert and NO
+        connection, because the rows are part of the read-only fixture rather than of any store.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnsort.srw:L50"
+    - action: >-
+        Confirm the nine inline rows the bound definition declares are present and in declaration order,
+        with the six columns in their declared types - three two-place decimal columns named n1, n2 and
+        n3, and three hundred-character character columns named s1, s2 and s3 - and confirm the row count
+        is nine on both halves before any click is synthesized.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_svc_sample.srd:L15"
+    - action: >-
+        RECORD THE FIXTURE'S OWN BASE SORT METADATA VERBATIM, BEFORE ANY CLICK. The definition declares
+        its table sort rule as the exact string "n1 A n2 A n3 A " - the three numeric columns, each
+        ascending, SEPARATED BY SINGLE SPACES AND CARRYING A TRAILING SPACE. Record it byte for byte,
+        including that trailing space, because it is the restore target: the third state of the sort
+        cycle and the repeat modifier-click both return to THIS string, and a capture that has not
+        recorded it cannot tell a correct restore from a plausible-looking one. Note while recording it
+        that this space-separated form is NOT the form the service constructs - the service joins its own
+        clauses with commas - so the two are distinguishable in a recording on sight.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_svc_sample.srd:L14"
+    - action: >-
+        Confirm the service's retained original-rule field is EMPTY at capture start on both halves. The
+        service captures the baseline lazily and exactly once - on the first sort it performs, and only
+        while that field is still empty - so a field left populated by an earlier capture would silently
+        substitute a different restore target and the restore cases would compare two different
+        behaviours.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L176-L178"
+    - action: >-
+        Confirm the ordered participating set is EMPTY at capture start on both halves, so that the first
+        recorded transition is an insertion into an empty set rather than a mutation of a set left behind
+        by a previous case. Every case below states the set it starts from, and this is the state the
+        first of them starts from.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L29"
+    - action: >-
+        Enable exactly the column-sort service and leave the other four DataWindow sub-services disabled,
+        matching the oracle window's own open event. This is a seed step rather than a precondition check
+        because the enabled set is observable: the host's changed-event dispatcher and its raw editing
+        event hand control to other sub-services only when those are enabled, so a different enabled set
+        produces a different recorded event order for reasons that are not this service's behaviour.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnsort.srw:L41"
+    - action: >-
+        Leave every host event-gate bit enabled - the gate bitmask starts at zero, meaning nothing
+        disabled - so the mouse events this service depends on reach it and every case below is a
+        departure from a known starting state rather than from an unknown one.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L109-L111"
+    - action: >-
+        Configure the determinism seams declared below ONCE, and use that one configuration for both
+        halves of the pair. A seam configured per capture is two configurations, and two configurations
+        make the two recordings answer two different questions.
+    - action: >-
+        On the target side, materialize the same nine rows from the same read-only definition,
+        transcribed rather than read at run time, and open one session for the host the cases below drive.
+        No schema provisioning and no row seeding runs on this side either, so this step is idempotent
+        and is safe to repeat without touching any persistent state.
+
+  runsOncePerPair: true
+  neverBetweenCaptures: true
+
+capturePhase:
+  behaviourUnderTest: >-
+    THE HEADLESS SORT MODEL THE SERVICE HOLDS AND THE EXPRESSION TEXT IT CONSTRUCTS, AND NOTHING ELSE.
+    For each synthesized click: which column the click resolves to, the per-column sort state after the
+    three-state cycle advances, the ordered set of columns participating in the sort with each one's
+    direction, the clause the grammar produces for each of them, the single expression string the service
+    joins those clauses into, the row order that expression produces, the current row afterwards, and the
+    returns the sort path produces into the host's event chain.
+
+
+    THE PRIMARY ARTIFACT IS THE EXPRESSION STRING, AND IT IS COMPARED BYTE FOR BYTE. It is built from
+    scratch on every transition [`n_cst_dwsvc_columnsort.sru:L174`], one clause per participating column
+    in insertion order, joined with a comma inserted only between non-empty clauses [`:L196-L197`], with
+    each clause carrying a single space and a single direction letter [`:L331-L336`]. Every character of
+    it is behaviour: the separator, the spacing, the letter case, the clause form the grammar chose, and
+    the presence or absence of a trailing character. Nothing about it is normalized before comparison.
+
+
+    WHAT THIS CAPTURE IS NOT, STATED SO A RECORDED FIELD CANNOT BE MISATTRIBUTED. IT DOES NOT CAPTURE
+    THE SORT INDICATOR - not its position, not its size, not its index-badge placement, and not its
+    rendering or removal as drawn output. That half of the capability does not ship in this phase and is
+    declared under `deferredCapabilities` below; a recording of it would be a recording of something no
+    service produces. Accordingly NO OBSERVED OUTPUT BELOW CARRIES A COORDINATE, A GEOMETRY VALUE, A
+    SCALING RESULT OR A TEXT-MEASUREMENT VALUE. It is also not a capture of the host event chain's own
+    ordering - `dataservices-dw-event-chain` owns that - and it records only the returns this service's
+    own handlers produce. AND IT IS NOT A MEASUREMENT: no elapsed value is recorded and no throughput is
+    asserted or implied. Sorting is exactly the behaviour that invites such a claim, and this capture
+    makes none.
+
+
+    ONE FURTHER EXCLUSION, BECAUSE IT WOULD OTHERWISE LOOK LIKE AN OMISSION. The reset and
+    original-rule-update entry points [`:L216-L247`, `:L249-L283`] are NOT exercised by this matrix. The
+    oracle window drives this service entirely through header clicks and calls neither, so a recording of
+    either would be a recording of a path the oracle never takes - and a defect claimed against an
+    unexercised path is a claim this pair could not support.
+
+  preconditions:
+    # ---- GATES THAT DECIDE WHETHER ANY SORT HAPPENS AT ALL ---------------------------------------
+    - >-
+      THE BOUND DEFINITION MUST BE IN THE GRID PRESENTATION STYLE. The service returns immediately
+      without sorting when the style is anything else [`n_cst_dwsvc_columnsort.sru:L61`], and the style
+      constants are declared on its base class where only the grid value admits sorting
+      [`n_cst_dwsvc.sru:L18-L24`, resolved at `:L143-L152`]. The fixture satisfies this in its own
+      declaration [`dw_svc_sample.srd:L3`], so the gate is checkable rather than assumed - but it is
+      recorded as a precondition because a capture taken against a non-grid definition would record
+      eight cases of "nothing happened" and could be mistaken for a passing comparison.
+    - >-
+      THE BOUND DEFINITION MUST DECLARE NO GROUPING. A grouped definition sorts nothing
+      [`n_cst_dwsvc_columnsort.sru:L63`]. The fixture declares none, and this is stated for the same
+      reason as the style gate: the failure mode is silence, not an error.
+    - >-
+      EVERY HEADER OBJECT MUST BE NAMED FOR ITS COLUMN WITH THE TWO-CHARACTER SUFFIX THE SERVICE STRIPS.
+      The service derives the column name by removing that suffix and returns zero for any header object
+      that does not carry it [`:L94-L102`]; the resolved name must then be a column in the detail band
+      [`:L104-L105`]. The fixture's six header objects satisfy both [`dw_svc_sample.srd:L16-L21`].
+    - >-
+      NO COLUMN IN THE MATRIX MAY USE AN EXCLUDED EDIT STYLE. Two edit styles are refused outright
+      [`:L107-L110`]. None of the fixture's six columns uses either, so all six are sortable and the
+      matrix's choice of columns is unconstrained by this gate.
+    # ---- HOW A CLICK IS RECOGNIZED, WHICH IS ITSELF A PRECONDITION -------------------------------
+    - >-
+      EACH SYNTHESIZED CLICK MUST BE A DOWN AND AN UP THAT THE SERVICE ACCEPTS AS ONE CLICK. The service
+      retains the down point [`:L53-L54`] and acts only when the up point is within the movement
+      tolerance of it on BOTH axes [`:L70`]; outside that tolerance the click is treated as a drag and
+      nothing sorts. The synthesized pair must therefore satisfy the tolerance identically on both
+      halves, which is why the click point is seamed rather than merely masked - see the mask below.
+    - >-
+      THE SORT IS PERFORMED BY A POSTED CONTINUATION, NOT BY THE BUTTON-UP HANDLER, AND THE CONTINUATION
+      MUST BE DRAINED BEFORE A CASE IS RECORDED [`:L70-L73`]. The legacy defers the work onto the
+      platform message queue; the target has no message pump and queues an explicit continuation
+      instead. A record taken before the continuation ran would capture the state BEFORE the transition
+      on either side, and would do so intermittently - which is the worst kind of parity failure because
+      it is not reproducible.
+    - >-
+      THE MODIFIER STATE MUST BE FIXED AND RECORDED PER CASE. The service reads the control key at click
+      time [`:L134`] and the two branches differ substantially: the modifier branch preserves the other
+      participating columns while the plain branch clears them first [`:L135-L145` against `:L146-L162`].
+      Every case below states the modifier state it was taken under, and the recording carries it, so a
+      case cannot be compared against its counterpart taken under the other branch.
+    - >-
+      A DOUBLE-CLICK IS NOT A SECOND CLICK FOR THIS SERVICE. The double-click handler re-enters the
+      button-down handler [`:L168`], so it records a new down point rather than advancing the cycle. The
+      matrix synthesizes discrete down-up pairs and no double-click, and this is stated so that a
+      recording containing an unexpected extra transition is read as a synthesis fault rather than as a
+      behavioural divergence.
+    # ---- THE INDEXING BASIS, DECLARED ONCE AND BINDING ON EVERY RECORD ---------------------------
+    - >-
+      EVERY COLUMN NUMBER AND EVERY ROW NUMBER IN EVERY RECORD IS A ONE-BASED LEGACY INDEX. The
+      participating set is a one-based array searched from index one [`:L112-L118`] and appended at
+      upper-bound-plus-one [`:L120-L123`, and again at `:L141`], where the legacy's upper-bound function
+      returns the LAST VALID INDEX rather than a length. Both halves record one-based values and the
+      comparison is one-based; the target performs the conversion at its own boundary and never in the
+      recording. This is pinned as a defect below as well, because it is the one translation hazard here
+      whose failure is invisible.
+    # ---- STATE THE MATRIX STARTS FROM ------------------------------------------------------------
+    - >-
+      THE PARTICIPATING SET IS EMPTY AND THE RETAINED ORIGINAL RULE IS UNSET AT THE START OF THE MATRIX,
+      as the seed phase establishes. The cases are ordered and each states its starting set, so the
+      matrix is a single ordered walk rather than eight independent captures - the composition-order and
+      restore cases are only meaningful in sequence.
+    - >-
+      THE SAME SIX-COLUMN MODEL AND THE SAME NINE ROWS ARE BOUND ON BOTH HALVES, including the code
+      table on the first character column and the two drop-down columns whose display and data columns
+      differ. That configuration is not a detail: it is what selects the display-lookup clause form for
+      those columns [`:L297-L311`], so an unequal configuration produces an unequal expression string
+      for identical clicks.
+    - >-
+      THE TARGET HALF IS CAPTURED AGAINST THE RUNNING SERVICE, not against an in-process test host. A
+      test host mounts no volume and so cannot be the candidate half of a pair however thorough it is;
+      `../README.md` section 7 is the authority for that distinction.
+    - >-
+      BOTH HALVES OF THIS PAIR ARE TAKEN IN ONE WORKING TREE. Where several clones run concurrently each
+      needs its own compose project and its own volume, so that one clone's teardown cannot invalidate
+      another clone's half-finished pair.
+
+
+  observedOutputs:
+    # ==============================================================================================
+    #  PART 1 OF 2 - THE SIX FIELDS EVERY CASE RECORD CARRIES
+    #  ---------------------------------------------------------------------------------------------
+    #  These are the shape of one record. Part 2 then declares the eight cases, each of which produces
+    #  one record of this shape. Splitting the two axes is deliberate: a reviewer reading a diff needs
+    #  to know both WHICH transition produced a record and WHICH field of it differed, and collapsing
+    #  the axes into a single list of eight opaque blobs would answer only the first question.
+    #  The expression string is declared FIRST because it is the primary artifact of this workflow.
+    # ==============================================================================================
+    - name: sortExpression
+      description: >-
+        THE PRIMARY ARTIFACT. The single expression string the service holds after the transition
+        completes - one clause per participating column in insertion order, joined with commas. A
+        difference of ANY kind here is a behavioural divergence: a different separator, different
+        spacing, a different direction letter, a different clause form for the same column, a different
+        column order, or a different string entirely. This is the field the whole pair exists to compare,
+        and it is the field a naive port is most likely to get subtly wrong while producing a row order
+        that happens to look right.
+      format: >-
+        The string exactly as the service holds it, BYTE FOR BYTE AND UNNORMALIZED, recorded quoted so
+        that leading, trailing and repeated whitespace is visible in the recording and survives review.
+        No trimming, no case folding, no separator normalization and no re-ordering of clauses is applied
+        on either side. The empty string is recorded as an empty string and is distinguishable from an
+        absent field, because empty is a meaningful state here - it is what triggers the restore path.
+        Where the transition took the restore path, the string that was APPLIED is recorded alongside the
+        constructed one, since those two differ precisely on that path.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L31, built at :L174-L199"
+    - name: perColumnSortState
+      description: >-
+        The sort state of EVERY column in the participating set after the transition, not only of the
+        column that was clicked. Recorded for all of them because the two branches differ exactly here:
+        the plain branch resets every other column's state before sorting while the modifier branch
+        leaves them alone, so a record that carried only the clicked column's state could not tell the
+        two branches apart.
+      format: >-
+        The raw numeric state per column - the not-sorted, ascending and descending values as the service
+        declares them, which are 0, 1 and 2 - and never a boolean or a rendered arrow character. Three
+        states cannot be projected onto two without losing one, and the not-sorted state is the one that
+        would be lost.
+      locator: >-
+        ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L37-L39, cycled at
+        :L125-L132
+    - name: participatingColumns
+      description: >-
+        The ordered list of columns in the participating set after the transition, each with its
+        direction and its one-based position in the set. THE ORDER IS THE POINT: it is insertion order -
+        the order in which columns were added to the sort - and it is NOT the definition's column order.
+        The set's membership is also behaviour in its own right, separately from the states above: a
+        column that cycles to not-sorted is REMOVED from the set on the modifier branch, and the plain
+        branch either empties the set or collapses it to the single clicked column.
+      format: >-
+        An ordered array preserving insertion order, each element carrying the column name, its numeric
+        direction and its one-based position. Never a set, never a map and never sorted for
+        presentation - re-ordering this field for readability would destroy the exact property it exists
+        to prove. The multi-column ordinal the service derives is recorded with it: it is assigned only
+        while MORE THAN ONE column participates and otherwise remains zero, which is itself observable.
+      locator: >-
+        ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L29, ordered by the
+        append at :L120-L123 and consumed at :L187-L199
+    - name: clausePerColumn
+      description: >-
+        The clause the grammar produced for each participating column, recorded per column rather than
+        only as part of the joined string. The grammar is not uniform: a computed column contributes its
+        own name, a drop-down column whose display and data columns differ contributes a display-lookup
+        form, a plain code table contributes the same form, a column declaring that empty means null
+        contributes a null-coalescing form chosen by column type, and everything else contributes the
+        bare column name. Recording per column is what makes a divergence attributable to the GRAMMAR
+        rather than merely to the join.
+      format: >-
+        One entry per participating column, carrying the column name, the clause text exactly as
+        produced, and which grammar branch produced it. The not-sorted case is recorded as the EMPTY
+        clause it genuinely is, because an empty clause is how a column leaves the joined expression
+        without leaving the participating set.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L290-L339"
+    - name: rowOrder
+      description: >-
+        The order of the nine rows after the sort is applied, which is the observable consequence of the
+        expression. Recorded in addition to the expression rather than instead of it, because the two
+        fail independently: a wrong expression can still produce the expected order on this fixture's
+        small, heavily-tied data, and a correct expression can produce a wrong order if the underlying
+        comparison differs. Both are compared, and a divergence in one without the other localizes the
+        fault immediately.
+      format: >-
+        A sequence of ONE-BASED row numbers in the order the rows appear after the sort, plus the value
+        of the fixture's computed current-row control per row so that the sequence is independently
+        checkable against what the definition itself evaluates. The nine rows carry deliberate ties on
+        the first two numeric columns, so the sequence is also what proves the second and third sort
+        keys were applied at all.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_svc_sample.srd:L15, with the computed control at :L28"
+    - name: eventChainReturns
+      description: >-
+        The returns this service's own handlers produce into the host's event chain, and the sequence in
+        which its four mouse handlers ran for the transition - the button-down handler that retains the
+        click point, the button-up handler that decides whether the click was a click, the posted
+        continuation that performs the sort, and the double-click handler that re-enters the first. Every
+        one of them returns zero on every path, INCLUDING the paths that refuse to sort, and that
+        uniformity is itself what is being pinned: a port that signalled a refusal by returning
+        something else would prevent the host's chain from continuing.
+      format: >-
+        The raw numeric return per handler in the order the handlers ran, with the refusal paths labelled
+        by the gate that refused - non-header object, unresolvable column name, non-detail band, excluded
+        edit style, non-grid style, grouping present, or movement beyond the tolerance. The returns are
+        this service's; the host chain's own ordering belongs to `dataservices-dw-event-chain` and is
+        cited, not duplicated.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L16-L19"
+
+    # ==============================================================================================
+    #  PART 2 OF 2 - THE EIGHT CASES, EACH ITS OWN RECORD
+    #  ---------------------------------------------------------------------------------------------
+    #  ONE ORDERED WALK, NOT EIGHT INDEPENDENT CAPTURES. Each case states the set it starts from, and
+    #  the composition-order and restore cases are only meaningful in sequence - the third state cannot
+    #  be reached without the first two, and the restore cannot be verified without the additions that
+    #  preceded it. Cases 1 to 3 walk one column through the full cycle on the plain branch; cases 4 to
+    #  7 build and mutate a multi-column sort on the modifier branch; case 8 is the negative case.
+    #  Each case names its columns concretely so the walk is reproducible by somebody who did not write
+    #  it, and each records all six fields of Part 1.
+    # ==============================================================================================
+    - name: case.PLAIN_CLICK_1_CYCLES_TO_ASCENDING
+      description: >-
+        CASE 1. A plain click, no modifier, on the header of the first numeric column, starting from an
+        empty participating set. The column is absent from the set, so it is appended with the
+        not-sorted state and the cycle then advances it to ascending. Expected observable: the set holds
+        exactly that one column ascending, and the constructed expression is that column's bare name
+        followed by a single space and the ascending direction letter - the form "n1 A". This case also
+        records the FIRST invocation of the lazy baseline capture, since it is the first sort performed.
+      locator: >-
+        ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L119-L123, cycled at
+        :L126-L127
+    - name: case.PLAIN_CLICK_2_CYCLES_TO_DESCENDING
+      description: >-
+        CASE 2. A second plain click on the SAME header, starting from that one column ascending. The
+        column is found in the set at its existing position and the cycle advances it to descending.
+        Expected observable: the set is unchanged in membership and position, only the direction changed,
+        and the expression becomes the same column name with the descending direction letter - the form
+        "n1 D". The row order therefore inverts while the expression differs by exactly one character,
+        which is precisely why both fields are recorded.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L128-L129"
+    - name: case.PLAIN_CLICK_3_CYCLES_TO_NOT_SORTED_AND_RESTORES_BASE_RULE
+      description: >-
+        CASE 3. A third plain click on the same header, starting from that one column descending. The
+        cycle advances it to NOT-SORTED, which is a real state and not an absence of state. Its clause is
+        therefore empty, the constructed expression is empty, and the service falls back to the retained
+        original rule - so what is APPLIED is the fixture's own declared base metadata, the exact string
+        recorded in the seed phase. The participating set is then emptied. Expected observable: the
+        constructed expression is empty, the applied expression is the recorded baseline byte for byte,
+        the set is empty, and THE ROW ORDER RETURNS TO THE FIXTURE'S DECLARED BASE ORDERING RATHER THAN
+        TO AN ARBITRARY UNSORTED ORDER. That last point is the whole reason the baseline is recorded
+        before the walk begins.
+      locator: >-
+        ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L130-L131, with the
+        restore at :L201-L207 and the set cleared at :L154-L156
+    - name: case.MODIFIER_CLICK_ADDS_SECOND_COLUMN
+      description: >-
+        CASE 4. A modifier-plus-click on the header of the SECOND numeric column, starting from the first
+        numeric column ascending - re-established by one plain click before this case, and that
+        re-establishing click is recorded as part of this case's starting state rather than silently
+        assumed. Because the modifier is held, the first column's state is PRESERVED instead of being
+        cleared, and the new column is appended after it. Expected observable: the set holds two columns
+        in insertion order, the first ascending and the second ascending, and the expression is the two
+        clauses joined by a single comma - the form "n1 A,n2 A". The multi-column ordinal becomes
+        meaningful here for the first time, because more than one column now participates.
+      locator: >-
+        ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L134-L135, with the
+        append at :L120-L123 and the join at :L196-L197
+    - name: case.MODIFIER_CLICK_ADDS_THIRD_COLUMN
+      description: >-
+        CASE 5. A modifier-plus-click on the header of the THIRD numeric column, starting from the two
+        columns of case 4. Expected observable: three columns in insertion order and a three-clause
+        expression - the form "n1 A,n2 A,n3 A". THIS IS THE CASE THAT PROVES COMPOSITION ORDER, and it
+        proves it because the fixture declares its column controls out of identifier order: a port that
+        composed from the definition's declaration order rather than from insertion order would emit a
+        different string for these identical clicks. The nine rows' deliberate ties on the first two
+        columns make the third key's contribution visible in the row order as well.
+      locator: >-
+        ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L187-L199, against the
+        declaration order at ws_objects/pfw.tests.pbl.src/dw_svc_sample.srd:L22-L27
+    - name: case.MODIFIER_CLICK_CHANGES_DIRECTION_IN_PLACE
+      description: >-
+        CASE 6. A modifier-plus-click on a column ALREADY IN the multi-column sort - the second numeric
+        column, starting from the three columns of case 5. Only that column's direction advances; its
+        POSITION in the set does not change and no other column is touched. Expected observable: the set
+        is identical in membership and order, one direction letter differs, and the expression is the
+        same three clauses in the same order with one letter changed - the form "n1 A,n2 D,n3 A". This is
+        the case that distinguishes "found in the set" from "appended to the set": a port that re-added
+        the column would move it to the end and produce a correctly-formed but wrongly-ordered
+        expression.
+      locator: >-
+        ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L113-L118, cycled at
+        :L128-L129
+    - name: case.MODIFIER_CLICK_REPEAT_RESTORES_ORIGINAL_RULE
+      description: >-
+        CASE 7. Modifier-plus-clicks continued on the participating columns until each has cycled through
+        to not-sorted and been dropped from the set, starting from the three columns of case 6. Each such
+        click is recorded as its own transition, and the case's expected observable is the sequence: as
+        each column reaches not-sorted its clause empties and it is REMOVED from the set, the expression
+        shrinks by one clause and one comma at a time, and on the click that empties the set the
+        constructed expression is empty and THE RETAINED ORIGINAL RULE IS APPLIED INSTEAD - the same
+        recorded baseline as case 3, reached by the other branch. Expected observable at the end: an
+        empty set, an empty constructed expression, the baseline applied byte for byte, and the row order
+        back at the fixture's declared base ordering. Note the ORDER of operations, which is observable:
+        the service sorts FIRST and removes the column from the set afterwards, so the transition that
+        restores is the same transition that drops the last column rather than a subsequent one.
+      locator: >-
+        ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnsort.srw:L36, implemented at
+        ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L135-L145 with the
+        restore at :L201-L207
+    - name: case.CLICK_OUTSIDE_A_COLUMN_HEADER_IS_A_NO_OPERATION
+      description: >-
+        CASE 8. THE NEGATIVE CASE, and it is a case rather than an afterthought. A click on a header-band
+        region that is not a column's header object - and, as separate sub-records under the same case,
+        a click whose resolved name is not a detail-band column and a click on a header object lacking
+        the expected name suffix. Expected observable in every sub-record: the handler returns zero, the
+        participating set is UNCHANGED, the expression is UNCHANGED, the row order is UNCHANGED, and no
+        transition is recorded at all. The refusing gate is recorded by name so the three sub-records are
+        distinguishable. This case is what proves a port's guards are neither too strict - which would
+        silently stop sorting working - nor too loose, which would sort on a click the legacy ignores.
+      locator: >-
+        ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L83-L85, with the
+        further guards at :L94-L102 and :L104-L105
+
+  recordingArtifacts:
+    # Six text-based, diffable files, one workflow's output in one workflow's own directory. THE
+    # EXTENSIONS ARE NOT A STYLE CHOICE: the root `.gitignore` carries six extensions UNANCHORED - one
+    # log extension and five archive and dump extensions, enumerated in `../README.md` section 3.5 - so
+    # they match at every depth including inside this store, and its only negations are anchored
+    # elsewhere and rescue nothing here. A capture named that way is silently untracked: present on the
+    # machine that produced it, absent from `git status`, from review and from CI, so the comparison
+    # looks taken and cannot be found by anybody else. The root `.gitignore` is NOT to be modified;
+    # naming the file correctly is the fix, and the schema's own filename pattern makes those six
+    # unspellable here in any case.
+    - filename: sort-expression.jsonl
+    - filename: sort-state.jsonl
+    - filename: clause-grammar.jsonl
+    - filename: row-order.csv
+    - filename: event-returns.jsonl
+    - filename: baseline-sort-metadata.txt
+
+
+# ==================================================================================================
+#  THE DEFERRED HALF - A DOCUMENTED GAP, AND EMPHATICALLY NOT A STUB
+#  ------------------------------------------------------------------------------------------------
+#  READ THE ENTRY BELOW AS A NOTE ABOUT THE EVENTUAL SYSTEM, BECAUSE THAT IS ALL IT IS. Naming a
+#  deferred capability area and its reserved route records WHERE a gap will eventually be filled; it
+#  does not claim, and cannot claim, that anything has been built to fill it. Behind that route there is
+#  NO PROJECT, NO CONTAINER, NO TEST, NO PARTIAL IMPLEMENTATION AND NO PLACEHOLDER THAT THROWS. The
+#  route itself is a routing declaration on the gateway that answers 501 with a machine-readable body
+#  naming the deferred area - metadata about the shape of the eventual system, not a stub of it (C-D).
+#  Correspondingly: NO CAPTURE STEP, NO OBSERVED OUTPUT AND NO MASK ENTRY IN THIS FILE TARGETS THE
+#  DEFERRED HALF. This workflow characterizes the half that ships, and nothing else.
+#
+#  THE DEFERRED OBJECT ASSIGNMENT IS NOT RESTATED HERE. `../../docs/DEFERRED.md` owns the roster - its
+#  section 6.1 carries the evidence for this split, section 6.2 the table of what ships against what
+#  does not, and section 5.2 the auditable compliance note on the distinction between a route and a
+#  stub. This entry points at that document rather than duplicating it, because a second copy of the
+#  roster would be a second thing to drift.
+# ==================================================================================================
+deferredCapabilities:
+  - capability: >-
+      THE SORT-INDICATOR GEOMETRY - the placement and sizing of the visual sort indicator on the column
+      header, together with the placement of the small ordinal badge that marks a column's position
+      within a multi-column sort, and the drawn removal of both when a column returns to the not-sorted
+      state.
+
+
+      WHAT WOULD BE NEEDED TO COVER IT, stated so the gap is enumerable rather than gestural: a
+      resolution-aware unit-conversion family, header-object geometry reads, a text-metric source for the
+      leader offset the routine subtracts, and a drawing surface able to create and destroy the indicator
+      objects. None of those exists in this phase, so none of it is captured, implemented or stubbed.
+
+
+      THE EVIDENCE, AND IT IS NARROW - which is exactly why only this much is deferred. The service
+      converts logical units into device pixels through the DPI conversion family at
+      `ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L359` and at `:L361`, and
+      those two calls exist PURELY to position the indicator: they sit inside the indicator-placement
+      routine, they feed a leader-offset subtraction applied to the header object's own coordinate, and
+      nothing downstream of them reaches the sort model. The same routine returns early for a not-sorted
+      column at `:L353`, which is the drawn removal named above. Those two lines are the ENTIRE
+      presentational coupling of this service.
+
+
+      WHAT SHIPS INSTEAD, SURFACED AS DATA OVER THE CONTRACT. The sort model is complete without the
+      indicator: the per-column sort state, the ordered participating set with each column's one-based
+      position, the multi-column ordinal the legacy passes to the indicator routine, the clause each
+      column contributes and the joined expression string are all headless, and all are captured above.
+      A client that wants to draw an indicator has every value it needs to decide WHAT to draw; what it
+      does not get from this phase is the geometry telling it WHERE. That is a gap a reader can list, and
+      it is deliberately preferred to a rendering path built on an approximation nobody characterized.
+      `../../docs/DEFERRED.md` sections 6.1 and 6.2 carry the roster and the full split; they are cited
+      here and not restated.
+    deferredTo: DesignSystem
+    reservedRoute: "/v1/design/**"
+
+# ==================================================================================================
+#  THE DETERMINISM MASK - INLINE, SYMMETRIC, AND EVERY ENTRY WITH ITS REASON
+#  ------------------------------------------------------------------------------------------------
+#  The mask is a member of THIS definition rather than a pointer to one, because a mask that drifts away
+#  from its workflow silently invalidates every pair captured under it. EVERY ENTRY APPLIES TO BOTH
+#  SIDES: masking only the candidate leaves the master holding a value that can never be matched, and
+#  masking only the master inverts the same problem. One configuration, used for both captures.
+#  `../../docs/PARITY.md` section 5.1 is the authoritative seam register and carries each seam's
+#  injection point and status; `../README.md` section 5.1 reproduces it with the statuses. The first four
+#  entries below are this workflow's application of that register. THE FIFTH IS THIS WORKFLOW'S OWN -
+#  collation appears in neither register, because no other workflow in this store sorts character columns
+#  - and it is stated with the same discipline the register applies to its own rows.
+#
+#  PREFER THE SEAM TO THE MASK. Four of the five entries below INJECT a deterministic substitute rather
+#  than removing a field from the comparison, because masking a field out removes the comparison's
+#  ability to detect anything in it, and every masked field is a field a regression can hide in.
+# ==================================================================================================
+determinismMask:
+  - seam: >-
+      Every clock read reachable from this sort path - any timestamp that reaches a recorded field or a
+      recorded decision, on either side.
+    method: >-
+      Inject the clock and substitute a deterministic double that advances only when the test advances it.
+      Nothing in the sort path branches on a clock value, so the substitution changes no path; it only
+      makes a recorded timestamp reproducible.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      A timestamp differs on every run BY DEFINITION RATHER THAN BY BEHAVIOUR, so an unmasked one reports
+      a difference on every comparison and trains a reviewer to ignore red results. NOTE WHAT THIS IS
+      NOT: seaming the clock does not introduce a timing assertion, and it does not license one. No
+      elapsed value and no rows-per-unit-time figure is recorded or compared anywhere in this workflow.
+  - seam: >-
+      Modify-call ordering on the DataWindow property path - the sequence of describe and modify calls
+      this service issues while applying a sort, which includes the band and edit-style reads that resolve
+      the clicked object, the property reads the clause grammar performs per column, the one-time read of
+      the definition's own declared sort rule, and the modify that applies the finished expression.
+    method: >-
+      Fix the order in which the service issues those describe and modify calls, and record them in that
+      one fixed order on both sides.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      Two orderings that reach the same state can emit different intermediate output, so an unpinned
+      order surfaces as a difference where no behaviour changed. FIXING THE ORDER IS NOT FIXING THE
+      OUTCOME: each property's VALUE remains fully compared, and a genuine change in what a property
+      returns is still detected. This matters more here than the count of calls suggests, because the
+      clause grammar reaches for several properties per column and chooses its branch on what they return.
+  - seam: >-
+      The click coordinates carried in the mouse-event payloads - the retained down point and the up
+      point the service compares against it.
+    method: >-
+      Substitute one FIXED LOGICAL COORDINATE PAIR PER CASE, chosen so that it resolves to that case's
+      intended header object and so that the up point is within the movement tolerance of the down point
+      on both axes. This is a seam rather than a mask-out precisely because the coordinate participates in
+      a DECISION as well as in a payload: outside the tolerance the service treats the pair as a drag and
+      refuses to sort, so a masked-out coordinate would leave the two halves free to disagree about
+      whether a click happened at all. The substituted pair is recorded; it is the resolved column that is
+      compared.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      A RAW COORDINATE IS AN ARTIFACT OF HOW THE CLICK WAS SYNTHESIZED, not of the service's behaviour -
+      two harnesses aiming at the same header object legitimately produce different numbers, and the
+      legacy and target harnesses inevitably do. THE COLUMN THE COORDINATE RESOLVES TO IS BEHAVIOUR, and
+      it is compared: the resolution walks the clicked object's name and band, which is exactly the logic
+      a port can get wrong. So the coordinate is fixed and the resolution is compared - masking the
+      resolution would remove the only part of this that matters.
+  - seam: >-
+      Line endings in every multi-line recorded field, and in every recording file this workflow writes.
+    method: >-
+      Declare one newline convention for this workflow and apply it identically to both halves AT
+      COMPARISON TIME. This is a comparison-time normalization only: IT DOES NOT LICENSE EDITING A STORED
+      MASTER, which the technique forbids outright.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      The master is produced on Windows by the legacy framework while the candidate runs in a Linux
+      container, so raw line endings differ BY PLATFORM RATHER THAN BY BEHAVIOUR - and the repository's
+      root `.gitattributes` declares only language mappings, WITH NO TEXT RULE AND NO END-OF-LINE RULE AT
+      ALL, so nothing normalizes them on the way into version control. Without this entry a byte-exact
+      comparison reports a difference on every line of every multi-line field, which would bury the one
+      field this workflow exists to compare. CHANGING `.gitattributes` IS NOT IN SCOPE and would be the
+      wrong place to solve it: the normalization belongs to the comparison, not to the repository's
+      checkout behaviour.
+  - seam: >-
+      THE COLLATION CULTURE USED TO ORDER CHARACTER-COLUMN VALUES - the string comparison the sort applies
+      to the fixture's three character columns, including the display values a display-lookup clause
+      resolves to.
+    method: >-
+      Pin ONE INVARIANT, CULTURE-INDEPENDENT COLLATION for the capture and use that same collation on both
+      halves. Record which collation was pinned in the recording, so a later reader can tell a
+      collation change from a behaviour change.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      The fixture's character columns hold CHINESE DISPLAY VALUES - the first one carries a code table
+      whose display side is Chinese while its data side is not - and a display-lookup clause sorts on the
+      display side. A culture-dependent collation orders those values differently on a Windows master and
+      a Linux container candidate even when the sort behaviour is byte-for-byte identical, and the
+      divergence would surface as a ROW-ORDER difference: the most alarming-looking failure this workflow
+      can produce, and in that case an entirely spurious one. BE PRECISE ABOUT WHAT IS MASKED HERE: THE
+      COLLATION IS PINNED, THE RESULTING ROW ORDER UNDER THAT FIXED COLLATION IS FULLY COMPARED. This
+      entry removes a platform variable, not an assertion - the ordering the pinned collation produces is
+      still one of the fields the pair compares.
+
+# ---- WHAT IS DELIBERATELY NOT MASKED, STATED EXPLICITLY ------------------------------------------
+#  These ARE the behaviour under test. Masking any one of them would produce a comparison that passes
+#  while proving nothing, which is worse than a comparison that fails:
+#    * THE CONSTRUCTED SORT-EXPRESSION STRING - compared byte for byte, unnormalized, including its
+#      separators, its spacing, its direction letters and its clause forms;
+#    * THE APPLIED EXPRESSION on the restore paths, and the recorded baseline it is compared against,
+#      including that baseline's trailing space;
+#    * THE PER-COLUMN SORT STATE, as its raw number, in all three states;
+#    * THE PARTICIPATING COLUMN LIST, ITS MEMBERSHIP AND ITS ORDER, plus each column's one-based
+#      position and the multi-column ordinal derived from it;
+#    * THE CLAUSE EACH COLUMN CONTRIBUTES, and which grammar branch produced it, including the empty
+#      clause a not-sorted column contributes;
+#    * THE RESULTING ROW ORDER, as a sequence of one-based row numbers under the pinned collation;
+#    * THE CURRENT ROW, and the computed control's evaluation of it;
+#    * THE EVENT RETURNS AND THE HANDLER SEQUENCE, as raw numbers, including on every refusal path;
+#    * WHICH GATE REFUSED, on the negative case.
+#  And nothing is masked on one side only, anywhere, ever - the schema will not permit it to be written.
+
+
+# ==================================================================================================
+#  THE DEFECTS AND QUIRKS THIS PAIR EXISTS TO PROVE SURVIVED
+#  ------------------------------------------------------------------------------------------------
+#  THE INVERSION IS LOAD-BEARING: a capture that shows CORRECTED behaviour is a parity FAILURE, not an
+#  improvement. Where the target produces output that looks more correct than the oracle, the finding is
+#  a divergence in the target and is filed as a defect (C-B). A legacy quirk is reproduced and annotated
+#  at its point of reproduction, never repaired. `../../docs/PARITY.md` section 7 is the authoritative
+#  catalogue of behaviour groups; the four entries below record which of them THIS pair pins.
+#
+#  THE HEADLESS/RENDERING SPLIT FINDING is recorded as the note on the first entry, where the evidence
+#  for it is closest to the behaviour it constrains.
+#
+#  ONE QUIRK IS DELIBERATELY NOT CLAIMED, and the omission is reasoned rather than an oversight. The
+#  original-rule-update entry point contains a genuine wrong-variable comparison - it tests a local that
+#  is still empty at that point instead of the field it plainly means to test
+#  [`n_cst_dwsvc_columnsort.sru:L272`], and the reset entry point reports failure rather than success when
+#  there is nothing to reset [`:L236`]. NEITHER IS REACHED BY THIS MATRIX: the oracle window drives the
+#  service exclusively through header clicks and calls neither entry point, so a defect claimed against
+#  either would be a claim this pair cannot support. They are named here so a reader who finds them in the
+#  source knows they were seen and consciously left out, and so that whoever exercises those entry points
+#  knows there is a quirk waiting there.
+# ==================================================================================================
+provesDefects:
+  - defect: >-
+      D-01. THE SORT CYCLE IS THREE-STATE, AND NOT-SORTED IS THE FIXTURE'S DECLARED DEFAULT RULE RATHER
+      THAN AN ABSENCE OF STATE. Clicking one column header repeatedly walks not-sorted to ascending to
+      descending and BACK TO NOT-SORTED, and that third state is a positive state with observable
+      consequences: the column's clause becomes empty, the constructed expression becomes empty, and the
+      service then applies THE DEFINITION'S OWN DECLARED SORT RULE in its place. The oracle window's own
+      header comment names all three states and explicitly labels the third as the default rule.
+    locator: >-
+      ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnsort.srw:L34-L39, with the cycle at
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L125-L132 and the
+      default-rule fallback at :L201-L207
+    note: >-
+      A TWO-STATE ASCENDING-DESCENDING TOGGLE WOULD BE A BEHAVIOUR CHANGE, and it is the single most
+      natural way to get this wrong, because a two-state toggle is what almost every other grid in
+      existence does. The capture therefore records the third state explicitly and proves that it returns
+      the rows to THE FIXTURE'S DECLARED BASE ORDERING rather than to an arbitrary unsorted order - which
+      is why the baseline is recorded in the seed phase before any click is synthesized. A port that
+      cleared the sort instead of restoring the declared rule would produce whatever order the buffer
+      happened to hold, and on this fixture that can easily coincide with the declared order and pass a
+      careless review.
+
+
+      THE HEADLESS/RENDERING SPLIT FINDING BELONGS HERE, because the third state is where the two halves
+      touch. THIS SERVICE'S PRESENTATIONAL COUPLING IS NARROW: the DPI conversion at
+      `n_cst_dwsvc_columnsort.sru:L359` and `:L361`, both inside the indicator-placement routine, which
+      also returns early for a not-sorted column at `:L353`. Two lines of coupling, all of it about where
+      to draw an arrow. THAT IS WHY ONLY THE INDICATOR GEOMETRY IS DEFERRED AND THE WHOLE SORT MODEL
+      SHIPS. Compare the two sibling workflows whose services are presentationally coupled far more
+      broadly - `dataservices-dwsvc-contextmenu`, whose service positions a window, constructs fonts and
+      exposes a popup-menu-typed API, and `dataservices-dwsvc-dropdownsearch`, whose service shows,
+      measures, offsets and repositions a window and declares a window prototype of its own. Their
+      headless halves are correspondingly smaller; here the headless half is nearly the whole object. The
+      contrast is the evidence that the split was drawn from what the source does rather than applied
+      uniformly, and `../../docs/DEFERRED.md` section 6.1 carries the same contrast with the per-object
+      counts behind it.
+  - defect: >-
+      D-02. A REPEAT MODIFIER-CLICK RESTORES THE ORIGINAL SORT RULE, AND THE RESTORE TARGET IS THE
+      FIXTURE'S OWN DECLARED METADATA - not an empty sort, not the buffer's incidental order, and not a
+      rule the service synthesizes. The service reads that rule from the definition LAZILY AND EXACTLY
+      ONCE, on the first sort it performs and only while its retained field is still empty, and thereafter
+      falls back to the retained copy whenever the constructed expression is empty. The oracle window's
+      header comment states the behaviour in one clause: clicking again restores the original sort rule.
+    locator: >-
+      ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnsort.srw:L36, with the lazy capture at
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L176-L178 and the fallback at
+      :L201-L207
+    note: >-
+      THE CAPTURE CANNOT VERIFY THIS WITHOUT THE BASELINE, which is why recording the fixture's declared
+      metadata is a seed step rather than an afterthought: observing that a restore happened is not the
+      same as observing that it restored to the RIGHT rule, and the two are indistinguishable in a
+      recording that never wrote the target down. Two further ways to get this wrong, both of which the
+      recording detects. First, the LAZINESS is behaviour: a port that captured the baseline eagerly at
+      construction, or re-captured it on every sort, would retain a rule that had already been overwritten
+      by its own previous sort - so the restore would return to the last sort rather than to the original,
+      and would do so only on the second and later restores. Second, THE FORM DIFFERS VISIBLY: the
+      declared rule is space-separated and carries a trailing space, while the service's own constructed
+      expressions are comma-joined, so the two are distinguishable on sight in a recording and a port that
+      reconstructed the baseline instead of retaining it verbatim is caught by the whitespace alone.
+      Finally note the ORDER on the modifier branch: the service sorts FIRST and removes the exhausted
+      column from the participating set afterwards, so the restore lands on the same transition that drops
+      the last column rather than on a subsequent one.
+  - defect: >-
+      D-03. MULTI-COLUMN SORT-EXPRESSION COMPOSITION ORDER IS OBSERVABLE, AND IT IS INSERTION ORDER. The
+      expression is built by walking the participating set in the order the columns were ADDED to the
+      sort - each newly clicked column being appended at the end of that set - and NOT in the definition's
+      column order, nor in identifier order, nor in the order the columns are declared in the definition
+      file. A column already in the set keeps its position when its direction changes; it is not moved to
+      the end.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L187-L199, with the append
+      that fixes insertion order at :L120-L123, the in-place update at :L113-L118 and the comma join at
+      :L196-L197
+    note: >-
+      THE CAPTURE PROVES THIS BY RECORDING THE EXPRESSION AFTER EVERY SINGLE ADDITION rather than only at
+      the end, so the composition order is demonstrated incrementally instead of inferred from a final
+      string that several different orders could have produced. THE FIXTURE MAKES IT CHECKABLE: its column
+      controls are DECLARED OUT OF IDENTIFIER ORDER [`ws_objects/pfw.tests.pbl.src/dw_svc_sample.srd:L22-L27`],
+      so a port that composed from the definition's declaration order - the most plausible wrong
+      implementation, since it is the order a naive enumeration of columns yields - emits a demonstrably
+      different string for identical clicks. Note also that the multi-column ordinal the service derives
+      while composing is assigned ONLY while more than one column participates and otherwise remains
+      zero; that ordinal is data and is recorded, even though the position at which the legacy draws it is
+      the deferred half.
+  - defect: >-
+      D-04. ONE-BASED COLUMN AND ROW INDEXING THROUGHOUT, WITH AN UPPER BOUND THAT IS THE LAST VALID INDEX
+      RATHER THAN A LENGTH. The participating set is a one-based array searched from index one, and a
+      newly clicked column is appended by writing at UPPER-BOUND-PLUS-ONE - an idiom that appears twice,
+      once when a column joins the sort and once when the set is rebuilt after a column leaves it. Every
+      row number the capture records, including the value of the fixture's own computed current-row
+      control, is likewise one-based.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnsort.sru:L112-L123, with the rebuild
+      idiom at :L137-L144 and the fixture's computed control at
+      ws_objects/pfw.tests.pbl.src/dw_svc_sample.srd:L28
+    note: >-
+      THIS IS THE ONE TRANSLATION HAZARD HERE WHOSE FAILURE IS INVISIBLE, which is why the indexing basis
+      is declared in the preconditions as well as pinned here. The target's arrays are zero-based with a
+      length one past the end, so a mechanical translation of either loop shifts every position by one -
+      and a shifted participating set still produces a well-formed expression, still sorts, and still
+      returns nine rows. The failure surfaces only as a wrong column order inside a multi-column
+      expression or as a dropped or duplicated first element, both of which look like plausible output. The
+      recording therefore carries every column's one-based position explicitly rather than relying on the
+      array order of a serialized list, and both halves record and compare one-based values with the
+      conversion performed at the target's own boundary and never in the recording. A reviewer should
+      treat any off-by-one in this field as a translation defect and never as a tolerable difference.
+
+# ==================================================================================================
+#  THE SHARED-VOLUME CAPTURE RULE
+#  ------------------------------------------------------------------------------------------------
+#  `../README.md` SECTION 2.1 CARRIES THAT RULE'S CANONICAL TEXT AND IS THE AUTHORITY FOR IT. It is
+#  cited here and deliberately NOT reproduced: the same text is owned word for word by
+#  `../README.md`, `../../docs/PARITY.md` and `../../orchestration/README.md`, and a fourth copy would be
+#  a fourth thing to drift. Section 2.4 explains the volume's name, section 2.5 why breaking the rule is
+#  dangerous precisely because nothing errors, and section 2.6 the teardown corollary.
+#
+#  WHY IT APPLIES EVEN THOUGH THIS WORKFLOW'S ROWS ARE INLINE IN A READ-ONLY FIXTURE. The exemption in
+#  `../README.md` section 2.7 is narrow and is not a loophole: it holds only while a workflow reads and
+#  writes NOTHING, which is why the pure string-transform workflow is the one that claims it. THIS
+#  WORKFLOW DOES NOT QUALIFY. Its target half is captured against the running service rather than an
+#  in-process host, the sort mutates live buffer state through the applied expression, and the transition
+#  is performed by a continuation that runs after the handler which queued it has already returned. A
+#  volume state that moved between the two halves would change the state the second half ran against and
+#  nothing would report it - so the rule is honoured in full, including its teardown corollary: between
+#  the two halves, tear the stack down with a plain down and NEVER with the flag that removes named
+#  volumes.
+sharedVolume:
+  applies: true
+
+# ---- HONEST STATE --------------------------------------------------------------------------------
+#  NOTHING HERE HAS BEEN RUN, AND THE ONLY LEGAL VALUE SAYS SO. No paired capture exists on either side
+#  for this identifier: the legacy half needs a PowerBuilder toolchain that is not present, and no
+#  recording directory for this identifier exists. Nothing in this definition may be read as reporting a
+#  parity result, and no expected value quoted above may be read as an observed one - the expression forms
+#  cited in the cases are what the grammar and the read-only fixture DECLARE, not what a run produced.
+executionStatus: specified-not-executed
+
+# ---- SIBLINGS ------------------------------------------------------------------------------------
+#  A cross-reference only: each pair stays independently comparable under its own identifier, and naming
+#  a sibling never merges two workflows. The event chain is the substrate this service's mouse events
+#  arrive through and owns the ordering contract this file cites rather than re-derives. The other two are
+#  the presentationally-coupled siblings whose much broader coupling is the contrast that justifies this
+#  service being SPLIT rather than deferred - see the note on D-01 - and they share this workflow's
+#  primary fixture, so a reader comparing the three is comparing three services against one definition.
+relatedWorkflows:
+  - dataservices-dw-event-chain
+  - dataservices-dwsvc-contextmenu
+  - dataservices-dwsvc-dropdownsearch

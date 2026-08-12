@@ -1,0 +1,1644 @@
+# yaml-language-server: $schema=./workflow.schema.json
+# ==================================================================================================
+#  dataservices-dwsvc-columnexp - THE COLUMN-EXPRESSION EXPANSION ENGINE
+#  ------------------------------------------------------------------------------------------------
+#  WHY THIS DEFINITION EXISTS
+#  `n_cst_dwsvc_columnexp.sru` is 2,435 lines - THE LARGEST IN-SCOPE LEGACY OBJECT - and it carries
+#  one of the two hardest contracts in the refactor. At its centre is the static-versus-dynamic
+#  expansion distinction, which the requirements correctly identify as a behaviour that "DOES NOT
+#  SURVIVE NAIVE SERIALIZATION". That is not a formatting problem to be tidied at the edge; it is a
+#  semantic one, and a recording that captures only the expanded string cannot detect a regression in
+#  it at all. This pair exists to pin that distinction, reference by reference.
+#
+#  THIS FILE SPECIFIES A CAPTURE. IT CONTAINS NO CODE AND NO CAPTURED VALUE.
+#  It conforms to `./workflow.schema.json`, which is authoritative for shape. Store-wide conventions
+#  - the capture rule's canonical text, the recording-file conventions, the seam register, the defect
+#  roster and what must never enter a recording - belong to `../README.md` and to `../../docs/PARITY.md`
+#  and are CITED here, never restated. A fourth copy of a rule three files already own word for word
+#  is a fourth thing to drift.
+#
+#  IT RUNS INSIDE THE EVENT CHAIN, NOT BESIDE IT
+#  `dataservices-dw-event-chain` pins the 22-event substrate this service observes the world through,
+#  and the coupling runs both ways: the chain's changed-event dispatcher calls THIS service's changed
+#  handler before it triggers the broker, and disabling the chain's item-change gate therefore
+#  suppresses expression evaluation as a second-order effect. That ordering contract is the sibling's
+#  to prove and is cross-referenced rather than re-derived. What is captured here is what the engine
+#  itself does once control reaches it.
+#
+#  ORDER AND VALUE, NEVER SPEED (`../README.md` section 6.4, `README.md` section "No timing assertions")
+#  Recalculation in this engine is about the ORDER expressions execute in and the VALUES they produce.
+#  NO ELAPSED VALUE IS RECORDED AND NO TIMING IS ASSERTED ANYWHERE IN THIS DEFINITION. The oracle
+#  window emits no timing field of its own - unlike the SQL-parser window, which does and which handles
+#  it by recording the field as explicitly non-behavioural - so there is nothing here to mask on that
+#  account and nothing to drop. The repository publishes no service-level agreement, no latency budget,
+#  no throughput target and no availability commitment, so no timing assertion could be measured
+#  against anything. The only quantitative gate in the brief is 80% per-service line coverage, read
+#  from `coverage.cobertura.xml` in CI - NOT from this store.
+#
+#  ---- ONE LOCATOR REFINED AGAINST THE SOURCE, BECAUSE THE REFINEMENT IS A DEFECT ----------------
+#  `../../docs/PARITY.md` section 7.8 describes the site at `n_cst_dwsvc_columnexp.sru:L739` as "a
+#  cache error that carries the text of a caught runtime exception". Read line by line, it is worse
+#  than that and the difference is itself legacy behaviour. There are two nested handlers in
+#  `_of_calcitem`: an OUTER `try` at `:L700` whose `catch` binds one throwable at `:L703` and closes at
+#  `:L704`, and an INNER `try` at `:L721` whose `catch` binds a DIFFERENT throwable at `:L738`. The
+#  message built at `:L739` sits inside the inner handler and reads the OUTER handler's variable -
+#  whose own `try` block closed thirty-five lines earlier - not the exception the inner handler
+#  actually caught. No local throwable of that name is declared anywhere in the function, so the
+#  reference can only resolve to the outer catch clause. THE REPORTED TEXT THEREFORE COMES FROM THE
+#  WRONG EXCEPTION VARIABLE. It is reproduced, not repaired (C-B), and defect D-03 below records it so
+#  a reader does not "fix" it while transcribing.
+#
+#  ---- ONE CAUTION ABOUT THE SPECIFICATION ITSELF ------------------------------------------------
+#  `../../docs/n_cst_dwsvc_columnexp.md` is the authoritative statement of these semantics and its
+#  worked examples are definitive - but two of its inline CODE COMMENTS are copy-paste artifacts that
+#  say the opposite of the code beside them. At `:L67` and again at `:L85` the comment describes a
+#  reference as statically expanded while the code on the following line uses the DOUBLE-sigil dynamic
+#  form, and both comments additionally mistype the second variable's name. The CODE and the stated
+#  outcomes at `:L48`, `:L50` and `:L69` are authoritative; the two comments are not. Said here
+#  because a reader who trusted `:L67` would conclude the double sigil is static, which would invert
+#  the single behaviour this entire pair exists to prove. The document is read-only and is NOT
+#  corrected (C-C).
+#
+#  ---- WHAT THIS DEFINITION DELIBERATELY OMITS, AND WHY ------------------------------------------
+#    * `redaction` - OMITTED because nothing this capture records is sensitive. Every value that
+#      reaches a recording originates either in the read-only fixture's own four inline rows - three
+#      zero decimals and two nulls - or in the expression variables the oracle window declares, which
+#      are the small integers one to five, a quoted digit and a precision. NO KEY, NO PASSWORD, NO
+#      CERTIFICATE, NO TOKEN AND NO CONNECTION STRING IS READ, EMITTED OR RECORDED HERE (C-F,
+#      `../README.md` section 6.2). This engine issues no SQL, so the redacted-statement rule has no
+#      field to act on.
+#    * `deferredCapabilities` - OMITTED because this workflow's capability is in scope IN FULL. The
+#      expansion engine, its variable environment, its calculation ordering, its macro callback and
+#      its trace are all headless and all ship. Three of this service's five sibling sub-services do
+#      split into a shipped headless half and a presentational half; THIS ONE DOES NOT, and claiming a
+#      gap it does not have would be as misleading as hiding one it did (C-D).
+#
+#  ---- GOVERNING CONSTRAINTS -------------------------------------------------------------------
+#  NO USER-SPECIFIED RULES EXIST. The project's rules document returns exactly one line reporting
+#  that none were provided - a single line, with nothing further to page through - so no rule is
+#  invented, inferred or back-filled, and nothing in this file exists because of one. Enterprise-
+#  standard best practice applies in their place. The binding constraints are the migration plan's
+#  own: C-B (defects reproduced, never corrected - a corrected capture is a parity FAILURE), C-C (the
+#  legacy tree is read-only and is the oracle; every claim carries a locator), C-D (nothing for a
+#  deferred capability area), C-F (no secret value), C-K (every decision carries its reason) and C-L
+#  (the shared-volume capture rule).
+# ==================================================================================================
+
+schemaVersion: "1"
+
+workflowId: dataservices-dwsvc-columnexp
+
+title: >-
+  Column-expression engine: static versus dynamic expansion, the inverted macro stream, and the
+  format-exact calculation trace
+
+capabilityArea: >-
+  The DataWindow column-expression expansion engine of `n_cst_dwsvc_columnexp` - its five-form macro
+  grammar and the STATIC-VERSUS-DYNAMIC EXPANSION distinction that grammar encodes, the seven-structure
+  descriptor model, the strongly-typed variable environment across seven scalar types, the nested and
+  recursive expression variables, the foreign cross-DataWindow variable, the tri-state per-column
+  calculation cache and the reverse dependency index that drives dirty propagation, the add-order
+  calculation sequence, MACRO INVOCATION as an inverted callback into the client, and the format-exact
+  six-field calculation TRACE.
+
+targetService: DataServices
+
+description: >-
+  ONE EXPANSION ENGINE, CAPTURED TWICE. The pair proves that the value every expression produces, the
+  order the expressions are calculated in, the mode each individual variable reference was expanded
+  under, and the trace and error output the engine emits are identical on the legacy master and on the
+  .NET candidate after identical masking.
+
+
+  THE MECHANICAL REASON THE DISTINCTION IS A SERIALIZATION PROBLEM, because it is what drives the
+  payload requirement below and not merely context. The parse routine REWRITES THE EXPRESSION IN PLACE
+  and emits reference arrays alongside the rewritten text. A STATIC reference - the single-sigil form -
+  is resolved and substituted into the rewritten text AT BIND TIME, so the variable's name is GONE from
+  the stored expression and no later assignment can reach it. A DYNAMIC reference - the double-sigil
+  form - leaves behind an entry indexing into the LIVE variable table, so a later assignment
+  propagates. The two forms are one character apart in the source and produce permanently divergent
+  behaviour.
+
+
+  THEREFORE THE RECORDING MUST CARRY ALL THREE OF: the UNEXPANDED source expression text; the
+  BIND-TIME variable snapshot; and the LIVE variable environment at calculation time - plus, PER
+  REFERENCE, which expansion mode applied. Recording only the already-expanded string is not a
+  faithful capture and cannot be made into one afterwards: it makes a static binding indistinguishable
+  from a literal, and it strips a dynamic binding of the environment it resolves against. Both
+  failures are silent, and both produce a comparison that passes while proving nothing.
+
+
+  THE MODE IS A PER-REFERENCE PROPERTY AND NEVER A PER-EXPRESSION ONE. Five modes must be
+  representable - static, dynamic, dynamic-indirect, macro-direct and macro-dynamic - and a single
+  expression may mix them freely. The specification's own worked example at
+  `../../docs/n_cst_dwsvc_columnexp.md:L68` puts a dynamic reference and a static reference inside ONE
+  expression, and the oracle window's `:L157` puts a dynamic-indirect reference, a macro-direct call
+  and a dynamic foreign reference inside another. A capture that tagged the expression rather than the
+  reference would have nowhere to record either.
+
+
+  WHY THIS WORKFLOW'S ORACLE IS UNUSUALLY GOOD EVIDENCE. The window binds THE SAME fixture data object
+  to TWO `se_cst_dw` controls - `:L169` and `:L301` both name `dw_test_dwsvc_columnexp` - and that is
+  what makes the cross-DataWindow path reachable at all. It then references THE SAME variable three
+  different ways on three adjacent lines and changes that variable's value from a fourth control. The
+  divergence is therefore not constructed by the capture; it is constructed by the oracle, and the
+  capture only has to record it.
+
+# ==================================================================================================
+#  THE ORACLE. READ, NEVER EDITED, MOVED, RENAMED, REFORMATTED, RE-ENCODED OR COPIED INTO THIS TREE
+#  ------------------------------------------------------------------------------------------------
+#  Every locator below was read at source rather than carried forward from a plan. The host window is
+#  318 lines and every line cited from it is within that range. The Chinese identifiers reproduced in
+#  this file are reproduced because they ARE the identifiers: the oracle declares its variables in
+#  Chinese, and its own grammar comment states at `w_test_dwsvc_columnexp.srw:L92` that VARIABLE AND
+#  FUNCTION NAMES ARE CASE-SENSITIVE. A translated name is therefore a DIFFERENT name, a re-cased name
+#  is a different name too, and neither would resolve. Names are carried verbatim, never translated,
+#  and no block of legacy source is pasted around them.
+# ==================================================================================================
+oracleFixtures:
+  # THE DRIVING WINDOW. Thin by the standards of the service it exercises - 318 lines against 2,435 -
+  # but it is the only window in the corpus that drives this engine, and it drives it thoroughly:
+  # tracing on, six variables, four nested expression variables, a foreign variable, the same variable
+  # referenced three ways, a forced recalculation, and the macro and trace handlers implemented inline.
+  - path: ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw
+    role: oracle-window
+    locators:
+      - "L7"         # `dw_2` declared from the service-extension class - the SECOND host
+      - "L21"        # `dw_1` declared from the same class - the FIRST host
+      - "L82-L93"    # the window's own header comment: THE MACRO GRAMMAR, stated by the oracle
+      - "L86-L91"    # the five forms
+      - "L87"        # single sigil is STATIC, double sigil is DYNAMIC - the whole distinction
+      - "L88"        # single-sigil function call, and the double-sigil built-in form
+      - "L90"        # the built-in that fetches a variable by computed name
+      - "L91"        # the reserved invoke form: dispatch a function by name with an argument list
+      - "L92"        # VARIABLE AND FUNCTION NAMES ARE CASE-SENSITIVE
+      - "L96"        # the service enabled
+      - "L98"        # THE TRACE ENABLED - without this the trace outputs below do not exist
+      - "L104-L108"  # five expression variables added
+      - "L106"       # the one holding a QUOTED STRING LITERAL rather than a bare number
+      - "L109"       # a TYPED variable added through the integral overload, value zero
+      - "L111-L114"  # four NESTED expression variables, each referencing other variables
+      - "L116"       # a column expression in the DYNAMIC-INDIRECT form, name computed by a condition
+      - "L117"       # a single-row calculation
+      - "L136"       # the second host's own expression service enabled
+      - "L140"       # an AGGREGATE expression variable on the second host
+      - "L143"       # that variable registered on the FIRST host as a FOREIGN variable
+      - "L145-L147"  # three expression variables bound to column names
+      - "L151"       # THE SAME VARIABLE, STATIC
+      - "L154"       # THE SAME VARIABLE, DYNAMIC
+      - "L157"       # THE SAME VARIABLE, DYNAMIC-INDIRECT - and the foreign reference, dynamic
+      - "L159"       # the comment recording that recalculation follows ADD order
+      - "L160"       # recalculate all
+      - "L169"       # the second host's bound definition
+      - "L222"       # the same add-order comment, on the forcing control
+      - "L223"       # recalculate all WITH THE FORCE FLAG
+      - "L241-L243"  # the same three expression variables, rebound
+      - "L247"       # the three-mode trio again, static, WITHOUT the foreign term
+      - "L250"       # dynamic
+      - "L253"       # dynamic-indirect
+      - "L256"       # recalculate all
+      - "L272"       # the precision input's initial text
+      - "L292"       # THE VARIABLE SET THAT MAKES THE DIVERGENCE OBSERVABLE - three-arity, recalc on
+      - "L301"       # the first host's bound definition - THE SAME NAME AS THE SECOND HOST'S
+      - "L305-L309"  # THE INVERTED MACRO STREAM: the window itself implements the macro switch
+      - "L308"       # the macro body - rounds its first argument to the precision in its second
+      - "L312"       # the item-changed notification handler
+      - "L315-L316"  # THE TRACE HANDLER: six fields, a CRLF terminator, then a scroll
+
+  # THE DEFINITION BOTH HOSTS BIND. `release 19`. Five columns, NONE of them updateable, four inline
+  # rows carrying three zero decimals and TWO NULLS. This is the workflow's seed, and it is part of a
+  # read-only fixture rather than anything a seed step creates.
+  - path: ws_objects/pfw.tests.pbl.src/dw_test_dwsvc_columnexp.srd
+    role: primary-fixture
+    locators:
+      - "L2"       # release 19
+      - "L8-L13"   # the table specification: three two-place decimals, two hundred-char columns
+      - "L13"      # the declared sort specification, ascending on all three decimals
+      - "L14"      # THE FOUR INLINE ROWS - zeros and nulls, and the nulls are deliberate
+      - "L20-L24"  # the column controls - DECLARED OUT OF IDENTIFIER ORDER, see D-02's note
+      - "L20-L22"  # the edit mask on the three decimal columns, two fractional digits
+      - "L23"      # identifier five, declared BEFORE identifier four
+      - "L24"      # identifier four, declared last
+
+  # THE RELEASE-12.5 SIBLING OF THE SAME FIXTURE FAMILY, AND THE DIFFERENCE IS RECORDED RATHER THAN
+  # GLOSSED. Its table specification at `L8-L13` and its data line at `L14` are BYTE-IDENTICAL to the
+  # primary fixture's - verified by diffing the two blocks, not assumed - and the ONLY difference
+  # between the two files' behavioural content is the declared release: `release 12.5` here against
+  # `release 19` there. `README.md` records the family hazard for the store as a whole: the
+  # `dw_test_dwsvc*` family declares release 19 while three `dw_svc_sample*` definitions declare 12.5,
+  # and substituting one family for the other changes the fixture and voids the comparison. Cited here
+  # so that equivalence is a checked fact rather than an assumption a later reader has to re-establish.
+  - path: ws_objects/pfw.tests.pbl.src/dw_svc_sample_columnexp.srd
+    role: supporting-fixture
+    locators:
+      - "L2"      # release 12.5 - THE difference
+      - "L8-L13"  # byte-identical to the primary fixture's table specification
+      - "L14"     # byte-identical data line: the same four rows of zeros and nulls
+
+  # THE OBJECT UNDER CHARACTERIZATION. 2,435 lines, the largest in-scope legacy object, and ZERO
+  # native bindings - the whole engine is PowerScript, so it ports as logic with no substitution
+  # problem. The locators below are the ones this definition's outputs and defects cite.
+  - path: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru
+    role: service-object
+    locators:
+      - "L6-L19"       # the SEVEN nested structures, forward-declared
+      - "L22-L42"      # the expression descriptor - nineteen fields, and they ARE the contract
+      - "L27"          # the source expression text
+      - "L28-L29"      # the variable and function reference arrays the parse routine emits
+      - "L30-L31"      # the relative-column and relative-input-column identifier arrays
+      - "L32"          # THE DUPLICATE-EXPRESSION ARRAY - multiple expressions per column
+      - "L33"          # the empty-string-is-null flag the null seeding exercises
+      - "L34-L40"      # has-macro, always-calc, trigger-event, recursive, dirty, empty, cacheable
+      - "L41"          # the generated compute-object name
+      - "L44-L48"      # THE COLUMN DESCRIPTOR - the tri-state flag and the REVERSE DEPENDENCY INDEX
+      - "L50-L56"      # the variable reference: name, full name, index, context flag, macro flag
+      - "L58-L63"      # the function reference: name, full name, argument array, built-in flag
+      - "L65-L71"      # the global variable: name, kind, local body, foreign body, LINKS array
+      - "L73-L78"      # the local variable body - RECURSIVE: its own value is an expression
+      - "L80-L83"      # THE FOREIGN VARIABLE BODY, whose second field is A LIVE OBJECT POINTER
+      - "L86-L88"      # the three events the engine declares
+      - "L90"          # the self-shadowing global auto-instance
+      - "L95"          # the compute-object name suffix
+      - "L98"          # the trace property, private-write
+      - "L101-L103"    # the three descriptor arrays that hold all engine state
+      - "L105-L106"    # the two re-entrancy flags
+      - "L110"         # THE RECURSION AND CALCULATION STACK, declared
+      - "L113-L115"    # THE TRI-STATE CALCULATION CACHE: unknown, yes, no - not a boolean
+      - "L117-L118"    # the variable-kind discriminator: local, foreign
+      - "L120-L121"    # THE TWO SENTINEL CONSTANTS that encode the grammar internally
+      - "L125-L208"    # the declaration block - THE REAL API SURFACE, far larger than the documented nine
+      - "L142"         # the item-calculation entry point, PUBLIC despite its private-convention prefix
+      - "L153-L159"    # variable add across SEVEN TYPED OVERLOADS
+      - "L160-L166"    # variable set, seven types, two-argument arity
+      - "L179-L185"    # variable set, seven types, three-argument arity
+      - "L188-L194"    # variable set, seven types, four-argument arity
+      - "L174-L177"    # expression set in four arities
+      - "L201"         # the foreign-variable registration entry point
+      - "L206-L207"    # the parse-error builder, in both its arities
+      - "L211"         # the item-changed handler
+      - "L229"         # the changed dispatcher - where the tri-state cache and reverse index are built
+      - "L234-L235"    # an unseen column starts UNKNOWN
+      - "L238-L239"    # the cache is consulted, and defaults to NO before any match is found
+      - "L241-L279"    # the match loop: always-calc, relative, relative-input, then a textual fallback
+      - "L276-L277"    # a match flips the flag to YES and APPENDS TO THE REVERSE INDEX
+      - "L281-L292"    # the variable pass, which skips foreign variables and walks the links array
+      - "L285"         # the variable half of the reverse index
+      - "L295-L303"    # the YES branch: walk the reverse index and recalculate exactly those entries
+      - "L330"         # the variable-changed handler - the path the three-arity set reaches
+      - "L658"         # the item-calculation implementation
+      - "L700-L704"    # THE OUTER try and catch
+      - "L713"         # cache-creation failure - hardcoded, NOT localized
+      - "L721"         # the inner try
+      - "L738"         # the inner catch, binding a DIFFERENT throwable
+      - "L739"         # the cache error that reads THE OUTER HANDLER'S VARIABLE - see the header note
+      - "L758"         # THE TRACE FIRE SITE, and where the empty-string-is-null flag renders a null
+      - "L762"         # a general expression error, on the two sentinel result strings
+      - "L897"         # recalculate-all without the force flag delegates to the forcing arity
+      - "L1138"        # single-row calculation with the force flag
+      - "L1160"        # THE RE-ENTRANCY GUARD - a nested call returns failed rather than recursing
+      - "L1164"        # everything is marked dirty before the pass begins
+      - "L1166-L1172"  # THE ADD-ORDER LOOP: it walks the expression array, NOT the column order
+      - "L1168-L1170"  # what the force flag actually does - it stops input-relative expressions being skipped
+      - "L1204-L1206"  # recalculate-all's row loop
+      - "L1308"        # the first parse-error site, with its computed caret position
+      - "L1383"        # an invalid argument list
+      - "L1390"        # the bare-variable sentinel's arity guard
+      - "L1394"        # the dynamic-dispatch sentinel's arity guard
+      - "L2421-L2422"  # THE RECURSION STACK CREATED, with its initial reservation
+      - "L2425"        # and destroyed
+
+  # THE HOST SURFACE THE ENGINE IS REACHED THROUGH, cited for two narrow purposes and no others: the
+  # macro callback and the trace are events on THIS class, not on the engine, and the enabled property
+  # the engine gates every entry point on is declared on the engine's own base class. The 22-event
+  # ordering contract is `dataservices-dw-event-chain`'s to prove and is NOT re-derived here.
+  - path: ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru
+    role: service-object
+    locators:
+      - "L14"        # the macro callback event: an untyped return over a string array
+      - "L32"        # the trace event: the call stack, the expression and the value
+      - "L41-L43"    # the gate bits, and the comment recording the expression-evaluation coupling
+      - "L84"        # the engine as a member of the host
+      - "L295-L320"  # the changed dispatcher that calls this engine FIRST, and only when it is enabled
+      - "L313-L315"  # the call itself
+
+  # THE AUTHORITATIVE LEGACY SPECIFICATION, read as the statement of intended behaviour. Its worked
+  # examples are DEFINITIVE for the distinction this pair proves. Read-only, and the two misleading
+  # inline comments recorded in the header above are NOT corrected (C-C).
+  - path: docs/n_cst_dwsvc_columnexp.md
+    role: specification
+    locators:
+      - "L5-L11"     # the seven declared capabilities, including multiple expressions per column
+      - "L8"         # one column, several expressions, selected by WHICH column was modified
+      - "L9"         # mixed calculation across DataWindows
+      - "L10"        # call-stack output
+      - "L29-L35"    # the foreign-variable pattern
+      - "L34"        # and the rule that a foreign variable REQUIRES the dynamic form
+      - "L37-L54"    # the static-expansion section
+      - "L43-L54"    # ITS WORKED EXAMPLE
+      - "L48"        # the stated result: fixed at bind time
+      - "L50"        # and unchanged by a later assignment
+      - "L56-L73"    # the dynamic-expansion section
+      - "L62-L73"    # THE IDENTICAL SEQUENCE under a dynamic reference
+      - "L68"        # ONE EXPRESSION MIXING BOTH MODES - why the mode is per-reference
+      - "L69"        # the stated result: the value changes
+      - "L75-L94"    # the dynamic-indirect section
+      - "L79"        # its syntax: fetch a variable whose name is a string
+      - "L92"        # its worked example, the name computed by a condition over two columns
+      - "L104-L128"  # the macro-direct section, and the callback the application must implement
+      - "L110"       # its syntax
+      - "L130-L151"  # the macro-dynamic section
+      - "L134"       # its syntax: the reserved dispatch name
+      - "L138-L141"  # its worked example, where THE FUNCTION NAME IS ITSELF A VARIABLE
+      - "L153-L164"  # the documented overview - THE NINE METHODS, against an API surface of dozens
+      - "L162"       # relative-column triggering
+      - "L163"       # relative-INPUT-column triggering, which fires only on user input
+
+# ==================================================================================================
+#  THE SEED PHASE - DECLARED SEPARATELY BECAUSE IT RUNS ONCE, WHILE THE CAPTURE RUNS TWICE
+#  ------------------------------------------------------------------------------------------------
+#  THIS WORKFLOW'S SEED IS NOT A DATABASE SEED, AND THE DIFFERENCE MATTERS. The persistence workflows
+#  seed storage: the oracle's own setup deletes the database file, recreates the schema and inserts
+#  rows, which is precisely the destructive reseed the capture rule forbids between the two halves of a
+#  pair. NOTHING OF THAT KIND HAPPENS HERE. The rows this workflow starts from are declared INLINE IN
+#  THE READ-ONLY DATAWINDOW DEFINITION ITSELF - four rows at `dw_test_dwsvc_columnexp.srd:L14`, and the
+#  same four, byte-identically, at `dw_svc_sample_columnexp.srd:L14`. So there is NO FILE DELETE, NO
+#  DDL, NO INSERT, NO CONNECTION AND NO SCHEMA PROVISIONING anywhere in this seed phase. Binding the
+#  definition IS the seed.
+#
+#  The two assertions below are nonetheless both true and both required: the binding and the expression
+#  set-up happen ONCE per pair, and nothing here runs between the two captures.
+#  `../README.md` section 4.4 carries the fuller rationale for the separation.
+# ==================================================================================================
+seedPhase:
+  steps:
+    - action: >-
+        Bind the DataWindow definition the host controls name to BOTH hosts. The oracle window names
+        the same definition on both - the second host at `:L169` and the first at `:L301` - and that
+        co-residency is a precondition of the foreign-variable path rather than an incidental detail, so
+        both bindings belong to the seed and neither may be skipped. Binding loads the definition's own
+        inline rows; THIS STEP PERFORMS NO FILE DELETE, NO SCHEMA CREATION AND NO ROW INSERT, because
+        the rows are part of the read-only fixture.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L169,L301"
+    - action: >-
+        Confirm the FOUR inline rows the bound definition declares are present and in declaration
+        order, over the five declared columns - three two-place decimal columns and two
+        hundred-character character columns, none of which is updateable - with the declared ascending
+        sort on all three decimals applied. Confirm the two-fractional-digit edit mask on the three
+        decimal columns, because the recorded values are numeric strings and the mask is part of how
+        they are rendered.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_test_dwsvc_columnexp.srd:L8-L14"
+    - action: >-
+        Seed the two character columns as NULL, NOT as the empty string, in all four rows - which is
+        what the fixture's own data line does, and it is DELIBERATE rather than incidental. The
+        distinction is observable: the expression descriptor carries an empty-string-is-null flag, and
+        the trace fire site renders a value as the literal placeholder text when the value is empty AND
+        either that flag is set or the column is not a character column. Substituting empty strings for
+        the nulls would change which branch of that condition is taken and would silently change the
+        recorded trace on every row. The three decimal columns are seeded as zero for the same reason -
+        zero is what the fixture declares, and the arithmetic the expressions perform starts from it.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_test_dwsvc_columnexp.srd:L14"
+    - action: >-
+        Run the oracle window's open sequence exactly as written and in its written order, because the
+        ORDER IS THE SEED: enable the service, then enable the trace, then add the five expression
+        variables, then the typed variable, then the four nested expression variables, then set the
+        dynamic-indirect column expression, then calculate row one. Add order is what the calculation
+        sequence later follows, so an out-of-order set-up seeds a different workflow.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L96-L117"
+    - action: >-
+        Enable the trace before any expression is set, not after. The oracle enables it at `:L98`,
+        which is BEFORE the first variable is added at `:L104` and well before the first column
+        expression is set at `:L116` - so the trace records the set-up calculation at `:L117` too. A
+        capture that enabled tracing later would be missing its opening records on one side only, and
+        the two recordings would differ by an offset that has nothing to do with behaviour.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L98"
+    - action: >-
+        Enable the second host's own expression service and add its aggregate expression variable
+        BEFORE registering that variable as a foreign variable on the first host. The oracle does this
+        in that order - the service at `:L136`, the variable at `:L140`, the registration at `:L143` -
+        and the order is load-bearing: the registration resolves against the other host's live service,
+        so registering first would resolve against a service that is not yet enabled.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L136-L143"
+    - action: >-
+        Set the precision input to the value the oracle's control declares as its initial text, so that
+        the variable set captured later moves the precision from the value the typed variable was added
+        with to the value the control holds. Both numbers are part of the fixture and neither is
+        invented by the capture: the added value comes from `:L109` and the control's text from `:L272`.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L109,L272"
+    - action: >-
+        Configure the determinism seams declared below ONCE, and use that one configuration for both
+        halves of the pair. A seam configured per capture is two configurations, and two configurations
+        make the two recordings answer two different questions. This step has no legacy counterpart -
+        the legacy has no seams to configure - which is why it carries no locator.
+    - action: >-
+        On the target side, open one expression session per host, register both hosts into THE SAME
+        session scope, and record the ordinal each handle is assigned in creation order. This is what
+        replaces the legacy's live in-process pointer, so it is seeded rather than left to the capture:
+        the co-resident case below is only meaningful if co-residency was established deliberately. No
+        schema provisioning and no row seeding runs on this side either - the candidate materializes
+        the same four rows from the same read-only definition, transcribed rather than read at run
+        time - so this step is idempotent and touches no persistent state.
+    - action: >-
+        Additionally open a SECOND, SEPARATE expression session containing only one host, and leave it
+        open. It exists solely so that the cross-session foreign reference declared under
+        `blockedBehaviours` has somewhere to fail: the capture must exercise the failure, and a failure
+        that cannot be reached cannot be recorded. Nothing else uses this session, and it is created in
+        the seed rather than mid-capture so that both halves of the pair start from the same two-session
+        topology. THIS STEP CARRIES NO LOCATOR BECAUSE IT HAS NO LEGACY COUNTERPART AND CANNOT HAVE ONE:
+        the legacy has no session concept at all - it holds a live in-process pointer instead - so a
+        session boundary is precisely the thing the target introduces and the legacy cannot exhibit. The
+        legacy side of this pair therefore has nothing to record here, and the recorded outcome on that
+        side is its explicit absence rather than a value.
+  runsOncePerPair: true
+  neverBetweenCaptures: true
+
+# ==================================================================================================
+#  THE CAPTURE PHASE - RUNS TWICE, AGAINST THE STATE THE SEED ALREADY ESTABLISHED
+# ==================================================================================================
+capturePhase:
+  behaviourUnderTest: >-
+    THE EXPANSION AND CALCULATION OF COLUMN EXPRESSIONS BY THE ENGINE AT
+    `ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru`, AND NOTHING ELSE. For each
+    expression: its unexpanded source text, the rewritten text the parse routine produces in place, the
+    expansion mode of every individual variable and function reference within it, the bind-time
+    snapshot of every variable it referenced statically, the live environment every dynamic reference
+    resolves against, and the value it computes for each row. Around that: the ORDER in which
+    expressions are calculated, the SET of columns a single change causes to recalculate, every macro
+    invocation with its ordered arguments and its returned value, every trace record field by field,
+    and every error the engine reports.
+
+
+    THREE BEHAVIOURS ARE THE POINT OF THE CAPTURE. First and above all, THE THREE-MODE CASE: the same
+    variable referenced statically, dynamically and dynamically-by-computed-name on three adjacent
+    lines of the oracle - `:L151`, `:L154` and `:L157` - captured BEFORE and AFTER that variable is
+    given a new value at `:L292`. The static reference must be UNCHANGED by the set while the dynamic
+    and the indirect references must both reflect the new value. Second, THE INVERTED MACRO STREAM at
+    `:L305-L309`, where the oracle window itself implements the macro the expressions call, so across a
+    service boundary the service must call BACK INTO ITS CLIENT and wait. Third, THE ADD-ORDER
+    CALCULATION: recalculating every column executes in the order the expressions were ADDED, which the
+    oracle states in its own comments at `:L159` and `:L222` and the engine implements by walking its
+    expression array rather than the DataWindow's columns.
+
+
+    WHAT THIS CAPTURE IS NOT. It is not a capture of the 22-event chain - `dataservices-dw-event-chain`
+    owns that, and this capture records only the two events the engine reaches the client through and
+    the one point at which the chain hands control to the engine. It is not a retrieval or update
+    capture: no statement is generated, no storage is written, and the fixture's five columns are not
+    updateable in the first place. It is not a capture of any presentational behaviour, because this
+    engine has none. AND IT IS NOT A MEASUREMENT: no elapsed value is recorded and no timing is
+    asserted, because recalculation here is about order and value and the repository publishes nothing a
+    duration could be compared against.
+
+  preconditions:
+    # ---- THE MACRO GRAMMAR, FIVE FORMS, AS THE ORACLE AND THE SPECIFICATION BOTH STATE IT ---------
+    # Taken from the oracle window's own header comment at `:L86-L91` and confirmed against
+    # `../../docs/n_cst_dwsvc_columnexp.md`. Both halves of the pair are captured against this same
+    # grammar, or the comparison compares two different languages.
+    - >-
+      GRAMMAR, FORM 1 of 5 - STATIC EXPANSION, spelled with a SINGLE sigil before a variable name.
+      Declared at `w_test_dwsvc_columnexp.srw:L87` and specified at
+      `docs/n_cst_dwsvc_columnexp.md:L37-L54`. The variable's value is substituted into the expression
+      AT THE MOMENT THE EXPRESSION IS SET, and no later assignment to that variable can change the
+      result. Exercised at `w_test_dwsvc_columnexp.srw:L151` and `:L247`.
+    - >-
+      GRAMMAR, FORM 2 of 5 - DYNAMIC EXPANSION, spelled with a DOUBLE sigil before a variable name.
+      Declared at `w_test_dwsvc_columnexp.srw:L87` and specified at
+      `docs/n_cst_dwsvc_columnexp.md:L56-L73`. The variable is retained AS A REFERENCE and resolved at
+      calculation time, so a later assignment propagates. Exercised at
+      `w_test_dwsvc_columnexp.srw:L154` and `:L250`.
+    - >-
+      GRAMMAR, FORM 3 of 5 - DYNAMIC-INDIRECT EXPANSION, spelled as the double-sigil parenthesized
+      form, which fetches a variable BY COMPUTED NAME. Syntax at `docs/n_cst_dwsvc_columnexp.md:L79`,
+      worked example at `:L92`. The name is not a literal: it is itself an expression evaluated at
+      calculation time, and in the oracle it is a conditional over two other variables at
+      `w_test_dwsvc_columnexp.srw:L116` and over two columns at `:L157` and `:L253`. This form is
+      dynamic by construction - there is no static counterpart, because a name that is not known until
+      calculation time cannot have been substituted at bind time.
+    - >-
+      GRAMMAR, FORM 4 of 5 - MACRO-DIRECT INVOCATION, spelled as a SINGLE sigil before a function name
+      followed by an argument list. Declared at `w_test_dwsvc_columnexp.srw:L88` and specified at
+      `docs/n_cst_dwsvc_columnexp.md:L104-L128`, syntax at `:L110`. The function is not built in: THE
+      APPLICATION implements it, in the host event the oracle implements at
+      `w_test_dwsvc_columnexp.srw:L305-L309`. Exercised in every expression the oracle sets.
+    - >-
+      GRAMMAR, FORM 5 of 5 - MACRO-DYNAMIC INVOCATION, spelled as the double-sigil reserved dispatch
+      form, which calls a function BY NAME with an argument list where THE FUNCTION NAME MAY ITSELF BE A
+      VARIABLE. Declared at `w_test_dwsvc_columnexp.srw:L91`, specified at
+      `docs/n_cst_dwsvc_columnexp.md:L130-L151` with its syntax at `:L134` and a worked example at
+      `:L138-L141` in which the function name is held in a variable and referenced statically. The
+      engine models this form with a reserved sentinel function name; the bare-variable form of form 3
+      is modelled with an EMPTY function name. Both spellings are recorded exactly as the engine holds
+      them, because both travel in captured payloads.
+    - >-
+      THE EXPANSION MODE IS A PER-REFERENCE PROPERTY AND IS RECORDED PER REFERENCE, NEVER PER
+      EXPRESSION. This is a precondition rather than an observation because it decides the SHAPE of
+      every payload below. Two independent pieces of evidence: the specification's worked example at
+      `docs/n_cst_dwsvc_columnexp.md:L68` places a dynamic reference and a static reference inside ONE
+      expression; and the oracle's `w_test_dwsvc_columnexp.srw:L157` places a dynamic-indirect
+      reference, a macro-direct call and a dynamic foreign reference inside another. The engine's own
+      descriptor agrees - it carries an ARRAY of variable references and an ARRAY of function
+      references per expression, each with its own flags - so a per-expression mode has nowhere to live
+      even in the legacy.
+    # ---- STATE THAT MUST HOLD BEFORE THE CAPTURE BEGINS -------------------------------------------
+    - >-
+      THE SERVICE IS ENABLED ON BOTH HOSTS. The engine gates every public entry point on its base
+      class's enabled property, returning the plain failure code rather than doing nothing, so a
+      capture taken with the service disabled records failures rather than behaviour. The oracle
+      enables the first host at `w_test_dwsvc_columnexp.srw:L96` and the second at `:L136`.
+    - >-
+      THE TRACE IS ENABLED. Without it the trace outputs below are simply absent, and their absence is
+      indistinguishable from an engine that calculated nothing. The oracle enables it at
+      `w_test_dwsvc_columnexp.srw:L98`, and the engine's fire site at
+      `n_cst_dwsvc_columnexp.sru:L758` is guarded on that property.
+    - >-
+      THE ITEM-CHANGE GATE ON THE HOST IS ENABLED. This is a precondition of THIS workflow even though
+      the gate belongs to the sibling's surface, because of a documented second-order coupling:
+      disabling the host's item-change bit returns before the changed dispatcher is reached, and that
+      dispatcher is the ONLY place the host calls this engine's changed handler
+      [`se_cst_dw.sru:L41-L43`, `:L295-L320`, `:L313-L315`]. A capture taken with that bit clear would
+      record an engine that never recalculates on a data change, and would record it as if that were
+      the engine's behaviour.
+    - >-
+      BOTH HOSTS ARE CO-RESIDENT IN ONE EXPRESSION SESSION on the target side, and a second session
+      exists holding only one host. The first is what makes the foreign-variable case comparable to the
+      legacy; the second is what makes the blocked case reachable. Both are established by the seed.
+    - >-
+      THE MACRO CALLBACK IS REGISTERED AND ANSWERS. The oracle implements exactly one macro name and
+      returns a rounded value for it [`w_test_dwsvc_columnexp.srw:L305-L309`, the body at `:L308`];
+      every expression the oracle sets calls that macro, so a capture in which the callback is absent
+      records every expression as an error rather than as a value. On the target side the callback is the
+      inverted stream's client end, reached through the host event declared at `se_cst_dw.sru:L14`, and
+      it must be connected before the first calculation.
+    - >-
+      NO EXPRESSION IS PRE-CACHED. The engine creates a generated compute object per cacheable
+      expression, named from the expression plus a fixed suffix [`n_cst_dwsvc_columnexp.sru:L95`], and
+      checks for and creates it on the calculation path [`:L711-L713`], so a residual object from an
+      earlier run would change which branch the calculation takes on its first pass. The capture begins
+      with no such object present, on both sides.
+
+  observedOutputs:
+    # ---- A. THE THREE-PART PAYLOAD. THE MOST IMPORTANT GROUP IN THE FILE ---------------------------
+    # An already-expanded expression string is NOT a faithful recording, and no amount of post-processing
+    # can turn one into a faithful recording afterwards. These five outputs together are what makes the
+    # static-versus-dynamic distinction detectable at all.
+    - name: expression.sourceText
+      description: >-
+        PART 1 OF 3. The UNEXPANDED source expression exactly as it was passed to the engine, character
+        for character, before any rewriting. This is the only artefact in which a static reference is
+        still visible as a reference: after the parse routine has run, its name is gone. A difference
+        here means the two sides were asked to expand different text, which invalidates every other
+        comparison in the group, so this output is compared FIRST.
+      format: >-
+        The raw string, unnormalized and unescaped, recorded as a quoted JSON string value. Sigils,
+        parentheses, commas, embedded quotes and Chinese identifiers are all preserved verbatim; no
+        whitespace is collapsed, because the oracle's own text carries irregular spacing - `:L116` has a
+        space before its comma - and normalizing it would mask a genuine change in the text.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L27"
+    - name: expression.rewrittenText
+      description: >-
+        The text the parse routine produces IN PLACE from the source. This is where the distinction
+        becomes visible mechanically rather than by inference: a statically expanded reference has been
+        replaced by its bind-time value and its name is ABSENT here, while a dynamically expanded
+        reference has left behind an entry indexing into the live variable table and is still resolvable.
+        Recorded because it is the artefact that proves WHY a later assignment cannot reach a static
+        reference, and a reviewer who sees only values has to take that on trust.
+      format: >-
+        The rewritten string verbatim, alongside the count of variable references and function
+        references the routine emitted for it - the two arrays are part of the parse result and their
+        lengths are behaviour.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L28-L29"
+    - name: expression.referenceMode
+      description: >-
+        PER REFERENCE, NOT PER EXPRESSION - one record for every variable and function reference the
+        parse routine emitted, in the order it emitted them, each tagged with exactly one of the FIVE
+        modes: STATIC, DYNAMIC, DYNAMIC-INDIRECT, MACRO-DIRECT or MACRO-DYNAMIC. This is the output that
+        makes a mixed expression legible. The oracle's `:L157` alone yields a dynamic-indirect
+        reference, a macro-direct call and a dynamic foreign reference from one line, and the
+        specification's `docs/n_cst_dwsvc_columnexp.md:L68` yields one dynamic and one static from
+        another. A capture that lost the per-reference tagging would render both indistinguishable from
+        an expression with a single mode.
+      format: >-
+        An ordered array of records, each carrying the reference's short name, its full name as the
+        engine stored it, its index into the variable or function table, its mode, and the two boolean
+        flags the engine's own reference descriptor carries - the context flag and the macro flag for a
+        variable reference, and the built-in flag for a function reference. The flags are recorded as
+        booleans rather than folded into the mode, because the engine keeps them separate.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L50-L63"
+    - name: expression.bindTimeSnapshot
+      description: >-
+        PART 2 OF 3. The value of every variable that was resolved STATICALLY, as it stood at the moment
+        the expression was set. Without this, a static binding in the recording is indistinguishable
+        from a literal that happened to have the same value - and the whole behaviour under test is that
+        a static binding STAYS at this value while the live environment moves away from it.
+      format: >-
+        A map from variable name to a DISCRIMINATED VALUE - the declared scalar type and the value's
+        textual projection - captured once per expression at set time and never updated afterwards. Not
+        a stringly-typed map: see the note on defect D-06.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L65-L78"
+    - name: expression.liveEnvironment
+      description: >-
+        PART 3 OF 3. The complete variable table AS IT STANDS AT CALCULATION TIME, which is what every
+        dynamic and dynamic-indirect reference resolves against. Recorded at each calculation rather than
+        once, because the divergence this pair proves is precisely that this table moves while the
+        bind-time snapshot does not. Comparing the two recordings' live environments at the same
+        calculation point is how a reviewer confirms the dynamic side was resolving against the same
+        state on both sides.
+      format: >-
+        An ordered array of variable records - name, kind, declared type where the variable is typed,
+        current discriminated value, and for an expression variable its own unexpanded body and its own
+        reference arrays, because a variable's value MAY ITSELF BE AN EXPRESSION with its own references
+        and the structure is recursive.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L73-L78"
+
+    # ---- B. THE DEFINITIVE THREE-MODE DIVERGENCE. THE REASON THIS WORKFLOW EXISTS ------------------
+    # The same variable, referenced three ways on three adjacent lines, then given a new value from a
+    # fourth control. Captured before and after. This is the whole behaviour.
+    - name: threeMode.expressionsAsSet
+      description: >-
+        The three expressions the oracle sets on three adjacent lines, recorded as set. Reading them
+        together is what makes the case definitive, because they differ ONLY in how they reference the
+        precision variable: the first references it statically as `$精度` [`:L151`]; the second
+        references the same variable dynamically as `$$精度` [`:L154`]; the third fetches it
+        dynamically by computed name as `$$('精度')` and additionally consumes the foreign variable
+        dynamically as `$$数据汇总` [`:L157`]. One sigil apart, and permanently divergent.
+      format: >-
+        The three source strings verbatim with the column each was bound to, plus the per-reference mode
+        array for each. The Chinese variable names are recorded as they are written, because they ARE
+        the identifiers and the grammar is case- and character-sensitive.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L151,L154,L157"
+    - name: threeMode.valuesBeforeVariableSet
+      description: >-
+        The value each of the three expressions produces for every row, captured AFTER the
+        recalculate-all at `:L160` and BEFORE the variable set at `:L292`. This is the baseline the
+        divergence is measured from; without it, an unchanged static value is not distinguishable from a
+        value that changed twice.
+      format: >-
+        Per row and per column: the computed value as its numeric string, exactly as the engine produced
+        it, under an invariant numeric culture. Rendered through the fixture's declared two-fractional-
+        digit mask, because that mask is part of the observable value.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L160"
+    - name: threeMode.valuesAfterVariableSet
+      description: >-
+        The same three values per row, captured after the three-arity variable set with its recalculate
+        flag at `:L292` has moved the precision variable from the value it was added with to the value
+        the input control holds. THE ASSERTION THIS PAIR EXISTS FOR: the STATICALLY referenced
+        expression's value must be BYTE-IDENTICAL to its before value, while the DYNAMIC and the
+        DYNAMIC-INDIRECT expressions' values must both reflect the new precision. A capture in which the
+        static value tracked the change is a PARITY FAILURE, not a more consistent result.
+      format: >-
+        The same per-row projection as the before capture, recorded in the same field order so the two
+        are diffable line by line, plus an explicit per-column before-and-after pair so the invariance
+        and the propagation are both visible in one place rather than reconstructed by the reader.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L292"
+    - name: threeMode.specificationWorkedExample
+      description: >-
+        The specification's own worked example, run as a capture in its own right rather than only cited.
+        The authoritative document states one outcome for the static form and a different outcome for the
+        dynamic form from THE IDENTICAL SEQUENCE - add an expression variable, add a typed variable,
+        define a derived variable referencing both, assign a new value to the typed variable, recalculate
+        - and the two stated results differ by exactly the change in the assigned value. Capturing it
+        gives the pair a second, independent witness to the same behaviour, drawn from the document
+        rather than from the oracle window.
+      format: >-
+        The two sequences and the two resulting values, each labelled with the specification section and
+        line range it comes from, so a reviewer can check the recorded outcome against the document's
+        stated one without leaving the recording.
+      locator: "docs/n_cst_dwsvc_columnexp.md:L43-L54 and :L62-L73"
+
+    # ---- C. THE VARIABLE ENVIRONMENT: SEVEN TYPES, NESTING, AND RECURSION -------------------------
+    - name: variable.declaredTypeAndValue
+      description: >-
+        Every variable the engine holds, with its DECLARED SCALAR TYPE and its value. The add entry
+        point exists in SEVEN TYPED OVERLOADS - time, string, integral, floating point, timestamp, date
+        and boolean - and the set entry point exists in all seven types across three separate arities,
+        so the type a variable was declared with is a first-class property and not an artefact of how it
+        was printed. The oracle exercises the integral overload directly at `:L109`.
+      format: >-
+        A DISCRIMINATED UNION per variable - the type tag and the typed value - and NEVER a
+        stringly-typed map. Collapsing to strings would lose exactly the type information the engine's
+        coercion behaviour depends on, and the loss would be silent.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L153-L159"
+    - name: variable.expressionVariableBody
+      description: >-
+        For each EXPRESSION variable, its own unexpanded body and its own emitted reference arrays. The
+        oracle declares five of these at `:L104-L108` whose bodies are plain values, and then four more
+        at `:L111-L114` whose bodies REFERENCE OTHER VARIABLES and call the macro - so the structure is
+        genuinely nested, and one variable's value cannot be recorded without recording the references
+        it resolves through.
+      format: >-
+        Per variable: the body verbatim, its reference array with each reference's mode, and its
+        has-macro flag. Recorded recursively to full depth, because the engine's local-variable
+        structure is itself recursive and a fixed-depth projection would truncate the deeper case
+        without saying so.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L104-L114"
+    - name: variable.quotedStringLiteralBody
+      description: >-
+        The one expression variable among the oracle's five whose body is a QUOTED STRING LITERAL rather
+        than a bare number - `'3'` at `:L106`, against `1`, `2`, `4` and `5` on the lines around it -
+        and the value produced when a later expression coerces it back to a number inside an arithmetic
+        term at `:L114`. Recorded on its own because it is the only place in this workflow where the
+        engine's own type coercion is exercised through the expression language rather than through a
+        typed overload, and because the quoting is easy to lose in a transcription: a body of `3` and a
+        body of `'3'` are different bodies.
+      format: >-
+        The body verbatim WITH its quotes intact, the type the engine resolved it to, and the value the
+        consuming expression computed from it.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L106,L114"
+    - name: variable.recursiveExpressionCase
+      description: >-
+        An expression variable whose body references another expression variable which in turn
+        references a third, calculated to full depth, together with the recursion flag state on the
+        expressions involved and the depth the engine's own recursion stack reached. The engine carries
+        an explicit recursive flag per expression, settable by index and by name, and the specification
+        lists recursion control among the capability's declared features - so recursion is a supported
+        configuration rather than an accident, and its depth is observable through the trace's call
+        stack.
+      format: >-
+        The resolution chain in resolution order, the value at each level, the recursion flag on each
+        expression, and the maximum stack depth reached. Depth is recorded as an ordinal count, never as
+        a duration.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L110,L2421-L2422"
+    - name: variable.addOrder
+      description: >-
+        The order in which variables and expressions were added, as an ordinal per entry. This is
+        recorded as an output rather than assumed from the seed because it is the KEY THE CALCULATION
+        SEQUENCE IS SORTED BY: the engine walks its expression array, and that array's order is
+        insertion order. A recording that carried the calculation sequence without carrying the add
+        order would show an ordering with nothing to check it against.
+      format: >-
+        Two ordered lists - variables and expressions - each entry carrying its name and its
+        one-based ordinal in the engine's own array.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L101-L103"
+
+    # ---- D. THE FOREIGN VARIABLE - THE CO-RESIDENT CASE THAT WORKS ---------------------------------
+    # The blocked cross-session case is declared under `blockedBehaviours`; these outputs capture the
+    # case that succeeds, plus the handle that replaces the legacy's pointer.
+    - name: foreignVar.registration
+      description: >-
+        The registration of a variable declared on the SECOND host as a foreign variable on the FIRST,
+        at `w_test_dwsvc_columnexp.srw:L143`, recorded with the name it is registered under, the host it
+        names, and the resulting variable-kind discriminator on the first host's table. The kind matters:
+        the engine's changed-column pass explicitly SKIPS variables of the foreign kind
+        [`n_cst_dwsvc_columnexp.sru:L282`], so registering as foreign changes which dirty-propagation
+        path the variable takes, not merely where its value comes from.
+      format: >-
+        The registered name, the target host's ordinal handle, the variable kind as its raw numeric
+        discriminator, and the length of the links array the registration produced.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L143"
+    - name: foreignVar.resolvedValue
+      description: >-
+        The value the foreign variable resolves to when consumed, and its propagation into the consuming
+        expression's result. The oracle makes this checkable end to end: the second host's variable is an
+        AGGREGATE over that host's own column [`:L140`], and the first host's third expression adds the
+        foreign value to its own arithmetic [`:L157`]. Because both hosts bind THE SAME definition with
+        the same four rows, the aggregate has a known relationship to the rows a reviewer can verify
+        rather than merely diff.
+      format: >-
+        The aggregate's value on the owning host, the value observed through the foreign reference on the
+        consuming host, and the consuming expression's result - all three, so a divergence can be
+        localized to the aggregate, to the crossing or to the arithmetic.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L140,L157"
+    - name: foreignVar.requiresDynamicExpansion
+      description: >-
+        THE EXPLICIT NEGATIVE, captured because the specification states the rule and a rule with no
+        recorded consequence is untested. The specification notes at `docs/n_cst_dwsvc_columnexp.md:L34`
+        that a foreign variable REQUIRES the dynamic form, and the oracle obeys it - `:L157` consumes the
+        foreign variable with a double sigil. The capture additionally attempts the same consumption with
+        a SINGLE sigil and records what the engine does with it, so that the requirement is documented by
+        observation rather than by restatement.
+      format: >-
+        The two attempts side by side: the mode used, the engine's numeric return code, any structured
+        error produced, and the value obtained or the absence of one.
+      locator: "docs/n_cst_dwsvc_columnexp.md:L29-L35"
+    - name: foreignVar.dataWindowHandle
+      description: >-
+        The session-scoped host handle through which a foreign reference is resolved on the target side,
+        recorded as its creation-order ordinal. This field HAS NO LEGACY COUNTERPART IN FORM - the legacy
+        holds a live in-process object pointer in the same descriptor position - and it is recorded
+        precisely because it is the substitution: the pointer is what cannot cross a service boundary,
+        and the handle is what replaces it. The IDENTITY RELATION is what is compared, not the value: two
+        references that named the same host in the legacy must resolve to the same ordinal here.
+      format: >-
+        The ordinal, the session ordinal it belongs to, and the host name the legacy pointer's target
+        was declared under - so the relation is checkable from the recording alone.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L80-L83"
+
+    # ---- E. CALCULATION ORDERING AND SCOPE --------------------------------------------------------
+    - name: calc.addOrderSequence
+      description: >-
+        THE ORDERED SEQUENCE OF COLUMN CALCULATIONS a recalculate-all performs, as an ordinal-tagged
+        list. The oracle asserts the rule in its own comments at `:L159` and `:L222` - recalculating all
+        columns executes in the order the expressions were ADDED - and the engine implements it by
+        walking its expression array from its first element to its last
+        [`n_cst_dwsvc_columnexp.sru:L1166-L1172`], which is insertion order. THE SEQUENCE MUST NOT MATCH
+        COLUMN ORDER, and in this fixture it cannot by accident: the oracle sets its expressions in the
+        order third-column, then second, then first at `:L116` then `:L151`, `:L154`, `:L157`, so add
+        order and column order genuinely disagree.
+      format: >-
+        An ordered list of calculation records - ordinal, expression index, column name, row - captured
+        for each recalculate-all, paired with the add-order list so the correspondence is checkable
+        without cross-referencing another file.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L1166-L1172"
+    - name: calc.forceFlagEffect
+      description: >-
+        What the FORCE flag actually does, captured as a difference between two recalculate-all passes -
+        one without it at `:L160` and `:L256`, one with it at `:L223`. It is easy to assume the flag
+        means "ignore the cache"; it does not. When the flag is CLEAR the pass SKIPS any expression that
+        has one or more relative-INPUT columns configured [`n_cst_dwsvc_columnexp.sru:L1168-L1170`];
+        when it is SET, nothing is skipped. So the observable effect is a DIFFERENT SET of expressions
+        calculated, not a different value from the same set.
+      format: >-
+        The two calculated sets side by side with the flag's value, plus the per-expression
+        relative-input-column array that decides membership. Where the two sets are equal the recording
+        says so explicitly, because on a configuration with no input-relative expressions equality is the
+        correct outcome and silence would look like a missing capture.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L160,L223,L256"
+    - name: calc.singleRowScope
+      description: >-
+        A single-row calculation's scope, from the oracle's `:L117`, recorded as the set of expressions
+        it evaluated and the row it evaluated them for - together with the engine's numeric return code
+        for an out-of-range row, which is a distinct code rather than a plain failure
+        [`n_cst_dwsvc_columnexp.sru:L1159`]. Recorded because the row-scoped and all-rows entry points
+        share their per-row logic, and a port that scoped one of them wrongly would still produce
+        correct values for the other.
+      format: >-
+        The row, the ordered expression set evaluated, and the raw numeric return code. THE CODE IS
+        RECORDED AS ITS NUMBER, never as a boolean projection of it, because the engine's algebra
+        distinguishes outcomes a boolean would merge.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L117"
+    - name: calc.reentrancyGuardOutcome
+      description: >-
+        The outcome of a calculation entered while a calculation is already in progress. The engine holds
+        a re-entrancy flag and returns the plain failure code IMMEDIATELY rather than recursing
+        [`n_cst_dwsvc_columnexp.sru:L1160`], so the guard is observable through the return code. This is
+        reachable from a macro callback, because the callback runs client-side code in the middle of a
+        calculation and that code could call back into the engine - which makes the guard a real path
+        rather than a defensive one, and worth driving deliberately.
+      format: >-
+        The nesting attempt, the raw numeric code returned, the flag's value at entry and at exit, and
+        the confirmation that the outer calculation completed normally afterwards - the guard must not
+        leave the flag set.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L1160"
+    - name: calc.relativeColumnTrigger
+      description: >-
+        Which expressions a change to one column triggers when relative columns are configured, captured
+        for the singular and the plural setter forms and for both the by-index and the by-name spellings.
+        The engine exposes all four combinations, and the specification documents the plural by-name form
+        at `docs/n_cst_dwsvc_columnexp.md:L162`. Recorded per form because four entry points that are
+        supposed to converge on one behaviour are four chances for one of them to diverge.
+      format: >-
+        Per configuration: the setter form used, the resulting relative-column identifier array, the
+        column changed, and the ordered set of expressions that recalculated.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L128,L135-L137"
+    - name: calc.relativeInputColumnTrigger
+      description: >-
+        The same for relative-INPUT columns, which are NOT the same thing and must not be captured as if
+        they were: the specification states at `docs/n_cst_dwsvc_columnexp.md:L163` that this form fires
+        ONLY when the user inputs the column, and the engine's changed dispatcher carries a
+        from-input discriminator on its own signature to tell the two cases apart. So the capture drives
+        each configured column BOTH as a user input and as a programmatic change, and records that the
+        two produce different recalculated sets.
+      format: >-
+        Per configuration and per driving mode: the setter form, the identifier array, whether the change
+        was flagged as coming from input, and the ordered set of expressions that recalculated. The
+        negative case - a programmatic change producing NO recalculation - is recorded explicitly.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L129,L138-L140,L229"
+    - name: calc.alwaysCalcAndTriggerEventFlags
+      description: >-
+        The effect of the always-calculate and trigger-event flags, each settable by index and by name.
+        Always-calculate makes an expression match every changed column unconditionally, short-circuiting
+        the relative-column tests entirely [`n_cst_dwsvc_columnexp.sru:L241-L279`]; trigger-event decides
+        whether a completed calculation raises the host's changed notification. Both are per-expression
+        booleans and both change what a recording contains, so both are captured set and clear.
+      format: >-
+        A small matrix: flag, value, the expressions that calculated, and whether the notification fired.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L133-L134,L148-L149"
+
+    # ---- F. THE TRI-STATE CACHE, THE REVERSE INDEX, AND MULTIPLE EXPRESSIONS PER COLUMN -----------
+    - name: cache.columnFlagTransitions
+      description: >-
+        The per-column calculation flag and EVERY TRANSITION IT MAKES. The flag is TRI-STATE - unknown,
+        yes, no - and not a boolean: a column starts unknown [`n_cst_dwsvc_columnexp.sru:L234-L235`], is
+        set to no as the default before any match is sought [`:L239`], and is promoted to yes only when a
+        match is found [`:L276`]. Thereafter the flag is CONSULTED rather than recomputed [`:L238`], so
+        it is a cache and its state decides whether the match loop runs at all. Two of the three states
+        would collapse under a boolean and the collapse would be invisible in the values.
+      format: >-
+        An ordered transition log per column: the raw numeric flag value before, the trigger, and the raw
+        numeric value after. RAW NUMBERS, not names, because the numbers are what the engine holds and
+        what a payload would carry.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L113-L115"
+    - name: cache.reverseDependencyIndex
+      description: >-
+        The REVERSE DEPENDENCY INDEX built per column - the list of expression entries and the list of
+        variable entries that depend on that column - and it is recorded as a first-class output because
+        it is the structure that makes dirty propagation work. The engine appends to the expression half
+        at `n_cst_dwsvc_columnexp.sru:L276-L277` and to the variable half at `:L285`, then walks the
+        expression half to decide what to recalculate at `:L295-L303`. An index built differently
+        produces a different recalculated set from the same change.
+      format: >-
+        Per column: the two ordered index arrays as arrays of one-based ordinals into the engine's own
+        expression and variable arrays, captured after the first change that forces the column's flag to
+        be resolved.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L44-L48"
+    - name: cache.recalculatedColumnSet
+      description: >-
+        THE FULL SET OF COLUMNS THAT RECALCULATE as a result of changing ONE column - and that set IS the
+        behaviour, not a by-product of it. This fixture makes the set non-trivial because its three
+        expressions reference each other's columns: the first references the second and third, the second
+        references the columns behind the first and third, and the third references the first and second
+        by name. So one change propagates, and how far it propagates is exactly what the reverse index
+        decides.
+      format: >-
+        Per changed column: the ordered set of columns recalculated, the ordinal each recalculation
+        occurred at, and the value each produced. Recorded as an ORDERED set rather than a set, because
+        the order is itself the add-order behaviour and discarding it would lose a second assertion.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L295-L303"
+    - name: dupExp.selectionByChangedColumn
+      description: >-
+        A column carrying TWO expressions, and which of them is selected - the selection following WHICH
+        COLUMN WAS MODIFIED, not which expression was added last. The expression descriptor carries a
+        duplicate-expression array for exactly this [`n_cst_dwsvc_columnexp.sru:L32`], the specification
+        lists it among the capability's declared features [`docs/n_cst_dwsvc_columnexp.md:L8`], and the
+        engine clears the dirty flag across the whole duplicate group when it processes any member of it
+        [`:L2059`]. The capture binds two expressions to one column, drives a change from each of two
+        different columns, and records which expression answered each time.
+      format: >-
+        The duplicate-expression array's contents as ordinals, then per driving change: the column
+        changed, the expression index selected, the value produced, and the dirty-flag state of every
+        member of the group before and after.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L22-L42"
+
+    # ---- G. THE INVERTED MACRO STREAM -------------------------------------------------------------
+    # The legacy expects THE APPLICATION to implement the macro switch, and the oracle window does
+    # exactly that. Across a service boundary the direction inverts: the service must call BACK INTO ITS
+    # CLIENT and wait for the answer before the calculation can continue.
+    - name: macro.invocation
+      description: >-
+        EVERY macro invocation, in invocation order: the macro NAME as the engine passed it, the ORDERED
+        ARGUMENT ARRAY, and the VALUE RETURNED. The oracle implements one macro name and its body rounds
+        the first argument to the precision given by the second [`:L305-L309`], so both arguments and the
+        return are checkable rather than opaque. Every expression the oracle sets calls this macro, which
+        makes the invocation log the densest output in the capture and the one that most directly shows
+        whether the inverted stream carried the same values in the same order on both sides.
+      format: >-
+        An ordered array of records - invocation ordinal, macro name, argument array in positional order
+        with each argument's textual projection, and the returned value as a DISCRIMINATED VALUE carrying
+        its runtime type as well as its text. The type is part of the answer: the callback's declared
+        return is untyped, and what the calculation then does with the value depends on the type it came
+        back as.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L305-L309"
+    - name: macro.invocationIsSynchronous
+      description: >-
+        THE EXPLICIT ORDERING FACT, recorded because it is what makes the inverted stream a stream rather
+        than a notification: the calculation CANNOT PROCEED without the returned value, so the callback is
+        strictly synchronous and no reordering is permitted. The capture records, per invocation, the
+        calculation step that was suspended and the step that resumed after the answer arrived, so that a
+        candidate which fired the callback and continued without waiting is detectable. An out-of-order
+        arrival is a HARD ERROR here, never a reorder opportunity.
+      format: >-
+        Per invocation: the suspended step's ordinal, the resumed step's ordinal, and a monotonic
+        sequencing ordinal. THE ORDINAL IS FOR DETECTION, NOT FOR TIMING - it is a counter, and nothing
+        in this store derives a duration from two of them.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L14"
+    - name: macro.dynamicDispatchCase
+      description: >-
+        A MACRO-DYNAMIC invocation, in which THE FUNCTION NAME IS ITSELF A VARIABLE rather than a literal
+        - the reserved dispatch form. The specification's worked example holds the function name in a
+        variable and references it statically inside the dispatch call
+        [`docs/n_cst_dwsvc_columnexp.md:L138-L141`], which is the fifth of the five grammar forms and the
+        only one the oracle window does not itself exercise. It is captured here because leaving it out
+        would leave one of the five modes unproven, and the engine models it with a distinct reserved
+        sentinel name that appears in payloads.
+      format: >-
+        The dispatch expression's source text, the reference mode of the name variable, the resolved
+        function name, the argument array, and the returned discriminated value - plus the engine's
+        built-in flag on the function reference, which distinguishes a reserved dispatch from an
+        application macro.
+      locator: "docs/n_cst_dwsvc_columnexp.md:L130-L151"
+    - name: macro.sentinelNamesAndArityGuards
+      description: >-
+        The TWO SENTINEL CONSTANTS the engine uses to encode its grammar internally, recorded with their
+        EXACT SPELLINGS because both appear in captured payloads: an EMPTY function name models a bare
+        variable reference, and a specific reserved word models dynamic dispatch
+        [`n_cst_dwsvc_columnexp.sru:L120-L121`]. Recorded alongside them: the two ARITY GUARDS the engine
+        enforces on those sentinels - the bare-variable form requires exactly one argument [`:L1390`] and
+        the dispatch form requires at least one [`:L1394`] - each of which reports through the parse-error
+        builder and returns the invalid-argument code.
+      format: >-
+        The two spellings verbatim, including the empty one recorded as an explicit empty string rather
+        than as an absent field, and per guard: the arity supplied, the raw numeric return code, and the
+        structured error produced.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L120-L121"
+
+    # ---- H. THE TRACE, FORMAT-EXACT --------------------------------------------------------------
+    - name: trace.record
+      description: >-
+        THE ACCUMULATED TRACE, as an ordered sequence of records carrying SIX FIELDS IN THIS ORDER: the
+        line counter, the column name, the row, THE CALL STACK, the value, and the UNEXPANDED EXPRESSION.
+        That order is the oracle's own, from its handler's format string at `:L315`, and it is preserved
+        because the trace is what a legacy operator actually read: reordering the fields would produce a
+        recording that no longer corresponds to the artefact the behaviour was originally observed
+        through. The handler appends each record to a growing text buffer terminated by a carriage-return
+        and line-feed escape, then scrolls.
+      format: >-
+        One record per line in a text artefact, the six fields in the oracle's order and separated as the
+        oracle separates them - the counter left-aligned in a four-wide field, the column name followed by
+        the row in parentheses, then the call stack, then the value, then the expression behind its own
+        label. Emitted as text rather than as structured data precisely BECAUSE the format is part of what
+        is compared; a structured re-projection would compare the fields and lose the formatting.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L315-L316"
+    - name: trace.callStack
+      description: >-
+        The CALL STACK field of each trace record, recorded verbatim rather than parsed. It is built by
+        the engine's own recursion and calculation stack - a vector created in the engine's constructor
+        with an initial reservation [`n_cst_dwsvc_columnexp.sru:L2421-L2422`] and declared at `:L110` -
+        so its contents are the live nesting of the calculation at the moment the record was emitted, and
+        it is the only output in this capture that exposes the recursion depth of a nested expression.
+      format: >-
+        The stack string exactly as the engine composed it, unparsed and unnormalized except for the
+        newline convention the mask declares. Recorded verbatim because its internal separator is the
+        engine's own and re-deriving it would substitute the capture's formatting for the oracle's.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L110"
+    - name: trace.nullValueRendering
+      description: >-
+        The VALUE field's rendering when the computed value is EMPTY, which is where the fixture's
+        deliberate null seeding becomes observable. The engine substitutes a literal placeholder text for
+        an empty value when EITHER the expression's empty-string-is-null flag is set OR the column is not
+        a character column [`n_cst_dwsvc_columnexp.sru:L758`], so the same empty value renders one way on
+        a decimal column and potentially another on a character column. Replacing the fixture's nulls with
+        empty strings would change which arm of that condition is taken and would silently change this
+        field on every row.
+      format: >-
+        Per record where the value was empty: the placeholder text as emitted, the expression's
+        empty-string-is-null flag, the column's type discriminator, and which of the two conditions was
+        satisfied.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L758"
+    - name: trace.enabledGate
+      description: >-
+        The trace property's own value, and the EXPLICIT NEGATIVE that no trace record is emitted while it
+        is clear. Recorded because the absence of trace records is otherwise ambiguous - it looks exactly
+        like an engine that calculated nothing - and because the property is declared private-write
+        [`n_cst_dwsvc_columnexp.sru:L98`], so it is settable only through its own entry point at `:L208`
+        and a port that exposed it as a plain field would widen the surface.
+      format: >-
+        The property's boolean value, the raw numeric code its setter returned, and the record count
+        emitted under each value.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L98"
+
+    # ---- I. ERRORS - STRUCTURED, WITH CARET POSITIONS, AND DELIBERATELY NOT LOCALIZED -------------
+    - name: parseError.structured
+      description: >-
+        Every parse and calculation error the engine reports, as a STRUCTURED RESULT preserving the
+        original message text, the caret position where the builder supplies one, the severity the dialog
+        carried, and THE EXPLICIT FACT THAT THE TEXT IS NOT LOCALIZED. The engine has 28 dialog call
+        sites, every one of them live and none of them routed through the localization layer, while the
+        equivalent messages in this service's sibling row-select and context-menu services ARE routed
+        through it. That inconsistency is legacy behaviour and is reproduced; see defect D-03.
+      format: >-
+        Per error: the message text verbatim, the caret position as a one-based character offset or an
+        explicit absence, the severity, the expression the error was raised against, the raw numeric
+        return code, and a boolean recording that the text was NOT localized. Only the delivery channel
+        changes from dialog to structured result; every field the dialog carried is preserved.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L1308"
+    - name: parseError.caretPosition
+      description: >-
+        The CARET POSITION specifically, captured on its own because it is computed rather than recorded
+        and the computation is not obvious: the builder is handed a position derived from the macro's own
+        start offset plus HALF the distance from that offset to the current scan position
+        [`n_cst_dwsvc_columnexp.sru:L1308`, `:L1383`, `:L1390`, `:L1394`]. Whatever the reason for the
+        halving, IT IS THE OBSERVABLE VALUE, and a port that reported the plain scan position would place
+        the caret somewhere else in the expression while every other field matched.
+      format: >-
+        Per error: the caret position as its raw integer, the expression's length, and the substring the
+        position points at - so a reviewer can see where the caret landed rather than recompute it.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L1308,L1383,L1390,L1394"
+    - name: calcError.expressionErrorSentinels
+      description: >-
+        The general expression error, raised when a calculated value comes back as EITHER of two
+        single-character sentinel strings [`n_cst_dwsvc_columnexp.sru:L762`]. Both spellings are recorded
+        exactly, because the check is on the value's literal text: an expression that legitimately
+        evaluated to one of those characters would be reported as an error, which is a real edge of the
+        legacy contract rather than a hypothetical one.
+      format: >-
+        The two sentinel spellings verbatim, and per occurrence: the value returned, which sentinel
+        matched, the message produced, and the boolean the engine returned.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L762"
+    - name: cacheError.reportsWrongExceptionVariable
+      description: >-
+        The cache error's message text, captured for one specific reason: the engine reports THE WRONG
+        EXCEPTION VARIABLE'S TEXT there. Inside the inner handler at
+        `n_cst_dwsvc_columnexp.sru:L738-L739` the message reads the OUTER handler's throwable, bound at
+        `:L703` in a block that closed at `:L704`, rather than the throwable the inner handler actually
+        caught. So the text that reaches the operator is not the text of the exception that occurred.
+        Recorded so the reproduction is deliberate and visible - see defect D-03's note.
+      format: >-
+        The message text verbatim, the exception the inner handler caught, the exception whose text was
+        actually reported, and an explicit note that the two differ by design of the reproduction rather
+        than by accident of the port.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L739"
+
+    # ---- J. THE REMAINING SURFACE -----------------------------------------------------------------
+    - name: service.enabledProperty
+      description: >-
+        The engine's enabled property and the EXPLICIT NEGATIVE behind it. The property is declared
+        protected-write on the engine's base class [`n_cst_dwsvc.sru:L38`] and set through an entry point
+        that returns early when the value is unchanged [`:L89-L92`], and every public entry point on the
+        engine gates on it - returning the plain FAILURE code rather than silently doing nothing, which is
+        an observable difference. The capture records a call made while disabled and the code it returned.
+      format: >-
+        The property's value, the raw numeric code the setter returned for a changing and for an unchanged
+        assignment, and the raw numeric code a gated entry point returned while disabled.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc.sru:L38,L89-L92"
+    - name: itemChanged.notification
+      description: >-
+        The item-changed notification the oracle handles at `w_test_dwsvc_columnexp.srw:L312`, recorded as
+        an arrival with its arguments and its position in the sequence. The oracle's handler body does
+        nothing but chain to its ancestor, which is itself the observation: the notification's OBSERVABLE
+        contribution here is that it FIRED, and when. The engine declares its own changed events
+        [`n_cst_dwsvc_columnexp.sru:L86-L88`] and the trigger-event flag decides whether a completed
+        calculation raises one, so the arrival is coupled to a flag this capture also records.
+      format: >-
+        Per arrival: the ordinal, the row, the column, and the trigger-event flag state of the expression
+        that caused it. No return value is recorded, because the event declares none.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L312"
+    - name: api.entryPointReturnCodes
+      description: >-
+        The raw numeric return code of every engine entry point the capture calls, recorded as a matrix.
+        This exists because the engine's API surface is FAR LARGER than the nine methods the
+        specification documents - see defect D-06's note for the enumeration - and the codes are the only
+        uniform observable across all of it. Each is recorded as ITS NUMBER, never as a boolean
+        projection: the surrounding return-code algebra is deliberately tri-state, so a boolean
+        projection merges outcomes the algebra keeps distinct.
+      format: >-
+        One row per call: the entry point, its arity, the arguments' types, and the raw numeric code
+        returned. The out-of-range and invalid-argument codes are recorded as their own distinct numbers
+        rather than folded into a generic failure.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L125-L208"
+
+  recordingArtifacts:
+    # Seven text-based, diffable files, one workflow's output in one workflow's own directory. THE
+    # EXTENSIONS ARE NOT A STYLE CHOICE: the root `.gitignore` carries six extensions UNANCHORED at
+    # `:L7-L12` - one log extension and five archive and dump extensions, enumerated in `../README.md`
+    # section 3.5 and tabulated in `README.md` - so they match at every depth including inside this
+    # store, and the file's only negations at `:L14-L15` are anchored elsewhere in the tree and rescue
+    # nothing here. A capture named that way is silently untracked: present on the machine that produced
+    # it, absent from `git status`, from review and from CI, so the comparison looks taken and cannot be
+    # found by anybody else. THE TRACE IS THE FILE THIS TRAP IS WAITING FOR - it is a growing text buffer
+    # that a reasonable person would call a log - so it is named with a plain text extension and NOT with
+    # the ignored one. The root `.gitignore` is not to be modified; naming the file correctly is the fix,
+    # and the schema's own filename pattern makes all six unspellable here in any case.
+    - filename: expression-payloads.jsonl
+    - filename: expansion-modes.jsonl
+    - filename: three-mode-divergence.json
+    - filename: calculation-order.jsonl
+    - filename: dependency-index.json
+    - filename: macro-invocations.jsonl
+    - filename: calculation-trace.txt
+
+# ==================================================================================================
+#  THE ONE HARD LIMIT, STATED WITHOUT SOFTENING
+#  ------------------------------------------------------------------------------------------------
+#  This store reports exactly two behaviours BLOCKED, and this workflow owns one of them - a division
+#  `dataservices-dw-event-chain` records from its own side, naming pinyin first-letter matching as
+#  `dataservices-dwsvc-dropdownsearch`'s and cross-session foreign expression variables as this
+#  definition's. A KNOWN GAP IS REPORTABLE; AN APPROXIMATION IS AN UNKNOWN ONE, and approximating a
+#  pointer dereference across a network would produce results wrong in a way no test would obviously
+#  catch. Recorded here, before implementation, rather than discovered during it.
+# ==================================================================================================
+blockedBehaviours:
+  - behaviour: >-
+      CROSS-SESSION FOREIGN EXPRESSION VARIABLES - a foreign variable resolved against another host's
+      expression service that is NOT co-resident in the same expression session, or that lives in a
+      different service instance altogether. The co-resident case IS supported, is exercised by this
+      capture, and is compared normally; it is the crossing of a session or an instance boundary that is
+      blocked.
+    reason: >-
+      THE LEGACY'S FOREIGN-VARIABLE DESCRIPTOR HOLDS A LIVE IN-PROCESS OBJECT POINTER, AND A POINTER
+      CANNOT BE SERIALIZED. Its second field is typed as the expression service class itself
+      [`ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L80-L83`], so what the
+      legacy stores is not a name, a handle or an address that could be re-resolved at the far end - it
+      is a direct reference to another live object in the same process, dereferenced synchronously
+      whenever the variable is consumed.
+
+
+      TWO OPERATIONS DEPEND ON THAT SYNCHRONOUS ACCESS AND NEITHER HAS A REMOTE FORM. Registering a
+      foreign variable resolves against the other host's live service at registration time
+      [`:L201`, driven at `ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L143`] - which is
+      why the oracle must enable that service at `:L136` before registering at `:L143`, and why the
+      seed phase declares that ordering. And resolving the LINKS ARRAY on the global-variable
+      descriptor [`n_cst_dwsvc_columnexp.sru:L65-L71`] walks a chain of such references, with the
+      changed-column pass explicitly branching on whether that array is non-empty [`:L281-L292`, the
+      branch at `:L285`]. A chain of pointers is not a payload.
+
+
+      THE LEGACY ALSO REQUIRES THE DYNAMIC FORM FOR THIS PATH, which removes the one escape that might
+      otherwise have existed. The specification states it at `docs/n_cst_dwsvc_columnexp.md:L34`, and
+      the oracle obeys it at `w_test_dwsvc_columnexp.srw:L157`. A static reference is substituted at
+      bind time and would need the value only once; a dynamic reference is resolved AT EVERY
+      CALCULATION, so the far service must be reachable for the whole life of the expression rather
+      than for one instant during its binding.
+
+
+      THE RESOLUTION, AND WHAT IS NOT BEING CLAIMED. Cross-DataWindow variables are resolved through a
+      SESSION-SCOPED HOST HANDLE, and they are supported ONLY where both hosts are co-resident in the
+      same expression session inside one service instance - which is the case the oracle exercises,
+      because it binds the same definition to two controls in one window. A foreign reference that
+      spans sessions or service instances is BLOCKED AND RETURNS A DEFINED ERROR AT THE BOUNDARY, NEVER
+      A SILENTLY WRONG VALUE AND NEVER A NULL THAT READS AS AN EMPTY AGGREGATE. THIS IS A GENUINE,
+      UNAVOIDABLE NARROWING OF THE LEGACY CONTRACT and it is recorded as one rather than described as a
+      design improvement.
+
+
+      WHAT THE CAPTURE MUST THEREFORE CONTAIN - BOTH CASES, NOT ONE. The co-resident case, which
+      succeeds and whose value is compared normally against the legacy master. AND the cross-session
+      case, driven against the second session the seed phase opens for exactly this purpose, whose
+      EXPECTED RECORDED OUTCOME IS THE DEFINED ERROR: its identifier, its message, and the raw numeric
+      code, recorded field by field like any other structured error in this capture. A CAPTURE IN WHICH
+      THE CROSS-SESSION CASE RETURNS A VALUE IS A FAILURE - the value would be either fabricated or
+      resolved through a coupling that is not supposed to exist, and both are worse outcomes than the
+      error. Equally, a capture in which the CO-RESIDENT case returns the error is a failure in the
+      other direction: the narrowing is exactly as wide as this paragraph says and no wider.
+    disposition: narrowed-with-defined-error
+
+# ==================================================================================================
+#  THE DETERMINISM MASK - INLINE, SYMMETRIC, AND EVERY ENTRY WITH ITS REASON
+#  ------------------------------------------------------------------------------------------------
+#  The mask is a MEMBER of this definition rather than a pointer to one, because a mask that drifts away
+#  from its workflow silently invalidates every pair captured under it. There is no reference, path or
+#  see-also member in the schema by which it could be delegated, and that omission is deliberate.
+#  EVERY ENTRY APPLIES TO BOTH SIDES: masking only the candidate leaves the master holding a value that
+#  can never be matched, and masking only the master inverts the same problem. One configuration, used
+#  for both captures. `../../docs/PARITY.md` section 5.1 is the authoritative seam register and carries
+#  each seam's injection point and status; the entries below are this workflow's application of it.
+#
+#  PREFER THE SEAM TO THE MASK, and four of the six entries below do: they make a field REPRODUCIBLE
+#  rather than removing it from the comparison. Only where a value cannot be made reproducible without
+#  changing observable behaviour is the field masked out instead, and the entry says so.
+# ==================================================================================================
+determinismMask:
+  - seam: >-
+      THE TRACE RECORD'S LINE COUNTER - the first of the trace's six fields, which the oracle's handler
+      derives from the LINE COUNT OF THE ACCUMULATED TEXT BUFFER rather than from a counter of its own
+      [`ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L315`].
+    method: >-
+      RENUMBER FROM ONE PER CAPTURE, on both sides, and compare the renumbered ordinals. The field is
+      not dropped and is not blanked: renumbering makes it reproducible, so the comparison keeps its
+      ability to detect a MISSING or a DUPLICATED trace record, which blanking the field would forfeit.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      Because the counter is read off the buffer's line count, its value depends on HOW MUCH HAS
+      ALREADY BEEN TRACED rather than on the behaviour under test - so any earlier tracing, any wrapped
+      long line, and any difference in the multi-line rendering of a call stack shifts every subsequent
+      number. Left unmasked it reports a difference on every record after the first divergence and buries
+      the real finding under an offset. WHAT IS EXPLICITLY NOT MASKED HERE IS THE RELATIVE ORDER OF THE
+      RECORDS: that order is behaviour - it is the add-order calculation sequence made visible - and it
+      is compared in full.
+  - seam: >-
+      EVERY CLOCK READ reachable from this engine - any timestamp that reaches a recorded field or a
+      recorded decision, on either side. Two of the engine's seven typed variable overloads take a
+      timestamp and a date, so a clock value can enter the variable environment through the public API
+      even though the engine reads no clock of its own.
+    method: >-
+      Inject the clock and substitute a deterministic double that advances only when the test advances
+      it. Nothing in this engine BRANCHES on a clock value, so the substitution changes no path; it only
+      makes a recorded timestamp reproducible.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      A timestamp differs on every run BY DEFINITION RATHER THAN BY BEHAVIOUR, so an unmasked one reports
+      a difference on every comparison and trains a reviewer to ignore red results. NOTE WHAT THIS IS
+      NOT: seaming the clock does not introduce a timing assertion. NO ELAPSED VALUE IS RECORDED OR
+      COMPARED ANYWHERE IN THIS WORKFLOW - the seam exists so that a date or timestamp VARIABLE is
+      reproducible, not so that a duration can be measured.
+  - seam: >-
+      NEWLINE CONVENTION in every multi-line recorded field - most consequentially the trace artefact,
+      whose records the oracle's handler terminates with an explicit CARRIAGE-RETURN AND LINE-FEED escape
+      [`ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L315`], and secondarily the multi-line
+      error messages, which the engine composes with embedded newline escapes.
+    method: >-
+      Declare ONE newline convention for this workflow and apply it identically to both halves AT
+      COMPARISON TIME. This is a comparison-time normalization only: IT DOES NOT LICENSE EDITING A
+      STORED MASTER, which the technique forbids outright.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      The master is produced on Windows by the legacy framework while the candidate runs in a Linux
+      container, so raw line endings differ BY PLATFORM RATHER THAN BY BEHAVIOUR - and the repository's
+      root `.gitattributes` declares ONLY language mappings, with NO `text` and NO `eol` rule at all, so
+      nothing normalises them on the way into version control. This workflow makes the difference
+      unusually visible because its principal artefact is a line-oriented text trace whose terminator
+      the oracle spells out explicitly, so without this entry a byte-exact comparison reports a
+      difference on EVERY line of it. Changing `.gitattributes` is NOT in scope and would be the wrong
+      place to solve it: the normalization belongs to the comparison, not to the repository's checkout
+      behaviour.
+  - seam: >-
+      MODIFY-CALL ORDERING on the DataWindow property path - the describe and modify calls the engine
+      issues while BINDING an expression, including the creation of the generated compute object per
+      cacheable expression and the property reads the parse routine performs to resolve column
+      identifiers and column types.
+    method: >-
+      Fix the order in which the engine issues its describe and modify calls, and record them in that
+      fixed order on both sides.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      Two orderings that reach the same state can emit different INTERMEDIATE output, so an unpinned
+      order surfaces as a difference where no behaviour changed - and this engine issues a dense burst of
+      such calls on every set, because it resolves a column identifier and a column type for every
+      reference it emits. Fixing the ORDER is not the same as fixing the OUTCOME: the properties' VALUES
+      remain fully compared, and a genuine change in what a property returns is still detected.
+  - seam: >-
+      SESSION AND HOST HANDLE IDENTIFIERS - allocated per run on the target side, where the legacy has an
+      in-process object identity instead. This includes the handle stored in place of the legacy's live
+      pointer in the foreign-variable descriptor, and the generated compute-object names the engine
+      derives per expression.
+    method: >-
+      Replace each identifier with a STABLE ORDINAL assigned in creation order, on both sides, and record
+      the ordinal rather than the identifier. Equality between two ordinals still means what equality
+      between two identifiers meant.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      The identifier is allocated per run and can never match across two runs, let alone across two
+      sides. But THE IDENTITY RELATION IS BEHAVIOUR - which host a foreign reference resolves against,
+      and therefore whether two references reach the same expression service - and an ordinal preserves
+      that relation exactly while removing the variation. THIS MATTERS MOST FOR THE FOREIGN-VARIABLE
+      CASE, where the handle is the very thing that replaces the legacy pointer: masking the field out
+      entirely would remove the relation along with the variation and would leave the blocked case's
+      boundary undetectable, which is why an ordinal is used instead.
+  - seam: >-
+      DECIMAL FORMATTING CULTURE in every numeric value rendered into a recording - the expression
+      results, the macro arguments and returns, and the value field of every trace record.
+    method: >-
+      Pin an INVARIANT culture for numeric rendering on both sides, and render through the fixture's own
+      declared two-fractional-digit edit mask
+      [`ws_objects/pfw.tests.pbl.src/dw_test_dwsvc_columnexp.srd:L20-L22`] rather than through whatever
+      default the host platform supplies.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      The oracle's macro ROUNDS ITS FIRST ARGUMENT TO A PRECISION [`w_test_dwsvc_columnexp.srw:L308`] and
+      every recorded value is therefore a numeric string, so a culture difference in the decimal separator
+      or the group separator would present as a VALUE DIVERGENCE WHEN THE VALUE IS IDENTICAL - a false
+      finding that looks exactly like the real one this pair is hunting. Pinning the culture is a seam and
+      not a mask: THE NUMBERS THEMSELVES REMAIN FULLY COMPARED, and a genuine change of precision, of
+      rounding direction or of magnitude is still detected. That distinction is the point of pinning
+      rather than blanking, because precision is what the variable set at `:L292` actually changes.
+
+# ---- WHAT IS DELIBERATELY NOT MASKED, STATED EXPLICITLY ---------------------------------------------
+#  FOR THIS WORKFLOW THIS IS THE MOST IMPORTANT PARAGRAPH IN THE MASK. Everything below is the behaviour
+#  under test. Masking any one of them would produce a comparison that passes while proving nothing,
+#  which is strictly worse than a comparison that fails - a red result gets investigated, a green one
+#  that proves nothing does not:
+#    * EVERY EXPRESSION VALUE, per row and per column, before and after every variable set;
+#    * THE STATIC-VERSUS-DYNAMIC DIVERGENCE ITSELF - the one output this whole pair exists for. A mask
+#      here would defeat the workflow completely and silently;
+#    * THE EXPANSION MODE OF EVERY INDIVIDUAL REFERENCE, all five of them, per reference and never
+#      aggregated to the expression;
+#    * THE UNEXPANDED SOURCE EXPRESSION TEXT, character for character, including its irregular spacing;
+#    * THE REWRITTEN TEXT the parse routine produces in place, and the lengths of the two reference
+#      arrays it emits alongside it;
+#    * THE BIND-TIME SNAPSHOT and THE LIVE ENVIRONMENT, both, as the two halves of one comparison -
+#      masking either makes the other unfalsifiable;
+#    * THE CALCULATION ORDER, and the add-order list it is checked against;
+#    * THE RECALCULATED-COLUMN SET produced by a change to one column, AND its order;
+#    * THE TRI-STATE CACHE TRANSITIONS, as raw numbers, all three states;
+#    * THE REVERSE DEPENDENCY INDEX, both of its arrays, as ordinals;
+#    * THE MACRO NAME AND ITS ORDERED ARGUMENT ARRAY, and the runtime type of what the callback returned;
+#    * THE CARET POSITION in every parse error, and the PARSE-ERROR TEXT verbatim - including the fact
+#      that it is not localized;
+#    * THE TWO SENTINEL SPELLINGS, including the empty one;
+#    * THE RAW NUMERIC RETURN CODES, never a boolean projection of any of them.
+#  And nothing is masked on one side only, anywhere, ever.
+
+# ==================================================================================================
+#  THE DEFECTS THIS PAIR EXISTS TO PROVE SURVIVED
+#  ------------------------------------------------------------------------------------------------
+#  THE INVERSION IS LOAD-BEARING: a capture that shows CORRECTED behaviour is a parity FAILURE, not an
+#  improvement. Where the target produces output that looks more correct than the oracle, the finding is
+#  a divergence in the target and is filed as a defect (C-B). A legacy defect is reproduced and annotated
+#  AT ITS POINT OF REPRODUCTION, never repaired. `../../docs/PARITY.md` section 7 is the authoritative
+#  catalogue of behaviour groups - section 7.3 for the expansion distinction and section 7.8 for the
+#  non-localized messages - and the entries below record which of them THIS pair pins.
+# ==================================================================================================
+provesDefects:
+  - defect: >-
+      D-01. STATIC EXPANSION IS PERMANENTLY FIXED AT BIND TIME WHILE DYNAMIC EXPANSION IS RESOLVED AT
+      CALCULATION TIME - two behaviours ONE CHARACTER APART in the source. The single-sigil form has its
+      variable's value substituted into the expression at the moment the expression is set, so no later
+      assignment to that variable can ever change the result; the double-sigil form retains the variable
+      as a reference into the live table, so a later assignment propagates. The oracle proves it without
+      construction: the SAME variable is referenced statically at `:L151`, dynamically at `:L154` and
+      dynamically-by-computed-name at `:L157`, and is then given a new value at `:L292`. The static
+      expression's value must be unchanged; the other two must move.
+    locator: >-
+      ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L151, :L154, :L157 and :L292, with the
+      authoritative worked examples at docs/n_cst_dwsvc_columnexp.md:L43-L54 and :L62-L73
+    note: >-
+      ANY CAPTURE IN WHICH A STATIC REFERENCE TRACKS A LATER VARIABLE CHANGE IS A PARITY FAILURE, and it
+      is the specific failure most likely to be mistaken for an improvement: a reviewer seeing all three
+      columns agree after the set would reasonably read it as consistency. It is not - it is the loss of
+      the behaviour. THE SECOND WAY TO GET THIS WRONG IS SUBTLER AND IS A RECORDING FAILURE RATHER THAN
+      AN IMPLEMENTATION ONE: recording only the already-expanded expression string. That capture cannot
+      detect this defect in either direction, because an expanded static reference is indistinguishable
+      from a literal and an expanded dynamic reference has lost the environment it resolves against - so
+      the comparison passes whatever the implementation does. This is why the three-part payload is
+      mandatory and why the mode is tagged per reference. Note finally that the specification's own
+      inline comments at `docs/n_cst_dwsvc_columnexp.md:L67` and `:L85` describe a double-sigil reference
+      as statically expanded, which is the opposite of what the code beside them does; the code and the
+      stated outcomes at `:L48`, `:L50` and `:L69` are authoritative, and the document is read-only and
+      is not corrected.
+  - defect: >-
+      D-02. RECALCULATING ALL COLUMNS FOLLOWS EXPRESSION ADD ORDER, NOT COLUMN ORDER. The oracle states
+      it in its own comments, twice, at `:L159` and `:L222`, and the engine implements it by walking its
+      own expression array from first element to last - insertion order - rather than iterating the
+      DataWindow's columns [`n_cst_dwsvc_columnexp.sru:L1166-L1172`].
+    locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L222-L223"
+    note: >-
+      IT LOOKS LIKE AN IMPLEMENTATION DETAIL AND IT IS OBSERVABLE, which is what makes it a defect to
+      preserve rather than a fact to note. These three expressions reference each other's columns, so the
+      order they are evaluated in decides which of them sees an already-updated neighbour and which sees a
+      stale one. THE FIXTURE MAKES THE TWO ORDERS GENUINELY DISAGREE, so a port that iterated columns
+      would not get away with it by coincidence: the oracle sets its expressions third-column, then
+      second, then first, and the fixture independently declares its own column controls OUT of
+      identifier order - identifier five before identifier four at
+      `ws_objects/pfw.tests.pbl.src/dw_test_dwsvc_columnexp.srd:L23-L24`. Two independent orderings
+      already differ from add order before the capture starts. One adjacent fact worth not conflating:
+      the FORCE flag on the same entry point does NOT change this order - it changes MEMBERSHIP, by
+      stopping input-relative expressions from being skipped [`n_cst_dwsvc_columnexp.sru:L1168-L1170`].
+  - defect: >-
+      D-03. THE PARSE-ERROR AND CALCULATION-ERROR MESSAGES ARE HARDCODED AND DO NOT ROUTE THROUGH
+      LOCALIZATION - 28 dialog call sites, EVERY ONE LIVE and none commented out, and not a single
+      localization call anywhere in the 2,435-line object. The equivalent messages in this service's
+      sibling row-select and context-menu services DO route through localization. That inconsistency is
+      legacy behaviour. Three sites are worth naming individually: cache-creation failure, a cache error
+      carrying an exception's text, and a general expression error; parse failures are built by a
+      dedicated formatter taking the expression, a CARET POSITION and a message.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L713, :L739, :L762, with the
+      error builder at :L1308, :L1383 and :L1390 and its declarations at :L206-L207
+    note: >-
+      HARMONIZING THIS WOULD BE A SILENT CORRECTION ON 28 PATHS. Routing these messages through the
+      localization layer "for consistency" would change the text a recording pins, everywhere at once,
+      and would do it while looking like a cleanup. Each site becomes a structured error preserving the
+      original text, the caret position where the builder supplies one, the severity, AND the explicit
+      fact that the text is NOT localized - only the delivery channel changes, because a headless service
+      cannot show a dialog. TWO REFINEMENTS FOUND BY READING THE SOURCE RATHER THAN THE SUMMARY. First,
+      the site at `:L739` does not report the exception it caught: it sits inside an inner handler that
+      binds one throwable at `:L738` and reads a DIFFERENT one - the outer handler's, bound at `:L703` in
+      a block that closed at `:L704` - so the text that reaches the operator belongs to another
+      exception entirely, and no local throwable of that name is declared in the enclosing function to
+      explain it away. Reproduce it; do not repair it. Second, the caret the builder receives is not the
+      scan position: it is the macro's start offset plus HALF the distance from there to the scan
+      position, so a port that passed the plain position would place the caret elsewhere in the
+      expression while every other field matched.
+  - defect: >-
+      D-04. THE PER-COLUMN CALCULATION CACHE IS TRI-STATE - UNKNOWN, YES, NO - AND NOT A BOOLEAN. A
+      column starts unknown, is set to NO as the default before any match is sought, and is promoted to
+      YES only when a match is found; thereafter the flag is CONSULTED rather than recomputed, which is
+      what makes it a cache rather than a result. Alongside it the engine holds two re-entrancy flags and
+      a recursion stack - a vector reserved in the constructor and released in the destructor.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L113-L115 declared,
+      :L234-L239 and :L295 consulted, with the re-entrancy flags at :L105-L106 and the recursion stack
+      at :L110 created at :L2421-L2422
+    note: >-
+      TWO OF THE THREE STATES COLLAPSE UNDER A BOOLEAN AND THE COLLAPSE IS INVISIBLE IN THE VALUES. A
+      port that stored "does this column need calculating" as a boolean cannot distinguish NOT YET
+      DETERMINED from DETERMINED: NOTHING TO DO, so it would either recompute the match loop on every
+      change - correct results, different recorded describe traffic - or cache a false as though the
+      question had been answered, and skip a column that should have been resolved. The transitions are
+      therefore recorded as RAW NUMBERS, in order, rather than as names or as a boolean projection. The
+      re-entrancy flags belong in the same entry because they are reachable from the macro callback: the
+      callback runs client-side code in the middle of a calculation, so a nested entry is a real path and
+      the guard's numeric return code is observable.
+  - defect: >-
+      D-05. TWO SENTINEL CONSTANTS ENCODE THE GRAMMAR INTERNALLY, and both are spellings rather than
+      flags: an EMPTY function name models a bare variable reference, and a specific reserved word models
+      dynamic dispatch. The engine branches on these string values directly when it validates a parsed
+      function reference's arity - the empty name requires exactly one argument, the reserved name at
+      least one - so the spellings are load-bearing and both appear in captured payloads.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L120-L121 declared, with the
+      two arity guards branching on them at :L1390 and :L1394
+    note: >-
+      PRESERVE BOTH SPELLINGS EXACTLY, AND PRESERVE THE EMPTY ONE AS AN EXPLICIT EMPTY STRING RATHER THAN
+      AS AN ABSENT FIELD - a serializer that omits empty strings would erase the distinction between a
+      bare variable reference and a reference with no function at all, which is the same distinction.
+      A SECOND, UNRELATED SPELLING NOTE, RECORDED HERE BECAUSE THIS IS THE ENTRY ABOUT SPELLINGS AND
+      BECAUSE IT IS FIXTURE BEHAVIOUR RATHER THAN ENGINE BEHAVIOUR: the oracle window spells the
+      expression-variable add call with TWO DIFFERENT LETTER CASES ON ADJACENT LINES - one casing across
+      `:L104-L108` and `:L140`, a different casing across `:L111-L114`. The language tolerates it,
+      because PowerScript method names are case-insensitive; it resolves to the same method and it changes
+      nothing. IT IS HARMLESS AND IT IS STILL NOT TO BE "FIXED" IN A TRANSCRIPTION - the fixture is
+      read-only (C-C), and a transcription that silently regularized the casing would be editing the
+      oracle. Note the sharp asymmetry that makes this worth stating at all: METHOD names are
+      case-insensitive here, but the oracle's own grammar comment states at `:L92` that VARIABLE AND
+      FUNCTION names ARE case-sensitive - so the same regularizing instinct applied one line lower, to a
+      variable name, would silently break resolution rather than merely tidy it.
+  - defect: >-
+      D-06. THE ITEM-CALCULATION ENTRY POINT IS DECLARED PUBLIC DESPITE CARRYING THE PRIVATE-CONVENTION
+      UNDERSCORE PREFIX. Every other underscore-prefixed member of this object is genuinely private -
+      the dirty marker, the index finders, the parse routine, the pre-processor, the value calculators
+      and the error builder - and this one, alone among them, is public. It is the per-item calculation
+      the row and all-rows entry points both funnel through.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L142 declared public,
+      implemented at :L658, within the declaration block at :L125-L208
+    note: >-
+      AN ANOMALY TO CARRY RATHER THAN TIDY. Narrowing it to private would remove a member of the public
+      surface a caller may legitimately be using, and renaming it to drop the prefix would change a
+      symbol that appears in recordings and in payloads - so both "obvious" corrections are behavioural
+      changes wearing the clothes of a style fix (C-B). THE REAL API SURFACE IS FAR LARGER THAN THE NINE
+      METHODS THE SPECIFICATION DESCRIBES, and this entry is where that is recorded because the
+      declaration block is where it is visible: expression add, set in FOUR arities, get in two, remove
+      in two, and remove-all; variable add across SEVEN TYPED OVERLOADS - time, string, integral,
+      floating point, timestamp, date and boolean; variable set across those same seven types in THREE
+      SEPARATE ARITIES EACH, which is twenty-one overloads on its own; expression-variable add, set in
+      three arities, and get; relative-column and relative-input-column setters in BOTH SINGULAR AND
+      PLURAL ARRAY FORMS, EACH BY INDEX AND BY NAME; always-calculate, recursive and trigger-event
+      setters each by index and by name; calculate in FOUR arities; and calculate-all in two. Beyond even
+      that: cacheability by index and by name, empty-row calculation in two arities, foreign-variable
+      registration, and the trace setter. AND BECAUSE THE VARIABLE ENVIRONMENT IS STRONGLY TYPED ACROSS
+      SEVEN DISTINCT SCALAR TYPES, ITS RECORDED REPRESENTATION MUST BE A DISCRIMINATED UNION AND NEVER A
+      STRINGLY-TYPED MAP. Collapsing it to strings would discard exactly the type information the
+      coercion behaviour depends on, and the discard would be silent: every value would still round-trip,
+      and every type-dependent behaviour would stop being checkable.
+  - defect: >-
+      D-07. ONE COLUMN MAY CARRY SEVERAL EXPRESSIONS, AND WHICH ONE ANSWERS IS SELECTED BY WHICH COLUMN
+      WAS MODIFIED - not by which expression was added last and not by which was added first. The
+      selection is carried by a DUPLICATE-EXPRESSION ARRAY on the expression descriptor, and the engine
+      clears the dirty flag across the whole duplicate group whenever it processes any single member of
+      it. The specification lists this among the capability's declared features.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L22-L42, the duplicate array
+      at :L32, populated at :L491 and :L1575, the group-wide dirty clear at :L694 and :L2059, and the
+      feature declared at docs/n_cst_dwsvc_columnexp.md:L8
+    note: >-
+      THE GROUP-WIDE DIRTY CLEAR IS THE PART A PORT LOSES. Clearing the flag on only the member that
+      answered would leave its siblings dirty, and the next pass would calculate a SECOND expression into
+      the same column and overwrite the first one's result - a plausible-looking value produced by the
+      wrong expression, which no row count and no null check would catch. The capture therefore binds two
+      expressions to one column, drives a change from each of two different source columns, and records
+      the dirty state of EVERY member of the group before and after each - so a port that cleared
+      narrowly is detected by the flags rather than inferred from a wrong value.
+  - defect: >-
+      D-08. THE REVERSE DEPENDENCY INDEX FROM A COLUMN TO THE EXPRESSIONS AND VARIABLES THAT DEPEND ON IT
+      IS WHAT MAKES DIRTY PROPAGATION WORK. The column descriptor carries two index arrays beside its
+      tri-state flag, and the engine builds them lazily on the first change that forces the column's flag
+      to be resolved - appending an expression entry when a match is found and a variable entry when a
+      global variable's body textually references the column - and then walks the expression array to
+      decide exactly what to recalculate.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_columnexp.sru:L44-L48 declared, built at
+      :L276-L277 and :L285 within the match loop at :L241-L292, and walked at :L295-L303
+    note: >-
+      THE FULL SET OF COLUMNS THAT RECALCULATE FROM A SINGLE CHANGE IS ITSELF BEHAVIOUR, and it is the
+      output this entry exists to pin - not merely the values, which a wrong set can still get right by
+      accident when the arithmetic happens to agree. Three parts of the build are easy to lose and each
+      changes the set. The FALLBACK: where an expression declares no relative columns at all, membership
+      is decided by whether its text TEXTUALLY REFERENCES the changed column, so a port that required
+      explicit relative columns would produce an empty set for the oracle's own expressions, none of
+      which declares any. The FOREIGN SKIP: the variable pass explicitly passes over variables of the
+      foreign kind [`:L282`], so a foreign variable does not participate in this propagation and a port
+      that included it would recalculate more columns than the legacy does. And the LINKS BRANCH: a
+      variable whose links array is non-empty is added to the variable half of the index [`:L285`] on a
+      different condition from the one that adds to the expression half. The capture records the two
+      arrays as ordinals, then a change per column, then the ordered set that recalculated.
+
+# ---- THE SHARED-VOLUME CAPTURE RULE ------------------------------------------------------------
+#  `applies: true`. THE RULE'S CANONICAL TEXT IS OWNED BY `../README.md` SECTION 2.1 AND IS CITED HERE
+#  RATHER THAN REPRODUCED - the same text is carried word for word by that file, by
+#  `../../docs/PARITY.md` section 4.2 and by `../../orchestration/README.md` section 7.2, and a fourth
+#  copy would be a fourth thing to drift, which is the failure this store exists to prevent rather than
+#  to commit.
+#
+#  WHY IT APPLIES EVEN THOUGH THIS WORKFLOW'S ROWS ARE INLINE IN A READ-ONLY FIXTURE AND IT ISSUES NO
+#  SQL. The exemption in `../README.md` section 2.7 is narrow and is not a loophole: it holds only while
+#  a workflow reads and writes NOTHING, and the store grants it to exactly one row - the paging
+#  rewrites, which are pure string transforms. THIS WORKFLOW DOES NOT QUALIFY. The target half is
+#  captured against the running service rather than an in-process host; every calculation WRITES a
+#  computed value into a live buffer; the engine creates generated compute objects as a side effect of
+#  binding; and the two expression sessions the seed opens persist across the capture. A volume state
+#  that moved between the two halves would change the input the second half ran against, and nothing
+#  would report it. The rule is therefore honoured in full, INCLUDING ITS TEARDOWN COROLLARY at
+#  `../README.md` section 2.6: between the two halves, tear the stack down with a plain down and never
+#  with the flag that removes named volumes.
+sharedVolume:
+  applies: true
+
+# ---- HONEST STATE ------------------------------------------------------------------------------
+#  NOTHING HERE HAS BEEN RUN, AND THE ONLY LEGAL VALUE SAYS SO. No paired capture exists on either
+#  side: the legacy half needs a PowerBuilder toolchain that is not present, and no recording directory
+#  for this identifier exists. NOTHING IN THIS DEFINITION MAY BE READ AS REPORTING A PARITY RESULT -
+#  in particular, the divergence described throughout as what the capture "must" show is the
+#  SPECIFICATION of the comparison, not an observation of one.
+executionStatus: specified-not-executed
+
+# ---- SIBLINGS ----------------------------------------------------------------------------------
+#  A cross-reference only: each pair stays independently comparable under its own identifier, and none
+#  of these definitions is merged with another. The event chain is the substrate this engine observes
+#  the world through, and the coupling is bidirectional - its changed dispatcher calls this engine
+#  first, and its item-change gate suppresses this engine's evaluation as a second-order effect. The
+#  row-select definition shares this service's host class and its sibling structure. The drop-down
+#  search definition is named because it owns the store's OTHER blocked behaviour, pinyin first-letter
+#  matching, so a reader looking for the pair of them finds both from either one.
+relatedWorkflows:
+  - dataservices-dw-event-chain
+  - dataservices-dwsvc-rowselect
+  - dataservices-dwsvc-dropdownsearch

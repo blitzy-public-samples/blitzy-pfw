@@ -1,0 +1,1140 @@
+# yaml-language-server: $schema=./workflow.schema.json
+# ==================================================================================================
+#  dataservices-dwsvc-rowselect - THE ROW-SELECTION STATE MACHINE
+#  ------------------------------------------------------------------------------------------------
+#  THIS FILE SPECIFIES A CAPTURE. IT CONTAINS NO CODE AND NO CAPTURED VALUE.
+#  It conforms to `./workflow.schema.json`, which is authoritative for shape. Store-wide conventions
+#  - the capture rule's canonical text, the recording-file conventions, the seam register, the defect
+#  roster and what must never enter a recording - belong to `../README.md` and to `../../docs/PARITY.md`
+#  and are CITED here, never restated. A fourth copy of a rule three files already own word for word is
+#  a fourth thing to drift.
+#
+#  ---- THIS SERVICE SHIPS WHOLE. THAT IS WHAT SEPARATES THIS WORKFLOW FROM ITS THREE SIBLINGS -----
+#  Of the five DataWindow sub-services, THREE are irreducibly presentational and ship only as a
+#  headless half: the drop-down search service positions a window and reads its rectangle, the
+#  context-menu service converts device units and measures a font and exposes a popup-menu-typed
+#  submenu surface, and the column-sort service converts units to place a sort indicator. The closure
+#  analysis counted MANY presentation references in each of those three. It counted EXACTLY ONE in
+#  this service - the dialog at `n_cst_dwsvc_rowselect.sru:L239` - and a dialog is not a rendering
+#  dependency, it is a DELIVERY CHANNEL. Replacing it with a structured error result preserves the
+#  message text, the localization category, the substitution argument and the severity, and leaves no
+#  residue behind. So the row-selection state machine ships COMPLETE: its state, its transitions, its
+#  style bits, its guard chain and its one error path are all headless. NOTHING IS SPLIT OFF AND
+#  NOTHING IS DEFERRED, which is why the deferred-capability member is absent below - see the note at
+#  the foot of this file, where the absence is recorded as a FINDING rather than left to read as an
+#  oversight (C-D).
+#
+#  ---- STATE AND ORDER, NEVER SPEED (C-B, and `../README.md` section 6.4) ------------------------
+#  Selection is a state machine. What this pair compares is WHICH ROWS ARE SELECTED, IN WHAT ORDER,
+#  which row holds focus, and which events fired with which returns. It records no elapsed value and
+#  asserts no timing. The repository publishes no service-level agreement, no latency budget, no
+#  throughput target and no availability commitment, so there is nothing a timing assertion could be
+#  measured against; `../README.md` section 5.4 states the same position as "never compared: execution
+#  time". The only quantitative gate in the brief is 80% per-service line coverage, and it is read from
+#  `coverage.cobertura.xml` in CI - not from this store.
+#
+#  ---- THE SEED SHAPE IS DIFFERENT FROM THE PERSISTENCE WORKFLOWS' ------------------------------
+#  Those workflows seed a database, and the oracle's own setup deletes the file and recreates the
+#  schema first - precisely the destructive reseed the capture rule forbids between the two halves of a
+#  pair. THIS workflow seeds nothing of the kind. Its nine rows are declared INLINE IN THE READ-ONLY
+#  DATAWINDOW DEFINITION ITSELF, at `dw_svc_sample.srd:L15`, so there is NO FILE DELETE, NO DDL, NO
+#  INSERT AND NO CONNECTION anywhere in its seed phase. Binding the definition IS the seed.
+#
+#  ---- WHY THE HOST WINDOW ALONE WOULD UNDER-SPECIFY THIS CAPTURE --------------------------------
+#  `w_test_dwsvc_rowselect.srw` is FIFTY-FOUR LINES and contains three statements of substance: it
+#  binds the definition, enables the service, and sets the style. Every transition this pair compares
+#  lives in the 288-line service object, and the event gate that suppresses one of them lives in the
+#  616-line service class. Citing the window alone would name the driver and omit the behaviour, so
+#  all three are cited below with locators (C-C).
+#
+#  ---- TWO FINDINGS READ OFF THE SOURCE, NOT COPIED FORWARD --------------------------------------
+#  Both change what a correct capture records, so both are stated here rather than discovered during
+#  implementation:
+#    * THE STYLE IS SUMMED BUT EVERY GUARD COMPARES IT WHOLE. `:L42` of the window sets the style to
+#      the arithmetic SUM of the two constants, and the fixture's own header comment at `:L34-L38`
+#      confirms the styles are combinable. Yet every guard in the service tests the composite with an
+#      EQUALITY or an INEQUALITY against a bare constant - never with a bit test. Defect D-01 records
+#      the consequence, which is observable and is not what a reader of the constants would predict.
+#    * THE DIALOG PATH IS GUARD-BLOCKED BY THIS FIXTURE. The batch-toggle guard chain probes for a
+#      checkbox edit style at `:L195`, and `dw_svc_sample.srd` declares NO checkbox column - only
+#      edit-mask, drop-down-DataWindow and drop-down-list-box styles. The chain therefore exits at
+#      `:L195` and the dialog at `:L239` is not reached from this fixture as bound. That is captured
+#      as the guard chain's EXIT POINT, and the dialog's own payload shape is captured separately
+#      under the precondition that supplies a checkbox column. Recording an unreachable dialog as
+#      though it fired would be a fabricated capture; recording nothing at all would leave the one
+#      error path in this service unproven.
+#
+#  ---- WHAT THIS DEFINITION DELIBERATELY OMITS, AND WHY -----------------------------------------
+#    * `deferredCapabilities` - OMITTED, and the omission is the finding. See the note at the foot of
+#      this file and the ships-whole reasoning above (C-D).
+#    * `blockedBehaviours` - OMITTED because this workflow blocks nothing. The store's two blocked
+#      cases belong to siblings: pinyin first-letter matching to the drop-down search definition and
+#      cross-session foreign expression variables to `dataservices-dwsvc-columnexp`. Neither is
+#      reachable from the row-selection state machine, and claiming either would misattribute a known
+#      gap to a workflow that does not have one.
+#    * `redaction` - OMITTED because nothing this capture records is sensitive. Every data value that
+#      reaches a recording originates in the read-only fixture's own inline rows - three two-place
+#      decimals and three status codes per row - and the one path that surfaces a value in a message
+#      is the rejected-edit path, whose substitution argument is a ROW NUMBER. NO KEY, NO PASSWORD, NO
+#      CERTIFICATE, NO TOKEN AND NO CONNECTION STRING IS READ, EMITTED OR RECORDED HERE (C-F). This
+#      service issues no SQL, so the redacted-statement rule has no field to act on.
+#    * `connectionUri` - OMITTED. This workflow opens no storage; its rows arrive with the definition.
+#
+#  ---- GOVERNING CONSTRAINTS -------------------------------------------------------------------
+#  NO USER-SPECIFIED RULES EXIST. The project's rules document returns exactly one line reporting that
+#  none were provided, so no rule is invented, inferred or back-filled, and nothing in this file exists
+#  because of one. Enterprise-standard best practice applies in their place. The binding constraints
+#  are the migration plan's own: C-B (defects reproduced, never corrected - a corrected capture is a
+#  parity FAILURE), C-C (the legacy tree is read-only and is the oracle; every claim carries a
+#  locator), C-D (nothing for a deferred capability area), C-F (no secret value), C-K (every decision
+#  carries its reason) and C-L (the shared-volume capture rule).
+# ==================================================================================================
+
+schemaVersion: "1"
+
+workflowId: dataservices-dwsvc-rowselect
+
+title: >-
+  Row-selection state machine: the summed style bitmask, the modifier-driven transitions, the ordered
+  selection set, and the one error path
+
+capabilityArea: >-
+  The row-selection state machine of the DataWindow sub-service `n_cst_dwsvc_rowselect` - its two
+  combinable style constants and the composite value the oracle window actually sets, the four events
+  it binds, the three transition arms a left click dispatches into, the range and toggle behaviours the
+  two modifier keys select, the two private state fields that survive between events, the ordered
+  batch-toggle guard chain and its single rejected-edit error path, and the coupling by which the
+  service class's row-focus event gate suppresses the selection maintenance this service performs.
+
+targetService: DataServices
+
+description: >-
+  ONE STATE MACHINE, CAPTURED TWICE. The pair proves that the set of selected rows, THE ORDER IN WHICH
+  THOSE ROWS ENTERED THE SET, the row holding focus, the composite style value in force, the events
+  emitted into the chain with their numeric returns, and the structured error where the one error path
+  is taken are identical on the legacy master and on the .NET candidate after identical masking.
+
+
+  THIS SERVICE SHIPS WHOLE, AND THAT IS THE FINDING THAT DISTINGUISHES THIS WORKFLOW FROM ITS THREE
+  SIBLING SERVICE WORKFLOWS. The closure analysis counted MANY presentation references in each of the
+  drop-down search, context-menu and column-sort services - window positioning and rectangle reads,
+  device-unit conversion, font measurement, a popup-menu-typed submenu surface - and each of those
+  three therefore ships as a headless half with its rendering half deferred and named as a reserved
+  gateway extension point. It counted EXACTLY ONE in this service: the dialog at
+  `ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L239`. A dialog is a DELIVERY
+  CHANNEL, not a rendering dependency. Replacing it with a structured error result that preserves the
+  message text, the localization category, the one substitution argument and the severity leaves no
+  residue, so the state machine ships COMPLETE - state, transitions, style bits, guard chain and error
+  path all headless. THAT IS WHY THIS DEFINITION DECLARES NO DEFERRED CAPABILITY: there is no split to
+  record, and the member's absence is a finding rather than an oversight (C-D).
+
+
+  THE SEED SHAPE IS GENUINELY DIFFERENT FROM THE PERSISTENCE WORKFLOWS'. The nine rows this capture
+  starts from are declared INLINE IN THE READ-ONLY DATAWINDOW DEFINITION at
+  `ws_objects/pfw.tests.pbl.src/dw_svc_sample.srd:L15`, so the seed phase performs NO FILE DELETE, NO
+  SCHEMA CREATION, NO ROW INSERT AND NO CONNECTION. Binding the definition is the seed. The two seed
+  assertions below are nonetheless both true and both required: the binding happens once per pair, and
+  nothing in the seed phase runs between the two captures.
+
+
+  THIS WORKFLOW RUNS INSIDE THE EVENT CHAIN, IT DOES NOT RESTATE IT. `dataservices-dw-event-chain`
+  owns the 22-event surface, the composable event gate and the ordering discipline assigned per
+  capability area. This service observes the world through that surface: its click handler is
+  subscribed to the chain's clicked topic, its double-click handler to the double-clicked topic, and
+  its row-focus handler to the row-focus-changed topic, all at
+  `n_cst_dwsvc_rowselect.sru:L274-L276`; and its filtered event is reached from the chain's filter
+  override. This definition therefore CROSS-REFERENCES the chain for the ordering contract instead of
+  re-deriving it, and records only what the state machine itself does with what the chain delivers.
+
+
+  NO DATA VALUE RECORDED HERE IS SENSITIVE. Every captured value originates in the read-only fixture's
+  own inline rows - three two-place decimals and three status codes per row - and the single message
+  path substitutes a ROW NUMBER and nothing else. Nothing is read from a credential, a key store or a
+  connection string, and no such value is emitted or recorded (C-F).
+
+oracleFixtures:
+  # THE OBJECT UNDER CHARACTERIZATION. 288 lines, and every transition this pair compares lives in it.
+  # Read, never edited, moved, renamed, reformatted, re-encoded or copied into this tree (C-C). Every
+  # locator below was read off the file rather than copied forward, and every one is cited by an
+  # observed output or a defect further down.
+  - path: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru
+    role: service-object
+    locators:
+      - "L4"          # it derives from the DataWindow service base, which supplies the guard predicates
+      - "L9-L12"      # THE FOUR EVENTS: click, row-focus-changed, filtered, double-click
+      - "L14"         # the self-shadowing global auto-instance
+      - "L19"         # the source comment declaring the two style constants combinable
+      - "L20"         # RS_SINGLE = 1
+      - "L21"         # RS_MULTIPLE = 2
+      - "L25"         # the composite style property, private-write, defaulting to the single-row value
+      - "L29"         # THE ROW-FOCUS RE-ENTRANCY FLAG
+      - "L30"         # THE MULTI-SELECTION STATE FLAG
+      - "L34-L37"     # the four-member private and public function surface
+      - "L40-L86"     # THE CLICK HANDLER - three transition arms and two modifier behaviours
+      - "L42"         # the non-positive-row early return, which is the click-below-last-row case
+      - "L45-L47"     # ARM 1: the batch-toggle attempt, entered only when the style is not exactly single
+      - "L49"         # ARM 2 GUARD: three disjuncts, including BOTH MODIFIERS HELD TOGETHER
+      - "L50"         # the focus move, whose failure aborts the transition with a prevention
+      - "L51"         # the unconditional clear of the whole selection
+      - "L52-L54"     # the conditional re-select, tested against the bare multi-row constant
+      - "L55"         # the multi-selection flag cleared
+      - "L56"         # ARM 2 returns 0 - continue, not prevent
+      - "L59"         # the anchor row read AFTER arm 2 has been ruled out
+      - "L61-L75"     # ARM 3a: the RANGE behaviour under the range modifier
+      - "L62"         # redraw suppressed across the range walk
+      - "L63"         # the range walk clears the whole selection first
+      - "L64-L69"     # the descending walk, taken when the clicked row is below the anchor
+      - "L70-L74"     # the ascending walk, taken when it is above
+      - "L75"         # redraw restored
+      - "L76-L81"     # ARM 3b: the TOGGLE behaviour under the discontiguous modifier
+      - "L77-L79"     # the anchor is re-selected on the FIRST discontiguous extension only
+      - "L80"         # THE TOGGLE ITSELF - select to the negation of the current selected state
+      - "L83"         # the multi-selection flag set by BOTH arm-3 behaviours
+      - "L85"         # ARM 3 returns 1 - prevent, so the platform does not also move focus
+      - "L88-L99"     # THE ROW-FOCUS HANDLER, which performs the selection maintenance
+      - "L88"         # the re-entrancy guard that makes the service's own focus move invisible to itself
+      - "L90"         # the unconditional clear
+      - "L92-L94"     # the conditional re-select of the new current row
+      - "L96"         # the multi-selection flag cleared
+      - "L101-L111"   # THE FILTERED HANDLER, reached from the event chain's filter override
+      - "L103"        # the clear
+      - "L105"        # the current row read after filtering
+      - "L106-L108"   # the conditional re-select
+      - "L113"        # THE DOUBLE-CLICK HANDLER delegates wholesale to the click handler
+      - "L116-L130"   # the focus move, and the flag it raises while it is in progress
+      - "L118"        # its own non-positive-row guard, returning failure rather than zero
+      - "L121-L126"   # the move is skipped when the row is already current, and is VERIFIED when it is not
+      - "L132-L149"   # the multi-selection query
+      - "L151-L181"   # THE STYLE SETTER
+      - "L168"        # the idempotent no-op arm, returning success without touching the selection
+      - "L169"        # THE ZERO-STYLE REJECTION, returning the invalid-argument code
+      - "L171"        # the assignment
+      - "L173-L179"   # the re-synchronisation performed only when the service is already enabled
+      - "L184-L269"   # THE BATCH-TOGGLE GUARD CHAIN AND THE ONE ERROR PATH
+      - "L188"        # the column name taken from the clicked object
+      - "L190"        # the single-pass loop the guards exit out of
+      - "L191"        # GUARD 1: the DataWindow must be editable
+      - "L192"        # GUARD 2: the clicked column must be editable
+      - "L193"        # GUARD 3: the clicked row must already be selected
+      - "L194"        # GUARD 4: a multi-selection must currently be in force
+      - "L195"        # GUARD 5: THE CHECKBOX EDIT-STYLE PROBE - the exit this fixture takes
+      - "L196-L199"   # GUARDS 6 and 7: both checkbox values must resolve, neither to a describe failure
+      - "L201"        # GUARD 8: the clicked cell must not be protected
+      - "L202"        # the column type, resolved through the base class
+      - "L203-L222"   # the on-to-off flip, dispatched by column type with a string-typed default arm
+      - "L223"        # the inner walk over the selected rows
+      - "L224"        # THE SELECTED-ROW WALK, forward from zero
+      - "L225"        # its termination on a non-positive row
+      - "L227"        # invisible cells are SKIPPED, not fatal
+      - "L229"        # protected cells are SKIPPED, not fatal
+      - "L230-L237"   # rows already holding the target value are SKIPPED
+      - "L238"        # the vetoable pre-change event, whose non-zero return is the rejection
+      - "L239"        # THE ONE DIALOG IN THIS SERVICE - and its ONLY presentation reference
+      - "L240"        # the rejection ABANDONS THE WHOLE BATCH rather than skipping the one row
+      - "L242-L245"   # redraw suppressed lazily, on the first row actually written
+      - "L246-L253"   # the write, dispatched by the same column type
+      - "L254"        # the post-change notification, fired per written row
+      - "L257"        # redraw restored only if it was suppressed
+      - "L259"        # the batch-handled return, which suppresses the ordinary click transition
+      - "L263"        # the not-handled return, which lets the ordinary click transition proceed
+      - "L273-L287"   # THE ENABLE AND DISABLE PATHS
+      - "L274-L276"   # THE THREE SUBSCRIPTIONS onto the event chain's topics
+      - "L277-L279"   # the initial selection taken at enable time
+      - "L281-L283"   # the disable path: unsubscribe, clear the selection, clear the flag
+
+  # THE DEFINITION THE ORACLE WINDOW BINDS, AND THE ONE THE CANDIDATE TRANSCRIBES. Its nine inline rows
+  # ARE the seed - see the seed phase below.
+  - path: ws_objects/pfw.tests.pbl.src/dw_svc_sample.srd
+    role: primary-fixture
+    locators:
+      - "L2"          # the definition release, which differs from the update fixture's and is recorded
+      - "L8-L14"      # six columns, every one carrying the update-where-clause flag
+      - "L11"         # the three-entry status code table on the first character column
+      - "L14"         # THE SORT SPECIFICATION - three ascending keys, which fixes the row order
+      - "L15"         # THE NINE INLINE ROWS - the seed, carried by the read-only definition itself
+      - "L22-L27"     # the column controls, declared OUT of identifier order
+      - "L22-L24"     # three edit-mask columns
+      - "L25-L26"     # two drop-down DataWindow columns, edit disallowed
+      - "L27"         # one drop-down list-box column, edit disallowed
+      - "L28"         # THE DETAIL-BAND COMPUTED FIELD THAT RENDERS THE CURRENT ROW NUMBER
+
+  # The child drop-down definition the fixture's two drop-down columns resolve to. Cited because the
+  # batch-toggle guard chain reads an edit style and a pair of checkbox values off a column, and the
+  # styles this child supplies are part of why the chain exits where it does.
+  - path: ws_objects/pfw.tests.pbl.src/dw_svc_sample_dddw.srd
+    role: supporting-fixture
+
+  # THE DRIVING WINDOW. FIFTY-FOUR LINES, three statements of substance. It is cited for what it
+  # CONFIGURES, and the behaviour it configures is cited above - see the banner on why both are needed.
+  - path: ws_objects/pfw.tests.pbl.src/w_test_dwsvc_rowselect.srw
+    role: oracle-window
+    locators:
+      - "L5"          # the control is declared as the service class itself, so the service surface is on it
+      - "L34-L38"     # THE HEADER COMMENT: single and multi selection, driven by modifier plus left click,
+                      # and - on its own line - that the styles are COMBINABLE
+      - "L40"         # the row-select service enabled
+      - "L42"         # THE STYLE SET TO THE ARITHMETIC SUM OF THE TWO CONSTANTS
+      - "L51"         # the bound definition
+      - "L52"         # a vertical scrollbar, which is what makes a click below the last row reachable
+
+  # THE EVENT SURFACE AND THE GATE. Cited as specification for two things this workflow depends on but
+  # does not own: the topics the three subscriptions above attach to, and the row-focus gate bit whose
+  # guard suppresses this service's selection maintenance. `dataservices-dw-event-chain` characterizes
+  # this class; this workflow records only the coupling, and defect D-03 is that coupling.
+  - path: ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru
+    role: service-object
+    locators:
+      - "L40"         # the source comment declaring the three gate bits composable
+      - "L41-L43"     # EID_ROWFOCUSCHANGE = 1, EID_ITEMFOCUSCHANGE = 2, EID_ITEMCHANGE = 4
+      - "L49"         # the row-focus-changed topic this service subscribes to
+      - "L60"         # the clicked topic
+      - "L63"         # the double-clicked topic
+      - "L124"        # THE GATE GUARD that returns before the row-focus-changed trigger is reached
+      - "L126"        # the trigger the guard makes unreachable, and whose return the class discards
+      - "L130"        # the same gate bit guarding the row-focus-CHANGING event
+      - "L145"        # the raw click event - UNGATED, which is why a click still selects
+      - "L148"        # the clicked trigger that delivers to this service's click handler
+      - "L136-L143"   # the raw double-click event, also ungated
+      - "L403-L414"   # THE FILTER OVERRIDE, which fires this service's filtered event
+      - "L109-L111"   # the public gate surface: query, disable, enable
+
+  # THE GUARD PREDICATES AND THE COLUMN-TYPE VOCABULARY. The batch-toggle chain's first four guards and
+  # its type dispatch are all inherited, so the base class is cited as specification for their meaning.
+  - path: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc.sru
+    role: specification
+    locators:
+      - "L26-L32"     # the column-type constants the toggle and write arms dispatch on
+      - "L51-L54"     # the protected and visible cell predicates the inner walk skips on
+      - "L57"         # the editable-DataWindow predicate, guard 1
+      - "L64-L65"     # the editable-column predicate, guard 2
+      - "L72-L73"     # the column-type resolver
+      - "L89"         # the enable setter, whose idempotent arm mirrors the style setter's
+
+  # THE LOCALIZATION CATEGORY THE ONE MESSAGE IS LOOKED UP IN. Cited because defect D-02 turns on the
+  # fact that THIS service's message does route through the localization layer - the category has to be
+  # nameable for that claim to be checkable.
+  - path: ws_objects/pfw.ui.controls.ext.pbl.src/ne_cst_i18n.sru
+    role: specification
+    locators:
+      - "L16-L17"     # the two custom categories, as offsets from the framework's custom base
+
+
+# ==================================================================================================
+#  THE SEED PHASE - RUNS ONCE, BEFORE THE PAIR, AND NEVER BETWEEN ITS TWO HALVES
+#  ------------------------------------------------------------------------------------------------
+#  IT DELETES NOTHING, CREATES NO SCHEMA AND INSERTS NO ROW. The nine rows are declared inline in the
+#  read-only DataWindow definition at `dw_svc_sample.srd:L15`, so BINDING THE DEFINITION IS THE SEED.
+#  That is what separates this seed shape from the persistence workflows', whose oracle deletes a
+#  database file and recreates the schema before it opens - precisely the destructive reseed the
+#  capture rule forbids between the two halves of a pair, and the likeliest way a careful engineer
+#  voids a comparison. The two assertions below are still both required, because the schema makes them
+#  assertions rather than settings: a seed that ran per capture would be a reseed, and a reseeded
+#  starting state makes the two recordings answer two different questions.
+# ==================================================================================================
+seedPhase:
+  steps:
+    - action: >-
+        Bind the DataWindow definition the driving oracle window names in its data-object property. On
+        the legacy side that is the definition the window declares; on the target side it is the
+        transcribed definition registered under the same six-column model. Binding LOADS THE
+        DEFINITION'S OWN INLINE ROWS - this step performs no file delete, no schema creation, no row
+        insert and no connection, because the rows are part of the read-only fixture.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_rowselect.srw:L51"
+    - action: >-
+        Confirm the nine inline rows the bound definition declares are present, with the six columns in
+        their declared types - three two-place decimals and three hundred-character strings - and with
+        the definition's own three-key ascending sort specification applied. The sort matters and is not
+        incidental: it fixes which physical row number each logical row holds, and every recorded
+        selection is a set of row numbers.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_svc_sample.srd:L15"
+    - action: >-
+        Confirm the definition presents at least nine rows' worth of scrollable extent with a vertical
+        scrollbar, and that a click target exists in the whitespace BELOW the last detail row. One
+        capture case is a click there, and it is only reachable when the detail band does not fill the
+        control.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_rowselect.srw:L52"
+    - action: >-
+        Enable the row-select service and leave the other four sub-services disabled, exactly as the
+        driving window's open event does. This is a seed step rather than a precondition check because
+        enabling is itself observable: the enable path subscribes three handlers onto the event chain's
+        topics and TAKES AN INITIAL SELECTION on the row that holds focus at that moment, so a capture
+        taken with the service enabled at a different point starts from a different selection.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_rowselect.srw:L40"
+    - action: >-
+        Set the selection style to the ARITHMETIC SUM of the single-row and multi-row constants, exactly
+        as the driving window's open event does, and record the composite value the property then holds.
+        Do not substitute either constant alone and do not substitute a bit-wise combination: the sum IS
+        the fixture's configuration, and defect D-01 turns on the composite value being carried through
+        to the guards unchanged.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_rowselect.srw:L42"
+    - action: >-
+        Set every event-gate bit on the host service class to enabled - the gate bitmask starts at zero,
+        meaning nothing disabled - so that the gated cases below are departures from a KNOWN starting
+        state rather than from an unknown one. The gate itself belongs to `dataservices-dw-event-chain`;
+        this step only pins the baseline this workflow measures its own coupling against.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L109-L111"
+    - action: >-
+        Record which physical row holds focus before the first capture case runs, and use the same
+        starting focus row for both halves of the pair. The first click's transition reads the focus row
+        as its range anchor, so an unequal starting focus produces an unequal range for reasons that are
+        not behaviour.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L59"
+    - action: >-
+        Configure the determinism seams declared below ONCE, and use that one configuration for both
+        halves of the pair. A seam configured per capture is two configurations, and two configurations
+        make the two recordings answer two different questions.
+    - action: >-
+        On the target side, open one selection session per host and record the identifier it allocates.
+        No schema provisioning and no row seeding runs on this side either: the candidate materializes
+        the same nine rows from the same read-only definition, transcribed rather than read at run time,
+        so this step is idempotent and is safe to repeat without touching any persistent state.
+  runsOncePerPair: true
+  neverBetweenCaptures: true
+
+capturePhase:
+  behaviourUnderTest: >-
+    THE ROW-SELECTION STATE MACHINE OF
+    `ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru`, AND NOTHING ELSE. For each
+    driven interaction: which of the three click-transition arms it dispatched into, the ORDERED set of
+    selected rows afterwards, the row holding focus, the composite style value in force, the two private
+    state flags, the events emitted into the chain with their numeric returns, and - where the one error
+    path is taken - the structured error result field by field. Within that, four behaviours are the
+    point of the capture: the composite style value flowing into guards that compare it WHOLE rather
+    than by bit; the divergent returns of the three arms, where two arms return continue and one returns
+    prevent; the batch-toggle guard chain's EXIT POINT; and the suppression of this service's selection
+    maintenance when the host class's row-focus gate bit is disabled.
+
+
+    WHAT THIS CAPTURE IS NOT. It is not a capture of the event chain's own dispatch - the sibling
+    definition owns that, and this one records only what the state machine does with what the chain
+    delivers. It is not a retrieval or update capture: no statement is generated, no buffer is written
+    except by the batch-toggle path's own writes, and no storage is read. It is not a capture of any
+    presentational behaviour, because this service has none to capture. AND IT IS NOT A MEASUREMENT. No
+    elapsed value is recorded and no timing is asserted anywhere in it.
+
+
+  preconditions:
+    # ---- THE SETUP THE ORACLE WINDOW PERFORMS, RESTATED AS CHECKABLE CONDITIONS -------------------
+    - >-
+      THE BOUND DEFINITION is the sample fixture the driving window names in its data-object property
+      [`w_test_dwsvc_rowselect.srw:L51`], and the same six-column model with the same nine rows is bound
+      on both halves of the pair. An unequal row set makes every recorded row number mean something
+      different on the two sides.
+    - >-
+      THE ROW-SELECT SERVICE IS ENABLED [`w_test_dwsvc_rowselect.srw:L40`], and it was enabled BEFORE
+      the first capture case ran rather than during one. Enabling subscribes three handlers onto the
+      event chain's clicked, double-clicked and row-focus-changed topics
+      [`n_cst_dwsvc_rowselect.sru:L274-L276`] and takes an initial selection on the focus row
+      [`:L277-L279`], so enabling mid-capture would inject a transition into the sequence being compared.
+    - >-
+      THE STYLE IN FORCE IS THE ARITHMETIC SUM of the single-row and multi-row constants
+      [`w_test_dwsvc_rowselect.srw:L42`], and the composite value is recorded rather than assumed. The
+      fixture's own header comment states on its own line that the styles are combinable
+      [`:L34-L38`]. Both halves are captured under the composite value: a capture taken with either
+      constant alone exercises a different set of guard outcomes and is not comparable with one taken
+      under the sum.
+    - >-
+      THE OTHER FOUR SUB-SERVICES ARE DISABLED. Column sort, context menu, drop-down search and column
+      expressions each subscribe their own handlers onto the same topics, so an enabled sibling changes
+      the recorded order for reasons that belong to that sibling's workflow and not to this one.
+    - >-
+      THE EVENT-GATE BITMASK STARTS AT ZERO - nothing disabled - and the three bits are the composable
+      values 1, 2 and 4 [`se_cst_dw.sru:L41-L43`]. The gated case below drives the row-focus bit
+      specifically, and it is a departure from this recorded baseline.
+    - >-
+      THE STARTING FOCUS ROW IS THE SAME ON BOTH HALVES. The click handler reads the focus row as its
+      range anchor AFTER the second arm has been ruled out [`n_cst_dwsvc_rowselect.sru:L59`], so the
+      anchor is a function of the starting focus and an unequal start produces an unequal range.
+    - >-
+      BOTH PRIVATE STATE FLAGS START FALSE - the row-focus re-entrancy flag [`:L29`] and the
+      multi-selection flag [`:L30`]. The first discontiguous extension behaves differently from every
+      later one because it re-selects the anchor only while the multi-selection flag is still false
+      [`:L77-L79`], so a capture that began with a stale flag would miss that arm entirely.
+    - >-
+      THE CLICK ROW IS DRIVEN BY LOGICAL ROW NUMBER, NOT BY DEVICE COORDINATE. The synthesized click's
+      coordinates are masked and the row they resolve to is compared - see the fourth mask entry for why
+      that split is the right one. Where a case requires a click that resolves to NO row, it is driven
+      as the non-positive row the handler's own early return tests for [`:L42`].
+    - >-
+      THE EVENT-CHAIN ORDERING DISCIPLINE IS THE ONE `dataservices-dw-event-chain` ASSIGNS, and this
+      workflow does not re-assign it. The click, double-click and row-focus notifications belong to that
+      definition's sequenced group; the rejected-edit path runs inside its synchronous item-change group,
+      because the batch-toggle chain fires the vetoable pre-change event and BLOCKS ON ITS RETURN
+      [`n_cst_dwsvc_rowselect.sru:L238`]. Both halves are captured under the same assignment, or the
+      comparison compares two different contracts.
+    - >-
+      ONE PRECONDITION IS SUPPLIED SEPARATELY AND ONLY FOR THE ERROR-PATH CASE: a column whose edit
+      style is a checkbox, with both of its checkbox values resolvable. THE BOUND FIXTURE HAS NO SUCH
+      COLUMN - it declares edit-mask, drop-down-DataWindow and drop-down-list-box styles only
+      [`dw_svc_sample.srd:L22-L27`] - so the guard chain exits at its checkbox probe [`:L195`] under the
+      fixture as bound. The unmodified-fixture outcome and the checkbox-supplied outcome are captured as
+      TWO SEPARATE RECORDS, and the fixture itself is NEVER edited to supply the column (C-C): the
+      column is supplied to the candidate through its own column model and to the master through a
+      separate driving configuration, and the record states which of the two it is.
+    - >-
+      THE TARGET HALF IS CAPTURED AGAINST THE RUNNING SERVICE, not against an in-process test host. A
+      test host mounts no volume and so cannot be the candidate half of a pair however thorough it is;
+      `../README.md` section 7 is the authority for that distinction.
+    - >-
+      BOTH HALVES OF THIS PAIR ARE TAKEN IN ONE WORKING TREE. Where several clones run concurrently each
+      needs its own compose project and its own volume, so that one clone's teardown cannot invalidate
+      another clone's half-finished pair.
+
+  observedOutputs:
+    # ==============================================================================================
+    #  PART 1 OF 3 - THE CAPTURE MATRIX. EIGHT CASES, EACH ITS OWN RECORD.
+    #  ---------------------------------------------------------------------------------------------
+    #  Each case is a separate output rather than a line item inside one, for the same reason the event
+    #  chain's raw events are separate: THE TRANSITIONS ARE NOT UNIFORM. Two arms return continue and
+    #  one returns prevent; one arm clears the selection and re-selects while another clears and walks a
+    #  range; one case never enters the state machine at all. Recording a single "the selection ended up
+    #  like this" output would compare the end state and lose every one of those distinctions, and
+    #  harmonizing the arms into one would be exactly the silent correction C-B forbids.
+    #
+    #  EVERY RECORDED ROW NUMBER IS A ONE-BASED LEGACY INDEX. That is stated once here, restated on the
+    #  indexing-basis output in part 2, and pinned as defect D-04 - because a silent off-by-one is
+    #  indistinguishable from a behavioural regression and the target's own arrays are zero-based.
+    # ==============================================================================================
+
+    - name: case.plainClickSelectsSingleRow
+      description: >-
+        CASE 1 OF 8. A plain left click on an unselected row, no modifier held. The batch-toggle attempt
+        is entered first because the composite style is not exactly the single-row constant [`:L45`] and
+        it declines, then the second arm is entered because neither modifier is held [`:L49`]: the focus
+        is moved to the clicked row, THE WHOLE SELECTION IS CLEARED [`:L51`], and the clicked row is
+        re-selected [`:L52-L54`] - which happens because the composite style is not exactly the multi-row
+        constant either. The multi-selection flag is cleared [`:L55`] and THE ARM RETURNS 0, continue
+        [`:L56`], so the platform performs its own click handling on top. Recorded with the arm taken,
+        the ordered selection before and after, the focus row before and after, both flags, and the
+        return.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L40-L57"
+    - name: case.discontiguousModifierExtendsSelection
+      description: >-
+        CASE 2 OF 8. A left click with the discontiguous modifier held, extending a multi-row selection
+        that need not be contiguous. Both earlier arms are declined - the first because a modifier is
+        held [`:L45`], the second because the composite style is not the single-row constant and exactly
+        one modifier is held [`:L49`] - so the anchor row is read [`:L59`] and the toggle behaviour runs
+        [`:L76-L81`]. TWO SUB-BEHAVIOURS ARE RECORDED SEPARATELY WITHIN THIS ONE CASE because they are
+        distinguishable: on the FIRST extension, while the multi-selection flag is still false and the
+        clicked row differs from the anchor, THE ANCHOR IS RE-SELECTED [`:L77-L79`] so that the
+        pre-existing focus row joins the set; on every later extension it is not. Then the clicked row is
+        set to THE NEGATION of its current selected state [`:L80`] - a toggle, not a select - the
+        multi-selection flag is set [`:L83`] and THE ARM RETURNS 1, prevent [`:L85`], so the platform
+        does NOT also move focus. Recorded with the ordered selection after each extension, the anchor,
+        whether the anchor was re-selected, and the return.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L76-L85"
+    - name: case.rangeModifierExtendsContiguousRange
+      description: >-
+        CASE 3 OF 8. A left click with the range modifier held, extending a contiguous range from the
+        anchor row. Redraw is suppressed [`:L62`], THE WHOLE SELECTION IS CLEARED FIRST [`:L63`] - so a
+        range extension DISCARDS any discontiguous selection rather than adding to it - and then one of
+        two directional walks runs: descending when the clicked row is below the anchor [`:L64-L69`],
+        ascending when it is above [`:L70-L74`]. Redraw is restored [`:L75`], the multi-selection flag is
+        set [`:L83`] and the arm returns 1, prevent [`:L85`]. Driven in BOTH directions and with the
+        clicked row EQUAL to the anchor, because the two walks are separate loops with separate
+        boundary conditions and the equal case exercises a single-iteration walk.
+      format: >-
+        The ordered selection is recorded as the sequence the walk produced, NOT re-sorted into ascending
+        row order. The descending walk inserts rows from the clicked row back to the anchor and the
+        ascending walk from the clicked row forward to it, so the two directions produce the same SET in
+        different ORDERS - and re-sorting the recording would erase the one difference between them.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L61-L75"
+    - name: case.plainClickCollapsesMultiSelection
+      description: >-
+        CASE 4 OF 8. A plain left click, no modifier, while a multi-row selection is in force - the
+        collapse back to one row. It reaches the same second arm as case 1 and the recorded transition is
+        the same three steps, but the STARTING state is different and so is what the clear at [`:L51`]
+        actually discards: it drops every row the previous case selected and leaves exactly the clicked
+        row. This is a separate case rather than a repeat of case 1 because the multi-selection flag is
+        TRUE on entry and FALSE on exit [`:L55`], which is a state transition case 1 cannot exhibit.
+        Driven with the clicked row both inside and outside the existing selection.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L49-L56"
+    - name: case.clickOnAlreadySelectedRow
+      description: >-
+        CASE 5 OF 8. A plain left click on a row that is ALREADY selected. This is the case that reaches
+        the batch-toggle guard chain, because the first arm is entered whenever the composite style is
+        not exactly the single-row constant and no modifier is held [`:L45`], and the chain's third guard
+        tests exactly this condition [`:L193`]. What the chain then does is the subject of case 8; what
+        THIS case records is the chain's return and what the click did afterwards: a return of 1 means
+        the batch was handled and the click transition is SUPPRESSED [`:L46`], a return of 0 means the
+        ordinary second arm proceeds. Driven with the multi-selection flag both true and false, because
+        the chain's fourth guard tests it [`:L194`].
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L45-L47"
+    - name: case.clickBelowLastRow
+      description: >-
+        CASE 6 OF 8. A left click in the whitespace below the last detail row, which the platform
+        delivers as a NON-POSITIVE ROW. The handler returns 0 immediately at its first statement
+        [`:L42`], so NOTHING happens: no arm is entered, the selection is not cleared, the focus does not
+        move, neither flag changes, and the batch-toggle chain is never reached. Recorded because the
+        no-op IS the behaviour and an implementation that cleared the selection on a miss would be a
+        divergence that looks like tidiness. Also driven through the focus-move helper, whose own
+        non-positive guard returns FAILURE rather than zero [`:L118`] - a different value for the same
+        condition, and both are recorded.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L42"
+    - name: case.selectionUnderRowFocusChange
+      description: >-
+        CASE 7 OF 8. A row-focus change, driven BOTH with the host class's row-focus gate bit enabled and
+        with it disabled - the pair of records that proves defect D-03. UNGATED: the chain reaches its
+        row-focus-changed trigger [`se_cst_dw.sru:L126`], this service's handler runs, the selection is
+        cleared [`:L90`] and the new current row is re-selected [`:L92-L94`] because the composite style
+        is not exactly the multi-row constant, and the multi-selection flag is cleared [`:L96`]. GATED:
+        the chain's guard returns before the trigger is reached [`se_cst_dw.sru:L124`], this service's
+        handler NEVER RUNS, and the selection is left exactly as the click left it - while the click
+        itself still works, because the raw click event carries no gate [`se_cst_dw.sru:L145`]. Also
+        driven through the service's OWN focus move, to record that the re-entrancy flag [`:L29`,
+        `:L120-L127`] makes the handler decline its own move [`:L88`] - so a click's focus move does not
+        clear the selection the same click is about to make.
+      format: >-
+        Recorded as a pair of records under one case, tagged gated and ungated, with the gate bitmask
+        value carried on each. The comparison is between the two sides for each tag, never between the
+        two tags - the difference BETWEEN the tags is the defect, and a comparison that collapsed them
+        would report the defect as a failure.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L88-L99"
+    - name: case.rejectedBatchEditErrorPath
+      description: >-
+        CASE 8 OF 8. THE ONE ERROR PATH IN THIS SERVICE, and the only case that produces a structured
+        error. It is captured as TWO RECORDS because the fixture as bound cannot reach it. RECORD A, THE
+        FIXTURE AS BOUND: the guard chain runs in order [`:L191-L201`] and EXITS AT THE CHECKBOX EDIT-
+        STYLE PROBE [`:L195`], because the bound definition declares no checkbox column
+        [`dw_svc_sample.srd:L22-L27`]; the chain returns 0 [`:L263`] and the ordinary click transition
+        proceeds. THE EXIT POINT IS THE RECORDED VALUE - which guard declined, by ordinal - so a target
+        that reached further, or declined earlier, is detected. RECORD B, WITH THE CHECKBOX PRECONDITION
+        SUPPLIED: the chain passes every guard, flips the on-value to the off-value by column type
+        [`:L203-L222`], walks the selected rows forward [`:L224`] skipping invisible [`:L227`], protected
+        [`:L229`] and already-equal [`:L230-L237`] rows, and fires the vetoable pre-change event per row
+        [`:L238`]. On a NON-ZERO return the dialog fires [`:L239`] and THE WHOLE BATCH IS ABANDONED
+        [`:L240`] rather than the one row being skipped - so rows already written stay written and rows
+        not yet reached are never attempted. Recorded with the guard outcomes, the walk order, the skip
+        reasons, the rows written before the rejection, the rejecting row, and the structured error.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L184-L269"
+
+
+    # ==============================================================================================
+    #  PART 2 OF 3 - THE STATE EACH CASE IS MEASURED BY
+    #  ---------------------------------------------------------------------------------------------
+    #  Every case in part 1 is scored against these, so they are declared once as their own outputs
+    #  rather than repeated inside eight descriptions. THE FIRST ONE IS THE ONE THAT IS EASIEST TO GET
+    #  WRONG: the selection is an ORDERED set, and a plain set would discard order that the oracle
+    #  makes observable.
+    # ==============================================================================================
+
+    - name: selection.orderedRowSet
+      description: >-
+        THE ORDERED SET OF SELECTED ROW NUMBERS AFTER EACH TRANSITION, and the single most important
+        recorded value in this workflow. RECORDED AS AN ORDERED SET, NOT AS A SET: selection ORDER is
+        observable in a multi-row selection and a plain set would discard it. Three independent reasons
+        it is observable, all in the source rather than inferred. First, the oracle's own enumeration is
+        ordinal - the selected-row walk takes the previous row as its argument and returns the next one
+        [`:L224`] - so the order rows are enumerated in is a defined sequence, and the batch-toggle path
+        writes rows IN THAT ORDER, which is why a rejection part-way through leaves a specific prefix
+        written [`:L240`]. Second, the two range walks build the same SET in opposite ORDERS
+        [`:L64-L69`, `:L70-L74`], so order is the only thing distinguishing them. Third, the first
+        discontiguous extension inserts the anchor BEFORE the clicked row [`:L77-L80`] while every later
+        one does not, so the anchor's position in the sequence records which extension it was.
+      format: >-
+        A sequence of one-based row numbers in selection order, serialized in that order and NEVER
+        re-sorted, canonicalized on neither side. The count is recorded alongside it so that an empty
+        selection is distinguishable from an absent record. Where a transition leaves the selection
+        untouched, the record carries the unchanged sequence rather than being omitted - an omission and
+        an unchanged value are different findings.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L224"
+    - name: selection.currentRow
+      description: >-
+        THE ROW HOLDING FOCUS after each transition, recorded independently of the selection because the
+        two DIVERGE and the divergence is behaviour. The second click arm moves focus and selects
+        [`:L50-L54`]; both modifier arms select WITHOUT moving focus, which is exactly why they return
+        prevent [`:L85`]; and the range walk's anchor is the focus row, read after the second arm was
+        ruled out [`:L59`]. So a recording in which focus tracked the last-clicked row on every
+        transition would be a divergence, not a simplification.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L59"
+    - name: selection.styleInForce
+      description: >-
+        THE COMPOSITE STYLE VALUE the property actually holds, recorded as THE NUMBER and never as a
+        decomposed pair of booleans. The oracle window sets it to the arithmetic sum of the two constants
+        [`w_test_dwsvc_rowselect.srw:L42`] and every guard in the service then compares that number
+        WHOLE - see defect D-01 - so the number is what the behaviour is a function of. Recorded on every
+        case, together with the outcome of each guard that read it, so that a target which reads the
+        value correctly but tests it differently is still detected.
+      format: >-
+        The raw numeric value of the property, plus the boolean outcome of each guard that compared it -
+        the not-exactly-single test [`:L45`], the exactly-single disjunct [`:L49`], and the four
+        not-exactly-multi tests [`:L52`, `:L92`, `:L106`, `:L175`]. Recording the number alone would
+        compare the input and lose what was done with it.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L25"
+    - name: selection.privateStateFlags
+      description: >-
+        THE TWO PRIVATE FIELDS THAT SURVIVE BETWEEN EVENTS, recorded before and after every transition.
+        THE MULTI-SELECTION FLAG [`:L30`] is set by both modifier arms [`:L83`] and cleared by the second
+        arm [`:L55`], the row-focus handler [`:L96`], the filtered handler [`:L110`], the style setter
+        [`:L178`] and the disable path [`:L283`]; it gates the first-extension anchor re-select
+        [`:L77`] and the batch-toggle chain's fourth guard [`:L194`], so its value CHANGES WHAT THE NEXT
+        TRANSITION DOES. THE ROW-FOCUS RE-ENTRANCY FLAG [`:L29`] is raised across the service's own focus
+        move [`:L120-L127`] and read by the row-focus handler's first statement [`:L88`]; it is what
+        stops a click's own focus move from clearing the selection that same click is about to make.
+        Both are recorded because both are inputs to later behaviour, not merely bookkeeping.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L29-L30"
+    - name: events.emittedWithReturns
+      description: >-
+        THE EVENTS THIS SERVICE EMITS INTO THE CHAIN AND THE NUMERIC VALUE EACH RETURNS, in arrival
+        order. Four events are bound [`:L9-L12`] and their returns are NOT uniform, which is the reason
+        the returns are recorded rather than assumed: the click handler returns 0 from its early guard
+        [`:L42`], 0 from its second arm [`:L56`], 1 from either modifier arm [`:L85`] and 1 when the
+        batch chain handled the click [`:L46`]; the row-focus handler returns 0 on every path including
+        its re-entrancy decline [`:L88`, `:L98`]; the filtered handler returns NOTHING AT ALL, which is a
+        third shape and not a zero [`:L101-L111`]; and the double-click handler returns whatever the
+        click handler returned, because it delegates wholesale [`:L113`]. The batch path additionally
+        emits the vetoable pre-change event per candidate row [`:L238`] and the post-change notification
+        per written row [`:L254`], and both appear in this sequence.
+      format: >-
+        One record per emitted event carrying the topic it arrived on, its arguments, its raw numeric
+        return, and the sequencing token the event chain assigned. A handler that returns nothing is
+        recorded as returning nothing - never as returning zero - because the two are different shapes
+        and collapsing them would hide a handler that acquired a return value it should not have.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L9-L12"
+    - name: error.rejectedBatchEditResult
+      description: >-
+        THE STRUCTURED ERROR RESULT that replaces the one dialog [`:L239`], recorded FIELD BY FIELD
+        wherever the error path is taken. Four fields, and all four are compared. THE MESSAGE TEXT, as
+        the composition the source performs: a localized row-identifying template with one substitution
+        applied, a line separator, a second localized string, and a trailing literal - recorded as the
+        composed result AND as its parts, so that a target which composes the same text from different
+        parts is still detected. THE LOCALIZATION CATEGORY, as the numeric value the framework's custom
+        base plus its offset yields [`ne_cst_i18n.sru:L17`], because the category is what selects the
+        translation table. THE SUBSTITUTION ARGUMENT, which is A ONE-BASED ROW NUMBER and the only value
+        substituted into the text. THE SEVERITY, as the oracle's own stop-sign icon selector - recorded
+        because it is the sole indication of severity the dialog carried and dropping it would narrow the
+        result.
+      format: >-
+        A field-by-field record. The two localized strings are recorded as the values the localization
+        layer RETURNED under the active locale together with the lookup keys they were requested by, so
+        that a divergence in the translation table is distinguishable from a divergence in the lookup. No
+        value in this record is a credential - the one substituted value is a row number (C-F).
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L239"
+    - name: indexing.basisIsOneBased
+      description: >-
+        THE INDEXING BASIS THE RECORDING IS WRITTEN IN, stated as its own recorded value rather than left
+        as a convention. EVERY ROW NUMBER IN EVERY RECORD IN THIS WORKFLOW IS A ONE-BASED LEGACY INDEX.
+        The legacy is one-based throughout and its upper-bound function returns THE LAST VALID INDEX,
+        whereas the target's arrays are zero-based with a length one past the end. The record therefore
+        carries the basis explicitly, so a comparison can fail on a basis mismatch instead of silently
+        comparing two differently-based sequences that happen to be the same length. Defect D-04 records
+        why this is not pedantry: a silent off-by-one here is indistinguishable from a behavioural
+        regression, and the reverse-walk case makes it worse rather than better.
+      format: >-
+        A single declared basis value on the recording, asserted equal across both halves before any row
+        number is compared. The recording also carries the row count and the last valid index as two
+        SEPARATE values, because in the legacy they are equal and in the target they differ by one - and
+        an implementation that recorded the target's length where the oracle recorded its last index
+        would produce a recording that is off by one everywhere and internally consistent.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_svc_sample.srd:L28"
+
+    # ==============================================================================================
+    #  PART 3 OF 3 - THE ADJACENT ENTRY POINTS THAT MUTATE THE SAME STATE
+    #  ---------------------------------------------------------------------------------------------
+    #  These are not click cases, but each writes the same selection state the eight cases measure, and
+    #  each does it through a DIFFERENT guard. A capture that drove only clicks would leave the state
+    #  machine's other four doors unproven.
+    # ==============================================================================================
+
+    - name: entry.styleSetterTransitions
+      description: >-
+        THE STYLE SETTER, driven through all four of its arms [`:L151-L181`]. THE IDEMPOTENT ARM: setting
+        the value already in force returns success and TOUCHES NOTHING [`:L168`] - no clear, no
+        re-select, no flag change - so a target that re-synchronised unconditionally would be a
+        divergence. THE REJECTION ARM: a zero style returns the invalid-argument code [`:L169`], and
+        that guard is ONE EQUALITY AGAINST ZERO AND NOTHING MORE - so ZERO IS THE ONLY REJECTED VALUE.
+        It is NOT a whitelist of the two named constants: the composite value is legal and is what the
+        oracle's own window sets, a value corresponding to no combination of the constants is legal, and
+        A NEGATIVE VALUE IS LEGAL TOO because no guard looks for one. That permissiveness is recorded
+        rather than tightened - narrowing the guard to a two-value whitelist would reject the fixture's
+        own configuration, and widening it to reject negatives would invent a validation the legacy does
+        not have. THE ENABLED ARM: with the service enabled, the assignment is followed by a clear and a
+        conditional re-select of the focus row [`:L173-L179`]. THE DISABLED ARM: with the service
+        disabled, the value changes and THE SELECTION IS LEFT ALONE, so the new style takes effect only
+        at the next transition. Driven across the whole argument matrix - zero, each named constant
+        alone, the composite value, a value outside the constant set, a negative value, and the least
+        representable value - with the ORACLE's verdict recorded for each.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L151-L181"
+    - name: entry.enableAndDisableTransitions
+      description: >-
+        THE ENABLE AND DISABLE PATHS [`:L273-L287`]. ENABLE subscribes three handlers onto the chain's
+        clicked, double-clicked and row-focus-changed topics IN THAT ORDER [`:L274-L276`] and then takes
+        an initial selection on whatever row holds focus, conditionally on the style [`:L277-L279`] - so
+        enabling is itself a state transition and not merely a registration. DISABLE unsubscribes every
+        handler this object owns, clears the selection and clears the multi-selection flag
+        [`:L281-L283`]. Both return 0 [`:L286`]. Recorded because the subscription ORDER is observable in
+        the chain's dispatch order, and because the initial selection is the starting state every case in
+        part 1 departs from.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L273-L287"
+    - name: entry.filteredHandlerResynchronisation
+      description: >-
+        THE FILTERED HANDLER [`:L101-L111`], reached from the event chain's filter override
+        [`se_cst_dw.sru:L403-L414`] - and reached ONLY on a successful filter and ONLY while this service
+        is enabled, which is the third of the chain's three conditional hand-offs. It clears the
+        selection [`:L103`], reads the current row AFTER filtering [`:L105`] and conditionally
+        re-selects it [`:L106-L108`]. Recorded because filtering renumbers rows: a row number that named
+        one logical row before the filter names a different one after it, so this handler is where a
+        selection recorded in one numbering is discarded and rebuilt in another. Driven with a filter
+        that removes rows above the current row, below it, and the current row itself.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L101-L111"
+    - name: entry.doubleClickDelegation
+      description: >-
+        THE DOUBLE-CLICK HANDLER, which is one statement: it returns the result of triggering the click
+        handler with its own four arguments [`:L113`]. Recorded as its own output because the delegation
+        is TOTAL - a double click performs a full click transition, including the range or toggle
+        behaviour if a modifier is held, and including the batch-toggle attempt - and because the
+        platform delivers a double click as a click followed by a double click, so the transition runs
+        TWICE. That doubling is observable in the toggle arm in particular, where two runs return the
+        clicked row to its original selected state [`:L80`]. A port that de-duplicated the pair would
+        produce a more sensible result and a failed comparison.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L113"
+    - name: entry.multiSelectionQuery
+      description: >-
+        THE PUBLIC MULTI-SELECTION QUERY [`:L132-L149`], which returns the multi-selection flag
+        unchanged. Recorded on every case because it is the service's only public read of its own state,
+        so it is what a consumer observes - and because it is a FLAG rather than a computed answer: after
+        a range walk that selected exactly one row it reports true, and after the second arm selected one
+        row it reports false, even though the selection is identical in both. That divergence between the
+        flag and the actual selection cardinality is behaviour and is compared as such.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L148"
+
+  recordingArtifacts:
+    # Five text-based, diffable files, one workflow's output in one workflow's own directory. THE
+    # EXTENSIONS ARE NOT A STYLE CHOICE: the root `.gitignore` carries six extensions UNANCHORED - one
+    # log extension and five archive and dump extensions, enumerated in `../README.md` section 3.5 - so
+    # they match at every depth including inside this store, and its only negations are anchored
+    # elsewhere and rescue nothing here. A capture named that way is silently untracked: present on the
+    # machine that produced it, absent from `git status`, from review and from CI, so the comparison
+    # looks taken and cannot be found. The root `.gitignore` is not to be modified; naming the file
+    # correctly is the fix, and the schema's own filename pattern makes the six unspellable here anyway.
+    - filename: selection-transitions.jsonl
+    - filename: selection-ordered-sets.jsonl
+    - filename: style-guard-outcomes.csv
+    - filename: batch-toggle-guard-chain.json
+    - filename: rejected-edit-error.json
+
+
+# ==================================================================================================
+#  THE DETERMINISM MASK - INLINE, SYMMETRIC, AND EVERY ENTRY WITH ITS REASON (C-K)
+#  ------------------------------------------------------------------------------------------------
+#  The mask is a MEMBER of this definition rather than a pointer to one, and there is deliberately no
+#  reference, no external file and no see-also anywhere by which it could be delegated - because a mask
+#  that drifts away from its workflow silently invalidates every pair captured under it. EVERY ENTRY
+#  APPLIES TO BOTH SIDES: masking only the candidate leaves the master holding a value that can never be
+#  matched, and masking only the master inverts the same problem, so a one-sided mask manufactures a
+#  passing comparison out of mismatched data. One configuration, used for both captures.
+#  `../../docs/PARITY.md` section 5.1 is the authoritative seam register and carries each seam's
+#  injection point and status; `../README.md` section 5.1 reproduces it with those statuses and section
+#  5.2 states the discipline these entries follow - PREFER THE SEAM TO THE MASK, because masking removes
+#  a field from the comparison while seaming makes the field reproducible, and only the second leaves the
+#  comparison able to detect anything in that field.
+# ==================================================================================================
+determinismMask:
+  - seam: >-
+      Every clock read reachable from this state machine - any timestamp that reaches a recorded field or
+      a recorded decision, on either side. Includes the clock a synthesized input event carries as its
+      own timestamp, which is how a platform ordinarily distinguishes a double click from two clicks.
+    method: >-
+      Inject the clock and substitute a deterministic double that advances only when the test advances
+      it, and drive the double-click case as an EXPLICIT double click rather than as two timed clicks -
+      so the delegation at [`n_cst_dwsvc_rowselect.sru:L113`] is exercised by the event that reaches it
+      rather than by an interval that has to be timed. Nothing in this service branches on a clock value,
+      so the substitution changes no path; it only makes a recorded timestamp reproducible. Preferred to
+      masking the field out, because a masked field is a field a regression can hide in.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      A timestamp differs on every run by definition rather than by behaviour, so an unmasked one reports
+      a difference on every comparison and trains a reviewer to ignore red results. NOTE WHAT THIS IS
+      NOT: seaming the clock introduces no timing assertion. No elapsed value is recorded, derived or
+      compared anywhere in this workflow, and driving the double click explicitly is precisely what keeps
+      an interval out of the capture rather than putting one in.
+  - seam: >-
+      Modify-call ordering on the DataWindow property path - the describe and modify calls this service
+      issues, which are the edit-style probe and the two checkbox-value reads in the batch-toggle guard
+      chain [`:L195`, `:L196`, `:L198`], the column-type resolution [`:L202`], and the visible and
+      protected cell probes the inner walk performs per row [`:L227`, `:L229`].
+    method: >-
+      Fix the order in which the service issues its describe and modify calls, and record them in that
+      fixed order on both sides. The guard chain's own order is CONTRACT and is not what this entry
+      touches - the chain's eight guards run in source order and their exit point is a compared value.
+      What is fixed here is the order of the calls WITHIN a step whose outcome does not depend on it,
+      most consequentially the per-row visible-then-protected probe pair.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      Two orderings that reach the same state can emit different intermediate describe output, so an
+      unpinned order surfaces as a difference where no behaviour changed. Fixing the order is not the
+      same as fixing the OUTCOME: every property's value remains fully compared, the guard chain's exit
+      ordinal remains fully compared, and a genuine change in what a probe returns is still detected.
+  - seam: >-
+      Line endings in every multi-line recorded field - most consequentially the structured error's
+      message text, which the source composes across a line separator [`:L239`] and which is therefore
+      multi-line by construction rather than by accident.
+    method: >-
+      Declare one newline convention for this workflow and apply it identically to both halves AT
+      COMPARISON TIME. This is a comparison-time normalization only: IT DOES NOT LICENSE EDITING A
+      STORED MASTER, which the technique forbids outright, and it does not license rewriting the
+      separator the source composed - the separator's PRESENCE is compared, only its byte spelling is
+      normalized. `../README.md` section 3.7 is the authority for the convention.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      The master is produced on Windows by the legacy framework while the candidate runs in a Linux
+      container, so raw line endings differ BY PLATFORM RATHER THAN BY BEHAVIOUR - and the repository's
+      root `.gitattributes` declares ONLY language mappings, with no text rule and no end-of-line rule at
+      all, so nothing normalizes them on the way into version control. Without this entry a byte-exact
+      comparison reports a difference on every line of the one multi-line field this workflow records.
+      CHANGING `.gitattributes` IS NOT IN SCOPE and would be the wrong place to solve it in any case: the
+      normalization belongs to the comparison, not to the repository's checkout behaviour.
+  - seam: >-
+      The pixel and unit coordinates of the click positions carried in the mouse-event payloads - the two
+      position arguments the click and double-click events receive [`:L9`, `:L12`], which the platform
+      fills from wherever the pointer physically was.
+    method: >-
+      Substitute a fixed logical coordinate per case, derived from the target row rather than from a
+      device position, and record that fixed coordinate instead of the raw one. THE ROW THE COORDINATE
+      RESOLVES TO IS NOT MASKED and is fully compared; only the coordinate that produced it is
+      substituted. The click-below-last-row case is driven as the NON-POSITIVE ROW its own guard tests
+      [`:L42`] rather than as a coordinate below the last band, so that case needs no coordinate at all.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      A raw device coordinate is an INPUT ARTEFACT of how the click was synthesized - it varies with
+      control geometry, band heights, scroll offset and display scaling, none of which this service
+      reads - whereas THE ROW IT RESOLVES TO IS BEHAVIOUR, because the row number is what every arm of
+      the state machine actually operates on. Masking the coordinate and comparing the resolved row keeps
+      the comparison pointed at the behaviour; masking the resolved row as well would remove the state
+      machine's only input from the comparison and leave a pair that passes while proving nothing.
+
+# ---- WHAT IS DELIBERATELY NOT MASKED, STATED EXPLICITLY --------------------------------------------
+#  These ARE the behaviour under test. Masking any one of them would produce a comparison that passes
+#  while proving nothing, which is worse than a comparison that fails:
+#    * THE SELECTED ROW SET, AND ITS ORDER - the order is observable and is compared as an order, never
+#      re-sorted, never canonicalized and never reduced to a set;
+#    * THE CURRENT ROW, recorded independently of the selection because the two diverge;
+#    * THE COMPOSITE STYLE VALUE AND EVERY GUARD OUTCOME DERIVED FROM IT - the number itself and the
+#      boolean result of each of the six comparisons that read it;
+#    * THE TWO PRIVATE STATE FLAGS, before and after every transition, including the re-entrancy flag's
+#      raised state during the service's own focus move;
+#    * THE EVENT SEQUENCE AND EVERY RETURN VALUE, as raw numbers, including the distinction between a
+#      handler that returns zero and one that returns nothing at all;
+#    * THE BATCH-TOGGLE GUARD CHAIN'S EXIT ORDINAL, and each guard's individual outcome;
+#    * THE STRUCTURED ERROR'S TEXT, ITS LOCALIZATION CATEGORY, ITS SUBSTITUTION ARGUMENT AND ITS
+#      SEVERITY - all four fields, and the lookup keys the two localized strings were requested by;
+#    * THE ROW-FOCUS GATE BITMASK VALUE, and the gated-versus-ungated tag each record carries;
+#    * THE INDEXING BASIS, the row count and the last valid index, as three separate values.
+#  And nothing is masked on one side only, anywhere, ever.
+
+
+# ==================================================================================================
+#  THE DEFECTS THIS PAIR EXISTS TO PROVE SURVIVED
+#  ------------------------------------------------------------------------------------------------
+#  THE INVERSION IS LOAD-BEARING: a capture that shows CORRECTED behaviour is a parity FAILURE, not an
+#  improvement. Where the target produces output that looks more correct than the oracle, the finding is
+#  a divergence in the target and is filed as a defect (C-B). A legacy defect is reproduced and annotated
+#  AT ITS POINT OF REPRODUCTION, never repaired. `../README.md` section 5.3 restates the inversion and
+#  `../../docs/PARITY.md` section 7 is the authoritative catalogue of behaviour groups; the four entries
+#  below record which of them THIS pair pins.
+# ==================================================================================================
+provesDefects:
+  - defect: >-
+      D-01. THE SELECTION STYLE IS A SUMMED BITMASK, BOTH BITS SET SIMULTANEOUSLY IS THE FIXTURE'S OWN
+      CONFIGURATION, AND EVERY GUARD COMPARES THE COMPOSITE WHOLE RATHER THAN BY BIT. The two constants
+      are 1 and 2, the source comment above them declares them combinable, and the driving oracle window
+      sets the property to their ARITHMETIC SUM. Single-row and multi-row are therefore NOT mutually
+      exclusive modes and the combined setting is THE DOCUMENTED NORMAL CASE, to be captured as such
+      rather than treated as an edge case. What makes it a defect rather than merely a design is that not
+      one of the six guards that read the property uses a bit test: the batch-toggle attempt is entered
+      when the value is NOT EXACTLY the single-row constant, the second click arm's first disjunct fires
+      only when it IS EXACTLY that constant, and four separate re-select decisions fire when it is NOT
+      EXACTLY the multi-row constant. Under the composite value 3 the observable consequence is that BOTH
+      exclusive behaviours are enabled at once - the batch-toggle path opens because 3 is not 1, and
+      single-row re-selection stays on because 3 is not 2 - so the service behaves as though single-row
+      selection were in force while simultaneously admitting the multi-row batch path.
+    locator: >-
+      ws_objects/pfw.tests.pbl.src/w_test_dwsvc_rowselect.srw:L42, with the combinability comment at
+      :L34-L38, the constants at
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L19-L21 and the six
+      whole-value comparisons at :L45, :L49, :L52, :L92, :L106 and :L175
+    note: >-
+      WHAT A WELL-MEANING CORRECTION WOULD BREAK. Rewriting the six comparisons as bit tests looks like
+      the obvious repair and it CHANGES BEHAVIOUR IN BOTH DIRECTIONS: a bit test for the multi-row bit
+      would be TRUE under the composite value, which turns off the single-row re-selection that the
+      oracle performs on four separate paths, so a plain click would leave nothing selected. Equally,
+      treating the two constants as an exclusive enumeration and normalising the sum to one of them would
+      close whichever path the other one opened. Neither is a tidy-up; both are divergences. The composite
+      value is carried through to the guards UNCHANGED, and the guards compare it exactly as the source
+      does.
+  - defect: >-
+      D-02. THE ONE DIALOG IN THIS SERVICE BECOMES A STRUCTURED ERROR RESULT, AND ONLY THE DELIVERY
+      CHANNEL CHANGES. The rejected-edit path shows a modal dialog composed of a localized
+      row-identifying template with a single substitution applied, a line separator, a second localized
+      string and a trailing literal, raised with a stop-sign severity. The structured result preserves all
+      four of those: THE EXACT MESSAGE TEXT, THE LOCALIZATION CATEGORY, THE SUBSTITUTION ARGUMENT and THE
+      SEVERITY. Nothing is added, nothing is dropped, and no text is rephrased. Two further behaviours
+      travel with it and are pinned by the same record: the rejection ABANDONS THE WHOLE BATCH rather
+      than skipping the offending row, so rows already written stay written and rows not yet reached are
+      never attempted; and the redraw suppression is LAZY, taken on the first row actually written, so a
+      batch that is rejected on its first candidate never suppresses redraw at all.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L239, with the vetoable
+      event at :L238, the batch abandonment at :L240 and the lazy redraw suppression at :L242-L245
+    note: >-
+      THIS SERVICE'S MESSAGE DOES ROUTE THROUGH THE LOCALIZATION LAYER, AND THE CONTRAST IS THE POINT.
+      Both of its strings are looked up in the DataWindow-service localization category
+      [`ws_objects/pfw.ui.controls.ext.pbl.src/ne_cst_i18n.sru:L17`], exactly as the base service's and
+      the context-menu service's messages do - and UNLIKE the column-expression service's messages, which
+      are hardcoded and bypass the layer entirely. That inconsistency between two objects in the same
+      library is legacy behaviour and is reproduced on both sides of it rather than harmonized: this
+      workflow proves the localized side, and `dataservices-dwsvc-columnexp` proves the hardcoded side. A
+      port that routed the column-expression messages through the layer "for consistency", or that
+      hardcoded these two "for symmetry", would break one side of a proven pair. SECOND NOTE, ON WHAT THE
+      RECORD MAY CONTAIN: the one value substituted into this text is A ROW NUMBER. Nothing in this
+      record is a credential, a key, a password or a certificate (C-F).
+  - defect: >-
+      D-03. THE HOST CLASS'S ROW-FOCUS GATE BIT SUPPRESSES THIS SERVICE'S SELECTION MAINTENANCE, AND THE
+      SUPPRESSION IS SELECTIVE RATHER THAN TOTAL. The gate bits are the composable values 1, 2 and 4. When
+      the row-focus bit is disabled, the host class's raw row-change event returns at its guard BEFORE it
+      reaches the trigger that would deliver to this service, so this service's row-focus handler NEVER
+      RUNS: the clear it performs and the conditional re-select that follows both simply do not happen,
+      and the selection is left holding row numbers from before the focus moved. The same bit guards the
+      row-focus-CHANGING event identically. But THE CLICK PATH CARRIES NO GATE AT ALL - the raw click
+      event has no bit test - so with the bit disabled a click still selects while the row-focus
+      maintenance that would normally reconcile the selection with the new focus row is gone. The gated
+      and ungated cases are both captured, so the coupling is proven from both sides.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L41-L43 for the bits, :L124 and :L130
+      for the guards, :L126 for the trigger the guard makes unreachable, and :L145 with :L148 for the
+      ungated click path; the suppressed handler is
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L88-L99
+    note: >-
+      CROSS-REFERENCE: the gate itself belongs to `dataservices-dw-event-chain`, which characterizes the
+      bitmask, its three bits and their public query, disable and enable surface. THIS workflow proves
+      only the COUPLING - that disabling a bit on the host class silently removes a behaviour from a
+      sub-service that never reads the bit. The two definitions are complementary and neither restates the
+      other. WHAT A WELL-MEANING CORRECTION WOULD BREAK: making the row-focus handler run regardless of
+      the gate, or gating the click path for symmetry, would each produce a more coherent service and a
+      failed comparison. Note also that this coupling has a documented sibling the chain records - the
+      item-change bit additionally suppresses column-expression calculation - so an implementation that
+      treats a gate bit as affecting only its own event is wrong in two places, not one.
+  - defect: >-
+      D-04. EVERY ROW NUMBER IN THIS SERVICE IS A ONE-BASED LEGACY INDEX, AND THE CAPTURE MUST STATE ITS
+      INDEXING BASIS EXPLICITLY. The legacy is one-based throughout and its upper-bound function returns
+      THE LAST VALID INDEX, whereas the target's arrays are zero-based with a length ONE PAST THE END. Six
+      places in this service make the basis observable rather than incidental: the click handler's guard
+      treats any NON-POSITIVE row as no row at all, so zero is not a valid row and cannot be the first
+      one; the focus-move helper repeats that guard with a different return value; the selected-row walk
+      is SEEDED WITH ZERO precisely because zero is not a row, and terminates when it returns a
+      non-positive value; the two range walks decrement and increment a row number across an inclusive
+      bound, so an off-by-one changes the range's length by one row at whichever end the walk started;
+      the structured error substitutes a row number into text a reader will compare against what the
+      screen showed; and the fixture's own detail-band computed field renders the current row number, so
+      THE ORACLE DISPLAYS ITS OWN INDEXING BASIS.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru:L42, :L118, :L224-L225,
+      :L64-L69, :L70-L74 and :L239, with the oracle's own row-number display at
+      ws_objects/pfw.tests.pbl.src/dw_svc_sample.srd:L28
+    note: >-
+      A SILENT OFF-BY-ONE HERE IS INDISTINGUISHABLE FROM A BEHAVIOURAL REGRESSION, which is why the basis
+      is a recorded value rather than a convention. The recording carries the row count and the last valid
+      index as TWO SEPARATE VALUES because in the legacy they are equal and in the target they differ by
+      one - so an implementation that recorded a length where the oracle recorded a last index produces a
+      recording that is off by one everywhere and INTERNALLY CONSISTENT, which no single-value assertion
+      would catch. The descending range walk deserves the same warning the store's standing example
+      carries: it counts DOWNWARD from the clicked row to the anchor, it looks like it has the direction
+      backwards, IT DOES NOT, and reversing it produces a selection of the correct cardinality in the
+      wrong order that a row-count assertion still passes.
+
+# ---- THE SHIPS-WHOLE FINDING, RECORDED WHERE THE DEFECTS ARE SO IT IS NOT READ AS AN OMISSION ------
+#  THIS SERVICE IS NOT SPLIT, AND THAT IS A MEASURED FINDING RATHER THAN AN ASSUMPTION. The closure
+#  analysis counted the presentation references in each of the five DataWindow sub-services and found
+#  MANY in three of them and EXACTLY ONE in this one. Those three therefore ship as a headless half with
+#  a deferred rendering half: the drop-down search service shows and positions a window and reads its
+#  rectangle, the context-menu service converts device units, constructs and measures a font and exposes
+#  a popup-menu-typed submenu surface, and the column-sort service converts units to place a sort
+#  indicator. NONE of that appears in this service. Its single reference is the dialog at
+#  `n_cst_dwsvc_rowselect.sru:L239`, and a dialog is a DELIVERY CHANNEL rather than a rendering
+#  dependency - defect D-02 records how it is replaced with no residue. So unlike its three siblings this
+#  service ships COMPLETE: its state, its transitions, its style bits, its guard chain and its one error
+#  path are all headless, there is no rendering half to name and no reserved route to point at, and this
+#  definition consequently declares no deferred capability at all. THE ABSENCE OF THAT MEMBER IS THE
+#  FINDING (C-D, and see the omission note at the foot of this file).
+
+
+# ==================================================================================================
+#  `deferredCapabilities` IS ABSENT, AND ITS ABSENCE IS A FINDING RATHER THAN AN OVERSIGHT
+#  ------------------------------------------------------------------------------------------------
+#  STATED EXPLICITLY BECAUSE THIS IS THE ONE DATAWINDOW SUB-SERVICE WORKFLOW THAT DECLARES NO DEFERRED
+#  HALF. Three of its four sibling service workflows declare one, because their services are split: each
+#  ships a headless model and leaves window positioning, device-unit conversion, font measurement or
+#  actual rendering to a capability area that receives no code in this phase. THIS SERVICE IS NOT SPLIT.
+#  The measured count is many presentation references in each of those three against EXACTLY ONE here,
+#  and that one is a dialog - a delivery channel, replaced by a structured error result with no residue
+#  (defect D-02). There is therefore no deferred half to name, no reserved route to point at and nothing
+#  whatsoever behind one.
+#
+#  THE MEMBER IS OMITTED RATHER THAN WRITTEN AS AN EMPTY LIST, AND THE DISTINCTION IS ENFORCED BY THE
+#  SCHEMA. `./workflow.schema.json` requires the member to carry at least one entry when it is present,
+#  so an empty list is a VALIDATION ERROR rather than a way of saying "none" - the schema-conformant way
+#  to declare no deferred capability is to omit the member and to state the reason where a reader will
+#  find it, which is what this block does and what the two omission notes in the banner do for the other
+#  absent members.
+#
+#  AND NOTHING IN THIS DEFINITION NAMES A CAPABILITY AREA THAT DOES NOT SHIP IN THIS PHASE (C-D). The
+#  four such areas have no candidate half, and a pair needs a candidate as well as a master, which is why
+#  the schema's own target-service enum excludes them and makes a workflow that targets one structurally
+#  unrepresentable. No project, no container, no test, no partial implementation and no placeholder that
+#  throws exists for any of them, and this workflow neither captures, implements nor stubs any part of
+#  one. `../README.md` section 6.1 is the authority for the position.
+# ==================================================================================================
+
+# ==================================================================================================
+#  THE SHARED-VOLUME CAPTURE RULE APPLIES IN FULL
+#  ------------------------------------------------------------------------------------------------
+#  `../README.md` section 2.1 carries the rule's CANONICAL TEXT and is the authority for it. It is CITED
+#  here and not reproduced, because that same text is owned word for word by `../README.md`,
+#  `../../docs/PARITY.md` and `../../orchestration/README.md`, and a fourth copy would be a fourth thing
+#  to drift - which is the failure this store exists to prevent, not to commit. Section 2.4 records why
+#  the volume carries the name it does, and section 2.6 carries the teardown corollary that follows.
+#
+#  WHY IT APPLIES EVEN THOUGH THIS WORKFLOW'S ROWS ARE INLINE IN A READ-ONLY FIXTURE. The exemption in
+#  `../README.md` section 2.7 is NARROW AND IS NOT A LOOPHOLE: it holds only while a workflow reads and
+#  writes NOTHING, and the moment one touches the persistence volume the rule applies to it in full. This
+#  workflow does not qualify on three counts. The target half is captured against the RUNNING SERVICE
+#  rather than an in-process host, per section 7. The batch-toggle path WRITES INTO THE LIVE BUFFER, one
+#  row at a time [`n_cst_dwsvc_rowselect.sru:L246-L253`], and fires a post-change notification per written
+#  row [`:L254`] - and when that path is rejected part-way it leaves a PARTIAL WRITE behind [`:L240`],
+#  which is precisely the kind of residue a moved volume state would silently alter. And the selection
+#  itself is state the next case departs from. A volume state that moved between the two halves would
+#  change the input the second half ran against and nothing would report it, so the rule is honoured in
+#  full including its teardown corollary: between the two halves, tear the stack down with a plain down
+#  and NEVER with the flag that removes named volumes.
+# ==================================================================================================
+sharedVolume:
+  applies: true
+
+# ---- HONEST STATE ------------------------------------------------------------------------------
+#  NOTHING HERE HAS BEEN RUN, AND THE ONLY LEGAL VALUE SAYS SO. No paired capture exists on either side:
+#  the legacy half needs a PowerBuilder toolchain that is not present, no recording directory exists for
+#  this identifier, and the compose bring-up the capture rule is expressed against could not have been
+#  exercised in the environment this store was authored in - `../README.md` section 7 states that plainly.
+#  NOTHING IN THIS DEFINITION MAY BE READ AS REPORTING A PARITY RESULT. It specifies a capture; it does
+#  not record one, and the schema's single-member enum is what stops it from ever appearing to.
+executionStatus: specified-not-executed
+
+# ---- SIBLINGS ----------------------------------------------------------------------------------
+#  A CROSS-REFERENCE ONLY. Each pair stays independently comparable under its own identifier, and naming a
+#  sibling never merges two workflows. Two are named, and each for a specific reason:
+#    * `dataservices-dw-event-chain` OWNS THE SURFACE THIS SERVICE OBSERVES THE WORLD THROUGH - the
+#      22-event chain, the composable event gate whose row-focus bit defect D-03 turns on, the three
+#      topics this service subscribes to at enable time, and the filter override that reaches its filtered
+#      handler. This workflow cross-references that definition for the ordering contract rather than
+#      re-deriving it, and that definition already names this one in its own sibling list, so the
+#      reference is reciprocal and neither file restates the other.
+#    * `dataservices-dwsvc-columnexp` PROVES THE OTHER SIDE OF THE LOCALIZATION INCONSISTENCY that defect
+#      D-02 records. This service's one message ROUTES THROUGH the localization layer; that service's
+#      messages are hardcoded and BYPASS it. The inconsistency between two objects in one library is
+#      legacy behaviour, and it is only provably preserved if both sides of it are captured - so the two
+#      definitions are complementary, and harmonizing either would break the other's pair. That
+#      definition also owns one of the store's two blocked behaviours, which is why this one claims
+#      neither.
+relatedWorkflows:
+  - dataservices-dw-event-chain
+  - dataservices-dwsvc-columnexp
