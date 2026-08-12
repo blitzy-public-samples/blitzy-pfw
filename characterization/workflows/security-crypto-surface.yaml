@@ -1,0 +1,1029 @@
+# yaml-language-server: $schema=./workflow.schema.json
+#
+# Characterization workflow definition - the cryptographic surface.
+#
+# THE ABSOLUTE RULE FOR THIS FILE: no secret value, in any form, anywhere. Not a key,
+# not a certificate, not a credential, not a fragment of one, and not an obviously
+# expired one. The only oracle this capability has is itself one of the repository's
+# hardcoded-secret sites, so this definition drives it with INJECTED test key material
+# and cites the fixture's own embedded material by locator only, through
+# ../../docs/SECRETS.md. Locators live there; values live nowhere.
+#
+# This file specifies a capture. It carries no code and no value.
+
+schemaVersion: "1"
+workflowId: security-crypto-surface
+title: >-
+  Security cryptographic surface - the keyed and unkeyed operation set, driven with injected test
+  key material
+capabilityArea: >-
+  The cryptographic surface: unkeyed hashing, keyed hashing, encoding conversion, the three
+  symmetric cipher families, the asymmetric encrypt, decrypt, sign and verify set, and random
+  generation - together with the seven weak legacy defaults that are preserved as defaults and
+  annotated as known legacy weaknesses rather than corrected
+targetService: Security
+
+description: |
+  WHAT THIS PAIR EXERCISES
+
+  One paired golden-master capture over the whole cryptographic operation surface: unkeyed
+  hashing of text and of a file, keyed hashing, the two encoding conversions in both
+  directions, symmetric encryption and decryption across the three cipher families, the
+  asymmetric encrypt, decrypt, sign and verify set with its three rejection outcomes, and
+  the three random generators. It pins seven weak legacy defaults so that a later change
+  cannot strengthen one of them without a recorded comparison failing.
+
+  NO CRYPTOGRAPHIC TEST WINDOW EXISTS, AND THAT IS A FINDING RATHER THAN A GAP IN THIS FILE
+
+  There is no w_test_crypto.srw among the 47 legacy test windows, and no fixture window for
+  this capability exists anywhere in the repository. A reader looking for one will not find
+  one, which is why the absence is recorded here instead of being left to a search.
+  characterization/README.md section 4.6 states the same finding and names it a risk rather
+  than an omission. The sole oracle is therefore a tab page inside a demo container:
+  ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru, hosted by
+  ws_objects/pfw.demos.pbl.src/w_demo.srw.
+
+  THE ORACLE IS A SECRET-BEARING SITE - READ THE WARNING BEFORE OPENING IT
+
+  That tab page is one of the repository's eight in-source hardcoded-secret sites. It embeds
+  two distinct plaintext private keys in event scripts, defaults an encryption key and an
+  initialization vector to plain guessable strings in fields that are not even masked, and
+  hardcodes a keyed-hash key. ../../docs/SECRETS.md is the authority: site 8 and its
+  section 2.6 carry every locator, its severity and its required action. This definition
+  cites those locators and reproduces no value from any of them, in any form - not pasted,
+  not excerpted, not abbreviated, not folded into another encoding, not hashed, and not
+  "redacted but included". The capture is consequently driven with injected test key
+  material only, and the fixture's embedded material is never read, never used, never
+  echoed, never captured and never stored.
+
+  Because the whole object is a secret-bearing site, the store-wide rule in
+  characterization/README.md section 6.2 applies to every recording taken under this
+  workflow and not merely to this document: no recording may capture, echo or store key
+  material, a certificate, a password or a token.
+
+  THE CONTRACT-LEVEL RULE THAT MAKES THAT STRUCTURAL RATHER THAN A MATTER OF REVIEW
+
+  Callers never send key bytes. A caller passes an opaque key reference and Security
+  resolves it against its own configured key store, so there is no request field into which
+  a key could be placed. ../../docs/CONTRACTS.md section 5.2 defines that rule and its error
+  behaviour for the cryptographic contract and ../../docs/SECRETS.md section 4.5 records it
+  from the secrets side; neither is restated here. One consequence bears on the asymmetric
+  cases below: key generation returns the public key and a reference to the private key, and
+  the generated private key is retained by Security and never returned to the caller.
+
+  THE SEVEN PRESERVED DEFAULTS ARE ANNOTATED, NOT REMEDIATED
+
+  Every item in provesDefects below is a weak cryptographic default. Each is preserved as
+  the default and annotated as a known legacy weakness, and annotation is the whole
+  remediation: none is silently strengthened and no safe mode is added alongside it. The
+  list is therefore not a remediation backlog, and it must not be read as one. A capture
+  that shows a strengthened default is a parity FAILURE and is filed as a divergence in the
+  target, because behaviour preservation forbids improvements as firmly as it forbids
+  regressions.
+
+  WHAT IS NOT CAPTURED
+
+  Four things, stated so that their absence is a decision rather than an oversight. First,
+  the fixture's embedded key values - never read and never recorded. Second, the contents of
+  the fixture's own default key and initialization-vector fields, for the same reason.
+  Third, any sibling tab page in the same demo container: the two payment-gateway pages and
+  the outbound HTTP-client page beside it belong to capability areas that receive no code in
+  this phase, and only the cryptographic tab's surface is captured here. Fourth, token
+  issuance: minting is net-new with no legacy oracle at all, so it is unit-tested rather
+  than characterized, and no pair could exist for it.
+
+  WHAT IS COMPARED WITHOUT BEING MASKED
+
+  The determinism mask below is deliberately narrow. Nothing masks any algorithm, cipher,
+  mode or padding identifier; any hash or checksum value over a fixed input; either file
+  hash taken over the read-only root binary; the round-trip fidelity of any cipher family;
+  any rejection outcome or its error classification, including the two size-limit
+  rejections and the no-padding rejection; the failure of decryption to detect a tampered
+  ciphertext; the character classes present in a generated random string; or the formatting
+  of a generated identifier per flag. Each of those is behaviour, and every masked field is
+  a field in which a regression can hide.
+
+  TWO RECORDING RULES THAT APPLY TO EVERY OUTPUT BELOW, STATED ONCE AS RULES
+
+  First, the key-material rule. KEY MATERIAL NEVER APPEARS IN AN OUTPUT. Where an
+  operation's result is key material, or contains it, or is derived closely enough from it
+  to carry it, the recording holds a placeholder and the material's shape and size - a byte
+  length, a modulus size in bits, a produced-or-not verdict - and nothing else. That is why
+  key generation records a shape rather than a pair of keys, and why every keyed operation
+  records the identifier that selected the algorithm rather than the key that keyed it. The
+  capturePhase redaction member declares the same fields field by field, so the rule is
+  enforced in two places rather than trusted once.
+
+  Second, the artifact rule. Every recording artifact is TEXT-BASED AND DIFFABLE, and no
+  artifact on this surface may be a binary dump. That constraint bites harder here than
+  almost anywhere else in the store, because ciphertext, digests, checksums and signatures
+  are all binary-shaped by nature: dumped raw, a reviewer sees only that two files differ
+  and never what differed, and a parity failure becomes detectable without becoming legible.
+  Each is therefore projected into a stable textual encoding - lower-case hexadecimal for
+  bytes, the operation's own returned string where it returns one - and each artifact is
+  named with one of the seven extensions this store admits. The six extensions the
+  repository's root .gitignore carries unanchored cannot be spelled here at all: an artifact
+  named that way would be silently untracked, present on the machine that produced it and
+  absent from review and from CI, so the comparison would look taken and be unfindable. The
+  root .gitignore is not modified to accommodate a name; the name is chosen correctly.
+
+  NO TIMING, AND A SECOND REASON FOR THAT BEYOND THE STORE-WIDE ONE
+
+  No timing value is recorded as an assertion anywhere in this definition: no throughput
+  figure, no key-generation duration, no elapsed time. The repository publishes no
+  service-level agreement, no latency budget, no throughput target and no availability
+  commitment to assert one against, and the only quantitative gate in the whole project is
+  80% line coverage per in-scope service, measured from coverage.cobertura.xml in CI rather
+  than from anything in this store. Cryptography invites a throughput or key-generation-time
+  claim more than most capability areas, and it carries its own additional reason to record
+  none: timing measurements over cryptographic operations are themselves a side channel, and
+  a recorded one is a published one. The oracle emits no timing field of its own, so nothing
+  needs recording-and-excluding either.
+
+  WHY THIS PAIR HAS NOT BEEN RUN
+
+  n_crypto is declared native over a closed binary and its 86 lines are declarations only -
+  there is no PowerScript body for any operation on the surface. The legacy half therefore
+  needs the Windows PowerBuilder toolchain and the closed binary, neither of which a Linux
+  container can execute, and no paired recording exists on either side. executionStatus is
+  specified-not-executed and no member of this document may imply otherwise.
+
+oracleFixtures:
+  - path: ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru
+    role: oracle-window
+    locators:
+      - "L220"
+      - "L266"
+      - "L281"
+      - "L404"
+      - "L419"
+      - "L434"
+      - "L449"
+      - "L466"
+      - "L470"
+      - "L474"
+      - "L489"
+      - "L504"
+      - "L515"
+      - "L547"
+      - "L562"
+      - "L577"
+      - "L592"
+      - "L607"
+      - "L622"
+      - "L637"
+      - "L652"
+      - "L667"
+      - "L682"
+      - "L699"
+      - "L718"
+      - "L720"
+      - "L736-L738"
+      - "L744"
+  - path: ws_objects/pfw.crypto.pbl.src/n_crypto.sru
+    role: specification
+    locators:
+      - "L8"
+      - "L11-L13"
+      - "L14-L18"
+      - "L19-L20"
+      - "L21-L29"
+      - "L30-L61"
+      - "L62-L69"
+      - "L70-L73"
+      - "L75"
+  - path: ws_objects/pfw.shared.pbl.src/enums.sru
+    role: specification
+    locators:
+      - "L924-L925"
+      - "L927"
+      - "L928-L933"
+      - "L936-L940"
+      - "L943-L946"
+      - "L949-L951"
+      - "L954-L957"
+      - "L960-L962"
+      - "L965-L967"
+
+seedPhase:
+  runsOncePerPair: true
+  neverBetweenCaptures: true
+  steps:
+    - action: >-
+        Confirm that this workflow's seed performs no destructive setup at all: no file is
+        deleted and no DDL is issued. The cryptographic surface opens no storage, so unlike
+        the SQLite fixture - whose own setup deletes the database file before opening it and
+        then recreates the schema - there is nothing here to tear down and nothing to
+        recreate. Recording the absence keeps a later reader from adding a reseed by analogy
+        with the workflow next door.
+    - action: >-
+        Provision an injected symmetric key and an injected initialization vector for the
+        capture, generated at capture time by the harness or supplied to it through
+        configuration. Both are test-only, both are bound identically on the legacy side and
+        the target side, and both are placeholders in the recording rather than values.
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L266"
+    - action: >-
+        Provision an injected keyed-hash key for the keyed hashing case, on the same terms:
+        harness-supplied, test-only, identical on both sides, and a placeholder in the
+        recording.
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L449"
+    - action: >-
+        Generate an injected asymmetric key pair for the signing, verification, encryption
+        and decryption cases. The public half is carried into the capture as a placeholder
+        recording only its shape and size; the private half is retained behind an opaque key
+        reference and never leaves the key store, which is the contract's own arrangement
+        rather than a convention adopted for this capture.
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L699"
+    - action: >-
+        State the reason the material must be injected rather than reused from the fixture,
+        because it is the reason this seed phase exists at all and is a different shape from
+        every other seed phase in this store. The oracle's own key material is committed to
+        version control: driving the capture with it would copy a committed secret into a
+        recording, and a recording is reviewed, diffed and published like any other tracked
+        file. Injection is what makes the capture possible without replicating a secret. The
+        fixture's embedded material is referenced by locator through ../../docs/SECRETS.md
+        and is not read by this workflow.
+    - action: >-
+        Pin the injected symmetric key lengths so that the capture exercises the cipher
+        rather than a key-material refusal: a non-empty single-key value, and at least 16
+        bytes for the triple-key family. Short key material is right-padded with zero bytes,
+        and this platform's cryptographic library refuses the known weak and semi-weak
+        single-key values and refuses triple keys whose adjacent sub-keys coincide, where the
+        binary the legacy bound did not. ../../docs/CONTRACTS.md section 5.3 records that
+        divergence as a property of the key material supplied rather than of the port; the
+        seed avoids it so it does not mask the behaviour under capture.
+    - action: >-
+        Bind the entropy seam and the clock seam to their deterministic doubles on both
+        sides before the first capture begins, so the two halves are taken under one
+        arrangement. The seams and their injection points are named in the determinism mask
+        below and registered authoritatively in ../../docs/PARITY.md section 5.1.
+
+capturePhase:
+  behaviourUnderTest: >-
+    Every operation the cryptographic tab page drives, taken against the state the seed
+    phase established and driven exclusively with the injected test key material that seed
+    phase provisioned: unkeyed hashing of a text value and of the read-only root framework
+    binary, keyed hashing, base64 and hexadecimal conversion in both directions, symmetric
+    encryption and decryption across the single-key, triple-key and 256-bit modern cipher
+    families in chained-block mode, the same operations through a mode-omitting overload so
+    that the electronic-codebook default is actually reached, asymmetric key generation,
+    encryption, decryption, signing and verification together with the two plaintext
+    size-limit rejections and the no-padding rejection, and the three random generators.
+    What is captured is the observable result of each call, the algorithm, cipher, mode and
+    padding identifiers in force for it, and the classification of every rejection - never
+    the key material any of them consumed or produced.
+  preconditions:
+    - >-
+      The paired captures are taken under the shared-volume capture rule, whose canonical
+      text characterization/README.md section 2.1 owns and which is cited here rather than
+      restated because the same wording is owned word for word by three upstream documents
+      and a fourth copy would be a fourth thing to drift.
+    - >-
+      The seed phase has run once and has not run again. No step of it runs between the
+      legacy-side capture and the target-side capture.
+    - >-
+      All key material in play is the injected, test-only material the seed phase
+      provisioned. The fixture's own embedded key material is not read, and its locators are
+      consulted through ../../docs/SECRETS.md rather than by opening the values.
+    - >-
+      The injected symmetric key lengths are full-length for each cipher family - a
+      non-empty single-key value and at least 16 bytes for the triple-key family - so that
+      the capture records the cipher's behaviour rather than this platform's refusal of weak
+      and degenerate key material.
+    - >-
+      The requested random blob and random string lengths stay inside the maximum the target
+      contract publishes, so the capture records generation rather than the cap's refusal.
+      ../../docs/CONTRACTS.md section 5.4 carries the cap and the legacy domain maximum
+      published beside it.
+    - >-
+      pfw.dll is present at the repository root, unmodified and tracked, because two file
+      hashes are taken over it. It is read only, never written, and it is never copied into
+      this store.
+    - >-
+      Text inputs are converted to bytes with the single-byte encoding the fixture uses, and
+      the same encoding is pinned on both sides.
+    - >-
+      The entropy seam and the clock seam are bound to their deterministic doubles on both
+      sides.
+    - >-
+      The target's own key material comes exclusively from configuration injection. No
+      literal key, certificate or credential is present in source, in application settings
+      or in a container definition on either side of the pair.
+  observedOutputs:
+    # ---------- Hashing ----------
+    - name: hash.text.sha256
+      description: >-
+        The digest of a fixed text value under the SHA-256 identifier. A difference means the
+        digest algorithm, the input bytes or the output rendering diverged - and because the
+        input is fixed and the algorithm is deterministic, a difference here is never
+        environmental.
+      format: >-
+        Lower-case hexadecimal digest string exactly as the operation returns it, plus the numeric
+        hash-type identifier that selected it
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L404"
+    - name: hash.file.crc32
+      description: >-
+        The checksum of the read-only root framework binary under the CRC-32 identifier. This
+        is the strongest capture input on the whole surface: the file is version-controlled
+        and never edited, so the expected value is fixed for all time, and no key or
+        credential is involved in producing it.
+      format: "The checksum string as returned, plus the file path and the numeric hash-type identifier"
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L281"
+    - name: hash.file.sha1
+      description: >-
+        The digest of the same read-only binary under the SHA-1 identifier, captured
+        separately from the checksum because it exercises a different family over an
+        identical input - which is what makes the pair of them able to distinguish an input
+        divergence from an algorithm divergence.
+      format: "Lower-case hexadecimal digest string, plus the file path and the numeric hash-type identifier"
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L489"
+    - name: hmac.text.sha256
+      description: >-
+        The keyed digest of a fixed text value under the SHA-256 identifier, produced with
+        the INJECTED keyed-hash key. The fixture hardcodes a key literal at this call site;
+        that literal is a secret site, is not used, and is not recorded. What is compared is
+        the digest produced under the injected key, which is identical on both sides because
+        the same injected key is bound on both.
+      format: >-
+        Lower-case hexadecimal digest string, plus the numeric hash-type identifier and a placeholder
+        standing for the key
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L449"
+    - name: hash.typeIdentifiers
+      description: >-
+        The complete hash-type identifier set as the legacy declares it, spellings and values
+        alike, spanning the digest families and the one checksum - CRYPTO_HASH_MD5 = 0,
+        CRYPTO_HASH_SHA1 = 1, CRYPTO_HASH_SHA256 = 2, CRYPTO_HASH_SHA384 = 3,
+        CRYPTO_HASH_SHA512 = 4 and CRYPTO_HASH_CRC32 = 5. Recorded as an output rather than
+        assumed, because the recording is where a silent renaming or renumbering would be
+        caught.
+      format: "Identifier spelling to numeric value, in declaration order"
+      locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L928-L933"
+    # ---------- Encoding ----------
+    - name: encoding.base64.encode
+      description: >-
+        Base64 rendering of a byte sequence, taken through the blob-to-string direction. The
+        two directions are separate entry points on the legacy surface, so they are captured
+        as separate outputs rather than inferred from one another.
+      format: >-
+        The encoded string as returned, plus the numeric encoding identifier and the byte length of the
+        input
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L419"
+    - name: encoding.base64.decode
+      description: >-
+        The byte sequence recovered from a base64 string, taken through the string-to-blob
+        direction. A difference here with a matching encode output localises the divergence
+        to the decoder.
+      format: "The decoded bytes rendered as lower-case hexadecimal, plus the numeric encoding identifier"
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L434"
+    - name: encoding.hex.encode
+      description: >-
+        Hexadecimal rendering of a byte sequence through the blob-to-string direction,
+        including the letter case the legacy emits, which is itself observable.
+      format: >-
+        The encoded string exactly as returned, preserving letter case, plus the numeric encoding
+        identifier
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L577"
+    - name: encoding.hex.decode
+      description: >-
+        The byte sequence recovered from a hexadecimal string through the string-to-blob
+        direction, captured separately for the same reason as the base64 pair.
+      format: "The decoded bytes rendered as lower-case hexadecimal, plus the numeric encoding identifier"
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L562"
+    - name: encoding.identifiers
+      description: >-
+        The encoding identifier set as declared - CRYPTO_ENCODING_BASE64 = 0 and
+        CRYPTO_ENCODING_HEX = 1 - recorded so that a renumbering cannot pass unnoticed.
+      format: "Identifier spelling to numeric value, in declaration order"
+      locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L924-L925"
+    # ---------- Symmetric ----------
+    - name: symmetric.des.cbc.roundTrip
+      description: >-
+        Encryption then decryption of a fixed plaintext through the single-key legacy cipher
+        in chained-block mode, with the injected key and initialization vector. The round
+        trip returning the original plaintext byte for byte is the behaviour; the ciphertext
+        is compared as well, because this mode with a pinned vector is deterministic.
+      format: >-
+        Ciphertext rendered as lower-case hexadecimal, the recovered plaintext, a round-trip verdict,
+        and the numeric cipher and mode identifiers in force
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L504"
+    - name: symmetric.des.cbc.decrypt
+      description: >-
+        The decrypt half of the single-key round trip captured as its own output, because the
+        legacy exposes it as its own call site and a decrypt-only divergence is a different
+        finding from a round-trip divergence.
+      format: "The recovered plaintext, plus the numeric cipher and mode identifiers"
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L547"
+    - name: symmetric.3des.cbc.roundTrip
+      description: >-
+        The same round trip through the triple-key variant in chained-block mode. Captured
+        per family rather than once, because the three families are separate identifier
+        values reaching separate implementations and a divergence in one says nothing about
+        the others.
+      format: >-
+        Ciphertext rendered as lower-case hexadecimal, the recovered plaintext, a round-trip verdict,
+        and the numeric cipher and mode identifiers
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L637"
+    - name: symmetric.3des.cbc.decrypt
+      description: "The decrypt half of the triple-key round trip, at its own legacy call site."
+      format: "The recovered plaintext, plus the numeric cipher and mode identifiers"
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L622"
+    - name: symmetric.aes256.cbc.roundTrip
+      description: >-
+        The same round trip through the 256-bit modern cipher in chained-block mode,
+        completing the three-family matrix.
+      format: >-
+        Ciphertext rendered as lower-case hexadecimal, the recovered plaintext, a round-trip verdict,
+        and the numeric cipher and mode identifiers
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L607"
+    - name: symmetric.aes256.cbc.decrypt
+      description: "The decrypt half of the 256-bit round trip, at its own legacy call site."
+      format: "The recovered plaintext, plus the numeric cipher and mode identifiers"
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L592"
+    - name: symmetric.modeOmitted.ecbDefault
+      description: >-
+        ADDED CASE, NOT SUPPLIED BY THE ORACLE. Encryption through a mode-omitting overload,
+        so that the electronic-codebook default is actually reached and characterized. Every
+        one of the fixture's six symmetric call sites passes the chained-block mode
+        explicitly, so no oracle call reaches the default at all; without this case the
+        default that provesDefects item 1 pins would go entirely uncharacterized. The
+        overload used is the arity that carries neither a mode nor a vector, which is the
+        arity that reaches the default and needs no vector to do so. What is recorded is the
+        resulting mode in force - the default resolving to electronic codebook - and the
+        ciphertext it produced.
+      format: >-
+        The numeric mode identifier actually in force, the numeric cipher identifier, and the ciphertext
+        rendered as lower-case hexadecimal
+      locator: "ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L30"
+    - name: symmetric.ecb.blockRepetition
+      description: >-
+        The observable consequence of the electronic-codebook default: a plaintext built from
+        a repeated block encrypts to a ciphertext whose corresponding blocks are identical,
+        so plaintext structure survives into the ciphertext. This is the weakness itself made
+        visible, and it is compared rather than masked - the determinism is the point.
+      format: >-
+        Ciphertext rendered as lower-case hexadecimal with block boundaries marked, plus a count of
+        repeated ciphertext blocks and the count of repeated plaintext blocks that produced them
+      locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L946"
+    - name: symmetric.tamperedCipher.noDetection
+      description: >-
+        A ciphertext is altered by one byte and decryption is attempted. The recorded
+        behaviour is that decryption does NOT report tampering: it returns altered plaintext
+        or a padding-level failure, never an integrity failure, because no authenticated mode
+        exists on this surface and the ciphertext therefore carries no integrity tag. A
+        target that reported an integrity failure here would be a parity failure, not an
+        improvement.
+      format: >-
+        The outcome classification, the returned plaintext or error rendered as text, and an explicit
+        flag recording that no integrity failure was raised
+      locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L943-L945"
+    - name: symmetric.rawKeyBytes.noDerivation
+      description: >-
+        A short passphrase is supplied where key material is expected, and the recorded
+        behaviour is that it is consumed as raw key bytes: no derivation function is applied,
+        no iteration count exists to apply, and no salt is involved, so whatever the caller
+        supplies is the key. The observable consequence recorded is that a passphrase shorter
+        than the cipher's key length is padded rather than stretched.
+      format: >-
+        The byte length of the supplied material, the byte length the cipher consumed, a flag recording
+        that no derivation was applied, and the resulting ciphertext rendered as lower-case hexadecimal
+      locator: "ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L30-L61"
+    - name: symmetric.cipherIdentifiers
+      description: >-
+        The symmetric cipher identifier set as declared, spellings and values alike -
+        CRYPTO_SYMCRYPT_TYPE_DES = 0, CRYPTO_SYMCRYPT_TYPE_3DES = 1,
+        CRYPTO_SYMCRYPT_TYPE_AES128 = 2, CRYPTO_SYMCRYPT_TYPE_AES192 = 3 and
+        CRYPTO_SYMCRYPT_TYPE_AES256 = 4 - five identifiers across the three cipher families
+        the surface offers.
+      format: "Identifier spelling to numeric value, in declaration order"
+      locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L936-L940"
+    - name: symmetric.modeIdentifiers
+      description: >-
+        The symmetric mode identifier set as declared, including the default alias that is
+        the whole evidence for provesDefects item 1 - CRYPTO_SYMCRYPT_MODE_ECB = 0,
+        CRYPTO_SYMCRYPT_MODE_CBC = 1, CRYPTO_SYMCRYPT_MODE_CFB = 2, and
+        CRYPTO_SYMCRYPT_MODE_DEFAULT declared equal to CRYPTO_SYMCRYPT_MODE_ECB. All three
+        modes are enumerated even though the feedback mode is not exercised as a case, for
+        the reason blockedBehaviours records.
+      format: >-
+        Identifier spelling to numeric value, in declaration order, with the default alias recorded as
+        the identifier it resolves to rather than as a number
+      locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L943-L946"
+    # ---------- Asymmetric ----------
+    - name: rsa.keyGeneration.shape
+      description: >-
+        Key generation at the legacy-legal small key size, through the arity that returns
+        both halves in two reference out-parameters and takes the block-format flag. Only the
+        SHAPE is recorded - the key size in bits, whether each half was produced, and the
+        rendering format requested. Neither half's value is recorded, and on the target side
+        the private half is never returned to a caller at all.
+      format: >-
+        Key size in bits, a produced-or-not verdict per half, the requested rendering format, and a
+        placeholder per half recording only its shape and size
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L699"
+    - name: rsa.encrypt
+      description: >-
+        Asymmetric encryption of a fixed plaintext under the public half, through the
+        padding-omitting arity so that the default padding is the one in force. The
+        ciphertext itself is not compared byte for byte, because the default padding is
+        randomized; what is compared is that it decrypts back to the original.
+      format: "Ciphertext byte length, the numeric padding identifier in force, and a decryptability verdict"
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L744"
+    - name: rsa.decrypt
+      description: >-
+        Asymmetric decryption under the private half, recorded as the recovered plaintext.
+        The private half is reached through the opaque key reference on the target side and
+        is never present in the recording in any form.
+      format: >-
+        The recovered plaintext, the numeric padding identifier in force, and a placeholder standing for
+        the key reference
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L720"
+    - name: rsa.sign.sha256
+      description: >-
+        A signature over fixed data under the SHA-256 identifier. The signature bytes are not
+        compared, because the signing padding is randomized and the bytes differ per run;
+        what is compared is that a signature was produced, its length, and that it verifies.
+      format: >-
+        Signature byte length, the numeric hash-type identifier that selected the digest, and a
+        produced-or-not verdict
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L470"
+    - name: rsa.verify.sha256
+      description: >-
+        Verification of that signature under the same hash identifier, recorded as the
+        boolean the legacy returns. Two cases are captured: the valid signature, which
+        verifies, and the same signature over altered data, which does not - because a
+        verification that succeeded on both would be indistinguishable from one that always
+        succeeds.
+      format: "The boolean verification result per case, plus the numeric hash-type identifier"
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L474"
+    - name: rsa.sizeLimit.rejection.pkcs1
+      description: >-
+        A first-class rejection outcome, not an incidental error. Under the default
+        PKCS-family padding the plaintext must be at least eleven bytes smaller than the key
+        modulus; a plaintext at or above that bound is refused. The refusal and its
+        classification are the behaviour and are compared.
+      format: >-
+        The plaintext byte length offered, the modulus size in bytes, the outcome classification, and
+        the numeric padding identifier in force
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L736"
+    - name: rsa.sizeLimit.rejection.oaep
+      description: >-
+        The same rejection under the optimal-asymmetric-encryption-padding form, whose bound
+        is forty-one bytes smaller than the key modulus rather than eleven. Captured
+        separately because the two bounds are different numbers and a port that applied one
+        bound to both paddings would pass a single-case check.
+      format: >-
+        The plaintext byte length offered, the modulus size in bytes, the outcome classification, and
+        the numeric padding identifier in force
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L737"
+    - name: rsa.noPadding.rejection
+      description: >-
+        The no-padding form is explicitly not supported, and the refusal is the legacy's own
+        rather than a hardening decision taken by the port. There is additionally no
+        identifier value to select it with - the declared padding set has exactly two members
+        - so the request is unrepresentable as well as refused. Both facts are recorded.
+      format: >-
+        The outcome classification, and the declared padding identifier set as evidence that no third
+        value exists to request
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L738"
+    - name: rsa.paddingIdentifiers
+      description: >-
+        The asymmetric padding identifier set as declared - CRYPTO_RSA_PADDING_PKCS1 = 0,
+        CRYPTO_RSA_PADDING_OAEP = 1, and CRYPTO_RSA_PADDING_DEFAULT declared equal to
+        CRYPTO_RSA_PADDING_PKCS1 - which is simultaneously the evidence for provesDefects
+        item 2 and for the unrepresentability recorded above.
+      format: >-
+        Identifier spelling to numeric value, in declaration order, with the default alias recorded as
+        the identifier it resolves to
+      locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L949-L951"
+    - name: rsa.keySizeIdentifiers
+      description: >-
+        The declared key-size set - CRYPTO_RSA_BITS_1024 = 1024, CRYPTO_RSA_BITS_2048 = 2048
+        and CRYPTO_RSA_BITS_4096 = 4096. The small size is a first-class declared value
+        alongside the other two, which is the evidence for provesDefects item 6, and it is
+        recorded so that its removal from the accepted set would surface as a difference.
+      format: "Identifier spelling to numeric value, in declaration order"
+      locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L965-L967"
+    # ---------- Random ----------
+    - name: random.blob.shape
+      description: >-
+        Random byte generation. The bytes are a masked seam and are not compared; what is
+        compared is the shape - that the requested byte count was produced and rendered
+        through the hexadecimal encoding the fixture wraps it in. A length mismatch is a
+        behavioural difference even though the value is not.
+      format: >-
+        Requested byte count, produced byte count, the numeric encoding identifier used to render it,
+        and a placeholder standing for the bytes
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L652"
+    - name: random.string.characterClasses
+      description: >-
+        Random string generation with the number, alphabet and symbol classes combined. The
+        characters are masked, but the CHARACTER CLASSES PRESENT in the output are behaviour
+        and are compared: a generator that silently dropped the symbol class would produce a
+        perfectly plausible string and would be caught only by this comparison. The requested
+        length is compared too.
+      format: >-
+        Requested length, produced length, the set of character classes observed in the output, the
+        numeric flag value requested, and a placeholder standing for the string
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L667"
+    - name: random.guid.formatting
+      description: >-
+        Identifier generation with the bracket and separator flags combined, and again
+        through the flag-omitting arity so the default formatting is reached. The value is
+        masked, but the FORMATTING is behaviour and is compared - bracket presence, separator
+        presence and separator positions, per flag combination. Four combinations are
+        captured: neither flag, bracket only, separator only, and both.
+      format: >-
+        Per flag combination: the numeric flag value, a formatting descriptor recording bracket presence
+        and separator positions, the total length, and a placeholder standing for the value
+      locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L682"
+    - name: random.identifiers
+      description: >-
+        The two flag identifier sets as declared - CRYPTO_RNDSTRING_NUMBER = 1,
+        CRYPTO_RNDSTRING_ALPHABET = 2, CRYPTO_RNDSTRING_SYMBOL = 4 with
+        CRYPTO_RNDSTRING_DEFAULT declared as number plus alphabet; and
+        CRYPTO_GUID_INCLUDE_BRACKET = 1, CRYPTO_GUID_INCLUDE_SEPARATOR = 2 with
+        CRYPTO_GUID_DEFAULT declared as both. The defaults are recorded as the combinations
+        they resolve to, because a caller reaching the flag-omitting arity gets those and
+        nothing else.
+      format: >-
+        Identifier spelling to numeric value, in declaration order, with each default alias recorded as
+        the combination it resolves to
+      locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L954-L962"
+  redaction:
+    - field: "The injected symmetric key"
+      treatment: redacted
+    - field: "The injected initialization vector"
+      treatment: redacted
+    - field: "The injected keyed-hash key"
+      treatment: redacted
+    - field: "The passphrase supplied to the no-derivation case as raw key material"
+      treatment: redacted
+    - field: "The generated asymmetric public half"
+      treatment: redacted
+    - field: "The generated asymmetric private half"
+      treatment: omitted
+    - field: "The opaque key reference a caller passes in place of key bytes"
+      treatment: redacted
+    - field: "The fixture's own embedded key material at every one of its locators"
+      treatment: omitted
+  recordingArtifacts:
+    - filename: hashing.json
+    - filename: encoding.json
+    - filename: symmetric.json
+    - filename: asymmetric.json
+    - filename: random.json
+    - filename: rejections.json
+    - filename: identifier-sets.json
+
+
+# The mask is inline and complete. It is not a pointer to a mask, and no entry of it is
+# delegated to another file, because a mask that drifts away from its workflow silently
+# invalidates every pair captured under it. Every entry names both sides: a one-sided mask
+# manufactures a passing comparison out of mismatched data, which is worse than no mask.
+determinismMask:
+  - seam: "Random blob generation"
+    method: >-
+      Seamed rather than masked wherever possible: entropy is injected through the
+      IEntropySource abstraction declared at
+      services/security-service/PowerFramework.Security/Crypto/RandomProvider.cs:L228, and a
+      test substitutes a deterministic double for the production implementation at :L269. The
+      provider reaches entropy only through its constructor parameter at :L578, so no code
+      path can bypass the double. Two doubles exist, at
+      services/security-service/PowerFramework.Security.Tests/RandomProviderTests.cs:L81 and
+      :L108. The produced bytes are still replaced by a placeholder in the recording; the
+      requested and produced byte counts are compared.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      Non-deterministic by construction - every value differs on every run by design, so a
+      recording containing one is unmatchable unless the value is masked on both sides. This
+      is one of the three primary non-determinism sources in the entire in-scope estate, and
+      all three of them live on this one surface, which is why this workflow carries more
+      seam entries than any other in the store. ../../docs/PARITY.md section 5.1 is the
+      authoritative register.
+  - seam: "Random string generation"
+    method: >-
+      The same injected entropy seam and the same deterministic doubles. The string value is
+      replaced by a placeholder, but the character classes present in the output are derived
+      from it before masking and are recorded and compared, as is the produced length.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      Non-deterministic by construction, for the same reason as the blob generator. The
+      distinction that matters: the characters are not behaviour, but the CLASSES OF
+      CHARACTER PRESENT are - a generator that silently stopped honouring one of the three
+      requested classes would still produce a plausible string, and the class set is the only
+      recorded field that would catch it. Masking the class set along with the value would
+      remove the one comparison this case exists to make.
+  - seam: "Identifier generation"
+    method: >-
+      The same injected entropy seam and the same deterministic doubles. The value is
+      replaced by a placeholder, but the formatting is derived before masking and compared:
+      bracket presence, separator presence and separator positions, recorded per flag
+      combination across all four combinations.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      Non-deterministic by construction, the third of the three primary seams. As with the
+      random string, the value is not behaviour but the FORMATTING is: the flags select it
+      deterministically, so a flag that stopped being honoured is a real regression that only
+      the formatting comparison detects.
+  - seam: "All injected key material, and every generated key pair"
+    method: >-
+      Replaced by a stable placeholder that records only the material's shape and size - key
+      length in bytes, modulus size in bits, and whether each half was produced. Never the
+      material. The capturePhase redaction member declares the same fields from the
+      sensitivity side; this entry declares them from the comparability side, and both are
+      needed because they answer different questions.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      Two independent reasons, either of which alone would be sufficient. First and governing:
+      a recording must never carry key material, so key material cannot appear in a compared
+      field. Second: a key generated at capture time differs per run and is therefore not
+      comparable in any case, so masking it costs the comparison nothing it could otherwise
+      have had.
+  - seam: "Signature and ciphertext bytes where a non-deterministic padding is involved"
+    method: >-
+      Compare the round-trip outcome and the verification result rather than the raw bytes -
+      that a ciphertext decrypts back to its original plaintext, and that a signature
+      verifies against its data and fails against altered data - together with the byte
+      lengths, which are deterministic. Where the mode is DETERMINISTIC, the ciphertext is
+      NOT masked and is compared byte for byte; the electronic-codebook cases and the
+      chained-block cases taken with a pinned vector are both in that category.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      A randomized padding makes the ciphertext or signature differ on every run while the
+      behaviour is identical, so the bytes cannot be compared and the decryptability and the
+      verification result are what carry the behaviour. The exception is load-bearing and
+      runs the other way: for the deterministic modes the ciphertext MUST be compared,
+      because its determinism is precisely the weakness this pair exists to characterize, and
+      masking it would hide the very property provesDefects item 1 pins.
+  - seam: "Every clock read"
+    method: >-
+      Injected as a time provider taken by constructor, with no ambient clock read behind it,
+      so a test substitutes a fixed or advancing double. No timing value is recorded as an
+      assertion in any case, so nothing on this surface depends on the substituted value
+      being any particular one.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      A clock read differs by definition rather than by behaviour, so any recorded field
+      derived from one is unmatchable. Declared even though this surface asserts no timing,
+      because the seam must be bound on both sides for the pair to be taken under one
+      arrangement, and an unbound clock can still reach a recording through an incidental
+      field.
+  - seam: "Newline normalization"
+    method: >-
+      Normalize line endings to a single convention on both sides before comparison. For
+      base64 output specifically, normalize the line wrapping first and then compare the
+      DECODED BYTES rather than the wrapped text, so a differently wrapped rendering of
+      identical bytes is not reported as a divergence.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      A platform artifact rather than a behaviour: the master is produced on Windows by
+      PowerBuilder and the candidate runs in a Linux container, and the repository's root
+      .gitattributes declares only linguist-language mappings with no text rule and no
+      end-of-line rule, so nothing normalizes line endings on the way into version control.
+      That file is not in scope to change, which is exactly why the normalization has to be
+      declared in the workflow's own mask instead. The base64 wrapping hazard is specific to
+      this surface: two encoders that agree on every byte can disagree on where they break
+      the line, and comparing the wrapped text would report that as a cryptographic
+      divergence.
+  - seam: "Text encoding of inputs before hashing or encrypting"
+    method: >-
+      Pin one declared input encoding on both sides - the single-byte encoding the fixture
+      converts through at its blob conversion call sites - and record the pinned encoding
+      alongside every affected output so that the pinning is visible in the recording rather
+      than assumed by the harness.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      The fixture converts strings to bytes with an explicit single-byte encoding before
+      handing them to the surface. A different default on the candidate side would change the
+      INPUT bytes and therefore every digest, ciphertext and signature derived from them -
+      and it would present as a cryptographic divergence when the cryptography is byte for
+      byte identical. This is the most misleading failure available on this surface, which is
+      why the encoding is pinned rather than left to a platform default.
+
+# EVERY ITEM BELOW IS A WEAK CRYPTOGRAPHIC DEFAULT THAT IS PRESERVED AS THE DEFAULT AND
+# ANNOTATED AS A KNOWN LEGACY WEAKNESS. Annotation is the whole remediation: not one of them
+# is silently strengthened and no safe mode is offered alongside any of them. This list is
+# NOT a remediation backlog. A capture showing a strengthened default is a parity FAILURE
+# and is filed as a divergence in the target, because behaviour preservation forbids
+# improvements as firmly as it forbids regressions. ../../docs/CONTRACTS.md section 5.3
+# carries the same roster from the contract side and is the authority for the annotations
+# the published contract descriptions actually bear.
+provesDefects:
+  - defect: >-
+      The default symmetric mode is electronic codebook. The mode default is declared equal
+      to the electronic-codebook identifier, so every overload that omits the mode selector
+      encrypts in it - identical plaintext blocks become identical ciphertext blocks and
+      plaintext structure survives into the ciphertext.
+    locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L943-L946"
+    note: >-
+      Annotation carried at the point of reproduction: electronic codebook is preserved as
+      the default, and a caller who needs otherwise passes the mode explicitly. It is not
+      silently upgraded, and no alternative default is offered.
+
+      ORACLE COVERAGE GAP, STATED RATHER THAN PAPERED OVER: the fixture never reaches this
+      default. All six of its symmetric call sites pass the chained-block mode explicitly -
+      at u_cst_tabpage_utility_crypto.sru:L504, :L547, :L592, :L607, :L622 and :L637 - so no
+      oracle call exercises the default at all, and a capture built only from what the oracle
+      does would leave the single most consequential weakness on this surface entirely
+      uncharacterized. That is why capturePhase adds a mode-omitting case. The mode-omitting
+      arities are declared at ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L30, :L32, :L34 and
+      :L36 with their blob counterparts through :L44, and the decrypt counterparts run from
+      :L46 to :L60.
+  - defect: >-
+      The default asymmetric padding is the PKCS-family form, and the no-padding form is
+      explicitly not supported. The legacy's own authoritative comment states the default,
+      states that the plaintext must be at least eleven bytes smaller than the key modulus,
+      states that the optimal-asymmetric-encryption-padding form requires forty-one bytes
+      smaller, and then states outright that no-padding is not supported.
+    locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L736-L738"
+    note: >-
+      Annotation: the PKCS-family default is preserved and is not silently upgraded to the
+      optimal-asymmetric form, and the no-padding refusal is the LEGACY'S OWN rather than a
+      hardening decision taken by the port - which is why reproducing the refusal is
+      preservation rather than improvement. The refusal is doubly established: beyond the
+      comment, the declared padding set has exactly two members at
+      ws_objects/pfw.shared.pbl.src/enums.sru:L949-L950, so there is no third value to
+      select and the request is unrepresentable as well as refused. All three outcomes - the
+      two size-limit rejections and the no-padding rejection - are captured as first-class
+      results with their classifications, not as incidental errors. The padding-omitting
+      arities that reach the default are n_crypto.sru:L62, :L64, :L66 and :L68.
+  - defect: >-
+      Symmetric padding is a single fixed family and is not selectable. There is no way to
+      choose a padding scheme for any symmetric operation, and no way to discover which one
+      is in force from the declared surface.
+    locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L936-L946"
+    note: >-
+      Annotation: the padding scheme is fixed and the contract carries no field for it,
+      because offering one would imply a choice the legacy never had - and inventing a choice
+      is a new feature, which behaviour preservation forbids exactly as firmly as it forbids
+      removing one. Established by ABSENCE, and the absence is mechanical rather than
+      inferred: no symmetric padding constant of any kind exists anywhere in enums.sru - the
+      cipher block exposes type and mode and nothing else - and not one of the 32 symmetric
+      overloads at ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L30-L61 carries a padding
+      parameter. Absence is weaker evidence than presence in general, but here it is the
+      right kind: a capability the legacy cannot express is one the port must not offer.
+  - defect: >-
+      No key-derivation function is reachable at all, and there is no salt concept anywhere
+      on the surface, so a passphrase supplied as key material is used as raw key bytes.
+      Whatever the caller supplies IS the key: nothing derives it, stretches it, or salts it,
+      and material shorter than the cipher's key length is padded rather than strengthened.
+    locator: "ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L30-L61"
+    note: >-
+      Annotation: the contract does not derive, stretch or salt, and adding a derivation
+      function would be a new capability rather than a fix. Established by ABSENCE across the
+      whole surface: no derivation-family or salt constant exists in
+      ws_objects/pfw.shared.pbl.src/enums.sru, and no signature on the cryptographic surface
+      accepts an iteration count or a salt. The fixture demonstrates the consequence directly
+      - its key field takes a plain string straight through into the key parameter with
+      nothing in between.
+
+      SECRETS POSITION FOR THIS WHOLE WORKFLOW, RECORDED HERE BECAUSE THIS IS THE ITEM WHOSE
+      EVIDENCE TOUCHES IT: the oracle is a secret-bearing site. It carries two distinct
+      embedded private keys at u_cst_tabpage_utility_crypto.sru:L466 and :L718, a hardcoded
+      keyed-hash key at :L449, and an encryption key and an initialization vector defaulted
+      to plain guessable strings in fields that are not masked, at :L266 and :L515. Every one
+      of those lies inside the read-only legacy region, so the posture is NEVER REPLICATE,
+      DOCUMENT, AND ROTATE - never edit the legacy file, and specifically not in order to
+      remove the literals, because deleting them from the oracle would corrupt the very
+      artifact the parity comparison is taken against. ../../docs/SECRETS.md holds every
+      locator with its severity and required action; the values live nowhere, and no field of
+      this definition and no field of any recording taken under it may carry one. On the
+      target side there is exactly one signing secret in the whole system, it is held by
+      Security alone, and it arrives exclusively through configuration injection: Security is
+      the SOLE token issuer and the other three services hold verification material only.
+      ../../docs/SECRETS.md sections 3.2, 4.1, 4.2 and 4.5 and ../../docs/CONTRACTS.md
+      section 5.2 are the authorities for all of that and none of it is restated here.
+  - defect: >-
+      No authenticated encryption is reachable - no authenticated mode of any kind exists on
+      the surface - so ciphertext carries no integrity tag and decryption cannot detect that
+      a ciphertext has been altered.
+    locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L943-L945"
+    note: >-
+      Annotation: ciphertext integrity is not protected by this surface, and a caller needing
+      it must obtain it separately - the keyed-hash operations are the surface's own means of
+      doing so. No authenticated mode is added. Established by ABSENCE: the declared mode set
+      is exactly electronic codebook, chained-block and feedback, and none of the three
+      authenticates. The observable consequence is captured directly, as
+      symmetric.tamperedCipher.noDetection: a ciphertext is altered by one byte and
+      decryption is attempted, and the recorded behaviour is that no integrity failure is
+      raised. A target that DID report an integrity failure there would be a parity failure
+      rather than an improvement, and it is the clearest example on this surface of why a
+      better-looking result is a bug report.
+  - defect: >-
+      A small asymmetric key size remains legal, and the legacy demonstration uses it. The
+      1024-bit size is a declared, first-class value alongside 2048 and 4096, and the oracle
+      generates at it.
+    locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L699"
+    note: >-
+      Annotation: 1024 is accepted, is annotated as a legacy-compatibility value, and is NOT
+      removed from the accepted set - refusing it would refuse input the legacy accepts,
+      which is a behavioural change dressed as hardening. The declaring evidence is the
+      key-size set at ws_objects/pfw.shared.pbl.src/enums.sru:L965-L967, where the small size
+      sits beside the two larger ones as an equal member. The capture records the size in
+      bits as an observed output precisely so that a later narrowing of the accepted set
+      surfaces as a comparison difference rather than as a silent policy change.
+  - defect: >-
+      The algorithm identifier sets are preserved exactly, values and spellings alike: the
+      six hash identifiers, the five cipher identifiers across three families, the three
+      modes with their default alias, the two padding values with theirs, the two encoding
+      values, the three random-string classes and the two identifier-formatting flags.
+    locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L924-L967"
+    note: >-
+      Stated precisely because the distinction matters: this is a preservation RULE rather
+      than a weakness, and it is listed here because this pair is what enforces it, not
+      because the identifiers are themselves defective. The rule exists because these
+      identifiers appear in serialized payloads, in log records and in characterization
+      recordings, so a rename or a renumbering would silently invalidate every stored
+      comparison - including every recording taken under this workflow. The identifiers keep
+      their original screaming-snake spelling in the target even though that departs from the
+      language's naming convention, and the analyzer rules that would object are suppressed
+      for the files carrying them rather than the identifiers being tidied.
+
+      One consequence of the declared sets is easy to miss and is recorded so it is not: the
+      declaring comment at ws_objects/pfw.shared.pbl.src/enums.sru:L927 names the hash set's
+      consumers as the hash operation AND the signing and verification operations - one set,
+      three consumers - so the whole set, including the weakest digest in it, is a legal
+      selector on the signature operations. That is preserved rather than narrowed, because
+      narrowing the accepted set would refuse input the legacy accepts.
+
+      NO THIRD-PARTY CRYPTOGRAPHY PACKAGE IS ADOPTED, AND NONE IS NEEDED: the platform's own
+      cryptographic library covers every operation enumerated on this surface - the
+      asymmetric family with generation, encryption, decryption, signing and verification;
+      keyed hashing; the whole digest family and the checksum; the three cipher families
+      across the three declared modes with the PKCS-family padding; cryptographic random
+      generation; and identifier generation. Adding a package would introduce an
+      unnecessary dependency on the sole token issuer, and it would put a third party's
+      choice of default between this port and the defaults it is required to preserve.
+
+# Declared rather than approximated. Each of the three is a boundary the published
+# cryptographic contract narrows on purpose, and each therefore bounds what this pair can
+# prove. ../../docs/CONTRACTS.md section 5.3 is the authority for all three, including the
+# defined error each returns. The root cause they share is worth stating once: the legacy
+# class is declared native over a closed binary at
+# ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L8 and its 86 lines are declarations only, so
+# where a parameter lived inside that binary there is no source anywhere in the repository
+# that can adjudicate it.
+blockedBehaviours:
+  - behaviour: >-
+      Keyed hashing and signing under the checksum identifier - the keyed and signing
+      operations invoked with the one member of the hash set that is a checksum rather than a
+      digest.
+    reason: >-
+      No evidence is missing and none could be: the construction itself does not exist. A
+      checksum has no compression function for a keyed-hash construction to key, and no
+      algorithm identifier for a signature scheme to name, so neither combination was ever
+      defined. The identifier is nonetheless a declared member of the one hash set that the
+      hash, signing and verification operations all share, so a caller can name it.
+    disposition: narrowed-with-defined-error
+  - behaviour: >-
+      Symmetric encryption and decryption in the feedback mode, which this workflow
+      enumerates as a declared identifier but does not exercise as a capture case.
+    reason: >-
+      The feedback width is unobservable. The legacy publishes one unqualified feedback-mode
+      value with no feedback-size argument anywhere in its signatures, and full-block versus
+      narrow feedback produce entirely different ciphertext from identical inputs - so there
+      is no way to establish from the repository which of them the closed binary used. A
+      substitute would produce ciphertext that is plausible and wrong, which is the failure
+      mode a characterization suite exists to prevent rather than to commit.
+    disposition: narrowed-with-defined-error
+  - behaviour: >-
+      Chained-block mode reached through one of the eight overloads that supply a mode but no
+      initialization vector.
+    reason: >-
+      The vector the closed binary substituted when none was supplied is unobservable, and
+      chained-block mode cannot be reproduced without it. The affected arities are declared
+      at ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L31, :L35, :L39, :L43, :L47, :L51, :L55
+      and :L59. This bounds the capture rather than blocking it: every chained-block case in
+      capturePhase deliberately uses a vector-supplying arity, and the added mode-omitting
+      case uses the arity that carries neither a mode nor a vector, which reaches the
+      electronic-codebook default and needs no vector to do so.
+    disposition: narrowed-with-defined-error
+
+# True, and not because this workflow writes to storage - it opens none. The fixture runs
+# inside the same oracle application whose state both halves of the pair share, so the
+# capture rule governs it in full. characterization/README.md section 2.1 owns that rule's
+# canonical text and is the authority for it; the one exemption this store admits belongs
+# solely to the pure-string-transform paging workflow, and it is not this one.
+sharedVolume:
+  applies: true
+
+executionStatus: specified-not-executed
+
+relatedWorkflows:
+  - gateway-lifecycle-composition-root
