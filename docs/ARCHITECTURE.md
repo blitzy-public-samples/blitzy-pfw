@@ -1686,16 +1686,16 @@ and without `wget`** but it **does** carry `openssl` (the .NET TLS stack depends
 every container health probe: a probe that assumes `curl` without installing it can never succeed, the
 `service_healthy` condition of §10.1 can never be satisfied, and the readiness gate silently never opens.
 
-**The four definitions solve that in two ways — three work with what the image already has, one installs a
-tool** — and the deciding fact is the same for all four: **every listener terminates TLS**, so no probe can
-be a plaintext socket write.
+**All four definitions solve it the same way — with what the image already has, installing nothing** — and
+the deciding fact is the same for all four: **every listener terminates TLS**, so no probe can be a
+plaintext socket write.
 
 | Definition | Probe mechanism | Installs anything? | Why that one |
 | --- | --- | --- | --- |
 | `gateway-service` | `openssl s_client` piped a hand-written request, matching the status line | **No** | The 5105 ingress is **TLS-terminated**, so a `/dev/tcp` socket redirection writes plaintext bytes into a TLS endpoint, never produces a status line, and fails **permanently** — leaving the `service_healthy` chain closed for ever. `openssl`, `bash` and `printf` are already in the image |
 | `dataservices-service` | `openssl s_client` piped a hand-written request | **No** | The 5102 listener is TLS-terminated, for the same reason and with the same consequence |
 | `security-service` | `openssl s_client`, likewise from the base image alone | **No** | The 5104 listener is TLS too. An earlier revision installed `curl` here with an unpinnable apt version; using the `openssl` already present adds no package and no layer |
-| `persistence-service` | `curl --cacert` | **Yes** — `curl` only, in one layer with the apt lists removed, before the `USER` switch | The 5101 listener is TLS, and this is the one definition that accepts an install rather than working around it |
+| `persistence-service` | `openssl s_client`, the same way, against 5101 | **No** | Both its listeners are TLS. An earlier revision installed `curl` here and it was **withdrawn** for the reason already recorded against Security — an apt version cannot be pinned against a family-tagged base without breaking the build when the archive moves on, and leaving it unpinned is a floating dependency that collides with the baseline of [`BUILD.md`](BUILD.md) §1.1. Removing it also takes a runtime package out of the one image that holds a storage provider. The `Http2`-only gRPC listener on 5111 is deliberately not probed: it would answer an HTTP/1.1 request with 400, and the host binds both endpoints or refuses to start |
 
 Every one of the four **verifies the presented chain against the mounted anchor**; none passes `-k`,
 `--insecure` or `-noverify`, because a probe that skips verification reports healthy for a listener the rest
@@ -1749,26 +1749,45 @@ rule drifts.
 nothing exists to bring up — **all four container definitions are authored, and so is
 `.github/workflows/ci.yml`** — but that nothing assembles them into a stack:
 `orchestration/docker-compose.yml` and `orchestration/README.md` are absent, so the health-condition
-dependency chain has no expression anywhere in the tree. **No image has been built from three of the four
-definitions, and no multi-service stack has been started.**
+dependency chain has no expression anywhere in the tree. **Two of the four definitions have never been
+built, and no multi-service stack has ever been started.**
 
-**Container correctness is asserted for exactly one image and for nothing else.** The Security image was
-**built and run** here: `docker build --check` reported no warnings, the build completed, and the running
+**Container correctness is asserted for two images and for nothing else.** The Security image was **built
+and run** here: `docker build --check` reported no warnings, the build completed, and the running
 container answered 200 on the anonymous `/health` over TLS and 401 on `/v1/ping`, reached Docker health
 status `healthy`, and was confirmed to carry `openssl` and neither `curl` nor `wget`. Its probe was driven
 negative as well — a dead port and the 401 route both fail it — so it is a probe and not a formality.
-That run is also what fixes the probe idiom for the other images: the runtime base carries `openssl` and
-neither `curl` nor `wget`, so a probe may only use what the image actually ships, and the Gateway,
-DataServices and Security definitions all use the `openssl s_client` pipeline while Persistence installs
-`curl` explicitly in its runtime stage and may therefore use it. The Gateway, DataServices and Persistence
-definitions exist but have not been built here.
+
+**The Persistence image was subsequently built and run the same way, and it is the one image whose
+storage seam could be exercised.** `docker build --check` reported no warnings; the build completed with
+zero warnings, zero errors and no NuGet advisory, the three repository-root MSBuild files resolving
+central package management from `/src`. On the built image: the final stage runs as uid 1654, PID 1 is
+`dotnet PowerFramework.Persistence.dll`, `EXPOSE` carries 5101 and 5111, `ASPNETCORE_HTTP_PORTS` is
+empty, and the layer contains no test assembly, no xunit, no `.proto`, no `ws_objects` content and no
+legacy native binary, while the SQLitePCLRaw `linux-x64` `libe_sqlite3.so` is published beside the
+managed assemblies. Running it against a **fresh named volume** confirmed the property that matters most
+for this service: Docker seeded the volume from the image directory as `1654:1654`, so the non-root
+process found its storage directory writable and the startup gate passed. Both listeners bound —
+HTTP/1.1 on 5101, HTTP/2 on 5111 — `/health` answered anonymously (503 with a machine-readable body
+naming the unprovisioned database, then 200 once the schema was applied to the volume), `/v1/ping`
+answered 401 without a token, and Docker's own `HEALTHCHECK` moved from unhealthy to `healthy` across
+that transition. Its probe was driven negative five ways — the 401 route, a dead port, a wrong trust
+anchor, a missing anchor, and an HTTP/1.1 request against the `Http2`-only 5111 — and all five failed it.
+A deliberately unwritable storage directory made the process **refuse to start and terminate**, which is
+the fail-fast posture surviving as fail-fast.
+
+Those two runs are also what fix the probe idiom for the remaining images: the runtime base carries
+`openssl` and neither `curl` nor `wget`, both measured on the image, so a probe may only use what the
+image actually ships — and **all four definitions now use the same `openssl s_client` pipeline and install
+nothing**, Persistence having installed `curl` in an earlier revision and no longer doing so, for the
+reason §10.3 records. **The Gateway and DataServices definitions have not been built here.**
 
 **The multi-service bring-up remains unexercised, and that is the claim that matters most.** No
 `orchestration/docker-compose.yml` exists, so the health-condition chain that reports Gateway healthy only
 once its three upstreams are has **never** been run, and the four `depends_on` conditions have no
-expression anywhere in the tree. One image passing its own probe says nothing about that chain. When the
-manifest is authored, correctness for the chain will rest on manifest review plus the CI pipeline; naming
-that mechanism is not the same as reporting it has run.
+expression anywhere in the tree. Two images passing their own probes say nothing about that chain. When
+the manifest is authored, correctness for the chain will rest on manifest review plus the CI pipeline;
+naming that mechanism is not the same as reporting it has run.
 
 **What *was* exercised**, in this repository: the per-service restore, release build and
 coverage-collecting test path, for every one of the four services. All ten test projects build and pass —

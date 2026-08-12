@@ -50,8 +50,9 @@ work **verbatim, from a clean checkout, for each of the four services independen
 > the runtime claims it still does **not** make.
 >
 > What the command does **not** prove is anything about a running system: it builds and tests each
-> service **in process**, so no image has been built from it, no service has been started, and no request
-> has crossed a network boundary. §8.3 and §13 hold that line at their own points of use.
+> service **in process**, so no image is built by it, no service is started by it, and no request crosses
+> a network boundary because of it. Two images have separately been built and run — see §1.3 — and that is
+> a different exercise from this command. §8.3 and §13 hold that line at their own points of use.
 
 **Read §2 before anything else.** It carries two findings that were observed directly and that break the
 build if a reader misses them. A reader who stops after the first screen must still have seen both.
@@ -192,8 +193,9 @@ longer that nothing exists to bring up — **all four container definitions are 
 `.github/workflows/ci.yml` (§10)** — but that nothing assembles them into a stack:
 `orchestration/docker-compose.yml` and `orchestration/README.md` are absent, so the §8 bring-up and its
 ordered health probes have not been exercised and the health-condition chain has no expression anywhere in
-the tree. One image, Security, was built and run and reached Docker health `healthy`; the other three have
-not been built here.
+the tree. Two images, Security and Persistence, were built and run and reached Docker health `healthy`
+([`ARCHITECTURE.md`](ARCHITECTURE.md) §10.6 records both runs, including the five ways the Persistence
+probe was driven negative); Gateway and DataServices have not been built here.
 
 **Container correctness for the stack is therefore not asserted, by review or by anything else.** Once the
 Compose manifest is authored, correctness will rest on definition-and-manifest review plus the CI pipeline
@@ -206,8 +208,11 @@ service test drives its own service **in process**, through `WebApplicationFacto
 handler behaviour, the status translation, the capability gate, the reserved routes and token issuance are
 all covered by passing tests. What an in-process host does **not** exercise is the deployed topology: no
 TLS handshake, no ALPN protocol negotiation, no real gRPC channel, no client-certificate presentation, no
-container health probe and no Compose `depends_on` ordering. **No request in this system has crossed a
-real network boundary between two services.**
+container health probe and no Compose `depends_on` ordering. Two of those gaps have been closed outside the
+test suites, by the two container runs of [`ARCHITECTURE.md`](ARCHITECTURE.md) §10.6 rather than by any
+test: a real TLS handshake with chain verification, and a real container health probe reaching `healthy`
+and driven negative. The rest stand. **No request in this system has crossed a real network boundary
+between two services.**
 
 The distinction matters and is held throughout: §1.2 is claimed and quotes its output, §1.3 is disclaimed.
 
@@ -848,9 +853,10 @@ builds Debug. Add `-c Release` when that matters.
 
 > **ALL FOUR `Dockerfile`s ARE AUTHORED.** `gateway-service`, `dataservices-service`,
 > `persistence-service` and `security-service` are each a real file a reader can open, and the probe table
-> below reports what each one actually does rather than what it should do. **Exactly one image — Security's
-> — has been built and started here** (§1.3); the other three have not, so nothing in this section is a
-> report of their runtime behaviour. §7.2 in particular is a constraint the manifest and the definitions
+> below reports what each one actually does rather than what it should do. **Two images — Security's and
+> Persistence's — have been built and started here** (§1.3); Gateway's and DataServices' have not, so
+> nothing in this section is a report of their runtime behaviour. §7.2 in particular is a constraint the
+> manifest and the definitions
 > have to agree on, and it is the one most easily got wrong — all four definitions are authored against it,
 > with every `COPY` path repository-root-relative.
 
@@ -868,19 +874,19 @@ TLS stack depends on it. Both facts were measured on `mcr.microsoft.com/dotnet/a
 assumed. A probe that expects `curl` without installing it can never succeed, the `service_healthy`
 condition of §8 can never be satisfied, and the readiness gate silently never opens.
 
-**Installing a tool is one answer and it is not the only one, and the four definitions each chose by
-whether the listener terminates TLS:**
+**Installing a tool is one answer and it is not the one taken: every listener in this estate terminates
+TLS, so all four definitions build their probe from what the image already ships and install nothing.**
 
 | Definition | Probe mechanism | Installs anything? | Why that choice |
 | --- | --- | --- | --- |
 | `gateway-service` | `openssl s_client` piped a hand-written request, matching the status line | **No** | The 5105 ingress is **TLS-terminated**, so `/dev/tcp` cannot perform the handshake and a probe built that way would fail permanently. `openssl`, `bash` and `printf` are already in the image |
 | `dataservices-service` | `openssl s_client` piped a hand-written request, reading the first response line | **No** | The 5102 listener is **TLS-terminated** and `/dev/tcp` cannot perform a handshake — a probe built that way would fail permanently. `openssl` 3.0.13 is already present, so the handshake and the request need nothing installed |
 | `security-service` | `openssl s_client`, the same way | **No** | The 5104 listener is TLS too. An earlier revision installed `curl` here; because the base image is referenced by FAMILY tag its package set advances with every security rebuild, so that dependency's version **cannot** be pinned without the build failing the moment the archive supersedes it — which collides with the baseline of §1.1. The definition documents the pipeline clause by clause, including why `-quiet` is required (it implies `-ign_eof`, without which the response is never read) and why no SNI is sent (the target is an IP literal) |
-| `persistence-service` | `curl --cacert` | **Yes** — `curl` only, in a single layer with the apt lists removed, before the `USER` switch | The 5101 listener is TLS; this is the one definition that accepts an install rather than working around it, and having `curl` it verifies the chain the same way the other three do |
+| `persistence-service` | `openssl s_client`, the same way, against 5101 | **No** | Both of its listeners are TLS. An earlier revision installed `curl` here and it was **withdrawn** for exactly the reason recorded against Security one row above: an unpinnable apt version against a family-tagged base is a floating dependency, which collides with the baseline of §1.1. It also removed a runtime package from the one image in the system that holds a storage provider. Its `Http2`-only gRPC listener on 5111 is deliberately **not** probed — it would answer an HTTP/1.1 request with 400, and the host binds both endpoints or refuses to start, so 5101 answering already proves the process is serving |
 
 A compose manifest should **inherit** these `HEALTHCHECK` declarations rather than declare a `curl`-based
-one of its own, which would reintroduce the missing-tool problem for three of the four images. Every one of
-the four verifies the presented chain against the mounted anchor; none passes `-k` or `--insecure`, because
+one of its own, which would reintroduce the missing-tool problem for every one of the four images. Every one
+of the four verifies the presented chain against the mounted anchor; none passes `-k` or `--insecure`, because
 a probe that skips verification reports healthy for a listener the rest of the stack cannot talk to.
 [`ARCHITECTURE.md`](ARCHITECTURE.md) §10.3 carries the same table.
 
@@ -1624,10 +1630,12 @@ legacy document itself is not edited.
 
 **Not claimed, because it was not exercised:**
 
-- **That any service starts, or serves a request, in a container.** Every one of the four **compiles**, and
-  its tests and coverage gate pass, and its image **builds** — those three are claimed above and in §8.2.
-  What is not claimed is runtime behaviour inside a container: no service was started from its image and
-  no request was served through one here.
+- **That the Gateway or DataServices service starts, or serves a request, in a container.** Every one of
+  the four **compiles**, and its tests and coverage gate pass, and its definition is authored — those are
+  claimed above and in §8.2. Container runtime behaviour is claimed for **two** of the four and for no
+  more: Security and Persistence were each built, started and driven, as
+  [`ARCHITECTURE.md`](ARCHITECTURE.md) §10.6 records. **Gateway's and DataServices' images have never been
+  built here**, so no layer, probe or non-root switch in either has been observed to work.
 - **The Compose bring-up, and any review of it.** `orchestration/docker-compose.yml` **does not exist**;
   only `orchestration/.env.example` does. So the §8 Compose path could not be run and there was nothing to
   review. All four `Dockerfile`s now exist, which is what makes the definition review of §8.2 possible at
@@ -1643,15 +1651,18 @@ legacy document itself is not edited.
   exercised.
 - **That any image has been published.** The image job builds all four and pushes them to the GitHub
   container registry only on a push to the default branch, authenticated with the automatically
-  provisioned token. No push has occurred from here, and no image build is claimed beyond the one §1.3
-  records: Security's image was built and started and reached Docker health `healthy`. The other three
-  definitions — including `services/persistence-service/Dockerfile`, whose runtime stage declares a
-  non-root user, a volume and a TLS health probe against its `Rest` endpoint on 5101 while `EXPOSE`ing
-  both 5101 and the `Grpc` endpoint on 5111 — are reviewed rather than built here.
-- **That any service has served a request across a network.** Every service test drives its host **in
-  process**, so no test performs a TLS handshake, ALPN negotiation, real gRPC channel setup or
-  client-certificate exchange. Nothing in this document should be read as evidence about a deployed
-  topology (§5.5, §1.3).
+  provisioned token. No push has occurred from here, and no image build is claimed beyond the two §1.3
+  records: Security's and Persistence's images were each built and started and reached Docker health
+  `healthy`. `services/persistence-service/Dockerfile` — whose runtime stage declares a non-root user, a
+  volume and a TLS health probe against its `Rest` endpoint on 5101 while `EXPOSE`ing both 5101 and the
+  `Grpc` endpoint on 5111 — is therefore built and exercised rather than only reviewed; the Gateway and
+  DataServices definitions are reviewed rather than built here.
+- **That any service has served a request across a network *in a test*.** Every service test drives its
+  host **in process**, so no test performs a TLS handshake, ALPN negotiation, real gRPC channel setup or
+  client-certificate exchange. Requests have crossed a boundary only in the two container runs of
+  [`ARCHITECTURE.md`](ARCHITECTURE.md) §10.6 — over TLS to a published port, with the chain verified
+  against the local CA — and a single container answering on loopback is not a deployed topology. Nothing
+  in this document should be read as evidence about one (§5.5, §1.3).
 - **Characterization parity.** `characterization/` does not exist, so no paired legacy and .NET recording
   has been captured and no parity comparison has been performed (§1.3).
 - Anything about build or runtime performance. No such objective is published in this repository, so none

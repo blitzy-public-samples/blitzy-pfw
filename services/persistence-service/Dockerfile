@@ -7,12 +7,12 @@
 #  sibling services carries its own Dockerfile; none of them is copied, restored or built here, and
 #  nothing reaches Persistence except DataServices, over gRPC, through the published contracts.
 #
-#  WHY THIS FILE IS THE LAST OF THE FOUR TO EXIST. It is the container-image half of the per-service
-#  CI matrix: .github/workflows/ci.yml builds one image per in-scope service per build, which it
-#  cannot do uniformly while one of the four has no Dockerfile. The AAP names
-#  services/persistence-service/Dockerfile as a create target, so this is that target rather than a
-#  new one, and its shape is taken from the Security sibling element for element because both
-#  services terminate TLS on their own listener.
+#  WHY THIS FILE EXISTS. It is the container-image half of the per-service CI matrix:
+#  .github/workflows/ci.yml builds one image per in-scope service per build, which it can only do
+#  uniformly while every one of the four services carries a definition of its own. The AAP names
+#  services/persistence-service/Dockerfile as a create target, so this is that target rather than a new
+#  one, and its shape follows the Security sibling element for element: both services terminate TLS on
+#  their own listener, and both probe it with the openssl the runtime image already ships.
 #
 #  LEGACY REFERENCE - READ FOR BUILD INTENT ONLY, NEVER TRANSLATED
 #  The two PowerBuilder project objects both declare `EXE:pfw.exe`: ONE fused executable linking 28
@@ -75,6 +75,11 @@
 #      volume possible at all.
 #    * Nothing for a deferred capability. DesignSystem, Documents, Integration and ScriptBridge have
 #      no stage, layer, label, environment variable or build input here.
+#    * No INSTALLED PACKAGE in the runtime stage, and in particular no SQLite package and no probe
+#      tool. The readiness probe is built from what the base image already ships and the storage
+#      engine arrives with the published assemblies; the runtime stage below reaches the network
+#      never and runs apt never. Its own comment carries the full reasoning, because that is the
+#      line at which a maintainer is most likely to add one.
 #    * No SQL Server or Oracle client, driver or connection string. Both DBMS behaviours this service
 #      preserves are PURE STRING TRANSFORMS in the paging rewriters, unit-tested with no instance of
 #      either kind, and no schema, connection string or DDL for either exists anywhere in the
@@ -168,30 +173,33 @@ RUN dotnet publish services/persistence-service/PowerFramework.Persistence/Power
 # --------------------------------------------------------------------------------------------------
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 
-# curl, for the readiness probe below and for nothing else.
+# NOTHING IS INSTALLED IN THIS STAGE, AND THIS PARAGRAPH SAYS WHY. It sits here deliberately, because
+# this is precisely the line at which a future maintainer reaches for a package manager.
 #
-# This base image ships neither curl nor wget. Every listener in this estate terminates TLS, so a raw
-# socket cannot complete a handshake and bash /dev/tcp cannot serve as a probe here. The Gateway,
-# DataServices and Security siblings answer that with the openssl s_client pipeline the base image does
-# ship; this definition installs one package instead and probes with curl, which is the one place in the
-# four that accepts an install rather than working around it - the chain is verified either way, and the
-# curl form is the readable one. Without a usable probe a compose
-# `depends_on: condition: service_healthy` gate on this service could never be satisfied.
+# MEASURED ON mcr.microsoft.com/dotnet/aspnet:10.0 RATHER THAN ASSUMED. The image carries
+# /usr/bin/openssl (3.0.13), /usr/bin/bash, /usr/bin/timeout and /usr/bin/head, and it carries NEITHER
+# curl NOR wget. The readiness probe at the foot of this file is built from that set alone, so no
+# package is required for it; the probe's own comment documents the pipeline clause by clause.
 #
-# Kept as small as the requirement allows: one package, no recommended extras, and the package lists
-# removed in the SAME layer so nothing is cached into the image. Installed BEFORE the USER switch
-# below because apt-get needs root; everything after that line runs unprivileged.
+# AN EARLIER REVISION OF THIS FILE INSTALLED curl FOR THE PROBE, AND THAT WAS WITHDRAWN. The base image
+# is referenced by FAMILY tag on purpose, so that a security-patched rebuild picks the fix up - which
+# means its package set advances. An apt version pinned against a moving base fails the build the moment
+# the archive supersedes it, and an unpinned one is a floating dependency, which collides with the
+# baseline this refactor holds itself to: no floating version, no wildcard and no "latest" anywhere. The
+# identical revision was made and withdrawn for the identical reason in the Security definition. All
+# four images now share one probe idiom and install nothing, which also removes a runtime package from
+# the one service in the system that holds a storage provider.
 #
-# The apt version is deliberately not pinned, and that is a considered decision rather than an
-# oversight. The base image is referenced by FAMILY tag so its package set advances with every
-# security-patched rebuild; pinning one apt version against a moving base fails the build the moment
-# the archive supersedes that version. The reproducibility that matters is pinned where it can be:
-# the SDK in global.json and every package version in Directory.Packages.props.
-# hadolint ignore=DL3008
-RUN apt-get update \
-  && apt-get install --yes --no-install-recommends curl \
-  && apt-get clean \
-  && rm -rf /var/lib/apt/lists/*
+# NO SQLite PACKAGE, SPECIFICALLY - the tempting one, because this is the only service with a storage
+# provider, and wrong twice over. The native engine is already placed beside the managed assemblies by
+# the centrally pinned SQLitePCLRaw.bundle_e_sqlite3 reference, so an apt libsqlite3 would be redundant;
+# and a second engine in the image risks the process binding one that parity was never measured against.
+# Neither legacy sqlite3 binary is shipped either (constraint C-C), and no SQLCipher package appears
+# anywhere: encrypted-database parity is out of Phase 1 scope.
+#
+# NOT AN ALPINE OR OTHER musl VARIANT EITHER. That bundle's native asset for this platform is linux-x64
+# against glibc; swapping the tag for a musl base silently changes the ABI the engine needs and would
+# demand a musl-targeted bundle to match it. The mandated tag stays.
 
 WORKDIR /app
 
@@ -282,38 +290,69 @@ USER $APP_UID
 
 # READINESS PROBE - THE ANONYMOUS GET /health OVER TLS, AND NOTHING AUTHENTICATED
 #
-# /health is anonymous on all four services; /v1/ping requires a bearer token and answers 401
-# without one, so a probe must never point at it. Gateway reports healthy only once this service,
-# DataServices and Security all do, so this probe is one of the three gates that readiness chain
-# rests on.
+# /health is anonymous on all four services; /v1/ping requires a bearer token and answers 401 without
+# one, so a probe must never point at it. Gateway reports healthy only once this service, DataServices
+# and Security all do, so this probe is one of the three gates that readiness chain rests on. A compose
+# manifest should INHERIT this declaration rather than write one of its own - a manifest-side probe
+# written with curl would reintroduce the missing-tool problem for every one of the four images.
 #
-# --cacert AND NOT --insecure, and the reasoning that once favoured --insecure is what settles it. A
-# self-check inside the container has no party to authenticate, true - but the thing this probe gates is
-# not "did a socket answer", it is the Compose `depends_on: condition: service_healthy` edge that lets
-# DataServices start calling this service. A listener presenting a certificate the REST OF THE STACK
-# rejects is not ready by that definition, and --insecure is precisely the flag that hides it: the probe
-# would go green while every real caller failed name or chain validation. Verifying against the same
-# mounted anchor every consumer uses is what makes a green probe mean what the gate needs it to mean, and
-# it bakes nothing into the image - the anchor is a read-only mount named by one variable, exactly as the
-# three sibling images name it. docs/ARCHITECTURE.md 4.2 states the rule this now follows: -k must not
-# appear in a readiness gate.
+# BUILT FROM WHAT THE IMAGE ALREADY SHIPS: openssl performs the handshake and the request is written by
+# hand. Nothing is installed and nothing is skipped, and this is the same pipeline the Gateway,
+# DataServices and Security definitions use, so one idiom covers all four.
 #
-# --fail turns anything that is not a success status into a failed probe, which matters because
-# /health answers 503 for Degraded and Unhealthy alike rather than refusing the connection.
+# A RAW /dev/tcp SOCKET IS NOT AN ALTERNATIVE HERE. Both of this service's listeners terminate TLS, so a
+# socket redirection writes plaintext bytes into a TLS endpoint: it never produces a status line, so it
+# fails PERMANENTLY rather than intermittently. A probe that can only ever fail leaves a compose
+# `depends_on: condition: service_healthy` gate shut for ever, which from the outside is
+# indistinguishable from a service that never started.
 #
-# 5101 is written literally rather than read from a variable, because the port is fixed by the
-# published contract - appsettings.json, docs/ARCHITECTURE.md and orchestration/.env.example all
-# state it - and introducing a variable only this probe would read means adding configuration
-# surface nothing else consumes. A deployment that moves the listener through Kestrel's own
-# configuration has to move this probe with it.
+# THE ANCHOR IS VERIFIED RATHER THAN SKIPPED, and that is the whole value of the probe. What it gates is
+# not "did a socket answer" but the edge on which DataServices begins calling this service. A listener
+# presenting a certificate the REST OF THE STACK rejects is not ready by that definition, and
+# -noverify - curl's -k by another name - is exactly the flag that would hide it: the probe would go
+# green while every real caller failed name or chain validation. docs/ARCHITECTURE.md 4.2 states the
+# rule this follows. The anchor is read from INTERNAL_TLS_TRUSTED_CA_PATH with the documented mount
+# point as its default, so no path and no trust material is baked into this image; an anchor that is not
+# mounted fails the probe, which is the truthful answer for a deployment whose trust half was forgotten
+# rather than an inconvenience to work around. -verify_return_error is what makes a verification failure
+# FATAL: without it s_client prints the error and carries on, so the probe could still read a 200 from a
+# listener whose chain it had just rejected. -verify_quiet beside it only silences the per-certificate
+# chatter and changes no verdict.
 #
-# The start period is unhurried: this host validates its configuration, opens its database and
-# applies pending migrations before it answers anything, and failures inside that window do not
-# count against the retry budget.
-HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
-  CMD ["/bin/bash", "-c", "exec curl --fail --silent --show-error --max-time 4 --output /dev/null \
-    --cacert \"${INTERNAL_TLS_TRUSTED_CA_PATH:-/run/secrets/internal-tls/ca.crt}\" \
-    --resolve localhost:5101:127.0.0.1 https://localhost:5101/health"]
+# CLAUSE BY CLAUSE, because every one of them is load-bearing:
+#   -quiet             implies -ign_eof. Without it s_client tears the connection down the instant
+#                      stdin reaches EOF, which is BEFORE the response arrives; the probe then reads
+#                      nothing and fails against a perfectly healthy service.
+#   Connection: close  lets the server end the session, so the pipeline terminates on its own.
+#   -verify_hostname   name validation is part of what is being checked, so the listener is addressed
+#   and -servername    by a name its certificate has to cover. The certificate recipe in
+#                      docs/ARCHITECTURE.md 9.3.1 carries DNS:localhost for exactly this, and
+#                      connecting to 127.0.0.1 keeps the probe on the loopback interface with no DNS.
+#   head -n 1          the status line and nothing else, matched on ' 200 ' WITH the surrounding spaces
+#                      so a 200 appearing inside a reason phrase cannot pass. A refused connection, a
+#                      failed handshake and a silent socket all fail.
+#   timeout 5          bounds a hung handshake from the inside. The HEALTHCHECK --timeout below is set
+#                      STRICTLY LARGER so that this guard, and not Docker's own kill, is what ends a
+#                      hung attempt: equal values race, and Docker winning that race replaces a clean
+#                      non-zero exit with a killed process.
+#
+# 5101 is written literally rather than read from a variable, because the port is fixed by the published
+# contract - appsettings.json, docs/ARCHITECTURE.md and orchestration/.env.example all state it - and a
+# variable only this probe would read is configuration surface nothing else consumes. A deployment that
+# moves the listener through Kestrel's own configuration has to move this probe with it.
+#
+# THE gRPC LISTENER ON 5111 IS DELIBERATELY NOT PROBED. It is configured Http2-only, so it would answer
+# this HTTP/1.1 request with 400; and the host binds both endpoints or refuses to start, so 5101
+# answering already proves the process is serving. Probing both would add a second way to fail without
+# adding anything it can detect.
+#
+# The start period is unhurried because this host does real work before it answers anything: it
+# validates its bound configuration, refuses a storage directory that resolves inside the read-only
+# legacy tree, creates that directory and proves it writable by writing and removing a probe file,
+# resolves every runtime seam it executes SQL through, and loads its trust anchor. Failures inside that
+# window do not count against the retry budget.
+HEALTHCHECK --interval=15s --timeout=10s --start-period=30s --retries=5 \
+  CMD ["/bin/bash", "-c", "line=$(printf 'GET /health HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' | timeout 5 openssl s_client -quiet -verify_quiet -verify_return_error -verify_hostname localhost -CAfile \"${INTERNAL_TLS_TRUSTED_CA_PATH:-/run/secrets/internal-tls/ca.crt}\" -servername localhost -connect 127.0.0.1:5101 2>/dev/null | head -n 1); case $line in *' 200 '*) exit 0 ;; *) exit 1 ;; esac"]
 
 # The framework-dependent application assembly, invoked by name. PowerFramework.Persistence.dll is
 # fixed by the project file name, because PowerFramework.Persistence.csproj declares no AssemblyName

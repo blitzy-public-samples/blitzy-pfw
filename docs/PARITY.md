@@ -206,18 +206,24 @@ longer that nothing exists to bring up. The four service applications all have e
 under `dotnet run`, **all four container definitions are authored**, and so is
 `.github/workflows/ci.yml`. What is missing is the thing that ASSEMBLES them:
 `orchestration/docker-compose.yml` and `orchestration/README.md` are absent, so the health-condition chain
-has no expression in the tree, and **three of the four images have not been built here**. Docker was additionally not installed in the
-environment where this migration was planned, so the Compose bring-up and its ordered health probes could
-not have been exercised in any case.
+has no expression in the tree, and **two of the four images have not been built here**. Docker was
+additionally not installed in the environment where this migration was planned, so the Compose bring-up
+and its ordered health probes could not have been exercised there in any case.
 
 This matters more in this document than in any other, because the capture rule in
 [§4.2](#42-the-rule-stated-in-full) is expressed in terms of a Docker volume. So the position must be
-exact: **the rule is authoritative, and the environment it presumes has never been stood up here** — and
-it cannot be until the missing container definition and the Compose manifest exist. Container correctness
-is **not asserted at present**: definition-and-manifest review plus CI is the intended assurance
-mechanism once those artifacts are authored, not a step that has been taken,
+exact: **the rule is authoritative, and the multi-service environment it presumes has never been stood up
+here** — and it cannot be until the Compose manifest exists. One relevant half HAS since been exercised,
+and stating it is not the same as claiming the rule was honoured: the Persistence image was built and run
+against a **fresh named volume**, which confirmed that Docker seeds such a volume from the image directory
+as `1654:1654` so the non-root process can write its database, and that `/health` answers 503 naming an
+unprovisioned database and 200 once the schema is applied to that volume
+([`ARCHITECTURE.md`](ARCHITECTURE.md) §10.6 records the run in full). That establishes the volume seam a
+capture would use; it does not constitute a capture, and no comparison is claimed from it. Container
+correctness for the stack as a whole is therefore **still not asserted**: definition-and-manifest review
+plus CI is the intended assurance mechanism once the manifest is authored, not a step that has been taken,
 and
-[R4](#r4--the-container-set-is-incomplete-no-image-has-been-built-and-no-bring-up-has-been-reviewed)
+[R4](#r4--nothing-assembles-the-container-set-so-no-multi-service-bring-up-has-been-reviewed)
 carries that as a tracked risk rather than a footnote.
 
 **No paired recording exists, therefore no parity result exists.** This is the claim that survives the
@@ -1544,10 +1550,12 @@ from the storage side.
 
 `orchestration/docker-compose.yml` and `orchestration/README.md` do not exist. All four container
 definitions **do** — `gateway-service`, `dataservices-service`, `persistence-service` and
-`security-service` — and so does `.github/workflows/ci.yml`. One image, Security, was built and run and
-reached Docker health `healthy`; for the other three **`docker build` has not been run here**, so no
-layer, no `HEALTHCHECK` and no non-root switch in them has been observed to work. Docker was additionally not installed in the environment where this migration was planned, so the
-Compose bring-up and its ordered health probes **were not run** and could not have been.
+`security-service` — and so does `.github/workflows/ci.yml`. Two images, Security and Persistence, were
+built and run and reached Docker health `healthy`; for the other two — Gateway and DataServices —
+**`docker build` has not been run here**, so no layer, no `HEALTHCHECK` and no non-root switch in them has
+been observed to work. Docker was additionally not installed in the environment where this migration was
+planned, so the Compose bring-up and its ordered health probes **were not run** and could not have been
+there.
 
 **Mitigation.** Definition-and-manifest review plus CI is the **intended** assurance mechanism for that
 path once the remaining artifacts are authored. It is not a step that has been taken: the manifest half has
@@ -1565,8 +1573,11 @@ exercised is the per-service restore, release build and coverage-collecting test
 passing with zero warnings and zero errors and producing a Cobertura report — and that run was against a
 **throwaway skeleton**, not against these services (§1.4, §8, and [`BUILD.md`](BUILD.md) §13, which is the
 authority for the distinction). Separately, this repository's own twenty projects restore audit-clean and
-build with zero warnings and zero errors, and all ten test suites pass; **no service has been started in a
-container**, and none has served a request across a network.
+build with zero warnings and zero errors, and all ten test suites pass. **Two services have since been
+started in a container and have served requests over a mapped port** — Security and Persistence, the
+latter recorded in [`ARCHITECTURE.md`](ARCHITECTURE.md) §10.6 — and neither run retires this risk, because
+a single container answering its own probe is not a stack and mounts none of the dependency conditions
+this risk is about.
 
 ### R5 — There is no authoritative legacy build definition to translate
 
