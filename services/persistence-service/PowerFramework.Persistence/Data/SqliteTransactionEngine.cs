@@ -507,19 +507,44 @@ namespace PowerFramework.Persistence.Data
 
         /// <inheritdoc/>
         /// <remarks>
-        /// ONLY THE DIALECT AND THE AUTO-COMMIT CHOICE ARE RETAINED, AND DELIBERATELY ONLY THOSE. The
-        /// descriptor also carries the server, the database, the log identity, the log password, the
-        /// connection parameters, the lock level and the user parameters. None of them has any meaning
-        /// for a file-backed store whose path is owned by <see cref="SqliteConnectionFactory"/> and
-        /// composed from configuration, so none is copied - which keeps the credential out of this
-        /// object's state entirely rather than merely unused (constraint C-F). The two DBParm flags the
-        /// task layer needs, bind-disabling and N-char binding, are read by the task layer from the
-        /// descriptor itself and are not this engine's to interpret.
+        /// <para>
+        /// ONLY THE DIALECT IS RETAINED, AND DELIBERATELY ONLY THAT. The descriptor also carries the
+        /// server, the database, the log identity, the log password, the connection parameters, the lock
+        /// level and the user parameters. None of them has any meaning for a file-backed store whose path
+        /// is owned by <see cref="SqliteConnectionFactory"/> and composed from configuration, so none is
+        /// copied - which keeps the credential out of this object's state entirely rather than merely
+        /// unused (constraint C-F). The two DBParm flags the task layer needs, bind-disabling and N-char
+        /// binding, are read by the task layer from the descriptor itself and are not this engine's to
+        /// interpret.
+        /// </para>
+        /// <para>
+        /// 🔴 <b>THE DESCRIPTOR'S <c>autocommit</c> IS NOT ONE OF THEM, AND ADOPTING IT WAS A SILENT LOST
+        /// UPDATE.</b> The oracle's descriptor transfer onto a transaction object is the SEVEN-FIELD copy
+        /// - dbms, servername, database, logid, logpass, dbparm and lock
+        /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L343-L354</c>] - and it touches
+        /// NEITHER <c>autocommit</c> NOR <c>userparm</c>. The flag never reaches a transaction object in
+        /// the oracle at all, because the task layer ERASES it first:
+        /// <c>_transData.AutoCommit = false</c> under the comment 擦除连接目标无关的参数 - erase
+        /// parameters irrelevant to the connection target
+        /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L118-L119</c>].
+        /// </para>
+        /// <para>
+        /// <b>WHAT ADOPTING IT COST, MEASURED RATHER THAN REASONED.</b> The pool keys its reference-counted
+        /// entries on WHOLE-descriptor equality
+        /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru</c>, <c>of_addref</c>], so a
+        /// session opened with <c>autocommit = true</c> and the tasks created ON that session - which
+        /// acquire with the ERASED descriptor - resolved to two DIFFERENT pool entries and therefore two
+        /// different connections. The caller's <c>Commit</c> reached the auto-commit engine and was
+        /// refused by the oracle's own guard [<c>n_cst_thread_trans.sru:L185-L191</c>] while its write sat
+        /// in the OTHER engine's explicit transaction, which the lease release then rolled back: an update
+        /// that answered <c>rowsUpdated: 1</c> while storage still held the old row, with no diagnostic
+        /// anywhere. Per-session auto-commit is moved by <c>SetAutoCommit</c>
+        /// [<see cref="TrySetAutoCommit(bool)"/>], which is the only route the oracle has for it.
+        /// </para>
         /// </remarks>
         public void ApplyConnectionFields(in TransactionData descriptor)
         {
             Dbms = descriptor.Dbms;
-            AutoCommit = descriptor.AutoCommit;
 
             // THE PRESENCE BIT, NOT THE CREDENTIAL. See CredentialRefusedText: a supplied password is
             // refused at connect rather than silently discarded, and answering the presence question

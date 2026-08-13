@@ -757,6 +757,181 @@ public sealed class JwksShapeTests
     }
 
     /// <summary>
+    /// A request arriving on an origin the deployment DECLARED is answered with that origin's addresses,
+    /// while the published identity stays the configured issuer.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// <para>
+    /// WHAT WENT WRONG, AS AN OPERATIONAL FACT RATHER THAN A CODE ONE. One service is reachable on two
+    /// addresses: the three internal verifiers arrive on the Compose service name, which is also the
+    /// issuer, while an operator, the end-to-end suite and any third-party consumer arrive through the
+    /// published host port. Composing both addresses from the issuer alone answered that second group with
+    /// a <c>jwks_uri</c> naming a host that resolves ONLY inside the Compose network - so the document
+    /// parsed, looked correct, and a stock bearer handler following it failed to RESOLVE the address
+    /// rather than being told anything was wrong. That is why it survived review: nothing in the response
+    /// is malformed.
+    /// </para>
+    /// <para>
+    /// THIS ROW AND ITS SIBLING ABOVE ARE THE TWO HALVES OF ONE INVARIANT, AND NEITHER IS SAFE ALONE. The
+    /// sibling asserts that an origin the deployment did NOT declare is never published - the anti-forgery
+    /// half. This one asserts that an origin the deployment DID declare is published - the reachability
+    /// half. A change satisfying either one alone is a regression: publish nothing but the issuer and
+    /// host-side consumers cannot fetch keys; publish whatever arrives and any caller chooses the key
+    /// material the whole system trusts.
+    /// </para>
+    /// <para>
+    /// THE IDENTITY IS ASSERTED UNCHANGED IN THE SAME ROW, deliberately. All three consuming services
+    /// compare the <c>iss</c> claim of every token against the configured issuer byte for byte, so an
+    /// implementation that moved the identity along with the locations would break every one of them -
+    /// and would pass an assertion that only checked the two addresses.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ADeclaredPublishedOriginIsAdvertisedToAConsumerArrivingOnItAsync()
+    {
+        // TWO CONSTRAINTS DECIDE THIS VALUE AND NEITHER IS INCIDENTAL. The scheme is `http` because the
+        // in-process test host serves plaintext, so that is the scheme the request genuinely arrives on -
+        // the sibling stock-retrieval row records the same fact by setting `RequireHttps = false`. The
+        // host is `localhost` because this service's own `AllowedHosts` admits three names and host
+        // filtering refuses anything else BEFORE any route runs, which is a separate control asserted by
+        // its own row below. The PORT is distinctive and is not the issuer's, so a document still composed
+        // from the issuer fails the address assertions rather than coincidentally matching them - which is
+        // exactly the shape of the real defect, where only the host differed.
+        const string DeclaredOrigin = "http://localhost:7443";
+
+        await using SecurityAppFactory factory = new()
+        {
+            ShapeOptions = options => options.PublishedOrigins.Add(DeclaredOrigin),
+        };
+
+        SecurityOptions configured = factory.ResolveSecurityOptions();
+
+        using HttpClient client = factory.CreateClient();
+
+        // The request ARRIVES on the declared origin. Only the authority is expressible on an in-process
+        // client, which together with the scheme is exactly what origin matching reads.
+        client.DefaultRequestHeaders.Host = "localhost:7443";
+
+        using HttpResponseMessage response = await client.GetAsync(
+            new Uri(configured.OpenIdConfigurationPath, UriKind.Relative),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        using JsonDocument document = JsonDocument.Parse(
+            await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+
+        // THE LOCATIONS MOVED to the declared origin.
+        Assert.Equal(
+            DeclaredOrigin + configured.JwksPath,
+            document.RootElement.GetProperty(KeySetAddressMember).GetString());
+
+        Assert.Equal(
+            DeclaredOrigin + configured.TokenEndpointPath,
+            document.RootElement.GetProperty(TokenEndpointMember).GetString());
+
+        // THE IDENTITY DID NOT.
+        Assert.Equal(
+            configured.Issuer,
+            document.RootElement.GetProperty(IssuerMember).GetString());
+    }
+
+    /// <summary>
+    /// With an origin declared, a request arriving on some OTHER origin still receives the canonical
+    /// issuer-composed document.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE FALLBACK IS THE ANTI-FORGERY PROPERTY RESTATED FOR THE CONFIGURED CASE, and it needs its own
+    /// row because the sibling above configures NO origin and therefore cannot distinguish "matched
+    /// nothing" from "selection is not implemented". Here selection is demonstrably live - the row above
+    /// proves it - so an unmatched origin taking the issuer is a real assertion about the matching rule
+    /// rather than about the feature being off.
+    /// </para>
+    /// <para>
+    /// THE UNMATCHED ORIGIN IS A NEAR-MISS ON PURPOSE: the same host as the declared entry with a
+    /// different port. Origin matching includes the port, so a rule that compared hosts alone would
+    /// publish the declared address here and fail this row. That is the specific loosening a future
+    /// simplification would reach for.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AnUndeclaredOriginFallsBackToTheCanonicalIssuer()
+    {
+        SecurityOptions options = CreateProbeOptions(
+            SecurityAppFactory.CreateSigningKeyMaterial(ProbeKeySizeInBits));
+
+        options.PublishedOrigins.Add("https://published.example:7443");
+
+        using SigningKeyProvider provider = new(Options.Create(options));
+
+        Ok<ProviderMetadataDocument> metadata = Assert.IsType<Ok<ProviderMetadataDocument>>(
+            JwksEndpoints.PublishProviderMetadata(
+                provider,
+                Options.Create(options),
+                CreateRequestArrivingOn("https://published.example:9999"),
+                NullLoggerFactory.Instance));
+
+        ProviderMetadataDocument body = Assert.IsType<ProviderMetadataDocument>(metadata.Value);
+
+        Assert.Equal(options.Issuer + options.JwksPath, body.JsonWebKeySetUri);
+        Assert.Equal(options.Issuer + options.TokenEndpointPath, body.TokenEndpoint);
+        Assert.Equal(options.Issuer, body.Issuer);
+    }
+
+    /// <summary>
+    /// A declared origin spelled with its scheme's DEFAULT port matches a request that omitted the port,
+    /// and the reverse.
+    /// </summary>
+    /// <param name="declared">The origin as the deployment spells it.</param>
+    /// <param name="arrivedOn">The origin the request carries.</param>
+    /// <remarks>
+    /// <para>
+    /// THE DEFAULT PORT IS THE CASE A HAND-BUILT STRING COMPARISON GETS WRONG, which is why both sides of
+    /// the comparison are normalised through the same parser. A proxy fronting this service on 443 is
+    /// declared either way round - <c>https://proxy</c> or <c>https://proxy:443</c> - and a browser or
+    /// client sends <c>Host: proxy</c> with the default port omitted. A comparison on raw text matches one
+    /// spelling and silently falls back on the other, which presents as the original unreachable-key-set
+    /// fault with the configuration apparently correct.
+    /// </para>
+    /// <para>
+    /// A CASE-DIFFERING HOST IS THE THIRD ROW because a host is case-insensitive by specification, so a
+    /// consumer that upper-cases it must not lose the declared address.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("https://proxy.example", "https://proxy.example:443")]
+    [InlineData("https://proxy.example:443", "https://proxy.example")]
+    [InlineData("https://proxy.example", "https://PROXY.example")]
+    public void ADeclaredOriginMatchesEveryEquivalentSpellingOfTheSameOrigin(
+        string declared,
+        string arrivedOn)
+    {
+        SecurityOptions options = CreateProbeOptions(
+            SecurityAppFactory.CreateSigningKeyMaterial(ProbeKeySizeInBits));
+
+        options.PublishedOrigins.Add(declared);
+
+        using SigningKeyProvider provider = new(Options.Create(options));
+
+        Ok<ProviderMetadataDocument> metadata = Assert.IsType<Ok<ProviderMetadataDocument>>(
+            JwksEndpoints.PublishProviderMetadata(
+                provider,
+                Options.Create(options),
+                CreateRequestArrivingOn(arrivedOn),
+                NullLoggerFactory.Instance));
+
+        ProviderMetadataDocument body = Assert.IsType<ProviderMetadataDocument>(metadata.Value);
+
+        // The DECLARED spelling is published, not the arriving one: the request selects a configured
+        // value and never contributes one.
+        Assert.Equal(declared + options.JwksPath, body.JsonWebKeySetUri);
+        Assert.Equal(declared + options.TokenEndpointPath, body.TokenEndpoint);
+        Assert.Equal(options.Issuer, body.Issuer);
+    }
+
+    /// <summary>
     /// A request naming an authority the deployment does not publish is refused before any route runs.
     /// </summary>
     /// <returns>A task representing the assertion.</returns>
@@ -1716,6 +1891,7 @@ public sealed class JwksShapeTests
             JwksEndpoints.PublishProviderMetadata(
                 provider,
                 Options.Create(faulted),
+                CreateRequestWithoutOrigin(),
                 NullLoggerFactory.Instance));
 
         AssertSharedProblemShape(problem);
@@ -1766,6 +1942,7 @@ public sealed class JwksShapeTests
             JwksEndpoints.PublishProviderMetadata(
                 provider,
                 Options.Create(options),
+                CreateRequestWithoutOrigin(),
                 NullLoggerFactory.Instance));
 
         ProviderMetadataDocument metadataBody =
@@ -1822,6 +1999,7 @@ public sealed class JwksShapeTests
             JwksEndpoints.PublishProviderMetadata(
                 provider,
                 Options.Create(options),
+                CreateRequestWithoutOrigin(),
                 NullLoggerFactory.Instance));
 
         ProviderMetadataDocument metadataBody =
@@ -2368,6 +2546,45 @@ public sealed class JwksShapeTests
         options.Audiences.Add(ProbeAudience);
 
         return options;
+    }
+
+    /// <summary>
+    /// Builds a request carrying NO host, which is the shape that selects the canonical issuer.
+    /// </summary>
+    /// <returns>A request with no scheme and no host.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE HOSTLESS REQUEST IS THE NEUTRAL INPUT FOR EVERY ROW THAT IS NOT ABOUT ORIGIN SELECTION, and it
+    /// is neutral by design rather than by accident: a request that carries no origin can match no
+    /// declared published origin, so the discovery document composes its addresses from the configured
+    /// issuer. Every row in this file that predates published-origin selection therefore continues to
+    /// assert exactly what it asserted before, against exactly the code path it asserted before.
+    /// </para>
+    /// </remarks>
+    private static HttpRequest CreateRequestWithoutOrigin() => new DefaultHttpContext().Request;
+
+    /// <summary>
+    /// Builds a request that arrived on a given absolute origin.
+    /// </summary>
+    /// <param name="origin">An absolute address whose scheme and authority the request carries.</param>
+    /// <returns>A request whose scheme and host are those of <paramref name="origin"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// The scheme and the host are set the way the server sets them - parsed, not raw - because that is
+    /// what the endpoint reads. <see cref="HostString"/> is built from the authority so a non-default port
+    /// is carried and a default port is not, which is the distinction origin matching turns on.
+    /// </para>
+    /// </remarks>
+    private static HttpRequest CreateRequestArrivingOn(string origin)
+    {
+        Uri arrivedOn = new(origin, UriKind.Absolute);
+
+        DefaultHttpContext context = new();
+
+        context.Request.Scheme = arrivedOn.Scheme;
+        context.Request.Host = new HostString(arrivedOn.Authority);
+
+        return context.Request;
     }
 
     /// <summary>

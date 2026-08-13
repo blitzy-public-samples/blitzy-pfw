@@ -215,6 +215,48 @@ public sealed class HeadlessDataWindowModelSetProvider : IDataWindowModelSetProv
         }
     }
 
+    /// <inheritdoc/>
+    /// <remarks>
+    /// <para>
+    /// THE SAME FOUR INIT CALLS <see cref="Build"/> MAKES, RE-ISSUED AGAINST THE DURABLE HOST. The service
+    /// base's init is a two-member assignment - <c>#DataWindow = dw</c> and <c>#Eventful = dw.Eventful</c>
+    /// [<c>n_cst_dwsvc.sru:L85-L86</c>] - and none of the four models overrides it, so re-issuing it is
+    /// idempotent and side-effect free: no per-handle state is touched, no subscription is registered
+    /// twice, and the row-selection set, the installed sort, the search's filter state and the built menu
+    /// model all survive intact. That is what makes undoing the chain's re-hosting safe rather than a
+    /// second construction.
+    /// </para>
+    /// <para>
+    /// THE COLUMN-EXPRESSION ENGINE IS NOT LISTED, AND THAT IS CORRECT RATHER THAN AN OMISSION. It is the
+    /// one of the five the chain OWNS - <see cref="HeadlessAttachedServiceFactory"/> builds a fresh engine
+    /// per conversation while adapting the other four from this retained set - so it dies with the chain
+    /// and there is nothing of it left to re-host.
+    /// </para>
+    /// <para>
+    /// A HANDLE THIS PROVIDER NEVER SERVED IS A NO-OP. The teardown path calls this unconditionally
+    /// because it cannot know whether a chain was ever built for the handle, and a refusal there would
+    /// turn an ordinary end-of-stream into a fault.
+    /// </para>
+    /// </remarks>
+    public void RebindToDurableHost(string dataWindowHandle)
+    {
+        ArgumentNullException.ThrowIfNull(dataWindowHandle);
+
+        lock (_gate)
+        {
+            if (!_sets.TryGetValue(dataWindowHandle, out DataWindowModelSet? retained)
+                || retained.Host is not HeadlessDataWindowHost host)
+            {
+                return;
+            }
+
+            retained.ContextMenu.OnInit(host);
+            retained.RowSelect.OnInit(host);
+            retained.DropDownSearch.OnInit(host);
+            retained.ColumnSort.OnInit(host);
+        }
+    }
+
     /// <summary>Builds the five models over one host and initialises each against it.</summary>
     /// <param name="host">The host.</param>
     /// <returns>The set.</returns>

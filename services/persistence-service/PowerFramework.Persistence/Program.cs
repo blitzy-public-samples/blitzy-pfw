@@ -180,6 +180,28 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 builder.Logging.Configure(static options => options.ActivityTrackingOptions =
     ActivityTrackingOptions.TraceId | ActivityTrackingOptions.SpanId | ActivityTrackingOptions.ParentId);
 
+// 🔴 AND THE SCOPE IS ACTUALLY RENDERED, WITHOUT WHICH THE LINE ABOVE CHANGES NOTHING OBSERVABLE.
+//
+// ActivityTrackingOptions puts the trace context into a log SCOPE. The console formatter's default is
+// `IncludeScopes = false`, so every one of those identifiers was assembled per record and then dropped
+// before it reached an operator - the mechanism was configured and its output was discarded. A measured
+// sweep of a running deployment found the caller's `traceId` in 39 Gateway records, because Gateway
+// alone also names it in its own message templates, and in ZERO records on this service: the
+// correlation identifier the ingress hands a caller in a problem body could not be joined to the
+// records on the service that actually failed, which is the entire purpose of publishing it.
+//
+// AddSimpleConsole IS THE MECHANISM, AND IT ADDS NO PACKAGE. Directory.Packages.props deliberately
+// excludes Serilog and the OpenTelemetry family (AAP 0.5.3), so the shared framework's own formatter is
+// what remains. It does NOT add a second console provider: the console registration uses
+// TryAddEnumerable, so this configures the one already present rather than duplicating it - verified by
+// counting ILoggerProvider registrations before and after, which stayed at three, and by confirming one
+// record per event rather than two.
+//
+// SET IN CODE RATHER THAN IN appsettings.json, deliberately. A settings key can be silently dropped by
+// a deployment's own configuration layer, and this estate's settings files are asserted key-for-key by
+// their own coherence tests - so the guarantee belongs where it cannot be overridden by omission.
+builder.Logging.AddSimpleConsole(static options => options.IncludeScopes = true);
+
 // --------------------------------------------------------------------------------------------------
 //  REGISTRATION. One call per concern, each implemented as an extension method at the bottom of this
 //  file so the entry point reads as an inventory rather than as a wall of container calls. The order
@@ -630,6 +652,20 @@ internal static class PersistenceServiceCollectionExtensions
                 bearer.TokenValidationParameters.ValidateAudience = true;
                 bearer.TokenValidationParameters.ValidateLifetime = true;
                 bearer.TokenValidationParameters.ValidateIssuerSigningKey = true;
+
+                // 🔴 THE REFUSAL RECORDS, WITHOUT WHICH THIS BOUNDARY ENFORCED CORRECTLY AND SILENTLY.
+                //
+                // Every 401 and every 403 this service answered produced NO operator record in ANY
+                // shipped logging profile - and this service is the worst of the three, because its
+                // Development overlay does not raise the cap either, so it was silent in both. The
+                // framework's own records sit at Information under `Microsoft.AspNetCore.*` and every
+                // profile here caps that category at Warning, so a measured probe - no credential, a
+                // forged signature, and an authenticated caller without the entitlement - produced not
+                // one line for any of the three. The hooks cover this service's gRPC surface, which is
+                // its primary one, because authentication and authorization run in the shared middleware
+                // pipeline ahead of any interceptor. Authorization/AuthenticationRefusalRecord.cs
+                // carries what a record may contain and why the failure event writes nothing of its own.
+                AuthenticationRefusalRecord.Attach(bearer);
 
                 // CLOCK SKEW IS BOUNDED AND NOT CONFIGURABLE, AND SAYING NOTHING WAS NOT THE SAME AS
                 // ALLOWING NOTHING.
@@ -1158,7 +1194,6 @@ internal static class PersistenceServiceCollectionExtensions
             options.Interceptors.Add<GrpcIngressLimitInterceptor>();
 
             options.Interceptors.Add<PersistenceStatusInterceptor>();
-
 
             // ⚠ LOAD BEARING, AND IT IS ABOUT THE SHARED PORT (constraint C-K). Left at its default,
             // the gRPC hosting layer maps a CATCH-ALL route of the shape /{service}/{method} so that a
@@ -2360,8 +2395,43 @@ internal sealed class PersistenceStatusInterceptor : Interceptor
     /// <c>ISqlRedactor</c> - so the wire path and the log path stay literally the same object and a change to
     /// one cannot miss the other.
     /// </remarks>
+    /// <remarks>
+    /// 🔴 EXCEPT WHEN THE MESSAGE IS THE PROVIDER'S ENVELOPE, WHICH IS NOT STATEMENT TEXT. See
+    /// <see cref="RedactExceptionMessage(string)"/> for the measured disclosure that makes the branch
+    /// necessary rather than tidy.
+    /// </remarks>
     private string DescribeRedactedMessages(Exception error) =>
-        ExceptionChain.DescribeMessages(error, _redactor.Redact);
+        ExceptionChain.DescribeMessages(error, RedactExceptionMessage);
+
+    /// <summary>
+    /// Masks one exception message under the policy its VALUE CLASS calls for.
+    /// </summary>
+    /// <param name="message">The message read from one exception in the chain.</param>
+    /// <returns>The masked message.</returns>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE STRICT SEAM ALONE LEAKED A ROW VALUE HERE, AND IT WAS MEASURED RATHER THAN REASONED
+    /// ABOUT.</b> Every message this reads is an exception message, and the dominant producer is
+    /// <c>Microsoft.Data.Sqlite.SqliteException</c>, whose message is the driver's envelope -
+    /// <c>SQLite Error 19: '&lt;text&gt;'.</c>. <see cref="ISqlRedactor.Redact(string)"/> is a SQL literal
+    /// scanner, and a failing unnamed CHECK constraint nests single quotes inside that envelope:
+    /// <c>SQLite Error 19: 'CHECK constraint failed: NAME &lt;&gt; 'Ada''.</c>. The scanner closes the outer
+    /// literal at the INNER opening quote, so the value between the two pairs is copied through verbatim
+    /// and the record published it in the clear (constraint C-F).
+    /// </para>
+    /// <para>
+    /// <b>THE SEAM STILL GOVERNS EVERYTHING IT WAS INTRODUCED FOR.</b> Statement-bearing text - which is
+    /// what the abstraction's own remarks describe it as being about - continues to go through the
+    /// injected instance, so a substituted redactor is still authoritative for that class and the wire and
+    /// log paths remain the same object in production. Only the envelope, which is a DIAGNOSTIC rather
+    /// than a statement, takes the envelope-aware policy on the concrete type;
+    /// <see cref="ISqlRedactor"/> is not widened (constraint C-K).
+    /// </para>
+    /// </remarks>
+    private string RedactExceptionMessage(string message) =>
+        SqlRedactor.IsProviderDiagnostic(message)
+            ? SqlRedactor.Instance.RedactProviderDiagnostic(message)
+            : _redactor.Redact(message);
 
     /// <summary>
     /// The default termination effect: report the structural-fault exit code, then request shutdown.
@@ -2711,15 +2781,146 @@ internal sealed class PersistenceSqlTaskHost : ISqlTaskHost
         // The contract channel first, and with the text exactly as the task raised it.
         _faults?.OnError(errCode, text);
 
-        _logger.LogError(
+        // ============ TWO POLICIES, CHOSEN BY WHAT THE TEXT IS, AND THE CHOICE IS A DISCLOSURE FIX ====
+        // 🔴 THE STRICT POLICY ALONE HERE LEAKED A ROW VALUE, MEASURED IN THIS SERVICE'S OWN LOG.
+        // An earlier revision sent everything through the injected seam and recorded, as a deliberate
+        // exception, that "the disclosure direction is toward LESS, never more". That was WRONG, and the
+        // counter-example is the ordinary one: one arm of what reaches this channel IS the transaction's
+        // own message - `Event OnError(rtCode, transObject.SQLErrText)`
+        // [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L390] - which arrives wrapped
+        // in Microsoft.Data.Sqlite's envelope. The seam's single member is a SQL LITERAL SCANNER, and a
+        // failing unnamed CHECK constraint nests single quotes inside that envelope:
+        //     SQLite Error 19: 'CHECK constraint failed: NAME <> 'Ada''.
+        // The scanner closes the outer literal at the INNER opening quote, so the value between the two
+        // pairs is copied through verbatim and the record read
+        //     SQLite Error <redacted>: '<redacted>'Ada'<redacted>'.
+        // - the row value in the clear, in the log of the one service whose entire disclosure posture is
+        // that no literal reaches a log or a response (constraint C-F).
+        //
+        // WHY THE BRANCH RATHER THAN ONE POLICY FOR EVERYTHING. The seam exists so a test can drive this
+        // site, and it is documented as being about STATEMENT text - which most of what arrives here is:
+        // the retrieval task composes two of these texts from a fixed prefix and the externally supplied
+        // SORT or FILTER expression [Tasks/SqlQueryTask.cs, the SetSort and SetFilter rejection arms]. That
+        // text stays on the seam, so a substituted redactor still governs exactly the class it was
+        // introduced for. A provider envelope is NOT statement text, so it goes through the envelope-aware
+        // policy on the concrete type instead, which peels the wrapper and scans only the interior, where
+        // the quoting is well formed:
+        //     SQLite Error 19: 'CHECK constraint failed: NAME <> '<redacted>''.
+        // The condition and the result code still read; the value does not. ISqlRedactor is NOT widened -
+        // it remains one member, as its own remarks require (constraint C-K) - and the log path now agrees
+        // with the wire path on the same value. See Errors/SqlRedactor.cs, RedactProviderDiagnostic, for
+        // the canonical field-class statement.
+        // ==========================================================================================
+        // 🔴 THE LEVEL IS DERIVED FROM THE CODE, AND IT USED TO BE LogError UNCONDITIONALLY.
+        //
+        // Most of what arrives here is not a fault of this deployment at all. A caller naming a
+        // DataWindow that does not exist, a malformed SQL clause, a rejected filter expression and a
+        // stale-baseline update conflict are all NORMAL, CONTRACT-DEFINED outcomes that this service
+        // answers correctly - and every one of them was recorded at ERROR. A measured probe issued two
+        // ordinary requests, an unknown handle and a replayed stale update, and both produced `fail:`
+        // records naming a service that was working exactly as published.
+        //
+        // WHY THAT IS A DEFECT RATHER THAN A COSMETIC PREFERENCE: ERROR is the level operational
+        // tooling alerts on, so a level that fires for caller-attributable outcomes trains its readers
+        // to ignore it - and the ONE record here that really does mean this deployment is broken, an
+        // internal fault or an exhausted host, becomes indistinguishable from the routine traffic
+        // around it. The sibling gRPC services report these same conditions at Warning and contain no
+        // LogError at all, so this channel was also the only place in the service disagreeing with the
+        // rest of it.
+        //
+        // THE CLASSIFICATION IS BY CODE AND NOTHING ELSE - not by text, which is caller-influenced and
+        // would make the level of a record something a caller could choose.
+        LogLevel level = ClassifyErrorLevel(errCode);
+
+        // 🔴 AN EMPTY DETAIL GETS ITS OWN TEMPLATE, because the shared one degenerates when there is
+        // nothing to say: a task that raises no text - which the stale-update conflict and the
+        // not-implemented arm both do deliberately - produced the literal record "Redacted detail
+        // (0 chars): " with nothing after the colon, so the field that exists to tell an operator
+        // whether a value was present instead read as a truncated or broken record. Saying that no text
+        // was raised is a fact about the task; printing an empty redaction is an artefact of the format.
+        if (text.Length == 0)
+        {
+            _logger.Log(
+                level,
+                "A SQL task reported framework error {ErrorCode} and raised no detail text with it. The "
+                    + "code is the whole of what the task disclosed; nothing was withheld or redacted "
+                    + "here.",
+                errCode);
+
+            return DataWindowBufferStore.EventContinue;
+        }
+
+        _logger.Log(
+            level,
             "A SQL task reported framework error {ErrorCode}. Redacted detail ({DetailLength} chars): "
                 + "{RedactedErrorText}",
             errCode,
             text.Length,
-            _redactor.Redact(text));
+            SqlRedactor.IsProviderDiagnostic(text)
+                ? SqlRedactor.Instance.RedactProviderDiagnostic(text)
+                : _redactor.Redact(text));
 
         return DataWindowBufferStore.EventContinue;
     }
+
+    /// <summary>
+    /// Chooses the level a framework error code is recorded at, from what the code means about WHOSE
+    /// fault the outcome is.
+    /// </summary>
+    /// <param name="errCode">The framework code the task reported.</param>
+    /// <returns>The level.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE QUESTION EACH LEVEL ANSWERS IS "WHO HAS TO DO SOMETHING". <see cref="LogLevel.Error"/> means
+    /// this deployment is faulty and an operator must act. <see cref="LogLevel.Warning"/> means the
+    /// request was refused for a reason the contract publishes, so the CALLER must act - and the record
+    /// exists so a rate of such refusals is still visible. <see cref="LogLevel.Information"/> means
+    /// nobody need act at all.
+    /// </para>
+    /// <para>
+    /// THE INFORMATION ARM FOLLOWS THE PRESERVED RETURN-CODE ALGEBRA rather than inventing a category.
+    /// A cancellation is classified by that algebra as NEITHER succeeded nor failed
+    /// [<c>ws_objects/pfw.shared.pbl.src/isfailed.srf:L11-L13</c>, which excludes it from failure
+    /// explicitly], and a prevention reads as a SUCCESS [<c>issucceeded.srf:L11-L13</c>, which tests
+    /// greater-than-or-equal-to zero]. Recording either as a failure of any severity would contradict
+    /// the algebra this refactor is required to reproduce exactly.
+    /// </para>
+    /// <para>
+    /// <b>THE DEFAULT ARM IS Error, DELIBERATELY, AND THAT DIRECTION MATTERS.</b> An unrecognised code
+    /// carries no evidence that the outcome is the caller's doing, so the conservative reading is that
+    /// this deployment has a problem. A default of Warning would let a genuinely new internal fault
+    /// arrive silently below the level anyone alerts on - which is the opposite defect to the one being
+    /// fixed, and a worse one.
+    /// </para>
+    /// </remarks>
+    private static LogLevel ClassifyErrorLevel(long errCode) => errCode switch
+    {
+        // Neither succeeded nor failed under the preserved algebra - so not a failure at any level.
+        RetCode.CANCELLED or RetCode.PREVENT => LogLevel.Information,
+
+        // Caller-attributable and contract-defined outcomes. Each is a refusal this service publishes
+        // and answers correctly, so the caller is the party that has to change something.
+        RetCode.E_INVALID_ARGUMENT
+            or RetCode.E_INVALID_TYPE
+            or RetCode.E_INVALID_TRANSACTION
+            or RetCode.E_INVALID_SQL
+            or RetCode.E_INVALID_DATA
+            or RetCode.E_INVALID_DATAOBJECT
+            or RetCode.E_INVALID_HANDLE
+            or RetCode.E_SQL_BIND_ARG_FAILED
+            or RetCode.E_ACCESS_DENIED
+            or RetCode.E_NO_SUPPORT
+            or RetCode.E_NO_IMPLEMENTATION => LogLevel.Warning,
+
+        // Contract-defined and EXPECTED under concurrency or load. The optimistic-concurrency conflict
+        // arrives as E_DB_ERROR and is the single most routine of them: it is the documented answer to a
+        // stale baseline, published as 409 at the ingress, and a caller is expected to retry or surface
+        // it. E_BUSY is a capacity ceiling that clears, and E_RETRY says so in its name.
+        RetCode.E_DB_ERROR or RetCode.E_BUSY or RetCode.E_RETRY => LogLevel.Warning,
+
+        // Everything else, including the unrecognised code - see the remarks on the default direction.
+        _ => LogLevel.Error,
+    };
 
     /// <inheritdoc/>
     /// <remarks>
@@ -3763,6 +3964,27 @@ internal sealed class UpdateTaskSurface : IUpdateTaskSurface
         {
             return new UpdateRunResult { Code = RetCode.E_INVALID_TRANSACTION };
         }
+
+        // 🔴 THE PREPARE EVENT, RAISED ON BOTH SIDES OF THE PAIR, WHICH IS THE OTHER HALF OF DISPATCHING A
+        // TASK. The substrate raises `onprepare` before it runs a task body - on the worker
+        // [n_cst_thread_task_sqlbase.sru:L725-L729] and on the caller
+        // [n_cst_threading_task_sqlupdate.sru:L291-L301] - and between them the two bodies clear exactly
+        // the state that belongs to ONE run: the worker's resets the commit signal, and the caller's clears
+        // the latched driver error, the three row counters and the per-table identity blocks.
+        //
+        // WITHOUT IT A SECOND UPDATE ON THE SAME TASK REPORTED THE SUM OF BOTH RUNS. The counters
+        // ACCUMULATE by design - `_nRowsInserted += inserted` [n_cst_threading_task_sqlupdate.sru:L66] -
+        // because the oracle fires its count event once per updated TABLE and a total has to survive the
+        // multi-table loop. So one inserted row answered "2 inserted" and handed back two identity blocks
+        // for one table. Both numbers are ones a caller acts on: the counts are how it learns what its
+        // payload did, and the identity blocks carry the keys the database assigned.
+        //
+        // RAISED AFTER THE SETTERS AND BEFORE THE BODY, WHICH IS SAFE BY THE ORACLE'S OWN DESIGN. The
+        // caller-side prepare deliberately leaves the multi-table flag and the retained update object
+        // standing - only its reset clears those [:L88, :L94 versus :L295-L298] - so the payload installed
+        // by SetUpdateData a moment ago survives into the run it was installed for.
+        _ = _worker.RunPrepare();
+        _ = _proxy.RunPrepare();
 
         // RAISED BEFORE THE BODY AND LOWERED IN A GUARANTEED finally. The substrate raises its running
         // flag as part of dispatching a task [n_cst_thread_task.sru:L164], and the guards that read it

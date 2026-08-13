@@ -554,6 +554,20 @@ the point of stating them: an earlier form of this table defaulted two of them t
 settings files bound `http`, so the table named listeners nobody had configured, and a reader
 following it reached a refused connection rather than a service.
 
+**`SECURITY_BASE_URL` is a HOST-SIDE address, and that is the whole reason the orchestration template
+declares `SECURITY_PUBLIC_BASE_URL`.** This suite runs on the host and reaches Security through its
+published port, while the three services inside the Compose network reach the same service as
+`security-service:5104`. Security's discovery document composed `jwks_uri` and `token_endpoint` from the
+issuer alone, so the document this suite fetched advertised a key-set address on a host the suite cannot
+resolve — which is what `02-authentication.spec.ts` asserts against, comparing the advertised address in
+FULL against `${SECURITY_BASE_URL}` rather than by suffix, because a suffix match is satisfied by an
+address on any host at all. Security now publishes whichever **declared** base address the request arrived
+on; the documented bring-up declares this suite's origin, so the assertion holds against the stack as
+brought up. If a run remaps `SECURITY_HOST_PORT`, set `SECURITY_PUBLIC_BASE_URL` to the same address this
+variable names — they are two views of one address and a disagreement between them reappears as an
+unfetchable `jwks_uri`. The `issuer` member is unaffected either way: it is the identity, it never varies,
+and this suite compares it to the token's `iss` claim.
+
 **Five variables, two credentials, one requirement.** `POST /v1/tokens` is the one operation a bearer
 token cannot protect — a caller cannot present a token in order to obtain its first token — so
 [`../../docs/CONTRACTS.md`](../../docs/CONTRACTS.md) C-01 publishes two schemes for it and accepts
@@ -1238,7 +1252,7 @@ a collected-test total belongs in a runnable command rather than in prose.
 | `npm ci` | **Succeeded**, exit 0 — *"added 6 packages, and audited 7 packages"*, *"found 0 vulnerabilities"* |
 | `npm run typecheck` (`tsc --noEmit`) | **Succeeded**, exit 0, **zero errors** |
 | `npm run test:list` (`playwright test --list`) | **Succeeded**, exit 0 — *"Total: 29 tests in 6 files"*, and only the six numbered ones |
-| `npx playwright test --list --grep "@no-stack"` | **Succeeded**, exit 0 — the stack-free subset, three files |
+| `npx playwright test --list --grep "@no-stack"` | **Succeeded**, exit 0 — the stack-free subset, and the runner's own summary line reads `Total: 9 tests in 4 files`. **Four, not three**: an earlier revision of this row said three, having counted the files that MENTION the tag rather than the files that apply it. The four are `01-health-readiness` (1), `02-authentication` (1), `03-capability-gating` (6) and `05-datawindow-workflow` (1); `04` and `06` discuss the tag in comments and apply it to nothing, which is what made three plausible. The test count of 9 was correct and is unchanged |
 | `npm test` (`playwright test`), no identity, no stack | **Failed**, exit 1 — **refused in `globalSetup`, before any test ran**, so there is no test summary at all: *"the end-to-end suite runs against a live four-service stack and 4 of 4 services did not answer"*, each named with its URL and classified `unreachable`, and the refusal quotes the partial alternative. A genuine setup failure, which is what an absent stack must produce |
 | `npm run test:partial`, no identity, no stack | **Failed**, exit 1 — **5 failed, 3 skipped, 20 did not run, 1 passed**, every line labelled `[api-partial-no-stack]`. The five failures are the token-issuance `beforeAll` of the five authenticated groups. Acknowledging the *stack* does not acknowledge the *identity*: the two variables are independent, and this run is what proves one cannot suppress the other's finding |
 | `npm run test:partial:no-identity`, no stack | **Succeeded**, exit 0 — **9 passed, 20 skipped**, every line labelled `[api-partial-no-stack]`. Both acknowledgements are given, so each precondition declines its own tests with a stated reason and the stack-free assertions pass. This is the only stack-free invocation that exits zero, and its project label is why it cannot be misread as an acceptance result. `E2E_ALLOW_MISSING_ISSUANCE_IDENTITY=1 npm run test:partial` is the same run spelled by hand, and measures identically |

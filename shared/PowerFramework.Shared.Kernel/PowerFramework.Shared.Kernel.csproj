@@ -88,8 +88,10 @@
       * GenerateDocumentationFile. Inherited TreatWarningsAsErrors turns a missing XML doc comment
         (CS1591) into a build error that would break the whole tree, and no requirement asks for a
         documentation file.
-      * Any solution filter. .NET 10 emits the XML .slnx solution format and legacy .slnf filters
-        are incompatible with it, failing with MSB4014 during restore, build and test.
+      * Any solution filter. .NET 10 emits the XML .slnx solution format, and no .slnf filter is
+        authored because a filter's project list must be kept in exact agreement with the solution
+        BY HAND and every drift fails hard. This line used to claim MSB4014 in all three verbs;
+        that was measured false on the pinned SDK (docs/BUILD.md section 2).
   -->
 
 </Project>

@@ -81,9 +81,11 @@
     files, global.json and this reference: no container, no daemon, no database, no network, no test to
     test reference and no path outside the repository. It also satisfies C-A and C-D, because it
     reaches no other shared library, nothing under services/ and nothing belonging to a deferred
-    capability. No local solution file accompanies it: AAP section 0.3.2.1 records that .slnf filters
-    are incompatible with the .slnx format and fail with MSB4014, and per service solutions live only
-    under services/, so this project is enumerated by the repository root PowerFramework.slnx instead.
+    capability. No local solution file accompanies it: per service solutions live only under
+    services/, so this project is enumerated by the repository root PowerFramework.slnx instead. No
+    .slnf filter is authored either - AAP section 0.3.2.1 attributes that to MSB4014 against the
+    .slnx format, which was measured false on the pinned SDK (docs/BUILD.md section 2); the durable
+    reason is that a filter's project list must be kept in exact agreement with the solution BY HAND.
   -->
   <ItemGroup Label="System under test. One project reference, by design.">
     <ProjectReference Include="..\PowerFramework.Shared.Containers\PowerFramework.Shared.Containers.csproj" />

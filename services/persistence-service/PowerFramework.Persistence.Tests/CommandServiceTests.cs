@@ -930,6 +930,116 @@ public sealed class CommandServiceTests
         Assert.False(offResponse.Committed);
     }
 
+    /// <summary>
+    /// 🔴 On a REUSED task the durability signal is re-armed for every dispatch, so a statement that fails
+    /// after one that committed reports <c>committed = false</c>.
+    /// </summary>
+    /// <param name="mode">All three modes, because the rule the contract states applies to every one.</param>
+    /// <remarks>
+    /// <para>
+    /// THE SIGNAL IS MANUAL-RESET, AND THAT IS WHY A DISPATCH HAS TO LOWER IT. The worker creates it with
+    /// <c>CreateEvent(0, true, false, 0)</c> - manual-reset, initially unsignalled
+    /// [<c>n_cst_thread_task_sqlbase.sru:L224-L226</c>] - so that the zero-timeout poll behind
+    /// <c>committed</c> answers the same thing every time it is asked. Nothing consumes it by reading it;
+    /// only the worker's prepare event lowers it [<c>:L725-L727</c>], and the substrate raises that event
+    /// before every run of the body.
+    /// </para>
+    /// <para>
+    /// WHILE THAT EVENT WENT UNRAISED THE FLAG WAS A LATCH RATHER THAN A REPORT. Reusing a task is
+    /// explicitly supported - the contract exposes <c>SetSql</c> and <c>Exec</c> as separate calls for
+    /// exactly that - so the first statement that committed left the signal set for the life of the
+    /// handle, and every later FAILING statement answered <c>committed = true</c>. The contract states the
+    /// rule verbatim: any failing statement answers false, on every mode, because the success arm is not
+    /// entered at all. Claiming durability for work that never happened is the worse direction of that
+    /// error, since a caller acts on it by not retrying.
+    /// </para>
+    /// <para>
+    /// THE SEQUENCE IS FOUR DISPATCHES ON ONE HANDLE and each assertion needs the ones before it: the
+    /// first proves the signal rises, the second that it falls again, the third that falling did not break
+    /// it, and the fourth that the fall is repeatable rather than a one-off. A latch would pass the first
+    /// and fail the second; a signal that was destroyed rather than lowered would pass the second and fail
+    /// the third.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(AutoCommitMode.AcNative)]
+    [InlineData(AutoCommitMode.AcOn)]
+    public async Task AReusedTaskReArmsTheDurabilitySignalForEveryDispatch(AutoCommitMode mode)
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        async Task<ExecResponse> Dispatch(string sql) => await harness.Commands.Exec(
+            new ExecRequest { Task = handle, Sql = sql, Autocommit = mode },
+            Context);
+
+        ExecResponse committed = await Dispatch("INSERT INTO t(id) VALUES(1)");
+
+        Assert.Equal(WireRetCode.Ok, committed.Status.RetCode);
+        Assert.True(committed.Committed);
+
+        // THE SAME TASK, A STATEMENT THE ENGINE REFUSES. No success arm runs, so nothing raises the
+        // notification - and the previous dispatch's raised signal must not answer for this one.
+        harness.Engine.ExecuteResult = SqlState.Failed(-1, "no such table");
+
+        ExecResponse failed = await Dispatch("INSERT INTO nowhere(id) VALUES(2)");
+
+        Assert.Equal(WireRetCode.EDbError, failed.Status.RetCode);
+        Assert.False(failed.Committed);
+
+        // THE SIGNAL WAS LOWERED, NOT DESTROYED: the next success raises it again.
+        harness.Engine.ExecuteResult = SqlState.Succeeded(1L);
+
+        ExecResponse committedAgain = await Dispatch("INSERT INTO t(id) VALUES(3)");
+
+        Assert.Equal(WireRetCode.Ok, committedAgain.Status.RetCode);
+        Assert.True(committedAgain.Committed);
+
+        // AND THE FALL IS REPEATABLE rather than a single re-arm that then latches again.
+        harness.Engine.ExecuteResult = SqlState.Failed(-1, "no such table");
+
+        ExecResponse failedAgain = await Dispatch("INSERT INTO nowhere(id) VALUES(4)");
+
+        Assert.Equal(WireRetCode.EDbError, failedAgain.Status.RetCode);
+        Assert.False(failedAgain.Committed);
+    }
+
+    /// <summary>
+    /// On a REUSED task the latched driver payload belongs to the dispatch that produced it, so a
+    /// successful statement after a failing one carries none.
+    /// </summary>
+    /// <remarks>
+    /// THE CALLER-SIDE HALF OF THE SAME PREPARE EVENT [<c>n_cst_threading_task_sqlbase.sru:L208</c>]. The
+    /// sink is last-error-wins and is never accumulated, but nothing in the run CLEARS it - so without the
+    /// per-dispatch raise a payload produced by an earlier failure travelled with a later success, and the
+    /// presence of that payload IS the signal that a driver error occurred. A caller would read a
+    /// database error on a statement that worked.
+    /// </remarks>
+    [Fact]
+    public async Task AReusedTaskDoesNotCarryAnEarlierDispatchsDriverPayload()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        harness.Engine.ExecuteResult = SqlState.Failed(-1, "no such table");
+
+        ExecResponse failed = await harness.Commands.Exec(
+            new ExecRequest { Task = handle, Sql = "INSERT INTO nowhere(id) VALUES(1)" },
+            Context);
+
+        Assert.Equal(WireRetCode.EDbError, failed.Status.RetCode);
+        Assert.NotNull(failed.Status.DbError);
+
+        harness.Engine.ExecuteResult = SqlState.Succeeded(1L);
+
+        ExecResponse succeeded = await harness.Commands.Exec(
+            new ExecRequest { Task = handle, Sql = "INSERT INTO t(id) VALUES(2)" },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, succeeded.Status.RetCode);
+        Assert.Null(succeeded.Status.DbError);
+    }
+
     // ---------------------------------------------------------------------------------------------
     //  REGION 3 - THE EMPTY STATEMENT, TWICE, WITH TWO DIFFERENT OBSERVABLE MESSAGES
     // ---------------------------------------------------------------------------------------------

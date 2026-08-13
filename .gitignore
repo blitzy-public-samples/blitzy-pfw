@@ -55,3 +55,39 @@ node_modules/
 playwright-report/
 blob-report/
 test-results/
+
+# ================================================================================================
+#  THE POPULATED ENVIRONMENT FILE. THIS IS A SECRETS CONTROL (C-F), NOT HOUSEKEEPING.
+#
+#  WHAT IT PREVENTS, CONCRETELY. The documented bring-up is `cp .env.example .env` followed by
+#  filling that copy in, and what gets filled in is the twelve host PATHS plus - when the operator
+#  adopts the optional issuance identity - `SECURITY_CLIENT_SECRET`, whose value IS a credential.
+#  Without a pattern here the populated copy is an UNTRACKED file that `git status` lists, that
+#  `git add -A` stages without comment, and that a commit then publishes. Every other control this
+#  repository has against committed key material - the CI target-scope audit, the no-credential-in-
+#  settings assertions, the options-pattern injection - operates on files the tree already tracks, so
+#  none of them sees the one file the bring-up instructions tell an operator to create.
+#
+#  THE MITIGATIONS THAT WERE ALREADY IN PLACE WERE PROSE, AND PROSE IS NOT A CONTROL.
+#  orchestration/README.md and .env.example both warn against committing the file and both suggest
+#  adding it to .git/info/exclude. That advice stands and is worth keeping as belt-and-braces, but
+#  .git/info/exclude is PER-CLONE and is not committed - so the protection held for whoever had read
+#  the warning and applied it, and for nobody else. This entry is the committed form of it, and it is
+#  the same correction the .NET build-output block above records for the same reason.
+#
+#  ANCHORED AND EXACT, WHICH IS THE DELIBERATE CHOICE. `/orchestration/.env` names the one path the
+#  documented bring-up creates. A bare `.env` or `**/.env` would additionally hide any future .env
+#  anywhere in the tree, including one a suite legitimately tracks as a FIXTURE - and a pattern that
+#  hides files nobody meant to hide is how a source path goes missing without a diagnostic. The
+#  TEMPLATE is deliberately NOT matched: `orchestration/.env.example` is tracked, is the authoritative
+#  variable inventory, and carries no value for any secret.
+#
+#  THE PER-SERVICE OVERRIDE FORMS ARE MATCHED TOO, because an operator running two stacks on one host
+#  names its file something like `.env.local` and the same exposure applies to it verbatim. The
+#  negation that follows re-admits the template, and it must stay AFTER the wildcard: git applies the
+#  last matching pattern, so reversing the two lines would re-hide the template.
+# ================================================================================================
+
+/orchestration/.env
+/orchestration/.env.*
+!/orchestration/.env.example

@@ -371,20 +371,21 @@ public sealed class GeneratedSchemaFidelityTests
     // ==============================================================================================
 
     [Fact]
-    public void TheDocumentPublishesOneHundredAndThirtyThreeMarkedSchemasOverOneHundredAndFortyFour()
+    public void TheDocumentPublishesOneHundredAndThirtyThreeMarkedSchemasOverOneHundredAndFortyFive()
     {
         OpenApiDocument document = Document;
         MarkedSchema[] marked = MarkedSchemas(document);
 
-        Assert.Equal(144, document.Components!.Schemas!.Count);
+        Assert.Equal(145, document.Components!.Schemas!.Count);
         Assert.Equal(133, marked.Length);
         Assert.Equal(118, marked.Count(static entry => !entry.IsEnum));
         Assert.Equal(15, marked.Count(static entry => entry.IsEnum));
 
-        // AND THE ELEVEN UNMARKED SCHEMAS ARE EXACTLY THE GATEWAY-AUTHORED ENVELOPES, named by
+        // AND THE TWELVE UNMARKED SCHEMAS ARE EXACTLY THE GATEWAY-AUTHORED ENVELOPES, named by
         // identity. None of them mirrors a protobuf message: the two problem shapes are RFC 9457, the
-        // health and capability shapes are this ingress's own, and the two array projections are the
-        // collection form of a gRPC server stream, which the protocol definitions have no message for.
+        // health and capability shapes are this ingress's own, the two array projections are the
+        // collection form of a gRPC server stream, which the protocol definitions have no message for, and
+        // the twelfth is a screened narrowing whose own entry below states why it is not marked.
         //
         // Asserted as an exact set rather than as a count, so a NEW protobuf shape published without a
         // marker - which would escape every check below - fails here instead of passing silently.
@@ -407,6 +408,15 @@ public sealed class GeneratedSchemaFidelityTests
                 "ProblemDetails",
                 "ReservedRouteBody",
                 "RetrieveResult",
+
+                // THE TWELFTH, AND IT IS UNMARKED FOR A REASON WORTH STATING RATHER THAN LISTING. It is
+                // this ingress's SCREENED NARROWING of dataservices.v1.RowValidationError: five identity
+                // members of that message's six, with its structured-error field deliberately absent so
+                // that no upstream prose reaches a caller through the member added to keep prose out of
+                // the body. Marking it would assert it to be the faithful projection of that descriptor,
+                // and the fidelity gate below would then correctly fail it for the missing member - the
+                // full projection is already published under its own name.
+                "RowValidationIdentity",
                 "UpstreamHealth",
             ],
             unmarked);

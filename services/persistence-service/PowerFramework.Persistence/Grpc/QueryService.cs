@@ -1418,10 +1418,13 @@ internal sealed class QueryStreamSink : IQueryResultSink, IDisposable
     private readonly IServerStreamWriter<QueryResponse> _stream;
     private readonly QueryTaskEntry _entry;
     private readonly CancellationToken _cancellationToken;
+    private readonly int _maxMessageBytes;
     private readonly Queue<QueryResponse> _pending = new();
     private readonly Lock _queueGate = new();
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private bool _broken;
+    private bool _sendCeilingExceeded;
+    private int _sendCeilingBytes;
     private bool _disposed;
 
     /// <summary>
@@ -1437,15 +1440,25 @@ internal sealed class QueryStreamSink : IQueryResultSink, IDisposable
     /// cancellation is a return code on this contract and an exception escaping into the codec would be a
     /// regression the legacy could not have had.
     /// </param>
+    /// <param name="maxMessageBytes">
+    /// The configured gRPC send ceiling in bytes - <c>Ingress:MaxSendMessageBytes</c>, the same value
+    /// <c>Program.cs</c> writes onto <c>GrpcServiceOptions.MaxSendMessageSize</c>. A queued response larger
+    /// than this is refused HERE rather than being handed to a writer that would reject it, so that the
+    /// refusal is a known condition with a name instead of an opaque write fault.
+    /// </param>
     /// <exception cref="ArgumentNullException">A required collaborator is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxMessageBytes"/> is not positive.</exception>
     internal QueryStreamSink(
         IServerStreamWriter<QueryResponse> stream,
         QueryTaskEntry entry,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int maxMessageBytes)
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
         _entry = entry ?? throw new ArgumentNullException(nameof(entry));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxMessageBytes);
         _cancellationToken = cancellationToken;
+        _maxMessageBytes = maxMessageBytes;
     }
 
     /// <summary>
@@ -1773,11 +1786,59 @@ internal sealed class QueryStreamSink : IQueryResultSink, IDisposable
                     return RetCode.OK;
                 }
 
+                // 🔴 THE SEND CEILING IS TESTED BEFORE THE WRITE, AND EXCEEDING IT IS NOT A BROKEN STREAM.
+                //
+                //    A message larger than the configured ceiling NEVER REACHES THE WIRE, so the transport
+                //    and the peer are both still perfectly healthy - which is precisely why the previous
+                //    behaviour was a wrong answer rather than a reported failure. The writer's own rejection
+                //    arrived as an exception, the catch below treated every exception as a vanished peer,
+                //    marked the stream broken, and the broken flag then made WriteTerminalStatusAsync
+                //    short-circuit. The call therefore ended with gRPC OK carrying ZERO chunks: byte for
+                //    byte indistinguishable from a retrieval of an empty table, for a request that had
+                //    matched a hundred thousand rows.
+                //
+                //    Testing here separates the two conditions at the only point that can tell them apart.
+                //    The offending message is dropped - it is undeliverable by definition - the condition is
+                //    recorded STICKILY for the boundary to report, and the stream is left writable so the
+                //    terminal status still goes out. The code returned is E_BUSY, which is the code this
+                //    estate already uses for a ceiling met one hop up at the DataServices receive limit and
+                //    which maps to ResourceExhausted and then to 429, so both boundaries answer the same
+                //    thing for the same condition.
+                //
+                //    THE CODEC STILL SEES ONLY `< 0` AND STILL REPORTS ITS OWN TransData Failed
+                //    [n_cst_thread_task_sqlquery.sru:L183-L185], which is preserved verbatim (constraint
+                //    C-B). The ceiling is a PORT-INTRODUCED bound with no legacy counterpart, so its
+                //    reporting belongs at the service boundary rather than inside a ported codec, and the
+                //    sticky flag is how it gets there without rewriting the codec's oracle-faithful arm.
+                int messageBytes = next.CalculateSize();
+
+                if (messageBytes > _maxMessageBytes)
+                {
+                    RecordSendCeilingExceeded(messageBytes);
+
+                    return RetCode.E_BUSY;
+                }
+
                 try
                 {
                     // SINGLE-ARGUMENT WriteAsync, deliberately - see the type's remarks for why the
                     // two-argument overload throws on this server stack.
                     await _stream.WriteAsync(next).ConfigureAwait(false);
+                }
+                catch (RpcException exhausted)
+                    when (exhausted.StatusCode == StatusCode.ResourceExhausted)
+                {
+                    // DEFENSIVE, AND IT COSTS NOTHING TO BE RIGHT TWICE. The pre-flight above uses the
+                    // same serialized length the writer measures, so this arm should be unreachable; it
+                    // exists because the two accountings are maintained independently - a framing or
+                    // header allowance counted on one side and not the other would put a message just over
+                    // the writer's edge and just under ours. Classifying it as the ceiling rather than as
+                    // a vanished peer keeps the stream writable and the answer truthful either way. The
+                    // status detail is NOT read: it is transport text, and this arm already knows the
+                    // condition.
+                    RecordSendCeilingExceeded(messageBytes);
+
+                    return RetCode.E_BUSY;
                 }
                 catch (Exception exception)
                     when (exception is not OutOfMemoryException and not StackOverflowException)
@@ -1852,6 +1913,57 @@ internal sealed class QueryStreamSink : IQueryResultSink, IDisposable
     }
 
     /// <summary>
+    /// Whether a response this retrieval built exceeded the configured gRPC send ceiling.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>STICKY, AND READ BY THE BOUNDARY RATHER THAN BY THE CODEC.</b> The codec that discovers the
+    /// refusal answers the legacy's own <c>E_INTERNAL_ERROR</c> / <c>TransData Failed</c> and the fault
+    /// recorder is last-wins, so neither the returned code nor the recorded diagnostic can carry this
+    /// condition out. The flag can: it is set once, never cleared, and the handler consults it after the
+    /// run to replace the outward code and diagnostic with the defined error while leaving every ported
+    /// behaviour on the way there untouched.
+    /// </para>
+    /// <para>
+    /// The stream is deliberately NOT marked broken when this is set, because nothing was ever written -
+    /// which is what allows the terminal status to be delivered in band.
+    /// </para>
+    /// </remarks>
+    internal bool SendCeilingExceeded
+    {
+        get
+        {
+            lock (_queueGate)
+            {
+                return _sendCeilingExceeded;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The size in bytes of the largest response that exceeded the ceiling, or zero when none did.
+    /// </summary>
+    /// <remarks>
+    /// FOR THE OPERATOR'S RECORD ONLY, AND NEVER FOR THE CALLER'S DIAGNOSTIC. A byte count carries no row
+    /// value and no statement text, so it is safe to log; publishing it to a caller alongside the ceiling
+    /// would nonetheless disclose how close an arbitrary request came to a declared bound, which is the
+    /// posture this service takes everywhere else it refuses on capacity.
+    /// </remarks>
+    internal int SendCeilingBytes
+    {
+        get
+        {
+            lock (_queueGate)
+            {
+                return _sendCeilingBytes;
+            }
+        }
+    }
+
+    /// <summary>The ceiling this sink enforces, in bytes.</summary>
+    internal int MaxMessageBytes => _maxMessageBytes;
+
+    /// <summary>
     /// Drops every queued payload without writing it.
     /// </summary>
     /// <remarks>
@@ -1904,6 +2016,32 @@ internal sealed class QueryStreamSink : IQueryResultSink, IDisposable
         lock (_queueGate)
         {
             _broken = true;
+            _pending.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Records that a response exceeded the ceiling, keeping the largest offending size seen.
+    /// </summary>
+    /// <param name="messageBytes">The serialized size of the refused response.</param>
+    /// <remarks>
+    /// THE QUEUE IS CLEARED, THE BROKEN FLAG IS NOT SET. Everything still queued behind an undeliverable
+    /// chunk belongs to the same over-sized sequence and would be refused for the same reason, so draining
+    /// it would only repeat the measurement; and the retrieval is abandoned from here anyway, because the
+    /// codec's sign test reacts to the returned code. Leaving the stream writable is the whole point - the
+    /// terminal status is a few dozen bytes and must still reach the caller.
+    /// </remarks>
+    private void RecordSendCeilingExceeded(int messageBytes)
+    {
+        lock (_queueGate)
+        {
+            _sendCeilingExceeded = true;
+
+            if (messageBytes > _sendCeilingBytes)
+            {
+                _sendCeilingBytes = messageBytes;
+            }
+
             _pending.Clear();
         }
     }
@@ -2158,6 +2296,45 @@ internal sealed class QueryService : GeneratedQueryServiceBase
         "A retrieval is in flight for this query task, so the request was refused. Retry once the "
         + "stream has completed.";
 
+    /// <summary>
+    /// Answered when a response this retrieval built was larger than the configured gRPC send ceiling.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE CONDITION THIS REPLACES WAS A WRONG ANSWER, NOT AN UNREPORTED FAILURE (issue MAJ-2).</b> A
+    /// chunk size the caller is free to choose determines how many rows go into ONE response message, and a
+    /// message over the ceiling cannot be written - so the retrieval had to end. What it used to end as was
+    /// gRPC <c>OK</c> carrying zero chunks, which is byte for byte the shape of a retrieval against an
+    /// empty table: measured on a hundred-thousand-row table, a chunk size of 100000 answered
+    /// <c>rows: [], rowCount: 0, final: true</c> through the REST projection with HTTP 200. This message
+    /// is what a caller now receives instead, and its code is <c>E_BUSY</c>, which the projection maps to
+    /// <c>ResourceExhausted</c> and then to HTTP 429 - the same answer the DataServices receive ceiling
+    /// already gives one hop up, so the two boundaries agree.
+    /// </para>
+    /// <para>
+    /// <b>IT NAMES THE SETTING AND THE REMEDY BUT QUOTES NO NUMBER.</b> The ceiling and the offending
+    /// size both go to the operator's log, where they identify the cause; publishing them here would tell
+    /// an unauthenticated-in-effect caller how close an arbitrary request came to a declared bound, which
+    /// is the posture every other capacity refusal on this contract takes. The remedy does not need the
+    /// numbers: a smaller chunk size produces smaller messages monotonically, so retrying downward
+    /// converges without knowing where the edge is.
+    /// </para>
+    /// <para>
+    /// <b>NO ROWS WERE DELIVERED IS STATED EXPLICITLY, because it is the one thing a caller cannot infer.
+    /// </b> The refusal can land on the FIRST chunk or on the fifth, and a caller that has already
+    /// accepted four must know that what it holds is partial. The sentence covers both by describing the
+    /// retrieval as incomplete rather than claiming a count.
+    /// </para>
+    /// </remarks>
+    private const string SendCeilingExceededText =
+        "The retrieval was abandoned because a single response message built from the requested chunk size "
+        + "exceeded this service's configured gRPC send ceiling (Ingress:MaxSendMessageBytes). The "
+        + "retrieval is INCOMPLETE and whatever chunks preceded this status are a partial result that must "
+        + "not be read as a whole one. Retrieve again with a smaller SetChunkSize so that each chunk fits "
+        + "the ceiling, or raise the ceiling in this service's configuration. The ceiling and the size of "
+        + "the refused message are recorded in this service's own log and are deliberately not quoted "
+        + "here.";
+
     /// <summary>Answered when a clause carries a modification style outside the published domain.</summary>
     /// <remarks>
     /// A proto3 enum field is OPEN: an unrecognised number is neither rejected by the parser nor folded
@@ -2190,6 +2367,7 @@ internal sealed class QueryService : GeneratedQueryServiceBase
     private readonly QueryTaskRegistry _tasks;
     private readonly IQueryTaskFactory _taskFactory;
     private readonly IQueryRetrievalRunner _runner;
+    private readonly int _maxSendMessageBytes;
     private readonly ILogger<QueryService>? _logger;
 
     /// <summary>
@@ -2211,8 +2389,23 @@ internal sealed class QueryService : GeneratedQueryServiceBase
     /// Optional structured logger. Optional rather than required so a unit test can construct the
     /// service with nothing but its behavioural collaborators.
     /// </param>
+    /// <param name="ingress">
+    /// The bound ingress group, read for ONE value: the gRPC send ceiling this adapter's streams must
+    /// respect. Optional for the same reason the logger is, and it falls back to the group's own declared
+    /// default rather than to a literal, so the ceiling has exactly one authority whether it was injected
+    /// or not.
+    /// </param>
     /// <exception cref="ArgumentNullException">A required collaborator is <see langword="null"/>.</exception>
     /// <remarks>
+    /// <para>
+    /// <b>THE SEND CEILING IS READ HERE BECAUSE A STREAM HAS TO KNOW IT (issue MAJ-2).</b> The value is
+    /// written onto <c>GrpcServiceOptions.MaxSendMessageSize</c> in <c>Program.cs</c> from this same
+    /// group, so the writer would reject an over-sized response anyway - but it rejects it as an
+    /// EXCEPTION, indistinguishable at the catch site from a peer that has gone, and a peer that has gone
+    /// leaves nowhere to write a terminal status. The sink therefore measures each response against the
+    /// ceiling itself and refuses it as a NAMED condition, which is what lets the failure be reported in
+    /// band instead of ending the call with a successful-looking empty stream.
+    /// </para>
     /// <b>NO <c>ISqlRedactor</c> AND NO <c>IOptions&lt;PersistenceOptions&gt;</c> ARE INJECTED, AND BOTH
     /// OMISSIONS ARE DELIBERATE.</b> The redaction of the statement field is reached directly by the
     /// sanctioned projection in <c>Errors/SqlRedactor.cs</c> precisely so it cannot be weakened from a
@@ -2227,13 +2420,18 @@ internal sealed class QueryService : GeneratedQueryServiceBase
         QueryTaskRegistry tasks,
         IQueryTaskFactory taskFactory,
         IQueryRetrievalRunner runner,
-        ILogger<QueryService>? logger = null)
+        ILogger<QueryService>? logger = null,
+        IOptions<IngressOptions>? ingress = null)
     {
         _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
         _tasks = tasks ?? throw new ArgumentNullException(nameof(tasks));
         _taskFactory = taskFactory ?? throw new ArgumentNullException(nameof(taskFactory));
         _runner = runner ?? throw new ArgumentNullException(nameof(runner));
         _logger = logger;
+
+        // The group's own default, not a literal: an uninjected ceiling is the SAME number a configured
+        // one defaults to, so a test and a deployment enforce the same bound.
+        _maxSendMessageBytes = (ingress?.Value ?? new IngressOptions()).MaxSendMessageBytes;
     }
 
     // ----------------------------------------------------------------------------------------------
@@ -3089,7 +3287,7 @@ internal sealed class QueryService : GeneratedQueryServiceBase
             return;
         }
 
-        using QueryStreamSink sink = new(responseStream, entry, cancellationToken);
+        using QueryStreamSink sink = new(responseStream, entry, cancellationToken, _maxSendMessageBytes);
 
         try
         {
@@ -3150,6 +3348,41 @@ internal sealed class QueryService : GeneratedQueryServiceBase
                 // it, because no statement was ever issued.
                 status = merged.ToStatus();
             }
+            else if (sink.SendCeilingExceeded)
+            {
+                // ==========================================================================================
+                //  THE SEND CEILING IS REPORTED HERE, AND IT DELIBERATELY OVERRIDES THE CODEC'S OWN ANSWER.
+                //
+                //  The codec that met the refusal answered the legacy's E_INTERNAL_ERROR with
+                //  `TransData Failed` [n_cst_thread_task_sqlquery.sru:L183-L185] and that arm is preserved
+                //  verbatim, because it is what the oracle does when a hand-over is refused. But the
+                //  ceiling is a PORT-INTRODUCED bound with no legacy counterpart at all - the legacy hands
+                //  a blob to an in-process event and has no message size - so relaying the ported code
+                //  would describe a port-only condition in the oracle's vocabulary and tell the caller
+                //  nothing it can act on. E_BUSY plus this file's own sentence describes the actual
+                //  condition, and it is the code the sibling ceiling one hop up already answers.
+                //
+                //  NO db_error IS ATTACHED, and that is what makes the projection work: DataServices
+                //  raises a failing status carrying no driver payload as the CALL status
+                //  [Grpc/DataWindowService.cs, the Status arm of the retrieve loop], which is how this
+                //  reaches a REST caller as 429 rather than as an empty success.
+                // ==========================================================================================
+                status = QueryWireCodes.Status(RetCode.E_BUSY, SendCeilingExceededText);
+
+                // THE CAUSE GOES TO THE OPERATOR, WHICH IS THE HALF THAT WAS MISSING. Previously the only
+                // trace of this condition anywhere was "a retrieval ended with return code -27", with no
+                // record of WHY - a whole-log search for a size or a ceiling returned nothing. Both numbers
+                // are byte counts: they carry no row value and no statement text, so recording them is
+                // safe under constraint C-F, and they are what an operator needs to decide between telling
+                // the caller to chunk smaller and raising the bound.
+                _logger?.LogWarning(
+                    "A retrieval built a response of {MessageBytes} bytes, which exceeds the configured "
+                    + "gRPC send ceiling of {CeilingBytes} bytes (Ingress:MaxSendMessageBytes). The "
+                    + "retrieval was abandoned and the caller was told to reduce its chunk size. No "
+                    + "response payload is recorded.",
+                    sink.SendCeilingBytes,
+                    sink.MaxMessageBytes);
+            }
             else
             {
                 QueryFaultSnapshot fault = entry.Faults.Snapshot();
@@ -3173,7 +3406,19 @@ internal sealed class QueryService : GeneratedQueryServiceBase
                 // rather than a ported behaviour (AAP 0.6.3.8), and it is applied here at the egress
                 // rather than at the recorder so the recorder stays a faithful reproduction of the
                 // proxy's own last-error field.
-                string diagnostic = SqlRedactor.Instance.Redact(fault.ErrorText);
+                // 🔴 PROVIDER-DIAGNOSTIC POLICY, so this field and the `db_error.sqlerrtext` attached below
+                // disclose at the SAME depth - they did not before, because Microsoft.Data.Sqlite's envelope
+                // presents the result code as a numeric literal and the diagnosis as a quoted string, and
+                // the strict policy masked both.
+                //
+                // THE `Modify` REJECTION IS STILL FULLY MASKED, WHICH IS WHY THE WIDENING IS SAFE HERE OF
+                // ALL PLACES. The paragraph above notes that this text may be the whole rejected
+                // `DataWindow.Table.Select='...'` assignment with the generated statement inside it. That
+                // string is not the provider's envelope, so it does not match the shape test and takes the
+                // strict path unchanged - the envelope must match the WHOLE input or not at all. Only a
+                // genuine driver envelope keeps its wrapper, and its interior is masked even then. See
+                // Errors/SqlRedactor.cs, RedactProviderDiagnostic, for the field-class policy.
+                string diagnostic = SqlRedactor.Instance.RedactProviderDiagnostic(fault.ErrorText);
 
                 // db_error is attached ONLY when the driver event actually fired, which is what the
                 // contract requires: it is absent on a validation failure, and that is the normal case for

@@ -28,9 +28,11 @@
   .NET 10 tooling emits .slnx, the XML solution format, which is what this file is. The shape below
   was established empirically against this SDK before the file was written: `dotnet new sln` emits a
   bare `<Solution>` root, and `dotnet sln add` emits `<Project Path="..." />` children using forward
-  slash separators relative to this file's own directory. Legacy solution filters (.slnf) are
-  recorded as incompatible with the .slnx format, failing with MSB4014 during restore, build and
-  test. Do not reach for one regardless: a per service solution already scoped to two projects has
+  slash separators relative to this file's own directory. Legacy solution filters (.slnf) were
+  recorded as failing against the .slnx format with MSB4014 in all three verbs; that claim was
+  MEASURED FALSE on the pinned SDK and docs/BUILD.md section 2 carries the correction - what does
+  fail hard is any drift between a filter's hand maintained project list and the solution.
+  Do not reach for one regardless: a per service solution already scoped to two projects has
   nothing left to filter, and every additional solution artifact courts the MSB1011 ambiguity above.
 
   SCOPE: EXACTLY TWO PROJECTS, AND NOTHING ELSE (constraints C-A and C-D)

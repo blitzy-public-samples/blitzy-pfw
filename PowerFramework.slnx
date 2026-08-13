@@ -47,8 +47,13 @@
   follows that shape exactly, because it was generated with the SDK and then annotated rather than
   hand written.
 
-  A legacy solution FILTER, the .slnf format, is INCOMPATIBLE with a .slnx format solution: a hand
-  authored filter pointing at one fails with MSB4014 during restore, during build AND during test.
+  A legacy solution FILTER, the .slnf format, is not authored here and must not be - because a
+  filter's project list has to be kept in exact agreement with the solution BY HAND, and every
+  disagreement fails hard in all three verbs. An earlier form of this note said a filter over a
+  .slnx fails with MSB4014; that was measured false on the pinned SDK, where a well formed filter
+  over an existing .slnx restores, builds and tests cleanly. docs/BUILD.md section 2 carries the
+  measurement, the four failing situations and the code's real trigger. The prohibition stands on
+  the maintenance ground, which does not expire the way a tooling defect would.
   Do not author one, now or as a follow up. To scope a build to a subset of projects, use the per
   service solution for the service in question, which is precisely why those four exist. There is
   likewise no .sln file anywhere in this repository, and no second .slnx at this root.

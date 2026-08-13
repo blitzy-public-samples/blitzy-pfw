@@ -708,7 +708,7 @@ public sealed class DataServicesRouteCensusTests
     {
         string[] reachable =
         [
-            "200", "400", "401", "403", "404", "409", "429", "500", "502", "503", "504",
+            "200", "400", "401", "403", "404", "409", "413", "429", "500", "502", "503", "504",
         ];
 
         await using GatewayTestHostFixture host =
@@ -719,6 +719,7 @@ public sealed class DataServicesRouteCensusTests
         using JsonDocument document = await ReadDocumentAsync(client);
 
         int checkedRoutes = 0;
+        int declaringSizeBound = 0;
 
         foreach (ProjectedRoute route in Census)
         {
@@ -732,11 +733,20 @@ public sealed class DataServicesRouteCensusTests
                     .Order(StringComparer.Ordinal),
             ];
 
-            // THE DECLARED SET MUST COVER THE REACHABLE SET. The 400 is the one status a route may omit,
-            // and only where the operation binds no body at all - so it is excluded from the required
-            // list rather than from the permitted one.
+            // THE DECLARED SET MUST COVER THE REACHABLE SET. Two statuses are CONDITIONAL on the route
+            // binding a body at all, so both are excluded from the required list rather than from the
+            // permitted one: the 400, which reports a body that would not bind, and the 413, which reports
+            // one refused at the ingress size bound before it was read. Measured directly: a 9 MiB body to
+            // a body-reading route answers 413, and the same body to a route that reads none answers that
+            // route's ordinary result, because the payload is never read. Requiring 413 on all thirty-nine
+            // would demand a declaration three of them cannot honestly make; the surplus check below still
+            // refuses it anywhere it is unreachable.
             string[] required =
-                [.. reachable.Where(static status => !string.Equals(status, "400", StringComparison.Ordinal))];
+            [
+                .. reachable.Where(static status =>
+                    !string.Equals(status, "400", StringComparison.Ordinal)
+                    && !string.Equals(status, "413", StringComparison.Ordinal)),
+            ];
 
             string[] missing = [.. required.Where(status => !declared.Contains(status, StringComparer.Ordinal))];
 
@@ -757,11 +767,38 @@ public sealed class DataServicesRouteCensusTests
             Assert.DoesNotContain("501", declared, StringComparer.Ordinal);
             Assert.DoesNotContain("422", declared, StringComparer.Ordinal);
 
+            // THE ONE CONDITIONAL STATUS IS ASSERTED, NOT TOLERATED. Excluding 413 from the required list
+            // above stops this test DEMANDING it where it is unreachable - but on its own it also lets the
+            // opposite defect through, which is what happened: gating the declaration on the 400's
+            // condition put a 413 on all three body-less routes, and this test passed anyway because
+            // "reachable somewhere" was the only bar the surplus check applied. So the biconditional is
+            // stated per route: a route declares 413 exactly when it reads a body, and in this census the
+            // body-reading routes are the POSTs - the three that read none are the GET and the two DELETEs,
+            // which compose their request from the route's own `sessionId`.
+            bool readsABody = string.Equals(route.HttpMethod, "POST", StringComparison.Ordinal);
+            bool declaresSizeBound = declared.Contains("413", StringComparer.Ordinal);
+
+            Assert.True(
+                readsABody == declaresSizeBound,
+                $"{route.HttpMethod} {route.Path} reads a body: {readsABody}, but declares 413: "
+                    + $"{declaresSizeBound}. A body-reading route that omits it leaves a client with no "
+                    + "branch for a refusal it will receive; a body-less route that declares it publishes "
+                    + "a status the route can never answer.");
+
+            if (declaresSizeBound)
+            {
+                declaringSizeBound++;
+            }
+
             checkedRoutes++;
         }
 
         // Guards against a silently empty loop: the count is the census, not a number this test chose.
         Assert.Equal(Census.Length, checkedRoutes);
+
+        // AND THE EXEMPTION IS EXACTLY THREE ROUTES WIDE. A count makes the census's own shape an
+        // assertion, so adding a body-less route without considering the bound cannot pass quietly.
+        Assert.Equal(Census.Length - 3, declaringSizeBound);
     }
 
     /// <summary>Finds one census row's operation object in the published document.</summary>

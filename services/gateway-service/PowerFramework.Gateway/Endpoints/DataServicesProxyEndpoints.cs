@@ -253,6 +253,12 @@ using PowerFramework.Shared.Kernel;
 // unqualified and unmistakable.
 using ConflictDetail = PowerFramework.Contracts.Common.V1.ConflictDetail;
 
+// The same aliasing rule, applied to the two types the refusal-identity allow-list needs: the buffer
+// discriminator it renders and the message whose descriptor supplies that discriminator's PUBLISHED
+// spelling. Two more aliases rather than one namespace import, for the collision reason above.
+using DbError = PowerFramework.Contracts.Common.V1.DbError;
+using DwBuffer = PowerFramework.Contracts.Common.V1.DwBuffer;
+
 namespace PowerFramework.Gateway.Endpoints;
 
 /// <summary>
@@ -394,6 +400,100 @@ public static class DataServicesProxyEndpoints
     /// <summary>The problem-details extension member carrying the optimistic-concurrency payload.</summary>
     private const string ConflictExtensionMember = "conflict";
 
+    /// <summary>The problem-details extension member carrying the database-layer failure payload.</summary>
+    /// <remarks>
+    /// <para>
+    /// DECLARED IN <c>gateway.v1.yaml</c>'s <c>ProblemDetails</c> SINCE THE CONTRACT WAS AUTHORED, as
+    /// <c>$ref</c> to the mirrored <c>DbError</c> shape, and nothing populated it - which is the finding
+    /// this constant closes rather than a member being added. The member's whole purpose is the one thing a
+    /// caller who omitted a required column needs: the identity of the column the storage engine refused.
+    /// </para>
+    /// <para>
+    /// <see langword="internal"/> so the sibling test project can name the member it asserts on, and so the
+    /// source guard that fixes what an in-band failure may attach can enumerate the ONE member that is
+    /// permitted. A test naming the string itself would keep passing after a rename while every response
+    /// carried the other spelling.
+    /// </para>
+    /// </remarks>
+    internal const string DatabaseErrorExtensionMember = "dbError";
+
+    /// <summary>The provider's numeric code on the database payload - the one classifier safe to log.</summary>
+    private const string DatabaseErrorCodeFieldName = "sqldbcode";
+
+    /// <summary>The offending buffer on the database payload.</summary>
+    private const string DatabaseErrorBufferFieldName = "buffer";
+
+    /// <summary>The offending one-based row on the database payload.</summary>
+    /// <remarks>
+    /// Zero means "no particular row", which is what the framework reports for a connection- or
+    /// statement-level failure not attributable to one - so a zero here is information rather than an
+    /// absent value.
+    /// </remarks>
+    private const string DatabaseErrorRowFieldName = "row";
+
+    /// <summary>
+    /// The problem-details extension member carrying the upstream database diagnostic's IDENTITY fields.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// PUBLISHED BY THE CONTRACT SINCE BEFORE ANYTHING PRODUCED IT, AND THAT GAP WAS THE DEFECT.
+    /// <c>gateway.v1.yaml</c> declares <c>dbError</c> on the problem schema, referencing the closed
+    /// <c>DbError</c> shape, so a client written against the published contract was entitled to read it -
+    /// and no code path ever set it, because the in-band failure renderer discarded the upstream message
+    /// whole. A published member with no producer is worse than an absent one: it documents a capability
+    /// the system does not have.
+    /// </para>
+
+    /// <summary>
+    /// The problem-details extension member carrying per-row validation refusals, IDENTITY ONLY.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE OTHER HALF OF "WHICH COLUMN", AND A DIFFERENT UPSTREAM PATH FROM <see cref="DatabaseErrorExtensionMember"/>.
+    /// A refusal reaches this gateway as <c>E_INVALID_DATA</c> from either of two places: the storage engine
+    /// rejecting a row, which arrives as a database diagnostic, or the DataWindow service's own row
+    /// validator rejecting one, which arrives as a repeated per-row record naming the column. Both are the
+    /// same HTTP status to the caller and both used to be answered with the same fixed prose, so both
+    /// needed a member. This one carries the second.
+    /// </para>
+    /// </remarks>
+    private const string ValidationErrorsExtensionMember = "validationErrors";
+
+    /// <summary>
+    /// How many per-row validation refusals are relayed to a caller at most.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A BOUND RATHER THAN A COUNT, AND THE REASON IT EXISTS AT ALL IS THE REASON THE WHOLE-MESSAGE
+    /// EXTENSION WAS REMOVED. What crosses the system's only external ingress must be bounded by this
+    /// gateway rather than by whatever an upstream happened to produce, because an unbounded relay is a
+    /// response size a caller controls by sending a larger payload. A refusal is a diagnostic, not a
+    /// report: the first entries identify the fault, and a caller with more than this many bad columns has
+    /// a payload-shaped problem rather than a per-column one.
+    /// </para>
+    /// <para>
+    /// TRUNCATION IS SILENT BY DESIGN. Publishing a "there were more" count would tell a caller the size
+    /// of an upstream collection it is not being shown, which is information about internal processing
+    /// rather than about the caller's own request, and the corrective action does not change with the
+    /// number.
+    /// </para>
+    /// </remarks>
+    private const int MaximumRelayedValidationErrors = 32;
+
+    /// <summary>
+    /// How many characters of an upstream diagnostic TEXT are relayed at most.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE SECOND BOUND, ON A DIFFERENT AXIS. The element cap bounds how MANY records cross; this bounds
+    /// how LARGE one relayed string may be, so a single pathological diagnostic cannot become the response.
+    /// The value is generous relative to every real diagnostic this estate produces - a constraint failure
+    /// naming a table and column is well under a hundred characters - so truncation is the abnormal case
+    /// rather than the routine one.
+    /// </para>
+    /// </remarks>
+    private const int MaximumRelayedDiagnosticLength = 512;
+
     /// <summary>
     /// The extension member that marks a terminal element as a stream this gateway terminated.
     /// </summary>
@@ -437,6 +537,28 @@ public static class DataServicesProxyEndpoints
     /// legitimately appear on a problem this file produces.
     /// </remarks>
     private const string DataServicesUpstream = "dataservices";
+
+    /// <summary>
+    /// The <c>upstream</c> member's value for a failure of the credential edge to Security.
+    /// </summary>
+    /// <remarks>
+    /// SPELLED EXACTLY AS THE PUBLISHED ENUM SPELLS IT - <c>[persistence, dataservices, security]</c> in
+    /// <c>OpenApi/gateway.v1.yaml</c>. The enum has always carried this member; nothing in this file could
+    /// ever produce it, so a consumer branching on it had a branch that could not be reached.
+    /// </remarks>
+    private const string SecurityUpstream = "security";
+
+    /// <summary>
+    /// What the operator record names where the failure was this gateway's own rather than an upstream's.
+    /// </summary>
+    /// <remarks>
+    /// NOT A MEMBER OF THE PUBLISHED ENUM AND NEVER WRITTEN TO A RESPONSE. The contract requires the
+    /// <c>upstream</c> member to be ABSENT when Gateway produced the response itself, so this value exists
+    /// only for the log line, where a blank slot would read as a template that lost an argument rather
+    /// than as a failure with no upstream. Spelled parenthetically for the same reason
+    /// <see cref="UnroutedRouteDescription"/> is.
+    /// </remarks>
+    private const string GatewayOwnFailureUpstream = "(none - this gateway)";
 
     /// <summary>
     /// RFC 9457's own default problem type, used wherever no more specific type applies.
@@ -601,6 +723,17 @@ public static class DataServicesProxyEndpoints
         + "describe a conflict no caller could act on. The update was NOT applied. Re-read before "
         + "resubmitting.";
 
+    /// <summary>
+    /// The trailer an upstream ingress refusal states its retry interval on, in whole seconds.
+    /// </summary>
+    /// <remarks>
+    /// Spelled here rather than shared from an upstream project, because a service reaches another only
+    /// through the published contract (C-A) and nothing else crosses that boundary. The wire spelling is
+    /// therefore the agreement, and the sibling test asserts it literally so a rename on either side is
+    /// caught rather than silently degrading this header back to the configured delta.
+    /// </remarks>
+    internal const string UpstreamRetryAfterTrailer = "retry-after";
+
     /// <summary>The detail for an upstream <c>ResourceExhausted</c>.</summary>
     private const string ResourceExhaustedDetail =
         "DataServices reported that a resource the operation needs is exhausted. The request was not "
@@ -628,6 +761,36 @@ public static class DataServicesProxyEndpoints
     private const string UnavailableDetail =
         "DataServices answered that it is unavailable. The request was not processed.";
 
+    /// <summary>
+    /// The detail for a failure of the CREDENTIAL edge, which is a different upstream from the data edge.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 ITS OWN PROSE BECAUSE ITS OWN SERVICE. A caller receiving
+    /// <see cref="UpstreamUnavailableDetail"/> for a Security outage is told twice over that DataServices
+    /// failed - once by the <c>upstream</c> member and once by the sentence - and both were wrong. Sharing
+    /// one sentence between two upstreams is what made the misattribution invisible in review: the member
+    /// was the only thing that could have distinguished them, and it was hardcoded.
+    /// </para>
+    /// <para>
+    /// IT NAMES NO ADDRESS, HOST OR PORT. The service name is topology a caller already knows from the
+    /// published enum; a resolved address is deployment detail, and the fault that produced this response
+    /// may carry one in its own message, which is why that message never reaches the body.
+    /// </para>
+    /// <para>
+    /// AND IT STATES THAT NOTHING WAS RETRIED, which is true of this edge specifically rather than a
+    /// hedge: token issuance is a POST whose replay is not safe - a transport failure does not reveal
+    /// whether the server processed it - so the outbound policy attempts it exactly once by design.
+    /// </para>
+    /// </remarks>
+    private const string SecurityUnavailableDetail =
+        "This gateway could not obtain the service credential this request needed. Security - the sole "
+        + "token issuer - could not be reached, or the issuance call failed in transit, so no token was "
+        + "minted and the downstream call was never attempted. DataServices is not implicated: it may be "
+        + "perfectly healthy. Nothing was retried, because issuance is a state-changing call whose replay "
+        + "is not safe. This failure mode is one decomposition itself creates: an in-process call cannot "
+        + "fail in transit and a network call can.";
+
     /// <summary>The detail for a transport failure that produced no gRPC response at all.</summary>
     /// <remarks>
     /// 🔴 THIS TEXT USED TO CLAIM A RETRY THAT MOST OPERATIONS NEVER GET. It read "after the configured
@@ -638,6 +801,11 @@ public static class DataServicesProxyEndpoints
     /// on purpose. Telling an operator their failed update had exhausted a retry policy sends them looking
     /// for a transient fault behind a call that was tried once; worse, it implies an update may have been
     /// applied more than once. The text states both possibilities and which one applies to what.
+    /// </remarks>
+    /// <remarks>
+    /// AND IT NAMES DataServices SPECIFICALLY, WHICH IS NOW TRUE OF IT. The sibling
+    /// <see cref="SecurityUnavailableDetail"/> carries the credential edge, so this sentence no longer has
+    /// to stand for two upstreams at once.
     /// </remarks>
     private const string UpstreamUnavailableDetail =
         "DataServices could not be reached, or the call to it failed in transit, so no response arrived. "
@@ -813,9 +981,19 @@ public static class DataServicesProxyEndpoints
     // --------------------------------------------------------------------------------------------------
 
     /// <summary>The allowlisted operator record written once per projected failure.</summary>
+    /// <remarks>
+    /// 🔴 THE UPSTREAM IS A TEMPLATE ARGUMENT RATHER THAN THE WORD "DataServices", AND THE HARDCODED WORD
+    /// WAS HALF OF A MEASURED MISATTRIBUTION. This template read "DataServices reported gRPC status
+    /// {GrpcStatus}", so a Security-edge outage produced the operator line "The /v1/datawindow projection
+    /// is answering 502 ... DataServices reported gRPC status (unrouted) (HttpRequestException)" while the
+    /// true cause was three lines above it in the same log. An operator reading the record went to the
+    /// wrong service, which is exactly what the correlation identifier and the <c>upstream</c> member
+    /// exist to prevent. The record now names whichever upstream the projection attributed the failure to,
+    /// and the caller's body and this line therefore cannot disagree.
+    /// </remarks>
     private const string ProjectedFailureLogMessage =
         "The /v1/datawindow projection is answering {HttpStatus} with retCode {RetCode} for {HttpMethod} "
-        + "{RoutePattern}: DataServices reported gRPC status {GrpcStatus} ({ExceptionType}). "
+        + "{RoutePattern}: upstream {Upstream} reported gRPC status {GrpcStatus} ({ExceptionType}). "
         + "Correlation {CorrelationId}. The upstream status detail, the request body and the response body "
         + "are deliberately not recorded here - they are caller or upstream content.";
 
@@ -837,6 +1015,21 @@ public static class DataServicesProxyEndpoints
     /// these routes and guarded anyway so that a record can never publish an empty field.
     /// </summary>
     private const string UnroutedRouteDescription = "(unrouted)";
+
+    /// <summary>
+    /// The description used where a failure carried no gRPC status at all, because no gRPC response ever
+    /// arrived.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 THIS EXISTS BECAUSE THE RECORD USED TO BORROW THE ROUTE MARKER ABOVE TO MEAN THIS, and the
+    /// borrowing produced a false statement. With the upstream now named correctly, the credential arm's
+    /// record read "upstream security reported gRPC status (unrouted)" - asserting that Security REPORTED
+    /// something, when the whole point of that arm is that Security answered nothing and no gRPC call was
+    /// ever made. Two different absences - "no route was matched" and "no status arrived" - were sharing
+    /// one word, so the record could not distinguish a service that refused from a service that was never
+    /// reached. Naming the absence is what makes the record true.
+    /// </remarks>
+    private const string NoGrpcStatusDescription = "(none - no gRPC response arrived)";
 
     // --------------------------------------------------------------------------------------------------
     //  THE PROTOBUF JSON CODECS
@@ -1577,7 +1770,7 @@ public static class DataServicesProxyEndpoints
         route.Accepts<ProtoPayload>(MediaTypeNames.Application.Json);
         route.Produces<ProtoPayload>(StatusCodes.Status200OK, MediaTypeNames.Application.Json);
 
-        Describe<TRequest, TResponse>(route, operation);
+        Describe<TRequest, TResponse>(route, operation, readsRequestBody: true);
     }
 
     /// <summary>
@@ -1633,7 +1826,9 @@ public static class DataServicesProxyEndpoints
 
         route.Produces<ProtoPayload>(StatusCodes.Status200OK, MediaTypeNames.Application.Json);
 
-        Describe<TRequest, TResponse>(route, operation);
+        // Reads no body: the request is composed from the route's own `sessionId` (DECISION above), so
+        // the ingress size bound cannot be reached here and 413 is not declared.
+        Describe<TRequest, TResponse>(route, operation, readsRequestBody: false);
     }
 
     /// <summary>
@@ -1684,7 +1879,7 @@ public static class DataServicesProxyEndpoints
             StatusCodes.Status200OK,
             MediaTypeNames.Application.Json);
 
-        Describe<TRequest, TResponse>(route, streaming);
+        Describe<TRequest, TResponse>(route, streaming, readsRequestBody: true);
     }
 
     /// <summary>
@@ -1713,7 +1908,8 @@ public static class DataServicesProxyEndpoints
     /// </remarks>
     private static void Describe<TRequest, TResponse>(
         RouteHandlerBuilder route,
-        ProjectedOperation operation)
+        ProjectedOperation operation,
+        bool readsRequestBody)
         where TRequest : class, IMessage, new()
         where TResponse : class, IMessage, new()
     {
@@ -1730,6 +1926,33 @@ public static class DataServicesProxyEndpoints
         {
             route.ProducesProblem(
                 StatusCodes.Status400BadRequest,
+                MediaTypeNames.Application.ProblemJson);
+
+            // 🔴 413 IS DECLARED WHEREVER A BODY IS READ, AND IT WAS DECLARED NOWHERE.
+            //
+            // The ingress bounds the request body size, so a body over the limit is refused 413 by the
+            // exception handler - measured directly against a running deployment - and neither this
+            // generated document nor the authored contract declared that status on any operation. A
+            // generated client therefore had no branch for a response it could really receive.
+            //
+        }
+
+        // 🔴 413 IS DECLARED WHEREVER A BODY IS READ - AND "READS A BODY" IS NOT "DECLARES A 400".
+        //
+        // Gating this on the 400's condition was WRONG and the generated document proved it at runtime:
+        // the three operations that read no body still declare a 400 for the `sessionId` parameter
+        // constraint, so they inherited a 413 they can never answer - the exact defect this file corrects
+        // in the other direction for 404 and 409, reintroduced by reusing a neighbouring gate.
+        //
+        // The condition is whether the operation ACCEPTS A BODY, which is a property of its registration:
+        // MapUnary and the streaming path call Accepts<ProtoPayload>, MapSessionScoped does not. Measured
+        // both ways against a running deployment - a 9 MiB body to POST /v1/datawindow/retrieve answered
+        // 413, and the same body to DELETE /v1/datawindow/sessions/{sessionId} answered 200, because a
+        // body a route never reads is never measured against the bound.
+        if (readsRequestBody)
+        {
+            route.ProducesProblem(
+                StatusCodes.Status413PayloadTooLarge,
                 MediaTypeNames.Application.ProblemJson);
         }
 
@@ -2065,11 +2288,49 @@ public static class DataServicesProxyEndpoints
         {
             return ProjectFailure(httpContext, ProjectStatus(failure), failure);
         }
+        catch (ServiceTokenUnavailableException credential)
+        {
+            // ======================================================================================
+            //  🔴 THE CREDENTIAL EDGE IS ITS OWN ARM, AHEAD OF THE TRANSPORT ARM BELOW, AND ITS ABSENCE
+            //  WAS A MEASURED MISATTRIBUTION.
+            //
+            //  Every projected call obtains a service token from Security first, so a Security outage
+            //  surfaced here as the bare HttpRequestException the arm below catches - and that arm names
+            //  DataServices in the `upstream` member and in its prose. Stopping security-service alone,
+            //  with DataServices and Persistence both healthy, therefore answered
+            //  `502 { upstream: "dataservices", detail: "DataServices could not be reached..." }` while
+            //  the true cause sat three lines earlier in the same log as
+            //  `HttpClient.security-rest ... Name or service not known`. Caller and operator were both
+            //  sent to the wrong service, and the published `upstream` enum's own description says the
+            //  member exists "so an operator can attribute the failure without correlating logs".
+            //
+            //  IT IS CAUGHT BY TYPE RATHER THAN BY INSPECTING A MESSAGE, which is why the typed
+            //  exception exists at all: a string test on transport prose would break on the first
+            //  platform whose resolver worded a failure differently.
+            //
+            //  THE STATUS IS UNCHANGED AT 502, deliberately. The contract's own 502 description already
+            //  reads "An upstream service could not be reached ... The body names which upstream
+            //  failed" - so 502 was always the right status and the body was always the wrong body.
+            //  Only the attribution and the prose move.
+            // ======================================================================================
+            return ProjectFailure(
+                httpContext,
+                new StatusProjection(
+                    StatusCodes.Status502BadGateway,
+                    RetCode.E_RETRY,
+                    SecurityUnavailableDetail,
+                    FromUpstream: true,
+                    Upstream: SecurityUpstream),
+                credential);
+        }
         catch (HttpRequestException transport)
         {
             // Adjudication A2: a transport failure that escapes as itself rather than as a gRPC status is
             // the clearest instance of "no gRPC response arrived at all", which is the case the published
             // status table cannot describe and the case 502 exists for.
+            //
+            // AND IT IS NOW GENUINELY THE DATA EDGE. The credential edge raises its own type and is caught
+            // above, so this arm no longer stands for two upstreams while naming one.
             return ProjectFailure(
                 httpContext,
                 new StatusProjection(
@@ -2221,10 +2482,14 @@ public static class DataServicesProxyEndpoints
         // caller that branches on the status line - which is every HTTP client - would treat a rejected
         // update as an applied one with nothing downstream left to correct it.
         //
-        // THE BODY IS FORWARDED UNCHANGED EITHER WAY. On a failure the caller still receives the same
-        // upstream message: the in-band code, the diagnostic and any db_error, exactly as produced. Only
-        // the status LINE changes. This projection still translates transport rather than semantics
-        // (constraint C-B).
+        // THE TWO BODIES DIFFER, AND THIS COMMENT USED TO SAY THEY DID NOT. On SUCCESS the upstream
+        // message is forwarded unchanged - no member renamed, dropped or reinterpreted. On FAILURE the
+        // caller receives this gateway's own problem document instead: the mapped status, the numeric
+        // in-band code, fixed detail prose, and the refusal's IDENTITY - which buffer, which row, which
+        // column, which provider code - relayed through a per-field allow-list. The whole upstream message
+        // is deliberately NOT attached, because it would be an unbounded unreviewed payload crossing the
+        // system's only external ingress. Only the status LINE and the failure ENVELOPE change; no
+        // semantics are reinterpreted either way (constraint C-B).
         // ==========================================================================================
         if (InBandStatus.TryProjectFailure(response, out StatusProjection failure))
         {
@@ -2241,37 +2506,68 @@ public static class DataServicesProxyEndpoints
     /// </summary>
     /// <param name="httpContext">The current request.</param>
     /// <param name="response">
-    /// The upstream message. Read for nothing but the fact of the failure; it is NOT attached to the
-    /// response.
+    /// The upstream message. Read for the fact of the failure and for ONE declared member - the
+    /// <c>common.v1.DbError</c> payload, when it carries a populated one. The message itself is never
+    /// attached.
     /// </param>
     /// <param name="failure">The projection the in-band code mapped to.</param>
     /// <returns>A problem response carrying the mapped status and this gateway's own allow-listed body.</returns>
     /// <remarks>
     /// <para>
-    /// 🔴 THE UPSTREAM MESSAGE IS NO LONGER ATTACHED, AND ITS ATTACHMENT WAS THE DEFECT. An earlier
-    /// revision serialised the WHOLE upstream response into a <c>response</c> problem extension, on the
-    /// reasoning that a caller of a failed operation needs the contract's own answer. The reasoning
-    /// mistakes what this boundary is: Gateway is the system's only external ingress, and a whole
-    /// upstream message is an unbounded, unreviewed payload. A relayed <c>db_error</c> carries
-    /// <c>sqlsyntax</c>, which is the complete generated statement - the legacy interpolates literal
-    /// values into it and its logger performs no redaction at all (AAP 0.6.4) - so the extension was a
-    /// channel through which row data and internal structure could leave the system in a body nobody had
-    /// screened. "It is redacted before it reaches this gateway" was doing all the work in that argument,
-    /// and a disclosure control that depends on another service having got it right is not a control.
+    /// 🔴 THE WHOLE UPSTREAM MESSAGE IS NOT ATTACHED, AND ITS ATTACHMENT WAS THE FIRST DEFECT HERE. An
+    /// earlier revision serialised the ENTIRE upstream response into a <c>response</c> problem extension,
+    /// on the reasoning that a caller of a failed operation needs the contract's own answer. The reasoning
+    /// mistakes what this boundary is: Gateway is the system's only external ingress, and a whole upstream
+    /// message is an unbounded, unreviewed payload under a member no contract declared. "It is redacted
+    /// before it reaches this gateway" was doing all the work in that argument, and a disclosure control
+    /// that depends on another service having got it right is not a control.
     /// </para>
     /// <para>
-    /// WHAT A CALLER GETS INSTEAD IS AN ALLOW-LIST, and it is the part a client can actually act on: the
-    /// mapped HTTP status, the numeric <c>retCode</c> from the legacy return-code algebra, and this
-    /// gateway's own fixed detail prose. Those are declared in the published contract; the whole-message
-    /// extension never was, so nothing documented is withdrawn by removing it.
+    /// 🔴 REMOVING IT WHOLESALE INTRODUCED THE SECOND DEFECT, WHICH IS WHAT <c>dbError</c> NOW CLOSES.
+    /// Discarding the message discarded the one member of it that a caller cannot proceed without: the
+    /// database-failure payload naming the column the storage engine refused. A <c>NOT NULL</c> refusal on
+    /// the update path is an IN-BAND failure - the transport answers OK and the body answers
+    /// <c>E_INVALID_DATA</c> - so it arrives HERE, not on the success path this file's success renderer
+    /// forwards whole. The observable consequence was measured: an insert omitting <c>AGE</c> received
+    /// <c>400</c> with fixed prose, no column name anywhere, and no corrective action available to the
+    /// caller, while Persistence and DataServices had each carried the identity intact.
     /// </para>
     /// <para>
-    /// THE OPERATOR STILL GETS THE DETAIL, through the structured log record below rather than through
-    /// the caller's response body - which is the right destination for it, and the one the legacy dialog
-    /// (AAP 0.6.1) actually corresponded to.
+    /// <b>ATTACHING ONE DECLARED MEMBER IS NOT A RETURN TO ATTACHING THE MESSAGE, AND THE DIFFERENCE IS
+    /// THE WHOLE OF WHY THIS IS SAFE.</b> Four things are true of <c>dbError</c> that were false of
+    /// <c>response</c>. It is DECLARED in <c>gateway.v1.yaml</c>'s <c>ProblemDetails</c> as a
+    /// <c>$ref</c> to the mirrored <c>DbError</c> shape, so a consumer has a schema for it. It is BOUNDED
+    /// at five members with <c>additionalProperties: false</c>, so it cannot grow into a channel. Its one
+    /// dangerous member is a PUBLISHED COMMITMENT rather than an assumption - the contract states that
+    /// <c>sqlsyntax</c> carries placeholders only and that empty is valid and common (C-G), and the
+    /// contracts suite asserts it. And it is EXACTLY the precedent this file already sets one status along:
+    /// the <c>conflict</c> extension on a <c>409</c> forwards a far richer payload - every failing row's
+    /// current AND original values - because a caller that cannot see what moved cannot act. A caller that
+    /// cannot see which column was refused is in the identical position.
+    /// </para>
+    /// <para>
+    /// WHAT A CALLER GETS IS THEREFORE STILL AN ALLOW-LIST, one member longer: the mapped HTTP status, the
+    /// numeric <c>retCode</c>, this gateway's own fixed detail prose, and the declared database payload
+    /// when there is one. Nothing undeclared is added, and the upstream's free-text <c>error_text</c>
+    /// remains unrelayed - see <see cref="InBandStatus.Project"/> for why that one stays out.
+    /// </para>
+    /// <para>
+    /// THE OPERATOR STILL GETS THE OPERATOR'S HALF, through the structured log record below. The record
+    /// stays NUMERIC and adds the payload's code, buffer and row - never its text and never its statement
+    /// field, because the statement is the member the legacy carried unredacted and a log is the one place
+    /// this file must not put it.
+    /// </para>
+    /// <para>
+    /// <b><see langword="internal"/> RATHER THAN <see langword="private"/> SO WHAT THIS PATH ATTACHES IS
+    /// ASSERTABLE ON THE RENDERED DOCUMENT.</b> The guarantee that matters is a property of the BODY - one
+    /// declared member is present when the response carries a payload, absent when it does not, and no
+    /// third member ever appears - and a source scan can only approximate that. Reaching this path through
+    /// a deployed host needs an upstream that can be provoked into every outcome, which is exactly the
+    /// coverage gap that let the whole-message extension survive unnoticed once already. Only this
+    /// service's own test assembly sees it, through the <c>InternalsVisibleTo</c> the project file declares.
     /// </para>
     /// </remarks>
-    private static IResult RenderInBandFailure(
+    internal static IResult RenderInBandFailure(
         HttpContext httpContext,
         IMessage response,
         StatusProjection failure)
@@ -2290,15 +2586,202 @@ public static class DataServicesProxyEndpoints
             DescribeRoute(httpContext),
             ResolveCorrelationId(httpContext));
 
-        // THE MESSAGE IS DELIBERATELY NOT READ INTO THE RESPONSE. It is a parameter because the caller of
-        // this method holds it and a future revision may need to inspect it here; discarding it explicitly
-        // is what makes the omission legible rather than looking like a dropped line.
-        _ = response;
-
         ProblemDetails problem = BuildProblem(httpContext, failure);
+
+        // THE MESSAGE IS READ FOR IDENTITY AND FOR NOTHING ELSE. It is NOT serialized, NOT forwarded and
+        // NOT reachable through this call as a whole payload: AttachRefusalIdentity reads a fixed list of
+        // named fields into a shape this file declares, and cannot emit a member that is not written there
+        // literally. That is the distinction between this and the whole-message extension that was removed
+        // - which was an unbounded relay of an unreviewed payload, and is what the source guard in
+        // DataServicesProxyInBandStatusTests forbids returning to.
+        AttachRefusalIdentity(problem, response);
 
         return TypedResults.Problem(problem);
     }
+
+    /// <summary>
+    /// Attaches the IDENTITY of an upstream refusal - which buffer, which row, which column, which
+    /// provider code - to a problem body, through an explicit per-field allow-list.
+    /// </summary>
+    /// <param name="problem">The problem body being built.</param>
+    /// <param name="response">The upstream message, read for named fields only.</param>
+    /// <remarks>
+    /// <para>
+    /// 🔴 WHAT THIS FIXES, STATED AS THE CALLER'S EXPERIENCE. A row omitting a value for a
+    /// <c>NOT NULL</c> column was refused with a correct status and a body that named nothing: fixed prose
+    /// saying the data was refused, the numeric outcome, the upstream, a trace identifier. The caller was
+    /// told its payload was wrong and not told which part, so the whole corrective action - available to
+    /// the caller, and to nobody else - was unavailable to it. An operator could read the column out of a
+    /// log; the client could not, and the client is the party that has to change something.
+    /// </para>
+    /// <para>
+    /// <b>IDENTITY IS DISCLOSABLE AND VALUES ARE NOT, AND THAT LINE IS THE WHOLE DESIGN.</b> A column
+    /// name, a column ordinal, a column type, a buffer discriminator, a one-based row ordinal and a
+    /// provider error code are all SCHEMA METADATA or the caller's own addressing of its own request. None
+    /// of them is data: the caller supplied the row, so telling it "row 1, column AGE" repeats what it
+    /// sent. A VALUE is different in kind - it may have come from another caller's row, and the generated
+    /// statement carries interpolated literals because the legacy runs without bind variables when
+    /// <c>DisableBind</c> is set [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L128-L129].
+    /// So identity crosses and values do not, and every field below is on one side of that line
+    /// deliberately.
+    /// </para>
+    /// <para>
+    /// <b><c>sqlsyntax</c> IS EMITTED EMPTY RATHER THAN OMITTED, AND THAT IS DEFENCE IN DEPTH RATHER THAN
+    /// A FORMALITY.</b> The published <c>DbError</c> shape is closed and requires the member, so a body
+    /// that dropped it would not validate against the contract this gateway publishes. It is emitted as
+    /// the empty string - which the contract's own description calls valid and common - so the member is
+    /// present and carries nothing. The upstream does redact it before it arrives; the point is that this
+    /// boundary does not RELY on that, because a disclosure control that depends on another service having
+    /// got it right is not a control at the system's only external ingress.
+    /// </para>
+    /// <para>
+    /// <b>THE UPSTREAM'S OWN PROSE IS NOT RELAYED, AND THIS IS THE ONE PLACE THAT DISTINCTION IS SUBTLE.</b>
+    /// The per-row validation record carries a structured error whose message is legacy operator prose; it
+    /// is deliberately NOT read here, so the fixed detail this gateway authors stays the only prose in the
+    /// body and no upstream text can be inferred from the response. <c>sqlerrtext</c> IS relayed, because
+    /// it is the provider's condition line - <c>NOT NULL constraint failed: COMPANY.AGE</c> - which is the
+    /// only place the failing column appears on the storage path at all, and the upstream masks anything
+    /// quoted inside it. It is length-bounded here regardless.
+    /// </para>
+    /// <para>
+    /// SILENT WHEN THERE IS NOTHING TO SAY. A failure whose upstream message carries no diagnostic and no
+    /// per-row record attaches neither member, so the body is exactly what it was before this method
+    /// existed. No member is fabricated to make the shape uniform - an empty collection would assert that
+    /// the upstream reported no failing column, which is a different claim from not having been told.
+    /// </para>
+    /// <para>
+    /// <c>internal</c> RATHER THAN <c>private</c> SO THE ALLOW-LIST CAN BE ASSERTED DIRECTLY, through the
+    /// <c>InternalsVisibleTo</c> item the project file already declares. What has to be tested here is
+    /// which members CAN appear for a given upstream message, and that is a property of this method rather
+    /// than of any route: driving it through HTTP would test whichever refusal a fake upstream could be
+    /// made to produce, which is exactly the coverage shape that let the whole-message extension survive.
+    /// It is reachable from no route and from no other type.
+    /// </para>
+    /// </remarks>
+    internal static void AttachRefusalIdentity(ProblemDetails problem, IMessage response)
+    {
+        // ONLY THE UPDATE RESPONSE CARRIES EITHER OF THESE, so the type test is the whole dispatch. A
+        // pattern match rather than reflection over the descriptor: a field this method cannot name in
+        // source cannot reach a caller through it.
+        if (response is not UpdateResponse update)
+        {
+            return;
+        }
+
+        if (InBandStatus.TryReadDatabaseError(update, out IMessage? located)
+            && located is DbError databaseError)
+        {
+            problem.Extensions[DatabaseErrorExtensionMember] = new JsonObject
+            {
+                // The provider's numeric code. Carries no caller data.
+                ["sqldbcode"] = databaseError.Sqldbcode,
+
+                // The provider's condition line, bounded. Row data quoted inside it is already masked
+                // upstream; the bound is this boundary's own control over size.
+                ["sqlerrtext"] = Bound(databaseError.Sqlerrtext),
+
+                // ALWAYS EMPTY. Present because the published shape requires it; never populated, because
+                // this is the member that would carry the generated statement.
+                ["sqlsyntax"] = string.Empty,
+
+                // The buffer as its PUBLISHED enumerator name, and the ONE-BASED row ordinal verbatim -
+                // legacy contract, not an off-by-one to normalise. Row 0 is legitimate and means "no
+                // particular row", which is what a connection- or statement-level failure reports.
+                ["buffer"] = WireBuffer(databaseError.Buffer),
+                ["row"] = databaseError.Row,
+            };
+        }
+
+        if (update.ValidationErrors.Count == 0)
+        {
+            return;
+        }
+
+        JsonArray refusals = [];
+
+        foreach (RowValidationError refusal in update.ValidationErrors)
+        {
+            if (refusals.Count == MaximumRelayedValidationErrors)
+            {
+                break;
+            }
+
+            // FIVE NAMED ASSIGNMENTS, AND THE SET OF MEMBERS THAT CAN APPEAR IS EXACTLY THESE FIVE. The
+            // record's sixth field is its structured error, and its omission here is the allow-list
+            // working rather than an oversight.
+            refusals.Add(new JsonObject
+            {
+                ["buffer"] = WireBuffer(refusal.Buffer),
+                ["row"] = refusal.Row,
+                ["columnName"] = Bound(refusal.ColumnName),
+                ["columnId"] = refusal.ColumnId,
+                ["columnType"] = Bound(refusal.ColumnType),
+            });
+        }
+
+        problem.Extensions[ValidationErrorsExtensionMember] = refusals;
+    }
+
+    /// <summary>
+    /// Bounds one relayed diagnostic string to <see cref="MaximumRelayedDiagnosticLength"/> characters.
+    /// </summary>
+    /// <param name="text">The upstream text, which may be null on the wire.</param>
+    /// <returns>The text, truncated when over the bound; the empty string when null.</returns>
+    /// <remarks>
+    /// <para>
+    /// TRUNCATION IS UNMARKED, DELIBERATELY. An ellipsis or a "truncated" flag would be prose this gateway
+    /// authored inside a field a consumer reads as the provider's, and the bound exists to cap a response
+    /// rather than to describe one. Every real diagnostic in this estate is far below the bound, so a
+    /// truncated value indicates something abnormal upstream rather than a routine elision.
+    /// </para>
+    /// <para>
+    /// A NULL BECOMES THE EMPTY STRING rather than a JSON null, because the published member is typed as a
+    /// string and a protobuf string field is never null on a decoded message - so this arm is defensive
+    /// against a hand-constructed message in a test rather than against the wire.
+    /// </para>
+    /// </remarks>
+    private static string Bound(string? text) => text is null
+        ? string.Empty
+        : text.Length <= MaximumRelayedDiagnosticLength
+            ? text
+            : text[..MaximumRelayedDiagnosticLength];
+
+    /// <summary>
+    /// Renders a buffer discriminator as the enumerator name the CONTRACT publishes.
+    /// </summary>
+    /// <param name="buffer">The buffer the upstream reported.</param>
+    /// <returns>The canonical protobuf JSON enumerator name, for example <c>DW_BUFFER_PRIMARY</c>.</returns>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <c>ToString()</c> IS THE WRONG ANSWER HERE AND LOOKS LIKE THE RIGHT ONE. The generated C# enum
+    /// member is <c>Primary</c>, so <c>ToString()</c> yields <c>"Primary"</c> - while the published
+    /// <c>DwBuffer</c> schema enumerates <c>DW_BUFFER_PRIMARY</c>, which is what the canonical protobuf
+    /// JSON mapping emits and therefore what every other buffer-carrying member of every other body in
+    /// this contract already carries. A body spelling it the C# way would not validate against the
+    /// contract this gateway publishes, and would make one member of one extension the only place in the
+    /// whole surface where a buffer is spelled differently - a discrepancy a consumer would have to
+    /// special-case. It was produced and observed against the running stack before being corrected.
+    /// </para>
+    /// <para>
+    /// READ FROM THE DESCRIPTOR RATHER THAN FROM A SWITCH, so the spelling cannot drift from the protocol
+    /// definition. A hand-written mapping would be three lines that compile forever and silently stop
+    /// matching the moment the enum gains a member. The fallback to the C# name is unreachable for a
+    /// decoded message - every value on the wire has a descriptor entry - and exists so an out-of-range
+    /// value from a hand-constructed message degrades to a legible string rather than to null.
+    /// </para>
+    /// </remarks>
+    private static string WireBuffer(DwBuffer buffer) =>
+        BufferEnumDescriptor.FindValueByNumber((int)buffer)?.Name ?? buffer.ToString();
+
+    /// <summary>
+    /// The buffer enumeration's descriptor, resolved once from the message that carries it.
+    /// </summary>
+    /// <remarks>
+    /// Resolved through <see cref="DbError"/>'s own field rather than through a separately named
+    /// reflection entry point, so it is the descriptor of the very field being rendered.
+    /// </remarks>
+    private static readonly EnumDescriptor BufferEnumDescriptor =
+        DbError.Descriptor.FindFieldByName("buffer").EnumType;
 
     /// <summary>
     /// Forwards an upstream server stream to the response as one JSON array, element by element.
@@ -2967,11 +3450,29 @@ public static class DataServicesProxyEndpoints
                 AlreadyExistsProblemType,
                 AlreadyExistsProblemTitle),
 
+            // 🔴 THE ONE ARM THAT CAN CARRY AN INTERVAL THE UPSTREAM ITSELF STATED, AND IT IS PREFERRED
+            //    OVER THIS GATEWAY'S CONFIGURED DELTA (issue INFO-3).
+            //
+            //    Two different conditions reach a caller as 429, and only one of them knows when it clears.
+            //    An upstream INGRESS bound is a fixed window: it replenishes on a schedule, its limiter
+            //    knows the remainder, and the upstream now puts that remainder on a `retry-after` trailer
+            //    in whole seconds - the same fact its own REST surface puts on the `Retry-After` header.
+            //    An upstream CAPACITY ceiling - a session or handle ceiling answered in band as E_BUSY -
+            //    clears when something is RELEASED rather than on a schedule, states no interval, and is
+            //    the condition RestProjection:RetryAfter's short configured delta was chosen for.
+            //
+            //    Relaying the stated remainder is therefore strictly more accurate than substituting the
+            //    configured delta, and substituting it is actively misleading: a caller told 5 when the
+            //    window has 60 seconds left retries into a guaranteed second refusal, having been given a
+            //    number by a service that had a better one. Nothing is fabricated in the other direction -
+            //    when the upstream states no interval this stays null and the configured delta applies, so
+            //    the E_BUSY path is untouched.
             StatusCode.ResourceExhausted => new(
                 StatusCodes.Status429TooManyRequests,
                 RetCode.E_BUSY,
                 ResourceExhaustedDetail,
-                FromUpstream: true),
+                FromUpstream: true,
+                RetryAfterSeconds: UpstreamRetryAfterSeconds(failure)),
 
             // A cancellation the UPSTREAM reported. A caller-initiated cancellation never reaches the map:
             // it is answered without a body, because the connection to answer on is gone. The legacy code
@@ -3119,14 +3620,15 @@ public static class DataServicesProxyEndpoints
     /// contract's schema is the one object in it that accepts additional properties.
     /// </para>
     /// <para>
-    /// <c>dbError</c> IS DELIBERATELY NEVER POPULATED HERE, and that is a finding rather than an omission.
-    /// A database failure does not reach Gateway on a FAILURE path: C-03's update carries it as a field of
-    /// its SUCCESS response, which this projection forwards whole, and no method of C-03 or C-04 declares a
-    /// rich-error binding whose database alternative would arrive on a status instead. Decoding a trailer
-    /// here to fill the member would duplicate the typed client's single decoding path - which reads the
-    /// key, the status and the payload type from the descriptor precisely so that one path exists - and
-    /// would put this file in the business of handling a payload whose statement field the legacy carried
-    /// unredacted. The member stays available in the contract for a producer that has one.
+    /// <c>dbError</c> IS ATTACHED BY THE IN-BAND FAILURE RENDERER RATHER THAN HERE, and the earlier claim
+    /// that it is never populated at all was itself the finding. The reasoning behind that claim was that a
+    /// database failure reaches Gateway only as a field of C-03's update SUCCESS response, which the success
+    /// renderer forwards whole. Half of that is right and the half that is wrong is decisive: the payload
+    /// exists ONLY when the update failed, and an update that failed in the storage engine answers an
+    /// IN-BAND failure - transport OK, body carrying <c>E_INVALID_DATA</c> - so it never travels the success
+    /// path at all and was discarded on the only path it does travel. <see cref="RenderInBandFailure"/> now
+    /// attaches it, and attaches nothing else; the member is not built here because only that one path has
+    /// one to build it from.
     /// </para>
     /// <para>
     /// <c>instance</c> carries the caller's own request path, which discloses nothing the caller did not
@@ -3150,7 +3652,7 @@ public static class DataServicesProxyEndpoints
         // Attaching it per path is how one of them ends up without it, which is exactly what happened:
         // both 429 paths, the in-band E_BUSY projection and an upstream ResourceExhausted, answered with
         // no header at all. See ApplyRetryAfter for why only 429 gets one.
-        ApplyRetryAfter(httpContext, projection.HttpStatus);
+        ApplyRetryAfter(httpContext, projection);
 
         ProblemDetails problem = new()
         {
@@ -3163,9 +3665,17 @@ public static class DataServicesProxyEndpoints
 
         problem.Extensions[RetCodeExtensionMember] = projection.RetCode;
 
+        // 🔴 THE UPSTREAM IS TAKEN FROM THE PROJECTION RATHER THAN ASSUMED, AND THE ASSUMPTION WAS THE
+        // DEFECT. This line read `= DataServicesUpstream` unconditionally, so every forwarded failure
+        // named DataServices whatever had actually failed - and the one edge that is NOT DataServices,
+        // the credential edge to Security, is reached on the way to every projected call. Stopping
+        // Security alone therefore answered `502 { upstream: "dataservices" }` while DataServices was
+        // healthy, which is precisely the misattribution the member's published description says it
+        // exists to prevent. The fallback keeps every projection that really is a DataServices outcome
+        // unchanged, so only the site that knows better has to say so.
         if (projection.FromUpstream)
         {
-            problem.Extensions[UpstreamExtensionMember] = DataServicesUpstream;
+            problem.Extensions[UpstreamExtensionMember] = projection.Upstream ?? DataServicesUpstream;
         }
 
         string correlationId = ResolveCorrelationId(httpContext);
@@ -3210,23 +3720,67 @@ public static class DataServicesProxyEndpoints
     /// inside a failure path. The guard is what keeps this safe to call from the single choke point.
     /// </para>
     /// </remarks>
-    private static void ApplyRetryAfter(HttpContext httpContext, int httpStatus)
+    private static void ApplyRetryAfter(HttpContext httpContext, StatusProjection projection)
     {
-        if (httpStatus != StatusCodes.Status429TooManyRequests || httpContext.Response.HasStarted)
+        if (projection.HttpStatus != StatusCodes.Status429TooManyRequests
+            || httpContext.Response.HasStarted)
         {
             return;
         }
 
-        TimeSpan configured = httpContext.RequestServices
-            .GetRequiredService<IOptions<GatewayOptions>>()
-            .Value
-            .RestProjection
-            .RetryAfter;
-
-        long seconds = (long)Math.Ceiling(configured.TotalSeconds);
+        // THE UPSTREAM'S OWN INTERVAL WINS WHEN IT STATED ONE, and only an upstream INGRESS refusal ever
+        // does - see the ResourceExhausted arm of ProjectStatus for why that is the more accurate answer
+        // and why the configured delta remains right for every other capacity refusal.
+        long seconds = projection.RetryAfterSeconds
+            ?? (long)Math.Ceiling(
+                httpContext.RequestServices
+                    .GetRequiredService<IOptions<GatewayOptions>>()
+                    .Value
+                    .RestProjection
+                    .RetryAfter
+                    .TotalSeconds);
 
         httpContext.Response.Headers.RetryAfter =
             Math.Max(seconds, 1L).ToString(CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Reads the retry interval an upstream refusal stated, in whole seconds, or <see langword="null"/>
+    /// when it stated none.
+    /// </summary>
+    /// <param name="failure">The upstream failure.</param>
+    /// <returns>The interval in whole seconds, or <see langword="null"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE TRAILER IS READ, NOT TRUSTED. Only a positive whole number is accepted: a value this gateway
+    /// cannot parse, or one that is zero or negative, is discarded in favour of the configured delta rather
+    /// than relayed, because "retry after 0 seconds" is the one answer a capacity refusal must not give and
+    /// a negative delta is not a delta at all. The upstreams are this system's own services rather than
+    /// strangers, so this is defence against a version skew or a future producer rather than against an
+    /// attacker - but a header crossing the only external boundary is not the place to relay an unchecked
+    /// upstream string.
+    /// </para>
+    /// <para>
+    /// THE NAME AND THE UNITS ARE THE UPSTREAM'S OWN AND ARE NOT TRANSLATED HERE. Both gRPC services put
+    /// this on a lower-case <c>retry-after</c> trailer in whole seconds specifically so that no unit
+    /// conversion sits between the limiter and this header
+    /// [<c>Grpc/GrpcIngressLimit.cs</c> in Persistence and DataServices].
+    /// </para>
+    /// <para>
+    /// <b><see langword="internal"/> RATHER THAN <see langword="private"/> SO THE READ GUARD IS TESTABLE</b>,
+    /// on the same footing as <see cref="BuildProblem"/>: what a malformed or non-positive upstream value
+    /// does is a property of this method, and reaching it through a projected call would need a fake upstream
+    /// per case. Only this service's own test assembly sees it.
+    /// </para>
+    /// </remarks>
+    internal static long? UpstreamRetryAfterSeconds(RpcException failure)
+    {
+        string? stated = failure.Trailers.GetValue(UpstreamRetryAfterTrailer);
+
+        return long.TryParse(stated, NumberStyles.None, CultureInfo.InvariantCulture, out long seconds)
+            && seconds > 0L
+                ? seconds
+                : null;
     }
 
     /// <summary>
@@ -3266,6 +3820,13 @@ public static class DataServicesProxyEndpoints
             projection.RetCode,
             httpContext.Request.Method,
             DescribeRoute(httpContext),
+
+            // THE SAME RESOLUTION BuildProblem PERFORMS, so the caller's `upstream` member and this
+            // record cannot name two different services for one occurrence. A rejection this gateway
+            // produced itself has no upstream at all, and says so rather than borrowing a default.
+            projection.FromUpstream
+                ? projection.Upstream ?? DataServicesUpstream
+                : GatewayOwnFailureUpstream,
             DescribeGrpcStatus(failure),
             failure.GetType().Name,
             ResolveCorrelationId(httpContext));
@@ -3275,15 +3836,26 @@ public static class DataServicesProxyEndpoints
     /// Names the gRPC status an exception carried, without reading its detail text.
     /// </summary>
     /// <param name="failure">The originating exception.</param>
-    /// <returns>The status name, or the unclassified marker when the exception carried none.</returns>
+    /// <returns>
+    /// The status name, or <see cref="NoGrpcStatusDescription"/> when no gRPC response arrived at all.
+    /// </returns>
     /// <remarks>
+    /// <para>
     /// The status CODE only. <c>Status.Detail</c> is upstream text and is deliberately never read here.
+    /// </para>
+    /// <para>
+    /// THE FALLBACK ARM IS NOW ITS OWN MARKER rather than the route one - see
+    /// <see cref="NoGrpcStatusDescription"/> for why reusing the route marker made the record assert
+    /// something untrue. Two exception classes reach it: a transport failure on the data edge, and a
+    /// credential failure on the Security edge. Neither carries a status, because in neither case did a
+    /// server answer.
+    /// </para>
     /// </remarks>
     private static string DescribeGrpcStatus(Exception failure) => failure switch
     {
         RpcException rpc => rpc.StatusCode.ToString(),
         DataServicesConflictException conflict => conflict.Status.StatusCode.ToString(),
-        _ => UnroutedRouteDescription,
+        _ => NoGrpcStatusDescription,
     };
 
     /// <summary>
@@ -3720,6 +4292,19 @@ public static class DataServicesProxyEndpoints
         private const string ErrorTextFieldName = "error_text";
 
         /// <summary>
+        /// The full protobuf name of the database-failure payload, matched by TYPE rather than by field
+        /// name.
+        /// </summary>
+        /// <remarks>
+        /// BY TYPE, BECAUSE THE FIELD NAME IS AMBIGUOUS AND THE TYPE IS NOT. <c>error</c> is the field name
+        /// on the update response, and it is ALSO the field name of a <c>StructuredError</c> on several of
+        /// the model responses - a wholly different shape carrying different members. Matching the name
+        /// would relay one under a member the contract declares as the other. The full type name is the one
+        /// thing that cannot be ambiguous, and it is the same string the protocol definition declares.
+        /// </remarks>
+        private const string DatabaseErrorMessageName = "common.v1.DbError";
+
+        /// <summary>
         /// Projects a failing in-band outcome onto its HTTP answer.
         /// </summary>
         /// <param name="response">The upstream response message.</param>
@@ -3805,6 +4390,118 @@ public static class DataServicesProxyEndpoints
                 errorText = descriptor.FindFieldByName(ErrorTextFieldName)
                     ?.Accessor
                     .GetValue(response) as string;
+
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Reads the database-failure payload an in-band failure carries, when it carries one.
+        /// </summary>
+        /// <param name="response">The upstream response message.</param>
+        /// <param name="databaseError">The payload, when the response carries a populated one.</param>
+        /// <returns>
+        /// <see langword="true"/> when a populated <c>common.v1.DbError</c> is present anywhere in the
+        /// response's own fields.
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// 🔴 WHAT THIS EXISTS FOR, STATED AS THE DEFECT IT CLOSES. The update path answers a
+        /// <c>NOT NULL</c> refusal as an IN-BAND failure - transport OK, body carrying
+        /// <c>E_INVALID_DATA</c> - and the payload naming the offending column travels with it as a field
+        /// of the very message the failure renderer was discarding. So a caller who omitted a required
+        /// column received <c>400</c> with fixed prose and no way at all to learn WHICH column, while the
+        /// identity had been carried intact across two service boundaries and was thrown away at the last
+        /// one. The success renderer forwards the whole message, and the failure renderer forwarded none of
+        /// it - and the payload exists only on the failure path, so it was never forwarded at all.
+        /// </para>
+        /// <para>
+        /// BY DESCRIPTOR, MATCHING <see cref="TryReadOutcome"/>'S OWN STYLE AND FOR ITS REASON. Well over a
+        /// hundred response messages are projected; a type switch over the ones that happen to carry this
+        /// payload today is a list that silently stops covering the next one.
+        /// </para>
+        /// <para>
+        /// TWO PLACES ARE LOOKED IN, AND EXACTLY THE TWO <see cref="TryReadOutcome"/> ALREADY READS FROM.
+        /// The two in-band shapes put the payload in different places: a message-level outcome carries it as
+        /// a direct field beside the code, and a nested <c>OperationStatus</c> carries it inside that status
+        /// alongside the code it belongs to. Looking only at the top level would find it on one shape and
+        /// silently miss it on the other - a per-shape gap of exactly the kind this file's descriptor-driven
+        /// reads exist to avoid. The descent stops there: it is one level, into the field the OUTCOME was
+        /// read from, rather than an unbounded walk looking for something to disclose.
+        /// </para>
+        /// <para>
+        /// A DEFAULT INSTANCE IS TREATED AS ABSENT. Protobuf has no presence bit for a singular message
+        /// beyond null, and the accessor answers null when the field was never set - but a producer that
+        /// assigned an all-defaults instance would otherwise publish <c>dbError</c> carrying a zero code,
+        /// empty text and row zero, which says nothing and reads as a database failure that did not happen.
+        /// Emptiness is decided by the message's own equality, so nothing here enumerates its members and a
+        /// member added to the payload cannot escape the test.
+        /// </para>
+        /// </remarks>
+        internal static bool TryReadDatabaseError(
+            IMessage response,
+            [NotNullWhen(true)] out IMessage? databaseError)
+        {
+            ArgumentNullException.ThrowIfNull(response);
+
+            if (TryReadDeclaredDatabaseError(response, out databaseError))
+            {
+                return true;
+            }
+
+            if (response.Descriptor.FindFieldByName(StatusFieldName) is { } statusField
+                && statusField.FieldType == FieldType.Message
+                && !statusField.IsRepeated
+                && statusField.Accessor.GetValue(response) is IMessage status)
+            {
+                return TryReadDeclaredDatabaseError(status, out databaseError);
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Scans ONE message's own fields for a populated database payload, by type.
+        /// </summary>
+        /// <param name="owner">The message whose declared fields are read.</param>
+        /// <param name="databaseError">The payload, when one is present and populated.</param>
+        /// <returns><see langword="true"/> when the owner declares and carries one.</returns>
+        /// <remarks>
+        /// ONE LEVEL AND NO RECURSION, which is what keeps the read a read of a declared member rather than
+        /// a search. Repeated and map fields are skipped because the payload is singular in every shape that
+        /// declares it, and a collection of them would be a different contract needing a different member.
+        /// </remarks>
+        private static bool TryReadDeclaredDatabaseError(
+            IMessage owner,
+            [NotNullWhen(true)] out IMessage? databaseError)
+        {
+            databaseError = null;
+
+            foreach (FieldDescriptor field in owner.Descriptor.Fields.InFieldNumberOrder())
+            {
+                if (field.FieldType != FieldType.Message
+                    || field.IsRepeated
+                    || field.IsMap
+                    || field.MessageType.FullName != DatabaseErrorMessageName)
+                {
+                    continue;
+                }
+
+                if (field.Accessor.GetValue(owner) is not IMessage candidate)
+                {
+                    continue;
+                }
+
+                // Equality against a fresh instance of the SAME type, so "empty" is the payload's own
+                // definition of empty rather than this file's opinion of which members matter.
+                if (candidate.Equals(candidate.Descriptor.Parser.ParseFrom([])))
+                {
+                    continue;
+                }
+
+                databaseError = candidate;
 
                 return true;
             }
@@ -4025,14 +4722,26 @@ public static class DataServicesProxyEndpoints
 
     /// <summary>Fallback prose for a payload the upstream could not apply, reported in band.</summary>
     /// <remarks>
+    /// <para>
     /// 400 rather than 500: the request's own DATA is what the upstream rejected, so the caller can correct
-    /// it. The upstream's own diagnostic replaces this prose whenever it supplied one, which on the update
-    /// path is the legacy sentence itself.
+    /// it. The prose is this gateway's own and the upstream's diagnostic never replaces it.
+    /// </para>
+    /// <para>
+    /// ⚠ IT DELIBERATELY NO LONGER SAYS *WHEN* THE REFUSAL HAPPENED, BECAUSE IT CANNOT AND WAS WRONG WHEN IT
+    /// TRIED. This one outcome code covers two distinct upstream arms: the buffered carrier flagged a row
+    /// modified with no updatable value, so no statement was ever generated; and the storage engine refusing
+    /// a row on a constraint the payload controls, where a statement was generated and rejected. The
+    /// previous wording asserted the first unconditionally - "before any statement is generated" - and so
+    /// told a caller whose NOT NULL violation had reached the database something demonstrably untrue about
+    /// its own request. What is true of BOTH arms is that nothing was applied and that re-sending the same
+    /// payload is refused again, so that is what it says. The <c>dbError</c> member is what distinguishes
+    /// them, and it names the column when the storage engine is the one that refused.
+    /// </para>
     /// </remarks>
     private const string InBandInvalidDataDetail =
-        "The upstream operation refused the data carried in the request. On the update path this is the "
-        + "buffered carrier failing validation before any statement is generated, so nothing was applied "
-        + "and re-sending the same payload will be refused again.";
+        "The upstream operation refused the data carried in the request. Nothing was applied and "
+        + "re-sending the same payload will be refused again. When the refusal came from the storage "
+        + "engine the dbError member carries its own diagnostic, which names the offending column.";
 
     /// <summary>Fallback prose for the oracle's unspecific failure reported in band.</summary>
     /// <remarks>
@@ -4092,13 +4801,38 @@ public static class DataServicesProxyEndpoints
         "The upstream operation reported a failure this projection does not classify. Its own outcome code "
         + "is on the retCode member.";
 
+    /// <summary>
+    /// One translated outcome: the HTTP status, the legacy return code, the caller-facing prose, whether
+    /// the failure came from an upstream at all, and - when it did - which one.
+    /// </summary>
+    /// <param name="HttpStatus">The status the caller receives.</param>
+    /// <param name="RetCode">The legacy return code carried on the <c>retCode</c> member.</param>
+    /// <param name="Detail">This gateway's own fixed prose for the outcome.</param>
+    /// <param name="FromUpstream">
+    /// Whether the failure was FORWARDED. False means this gateway produced the response itself, in which
+    /// case the contract requires the <c>upstream</c> member to be absent entirely.
+    /// </param>
+    /// <param name="Type">An optional problem type URI, for the outcomes that publish one.</param>
+    /// <param name="Title">An optional title; the status phrase is used when none is given.</param>
+    /// <param name="Upstream">
+    /// 🔴 WHICH upstream a forwarded failure came from, or <see langword="null"/> for the default. The
+    /// member existed on the wire and in the published enum - <c>[persistence, dataservices, security]</c>
+    /// - long before it existed here, and <see cref="BuildProblem"/> hardcoded <c>dataservices</c> for
+    /// every forwarded failure. That made <c>security</c> UNREACHABLE, so a Security-edge outage was
+    /// reported to the caller and the operator as a DataServices failure - the exact opposite of what the
+    /// member's own published description promises it is for. Null keeps every pre-existing projection
+    /// site saying <c>dataservices</c>, which is what all of them mean: they translate a gRPC status or an
+    /// in-band code from the DataServices channel.
+    /// </param>
     internal readonly record struct StatusProjection(
         int HttpStatus,
         long RetCode,
         string Detail,
         bool FromUpstream,
         string? Type = null,
-        string? Title = null);
+        string? Title = null,
+        string? Upstream = null,
+        long? RetryAfterSeconds = null);
 }
 
 /// <summary>

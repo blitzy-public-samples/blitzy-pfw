@@ -151,9 +151,16 @@
 //  annotated constants, where they are parity obligations. Exposing either as an operator-selectable
 //  setting here would misrepresent a preserved legacy weakness as a deliberate deployment choice.
 //
-//  NO METADATA BASE ADDRESS. Absolute metadata addresses are composed from Issuer, which is the same
-//  value a consumer's bearer handler uses for discovery. A second address setting could disagree with
-//  it, and an option nothing reads is dead configuration.
+//  NO METADATA BASE ADDRESS. Absolute metadata addresses are composed from Issuer by default, which is
+//  the same value a consumer's bearer handler uses for discovery. A second BASE address setting could
+//  disagree with it, and an option nothing reads is dead configuration.
+//
+//  PublishedOrigins IS NOT THAT SETTING, AND THE DIFFERENCE IS WHY IT EXISTS. It is not an
+//  alternative base that could disagree with the issuer - it is the deployment DECLARING the further
+//  origins it answers on, so that a caller reaching this service under one of them is answered with
+//  locations under it rather than under a name that does not resolve on its side. The issuer stays the
+//  default, the fallback and the published identity; an origin nobody declared selects nothing. That is
+//  the one shape a single base address cannot express, because the deployment genuinely has two.
 //
 //  NO PROVIDER DISCRIMINATOR AND NO keyRef-TO-VALUE MAP on the key store. One resolution mechanism
 //  exists, and a map of key values in a settings-bound option is precisely the hardcoded material
@@ -307,7 +314,8 @@ public sealed class SecurityOptions
     /// tempting reading is that the format is a deployment decision and that a rule invented here could
     /// reject an identity a deployment legitimately uses. That premise is wrong for this particular value,
     /// because the format is NOT free: the discovery document's <c>jwks_uri</c> and
-    /// <c>token_endpoint</c> members are COMPOSED from it, so it has to be an absolute address a
+    /// <c>token_endpoint</c> members are COMPOSED from it - from it, or from one of the origins
+    /// <see cref="PublishedOrigins"/> declares - so it has to be an absolute address a
     /// consumer's bearer handler can fetch. <see cref="SecurityOptionsValidator"/> therefore requires
     /// it to be absolute, http or https, and free of embedded credentials, a query string and a
     /// fragment - the identical rule every sibling service already applies to every address it binds.
@@ -318,6 +326,61 @@ public sealed class SecurityOptions
     /// </remarks>
     [Required(AllowEmptyStrings = false)]
     public string Issuer { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Additional absolute base addresses this issuer may be reached on, which the discovery document
+    /// composes its <c>jwks_uri</c> and <c>token_endpoint</c> members from when a request arrives on one
+    /// of them. Empty by default, and the <c>issuer</c> member is never affected.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS EXISTS BECAUSE ONE SERVICE IS REACHED ON TWO ADDRESSES, AND THE DOCUMENT COULD ONLY NAME
+    /// ONE.</b> On the documented Compose topology the three internal verifiers reach this service as
+    /// <c>https://security-service:5104</c> - the Compose service name, which is also
+    /// <see cref="Issuer"/> - while an operator, the end-to-end suite and any third-party consumer reach
+    /// the very same service through its published host port as <c>https://localhost:5104</c>. Composing
+    /// both addresses from <see cref="Issuer"/> alone therefore handed every host-side consumer a
+    /// <c>jwks_uri</c> naming a host that resolves only inside the Compose network: the document parsed,
+    /// looked correct, and directed the consumer at nothing it could reach. The failure is a DNS failure
+    /// on key retrieval rather than a rejected document, which is why it survived review.
+    /// </para>
+    /// <para>
+    /// <b>WHY NOT SIMPLY REFLECT THE REQUEST, WHICH IS THE IDIOMATIC ANSWER.</b> An earlier revision did
+    /// exactly that and it was removed as a defect, for a reason that still holds: a request's scheme,
+    /// host and path base are all CALLER-CONTROLLED, so a caller-chosen <c>Host</c> header was answered
+    /// with a document telling every consumer to fetch this issuer's verification keys from that host,
+    /// and a stock bearer handler follows <c>jwks_uri</c> without question. Reinstating reflection would
+    /// reintroduce that forgery. This member keeps the property that made the removal correct - <b>every
+    /// address this document can publish is one the DEPLOYMENT declared</b> - and adds only the ability
+    /// to CHOOSE among those declared addresses by which one the request actually arrived on. An
+    /// unrecognised origin is not honoured: it falls back to <see cref="Issuer"/>, so the worst a forged
+    /// <c>Host</c> header can achieve is the canonical document it would have received anyway.
+    /// </para>
+    /// <para>
+    /// <b>THE IDENTITY AND THE LOCATION ARE NOW DISTINCT, AND ONLY THE LOCATION VARIES.</b> The
+    /// <c>issuer</c> member and the <c>iss</c> claim remain <see cref="Issuer"/> verbatim on every
+    /// response, because all three consuming services compare that claim byte for byte and a document
+    /// whose identity moved with the caller would break every one of them. What varies is only where the
+    /// document says its key set and token endpoint live - which is the one thing that genuinely differs
+    /// between the two networks. A consumer fetching from either origin therefore validates against the
+    /// same identity and retrieves keys from an address it can resolve.
+    /// </para>
+    /// <para>
+    /// <b>NO HOST NAME APPEARS IN CODE (C-F).</b> Every entry is supplied by the deployment;
+    /// <c>orchestration/docker-compose.yml</c> maps <c>SECURITY_PUBLIC_BASE_URL</c> onto index 0 and
+    /// <c>orchestration/.env.example</c> declares it. The shipped default is EMPTY, which reproduces the
+    /// previous behaviour exactly - issuer-composed addresses and nothing else - so a deployment that
+    /// configures nothing is unchanged by this member's existence.
+    /// </para>
+    /// <para>
+    /// <see cref="SecurityOptionsValidator"/> holds each entry to the same shape rule as
+    /// <see cref="Issuer"/> - absolute, http or https, no embedded credentials, no query, no fragment,
+    /// no duplicate origin - and refuses startup on a malformed entry rather than silently ignoring it,
+    /// because an entry that is quietly dropped presents as the original unreachable-key-set fault with
+    /// the configuration apparently in place.
+    /// </para>
+    /// </remarks>
+    public IList<string> PublishedOrigins { get; } = [];
 
     /// <summary>
     /// The audience identities a minted token may be addressed to - the in-scope service identities
@@ -1853,6 +1916,7 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
         MaximumScopeLength.ToString(CultureInfo.InvariantCulture);
 
     private const string IssuerKey = SecurityOptions.SectionName + ":Issuer";
+    private const string PublishedOriginsKey = SecurityOptions.SectionName + ":PublishedOrigins";
     private const string AudiencesKey = SecurityOptions.SectionName + ":Audiences";
 
     /// <summary>The configuration path of the issuance permission roster.</summary>
@@ -1915,6 +1979,7 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
         CheckSigningMaterial(options, failures);
         CheckRetiringSigningMaterial(options, failures);
         CheckIssuer(options, failures);
+        CheckPublishedOrigins(options, failures);
         CheckAudienceRoster(options, failures);
         CheckCallerRoster(options, failures);
         CheckSigningKeyIdentifier(options, failures);
@@ -2213,6 +2278,144 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
                 "merged when a path is composed onto it, so a deployment that configured either would " +
                 "have no effect and no diagnostic, and a fragment is never transmitted at all. The " +
                 "configured value is deliberately not quoted here.");
+        }
+    }
+
+    /// <summary>
+    /// Holds every additional published base address to the same shape rule as the issuer, and rejects a
+    /// duplicate origin.
+    /// </summary>
+    /// <param name="options">The bound instance.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// <para>
+    /// AN EMPTY COLLECTION IS THE SHIPPED DEFAULT AND IS NOT A FAULT. It reproduces the behaviour that
+    /// preceded <see cref="SecurityOptions.PublishedOrigins"/> exactly - every published address composed
+    /// from the issuer - so a deployment that configures nothing is not required to.
+    /// </para>
+    /// <para>
+    /// THE SAME FIVE RULES AS THE ISSUER, AND DELIBERATELY NOT A LOOSER SET. Each entry is composed with
+    /// the well-known paths in exactly the way the issuer is, so an entry the issuer's own rule would
+    /// reject produces exactly the same unfetchable document. Applying a weaker rule here would mean the
+    /// two sources of one published address disagreed about what a valid address is.
+    /// </para>
+    /// <para>
+    /// A MALFORMED ENTRY REFUSES STARTUP RATHER THAN BEING SKIPPED, and that choice is the point. A
+    /// skipped entry leaves the deployment believing an origin is published while consumers arriving on
+    /// it receive the canonical document - which presents as the ORIGINAL unreachable-key-set fault with
+    /// the configuration apparently correct, and is therefore the hardest possible way to discover a
+    /// typo. The failing INDEX is named so a deployment can find the entry in an indexed environment
+    /// variable, and the value is never quoted, matching the posture every sibling check takes.
+    /// </para>
+    /// <para>
+    /// DUPLICATES ARE COMPARED ON ORIGIN - scheme, host and port - rather than on the whole string,
+    /// because the origin is what a request is matched against when the document is composed. Two
+    /// entries differing only by a trailing separator or by case in the host are one origin, so they are
+    /// a configuration mistake rather than two published locations, and the issuer's own origin counts as
+    /// already taken: it needs no entry, and an entry restating it is redundant rather than harmful to
+    /// leave unreported.
+    /// </para>
+    /// </remarks>
+    private static void CheckPublishedOrigins(SecurityOptions options, List<string> failures)
+    {
+        if (options.PublishedOrigins.Count == 0)
+        {
+            return;
+        }
+
+        // Seeded with the issuer's own origin when it parses, so an entry restating it is reported as the
+        // duplicate it is. A malformed issuer is already reported by CheckIssuer, so it is simply not
+        // seeded here rather than reported twice.
+        HashSet<string> origins = new(StringComparer.OrdinalIgnoreCase);
+
+        if (Uri.TryCreate(options.Issuer, UriKind.Absolute, out Uri? configuredIssuer))
+        {
+            origins.Add(configuredIssuer.GetLeftPart(UriPartial.Authority));
+        }
+
+        for (int index = 0; index < options.PublishedOrigins.Count; index++)
+        {
+            string entryKey = IndexedKey(PublishedOriginsKey, index);
+            string? entry = options.PublishedOrigins[index];
+
+            if (string.IsNullOrWhiteSpace(entry))
+            {
+                failures.Add(
+                    $"Configuration key '{entryKey}' must not be blank. An empty entry publishes no " +
+                    "address and is indistinguishable at runtime from the member being unconfigured, " +
+                    "so it is a configuration mistake rather than a way to leave a slot open. Remove " +
+                    "the entry.");
+
+                continue;
+            }
+
+            if (!Uri.TryCreate(entry, UriKind.Absolute, out Uri? origin)
+                || !string.Equals(entry, entry.Trim(), StringComparison.Ordinal))
+            {
+                failures.Add(
+                    $"Configuration key '{entryKey}' must be an absolute address with no surrounding " +
+                    "whitespace, for example 'https://localhost:5104'. It is composed with the " +
+                    "well-known paths to produce the 'jwks_uri' and 'token_endpoint' members this " +
+                    "service publishes to a consumer arriving on that address, so a relative or padded " +
+                    "value produces a document describing nothing fetchable. The configured value is " +
+                    "deliberately not quoted here, because a rejected address may carry a credential.");
+
+                continue;
+            }
+
+            // Uri.Scheme is lower-cased by the parser, so an ordinal comparison is both correct and free
+            // of any culture dependency - the same reasoning CheckIssuer records.
+            if (!string.Equals(origin.Scheme, Uri.UriSchemeHttp, StringComparison.Ordinal)
+                && !string.Equals(origin.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal))
+            {
+                failures.Add(
+                    $"Configuration key '{entryKey}' must use the http or https scheme; " +
+                    $"'{origin.Scheme}' cannot be fetched by a consumer's bearer handler, so a " +
+                    "discovery document composed from it would describe an unreachable key set.");
+
+                continue;
+            }
+
+            if (origin.UserInfo.Length > 0)
+            {
+                failures.Add(
+                    $"Configuration key '{entryKey}' must not embed credentials in the address. Remove " +
+                    "the 'user:password@' portion: this value is published in the anonymous discovery " +
+                    "document, so a credential here would leave the process. The configured value is " +
+                    "deliberately not quoted here.");
+
+                continue;
+            }
+
+            if (!string.IsNullOrEmpty(origin.Query) || !string.IsNullOrEmpty(origin.Fragment))
+            {
+                failures.Add(
+                    $"Configuration key '{entryKey}' is a base address composed with the well-known " +
+                    "paths and must carry neither a query string nor a fragment. Both are dropped " +
+                    "rather than merged when a path is composed onto it, so a deployment that " +
+                    "configured either would have no effect and no diagnostic, and a fragment is never " +
+                    "transmitted at all. The configured value is deliberately not quoted here.");
+
+                continue;
+            }
+
+            // NO RULE AGAINST A PATH, AND THAT IS MEASURED RATHER THAN OVERLOOKED. A well-known path is
+            // absolute, so the tempting rule is that a configured prefix would be REPLACED by it and vanish
+            // silently. It is not: the composer concatenates - the configured base with one trailing
+            // separator trimmed, then the path - so 'https://proxy.example/security' publishes
+            // 'https://proxy.example/security/.well-known/jwks.json'. Refusing a prefix would refuse the
+            // one spelling by which a path-prefixing proxy is declared, which is exactly what the issuer's
+            // own rule permits and what this member's remarks call the honest place for it.
+
+            if (!origins.Add(origin.GetLeftPart(UriPartial.Authority)))
+            {
+                failures.Add(
+                    $"Configuration key '{entryKey}' repeats an origin that is already published - " +
+                    "either the configured issuer's own origin, which never needs an entry, or an " +
+                    "earlier entry in this list. One origin resolves to one published address, so a " +
+                    "second entry for it cannot take effect and its presence suggests a different " +
+                    "address was intended. The configured value is deliberately not quoted here.");
+            }
         }
     }
 

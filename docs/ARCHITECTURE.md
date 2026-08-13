@@ -742,7 +742,7 @@ subscription. A caller needing continuous delivery uses the gRPC stream, which n
 
 **Every projected payload is published concretely, and the mechanism that keeps it honest is a build
 failure rather than a review habit.** `gateway.v1.yaml` declares the complete transitive closure of the
-projected surface — 118 messages and 15 enums, 133 of its 144 schemas — member by member, closed to
+projected surface — 118 messages and 15 enums, 133 of its 145 schemas — member by member, closed to
 unknown members, with the canonical protobuf JSON encodings and a `required` list stating what the wire
 carries. Delegating every projected body to one open schema and pointing a consumer at an extension
 naming the real message is the cheaper document to write, and it publishes a permissiveness the strict
@@ -1553,12 +1553,25 @@ configuration; parts 3 to 6 name where each remaining piece lands and its state.
 | 3 | **Client-certificate trust.** `ClientCertificateMode` `AllowCertificate` makes Kestrel **request** a certificate and hand it to the application without demanding one, so the token operation can require it per operation while `/health`, the key set and the discovery document stay anonymously reachable. *Which* issuers may have signed that certificate is decided by `Security:MutualTls:ClientCaPath`: the anchor is loaded at startup and installed as Kestrel's `ClientCertificateValidation` callback, which builds the caller's chain under `X509ChainTrustMode.CustomRootTrust` against that anchor alone. Unset defers to the platform's verdict; set-but-unreadable refuses to start. `AllowAnyClientCertificate` is never called. **Completing the handshake and establishing an identity are two decisions taken by two anchors, and only the first has a published variable:** `Security:ClientCertificateAuthorityPath` is the ISSUANCE anchor read by `Tokens/ClientCertificateTrust`, and with it unset a certificate that had just completed the handshake was refused `401 E_ACCESS_DENIED` while `Basic` callers kept minting — so the documented bootstrap could not work. The composition root now ADOPTS `Security:MutualTls:ClientCaPath` as the issuance anchor when the issuance key is unset, which makes `SECURITY_MTLS_CLIENT_CA_PATH` sufficient on its own; an explicitly configured issuance anchor still wins, because a deployment may complete handshakes for a broader authority than issuance honours | `services/security-service/PowerFramework.Security/Program.cs` (`CallerCertificateTrust`, and the `PostConfigure` on `AddOptions<SecurityOptions>()` that performs the adoption), configured from `SECURITY_MTLS_CLIENT_CA_PATH` | **Present and configurable; exercised IN-PROCESS, and NOT end to end — this is the single status statement for the certificate arm, and every other mention of it in this document defers here.** What is exercised: with a Security instance configured by `SECURITY_MTLS_CLIENT_CA_PATH` alone, a caller certificate issued by the documented local authority is minted a token, a certificate whose common name names a different roster subject is refused `403`, a self-signed certificate spoofing a roster name is refused, and an unreadable anchor refuses startup — all against an in-process host that presents the certificate through a **stubbed** `ITlsConnectionFeature`, because an in-process host performs no handshake to carry a real one. What is therefore NOT exercised: the handshake itself, and consequently a mint against a certificate that a running Kestrel listener actually negotiated. **The exact evidence that would promote this to end-to-end**, in the order it has to be obtained: (1) a bring-up with `SECURITY_MTLS_CLIENT_CA_PATH` projected as a Compose secret rather than left empty, which the documented bring-up does not do; (2) a `POST /v1/tokens` from a caller presenting the issued client certificate over TLS to Security's own listener, returning `200` and a token; (3) the same call with a certificate naming a different roster subject, returning `403`; (4) the same call with a self-signed certificate, failing in the handshake rather than at the operation. Until all four are recorded in [`orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised), the arm stays marked unexercised here. An OS-trust-store mount is not required either way, which is what makes it operable without a root-privileged step in the runtime image |
 | 4 | **Subject-to-caller mapping.** The certificate establishes the identity; a `subject` in the request body that disagrees with it is refused `403`, per the table above. The certificate's common name is compared ordinally against the claimed subject, and the refusal names neither the expected identity nor any stored configuration | `Endpoints/TokenEndpoints.cs` | **Present** |
 | 5 | **The caller side.** Gateway and DataServices present a client certificate when they call the issuance endpoint, from `Gateway:MutualTls:{CertificatePath, CertificateKeyPath}` and `DataServices:Security:MutualTls:{CertificatePath, CertificateKeyPath}` respectively, supplied by the four `*_MTLS_CERT_PATH` / `*_MTLS_KEY_PATH` variables. Each pair is **both-or-neither and that is enforced rather than documented**: half-configured fails startup with a names-only message, entirely unset is a legitimate state meaning that service cannot reach the issuance edge in this run | `Clients/SecurityClient.cs` in both services; the two settings groups and the four variables | **Present, and the certificate is genuinely attached in both services**: each loads the PEM pair once at startup as a singleton and presents it on the primary handler of its Security channel, so a configured-but-unreadable pair is a refusal to start rather than a first-request failure. What remains undemonstrated is narrower than it was: the issuance endpoint HAS now accepted a chain-verified caller certificate and minted from its common name against a running instance, so what is still unexercised is these two services presenting **their own** configured pair, which the documented bring-up leaves empty. Either way it is different from being callable without authentication — nothing anywhere in this repository offers an unauthenticated mint |
-| 6 | **JWKS and discovery transport.** Both documents are anonymous and public by design, and they are the *verification* half rather than the issuance half — so they are served by the SAME single listener as the issuance edge, alongside `/health` and `/v1/ping`, and stay anonymous on it because `AllowCertificate` does not demand a certificate. Over HTTPS in every environment; behind the terminating proxy of §9.4 in a deployed topology, with the one exception §9.4 names | each service's bearer authority settings | **Present and verified.** Both documents answered `200` anonymously over TLS against the running stack, and the three verifiers self-configured from them well enough that a token minted by Security was accepted on another service's `/v1/ping` — see §10.6 |
+| 6 | **JWKS and discovery transport.** Both documents are anonymous and public by design, and they are the *verification* half rather than the issuance half — so they are served by the SAME single listener as the issuance edge, alongside `/health` and `/v1/ping`, and stay anonymous on it because `AllowCertificate` does not demand a certificate. Over HTTPS in every environment; behind the terminating proxy of §9.4 in a deployed topology, with the one exception §9.4 names. **The discovery document's two ADDRESS members are composed from a declared base address chosen by the origin the request arrived on, while its `issuer` member is the configured identity and never varies** — because this one service is reachable both as `security-service:5104` in-network and through its published host port, and a document that could name only one of those handed every host-side consumer a `jwks_uri` resolvable only inside the Compose network. The declared set comes from `Security:PublishedOrigins` (`SECURITY_PUBLIC_BASE_URL`); an origin that matches none of it falls back to the issuer, so a caller-supplied `Host` header can never be advertised | each service's bearer authority settings; `Security:PublishedOrigins` for the published location | **Present and verified.** Both documents answered `200` anonymously over TLS against the running stack, and the three verifiers self-configured from them well enough that a token minted by Security was accepted on another service's `/v1/ping` — see §10.6. The origin selection was verified in the same way: the document fetched from the host origin advertised a host-resolvable `jwks_uri` that was then fetched successfully, the document fetched from inside the network advertised the in-network origin, and a request carrying an unrecognised `Host` received the canonical issuer-composed document |
 
-**What a developer generates locally.** On the documented topology there are **two kinds** of required
-artifact — the signing identity, and one shared secret per roster entry — and they are produced by
-different commands for a reason that is easy to get wrong in the other direction. The certificate set is
-optional and is generated only by a deployment that chooses to terminate TLS.
+**What a developer generates locally.** On the documented topology there are **three kinds** of required
+artifact — the signing identity, one shared secret per roster entry, and the certificate set — and they are
+produced by different commands for a reason that is easy to get wrong in the other direction.
+
+**The certificate set is REQUIRED on the documented bring-up, not optional, and the earlier wording here
+said the opposite.** Every listener in this stack is `https` and each of the nine TLS host paths is declared
+in `orchestration/docker-compose.yml` with the `${VAR:?message}` form, so an operator who reads "optional"
+and skips part 3 does not get a plaintext stack — bring-up **aborts by name** on
+`SECURITY_TLS_CERTIFICATE_PATH` before a single container is created. Nine, not three: a certificate and key
+**pair per service** (part 3) plus the one shared public anchor. Parts 3 and 5 below generate and verify
+them, and part 6 names them.
+
+**Read part 4b before running any of it, because the modes are not where intuition puts them.** Seven of
+these files are projected into a container as Compose secrets and must therefore be readable by the
+unprivileged runtime account **on the host**; three are never projected and stay `0600`. The line that
+decides which is which is "is it projected", not "is it a key" — and getting it wrong does not degrade
+the stack, it prevents it starting at all.
 
 ```bash
 set -euo pipefail
@@ -1566,11 +1579,23 @@ set -euo pipefail
 install -d -m 700 "$HOME/.config/powerframework/secrets"
 cd "$HOME/.config/powerframework/secrets"
 
-# 1. THE ONE REQUIRED ARTIFACT - the RS256 SIGNING identity. Security is configured for RS256 and
-#    publishes an RSA-only JWK set, so this must be an RSA private key. A random symmetric string
-#    cannot sign RS256 at all, which is why `openssl rand` is the wrong tool here.
+# 1. THE SIGNING IDENTITY - required, and one of THREE required artifacts rather than the only one.
+#    The other two are the certificate set of part 3 (nine host paths, every one of them declared
+#    `${VAR:?}` in the manifest) and one shared secret per roster caller, which
+#    orchestration/README.md section 3.2 generates. Stopping after this part aborts bring-up by name on
+#    SECURITY_TLS_CERTIFICATE_PATH; stopping after part 3 refuses Security's startup on an unresolved
+#    roster credential. Security is configured for RS256 and publishes an RSA-only JWK set, so this
+#    must be an RSA private key. A random symmetric string cannot sign RS256 at all, which is why
+#    `openssl rand` is the wrong tool here.
+#
+#    ⚠ 0644, NOT 0600, AND FOR THE SAME REASON AS THE SERVER KEYS IN PART 4b. This file is NAMED by
+#    SECURITY_JWT_SIGNING_KEY_PATH and the manifest PROJECTS it into security-service as a Compose
+#    secret, where a 0600 host file arrives root-owned and the unprivileged runtime account cannot
+#    read it - Security then refuses to start, naming the unreadable file. The enclosing 0700
+#    directory is the real host control. `sudo chown 1654` with the mode left at 0600 is the
+#    privileged alternative.
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out security-signing.key
-chmod 600 security-signing.key
+chmod 644 security-signing.key
 
 # 2. The local certificate authority. One per environment; it signs both the server certificate
 #    below and the two caller certificates, and its PUBLIC half is what every service trusts.
@@ -1623,45 +1648,71 @@ SAN
           -extfile "$svc-san.cnf" -extensions ext -out "$svc-server.crt"
 done
 
-# 4. The CALLER certificates - one per service that calls the issuance endpoint, which is two.
+# 4. The CALLER certificates - one per caller of the issuance endpoint, which is THREE and not two.
+#    Two are services (Gateway and DataServices); the third is the operator / end-to-end identity
+#    `pfw-e2e-suite`, which Security's Development overlay registers and which tests/e2e/README.md
+#    section 4.6 already points at `pfw-e2e-suite.crt` from this very loop. An earlier form of this loop
+#    issued only the two service identities, on the reasoning that only services call the issuance
+#    endpoint - which overlooked that the suite is a third caller of it, and left that cross-reference
+#    naming a file this recipe never produced.
+#
+#    OPTIONAL, AND ONLY THIS PART IS. The documented bring-up authenticates all three callers with the
+#    shared-secret `Basic` form of orchestration/README.md section 3.2 and projects no caller
+#    certificate at all; this part exists for a deployment adopting the mutual-TLS alternative on the
+#    issuance edge. Parts 1 to 3 are required either way.
+#
 #    These need NO subjectAltName: they are validated as CLIENT identities, so their common name is
 #    read as the caller's name by Endpoints/TokenEndpoints.cs and no host matching is performed on
-#    them. The name must equal the `subject` that service claims, or issuance answers 403.
+#    them. The name must equal the `subject` that caller claims, or issuance answers 403 - which is why
+#    the third one is spelled `pfw-e2e-suite` exactly, matching E2E_TOKEN_SUBJECT's default.
 cat > client-ext.cnf <<'CLIENT'
 [ext]
 basicConstraints = critical, CA:FALSE
 keyUsage         = critical, digitalSignature
 extendedKeyUsage = clientAuth
 CLIENT
-for caller in powerframework-gateway powerframework-dataservices; do
+for caller in powerframework-gateway powerframework-dataservices pfw-e2e-suite; do
   openssl req -newkey rsa:2048 -nodes -subj "/CN=$caller" \
           -keyout "$caller.key" -out "$caller.csr"
   openssl x509 -req -in "$caller.csr" -CA mtls-ca.crt -CAkey mtls-ca.key -days 30 \
           -extfile client-ext.cnf -extensions ext -out "$caller.crt"
 done
 
-# 4b. PERMISSIONS, AND THE ONE LINE HERE THAT IS COUNTER-INTUITIVE ENOUGH TO NEED ITS REASON.
+# 4b. PERMISSIONS, AND THE ONE RULE HERE THAT IS COUNTER-INTUITIVE ENOUGH TO NEED ITS REASON.
 #
-#     Every key except one is 0600 - the CA key, the signing key and the two caller keys never leave
-#     this machine and nothing reads them but you and, for the caller pairs, a deployment that chooses
-#     mutual TLS and declares its own projection for them.
+#     THE RULE IS "PROJECTED OR NOT", AND NOTHING ELSE DECIDES IT. Every file this stack PROJECTS as a
+#     Compose secret must be readable by the containers' unprivileged account; every file it does not
+#     project stays 0600. Getting this backwards is the single failure that stops the documented
+#     bring-up dead, so both halves are enumerated rather than left to inference.
 #
-#     THE FOUR *-server.key FILES ARE 0644, AND THAT IS REQUIRED RATHER THAN LAX. They are the keys
-#     orchestration/docker-compose.yml PROJECTS, as Compose secrets, each into its own container - and
+#     0644 - PROJECTED, AND REQUIRED RATHER THAN LAX:
+#       * the four *-server.key files below, each granted to its own container, and
+#       * the SIGNING KEY of part 1 above, granted to security-service - projected under
+#         /run/secrets/security/jwt-signing-key rather than beside the TLS material, and
+#       * the two SERVICE caller credentials of orchestration/README.md section 3.2 step 2,
+#         caller-gateway.secret and caller-dataservices.secret, which that section chmods itself.
 #     Compose accepts `mode:`, `uid:` and `gid:` on a secret and IGNORES ALL THREE outside Swarm. This
 #     was measured, not assumed: a host file at 0600 arrives inside the container as
-#     `-rw------- root root`, every image runs as the unprivileged `app` account (uid 1654), and
-#     Kestrel then cannot read the key and REFUSES TO START. At 0644 it arrives world-readable inside
-#     the container and readable by that account, which is the only thing that makes the documented
-#     bring-up work.
+#     `-rw------- root root`, every image runs as the unprivileged `app` account (uid 1654), and the
+#     service then cannot read the file and REFUSES TO START - Kestrel for a certificate key, Security
+#     for the signing key or a caller credential. At 0644 the file arrives readable by that account,
+#     which is the only thing that makes the documented bring-up work.
 #
-#     THE DIRECTORY IS THE REAL HOST CONTROL, which is why this is not the weakening it looks like.
+#     0600 - NOT PROJECTED, AND CORRECTLY LEFT ALONE:
+#       * mtls-ca.key, the authority's private half, which nothing but you ever reads, and
+#       * the three mutual-TLS CALLER keys of part 4, which only a deployment adopting that fallback
+#         projects, and which then need the same uid-1654 treatment as any other projected file, and
+#       * caller-e2e-suite.secret, whose VALUE is carried in the environment file rather than as a
+#         projected file (see orchestration/README.md section 3.2).
+#
+#     THE DIRECTORY IS THE REAL HOST CONTROL, which is why 0644 is not the weakening it looks like.
 #     The enclosing directory is 0700 from the first command in this recipe, so no other account on
 #     this machine can traverse to the file whatever its own mode says. A deployment that would rather
-#     keep 0600 owns the alternative: `sudo chown 1654 *-server.key` and leave the mode alone, which
-#     needs privilege here and is why it is not the documented default.
-chmod 600 mtls-ca.key powerframework-gateway.key powerframework-dataservices.key
+#     keep 0600 owns the alternative: `sudo chown 1654 <file>` and leave the mode alone, which needs
+#     privilege here and is why it is not the documented default.
+chmod 600 mtls-ca.key powerframework-gateway.key powerframework-dataservices.key pfw-e2e-suite.key
 chmod 644 persistence-server.key dataservices-server.key security-server.key gateway-server.key
+chmod 644 security-signing.key caller-gateway.secret caller-dataservices.secret
 
 # 5. Verify before deploying, because a name mismatch is silent until the first connection and then
 #    presents as an unreachable upstream rather than as a certificate problem.
@@ -1683,25 +1734,55 @@ for svc in persistence dataservices security gateway; do
 done
 openssl verify -CAfile mtls-ca.crt -purpose sslclient powerframework-gateway.crt
 openssl verify -CAfile mtls-ca.crt -purpose sslclient powerframework-dataservices.crt
+openssl verify -CAfile mtls-ca.crt -purpose sslclient pfw-e2e-suite.crt
 
-# 6. NAME THE THREE FILES IN orchestration/.env. Nothing is copied, renamed or assembled here, because
-#    the stack does not read this directory: orchestration/docker-compose.yml declares three top-level
-#    Compose SECRETS whose `file:` sources are these host paths, and PROJECTS them read-only into all
-#    four services at three FIXED container paths - /run/secrets/internal-tls/server.crt, .../server.key
-#    and .../ca.crt. The container-side names are `target:` entries in the manifest and are literals
-#    there, so the only decision left to the operator is which host file feeds each one:
+# 6. NAME THE NINE TLS FILES IN orchestration/.env - four pairs and the one shared anchor, and the count
+#    is nine rather than three because part 3 issues a pair PER SERVICE. Nothing is copied, renamed or
+#    assembled here, because the stack does not read this directory: orchestration/docker-compose.yml
+#    declares one top-level Compose SECRET per host path, and PROJECTS each read-only at three FIXED
+#    container paths - /run/secrets/internal-tls/server.crt, .../server.key and .../ca.crt. Each
+#    service's own certificate and key are granted to THAT CONTAINER ONLY, which is the whole point of
+#    per-service material; only the public anchor is granted to all four. The container-side names are
+#    `target:` entries in the manifest and are literals there, so the only decision left to the operator
+#    is which host file feeds each one:
 for svc in persistence dataservices security gateway; do
   upper=$(printf '%s' "$svc" | tr '[:lower:]' '[:upper:]')
   echo "${upper}_TLS_CERTIFICATE_PATH=$PWD/$svc-server.crt"
   echo "${upper}_TLS_CERTIFICATE_KEY_PATH=$PWD/$svc-server.key"
 done
-# ... which expands to exactly these eight assignments, plus the one shared anchor:
+# ... which expands to exactly these eight assignments, plus the shared anchor and the three non-TLS
+#     paths:
 #      SECURITY_TLS_CERTIFICATE_PATH        SECURITY_TLS_CERTIFICATE_KEY_PATH
 #      PERSISTENCE_TLS_CERTIFICATE_PATH     PERSISTENCE_TLS_CERTIFICATE_KEY_PATH
 #      DATASERVICES_TLS_CERTIFICATE_PATH    DATASERVICES_TLS_CERTIFICATE_KEY_PATH
 #      GATEWAY_TLS_CERTIFICATE_PATH         GATEWAY_TLS_CERTIFICATE_KEY_PATH
 #      INTERNAL_TLS_CA_PATH  (shared - the PUBLIC anchor, and sharing a public anchor is correct)
+#      SECURITY_JWT_SIGNING_KEY_PATH
+#      SECURITY_CLIENT_SECRET_GATEWAY_PATH  SECURITY_CLIENT_SECRET_DATASERVICES_PATH
 echo "INTERNAL_TLS_CA_PATH=$PWD/mtls-ca.crt"
+# 🔴 THESE THREE ARE PATHS AND NOT VALUES, AND THAT IS THE WHOLE POINT OF PROJECTING THEM. An earlier
+#    arrangement passed the signing key and the two caller secrets into the container ENVIRONMENT,
+#    where `docker compose config` renders them in cleartext, `docker inspect` returns them to anyone
+#    who can reach the daemon socket, and every child process inherits them. The manifest reads only
+#    the *_PATH spellings below; it reads no SECURITY_JWT_SIGNING_KEY, SECURITY_CLIENT_SECRET_GATEWAY
+#    or SECURITY_CLIENT_SECRET_DATASERVICES value at all, so naming material there configures nothing.
+echo "SECURITY_JWT_SIGNING_KEY_PATH=$PWD/security-signing.key"
+echo "SECURITY_CLIENT_SECRET_GATEWAY_PATH=$PWD/caller-gateway.secret"
+echo "SECURITY_CLIENT_SECRET_DATASERVICES_PATH=$PWD/caller-dataservices.secret"
+
+#    AND THE THREE CREDENTIAL PATHS FROM PARTS 1 AND 1b, WHICH ARE NOT OPTIONAL EITHER. Each is a
+#    PATH and never the material: the value used to be passed into the container ENVIRONMENT, where
+#    `docker compose config` renders it in cleartext, `docker inspect` returns it to anyone who can
+#    reach the daemon socket, and every child process inherits it.
+echo "SECURITY_JWT_SIGNING_KEY_PATH=$PWD/security-signing.key"
+echo "SECURITY_CLIENT_SECRET_GATEWAY_PATH=$PWD/caller-gateway.secret"
+echo "SECURITY_CLIENT_SECRET_DATASERVICES_PATH=$PWD/caller-dataservices.secret"
+
+#    AND THE ONE VALUE, from part 1c. It is not a path because nothing projects it - see 1c for why -
+#    and its paired identifier must be the exact subject the roster registers, because the issuance edge
+#    reconciles the claimed subject against the authenticated credential identity ordinally.
+echo "SECURITY_CLIENT_SECRET=$(cat caller-e2e-suite.secret)"
+echo "SECURITY_CLIENT_ID=pfw-e2e-suite"
 
 #    THIS STEP IS NOT OPTIONAL FOR A COMPOSE BRING-UP, and it fails by name rather than subtly. Each
 #    secret's `file:` carries the `${VAR:?message}` form, so an unset variable aborts `docker compose up`
@@ -1709,15 +1790,24 @@ echo "INTERNAL_TLS_CA_PATH=$PWD/mtls-ca.crt"
 #    Skip it and every listener is https with no resolvable certificate, Kestrel refuses to start rather
 #    than downgrading to plaintext, and all four services crash-loop with no /health ever answering.
 #
-#    ⚠ THE PRIVATE KEY MUST BE READABLE BY UID 1654, AND THE PROJECTION WILL NOT ARRANGE THAT FOR YOU.
+#    THE SAME STEP NAMES THE THREE NON-TLS PATHS, and they are declared exactly the same way. Point
+#    SECURITY_JWT_SIGNING_KEY_PATH at the signing key of part 1, and
+#    SECURITY_CLIENT_SECRET_GATEWAY_PATH / SECURITY_CLIENT_SECRET_DATASERVICES_PATH at the two service
+#    caller credentials orchestration/README.md section 3.2 generates. All three are PROJECTED as
+#    Compose secrets under /run/secrets/security/ - which is why part 4b makes them readable - and all
+#    three carry the same `${VAR:?message}` abort. That section is the single place their generation
+#    lives; this one records that they belong in the same environment file as the nine paths above.
+#
+#    ⚠ EVERY PROJECTED FILE MUST BE READABLE BY UID 1654, AND THE PROJECTION WILL NOT ARRANGE THAT FOR YOU.
 #    Compose accepts `mode:`, `uid:` and `gid:` on a secret and IGNORES ALL THREE outside Swarm, so the
 #    host file's ownership and mode arrive numerically unchanged inside the container, and every runtime
 #    stage drops to the unprivileged `app` account the base image publishes as UID 1654. A key at 0600
-#    owned by your own account is therefore UNREADABLE there and Kestrel fails exactly as if it were
-#    absent - the symptom is indistinguishable from a missing file. `chmod 644 server.key` in part 4b is
-#    what prevents that, and it is safe only because the enclosing directory is 0700 from this recipe's
-#    very first command. The root-privileged alternative keeps the key 0600 and gives it to that
-#    account instead:
+#    owned by your own account is therefore UNREADABLE there and the service fails exactly as if it were
+#    absent - the symptom is indistinguishable from a missing file. The `chmod 644` lines in part 4b and
+#    in orchestration/README.md section 3.2 are what prevent that, for the seven files this stack
+#    projects, and they are safe only because the enclosing directory is 0700 from this recipe's very
+#    first command. The root-privileged alternative keeps the file 0600 and gives it to that account
+#    instead:
 #      sudo chown 1654 server.key
 #
 #    A deployment adopting the mutual-TLS fallback on the issuance edge adds NO second mount to the ones
@@ -1763,15 +1853,23 @@ for a lookup that must fail. The 30-day certificate lifetime above is the contro
 it. A deployment whose authority does publish revocation information leaves these paths unset and uses
 platform trust, where the platform's own revocation behaviour applies.
 
-Point `SECURITY_JWT_SIGNING_KEY`, the four `<SERVICE>_TLS_CERTIFICATE_PATH` / `_KEY_PATH` pairs,
-`INTERNAL_TLS_CA_PATH` and `SECURITY_MTLS_CLIENT_CA_PATH` at those files from the environment file —
-those five are the names `orchestration/.env.example` actually declares — plus the two client pairs,
+Point `SECURITY_JWT_SIGNING_KEY_PATH`, the four `<SERVICE>_TLS_CERTIFICATE_PATH` / `_KEY_PATH` pairs,
+`INTERNAL_TLS_CA_PATH`, the two `SECURITY_CLIENT_SECRET_*_PATH` credentials and
+`SECURITY_MTLS_CLIENT_CA_PATH` at those files from the environment file — **and the signing key's name ends
+in `_PATH`**, which is worth stating because an earlier revision of this paragraph named the value form
+`SECURITY_JWT_SIGNING_KEY`, and `orchestration/.env.example` does not declare that name at all: an operator
+following the old spelling set a variable nothing reads and left the secret source the manifest requires
+unset, which aborts bring-up by name — plus the two client pairs,
 `GATEWAY_MTLS_CERT_PATH` / `GATEWAY_MTLS_KEY_PATH` and `DATASERVICES_MTLS_CERT_PATH` /
 `DATASERVICES_MTLS_KEY_PATH`, for a deployment choosing the certificate alternative on the issuance edge.
 Every one carries a **path or a PEM value supplied at deployment time**, and none has a value in this
-repository. On the documented Compose bring-up the first four map as: the signing key is injected as a
-value, and the three certificate paths are **secret sources** — host paths Compose reads and projects,
-never paths any container is told about.
+repository. On the documented Compose bring-up **all of them are secret sources** — host paths Compose reads
+and projects, never paths any container is told about. That includes the signing key, which is named by
+`SECURITY_JWT_SIGNING_KEY_PATH` and projected at `/run/secrets/security/jwt-signing-key`: an earlier
+revision injected it as an environment VALUE, where `docker compose config` rendered it in cleartext and
+`docker inspect` returned it to anyone who could reach the daemon socket. The two service caller credentials
+moved the same way and for the same reason, so the file-versus-value split is now simply "projected, except
+the third caller credential" — see [`../orchestration/README.md`](../orchestration/README.md) §3.2.
 
 **One naming hazard, stated because the failure it produces looks like something else.** The two
 `SECURITY_MTLS_*` certificate names above are the **server** half — they record where Security's own
@@ -1848,6 +1946,20 @@ configuration file in this repository — base or Development, in any of the fou
 is `https`, so waiving the requirement would permit a plaintext metadata address that no configuration
 declares — and a standing relaxation with no consumer is the kind of dead setting a later reader mistakes
 for a requirement.
+
+**That host difference is not only a documentation convenience — Security has to PUBLISH it, and one
+member could not.** The loopback and in-network forms of the other three services matter only to whoever
+types them. Security's matter to a machine: its discovery document tells every consumer where to fetch the
+keys that validate every token in the estate, and the two groups of consumer arrive on different hosts —
+the three verifiers on `security-service:5104`, an operator and the end-to-end suite on the published host
+port. Composing that address from the issuer alone therefore served one group correctly and handed the
+other a host it could not resolve. The resolution keeps the identity single and lets the location vary:
+`issuer` stays the configured identity on every response, while `jwks_uri` and `token_endpoint` are
+composed from whichever **declared** base address matches the origin the request arrived on
+(`Security:PublishedOrigins`, supplied as `SECURITY_PUBLIC_BASE_URL`), falling back to the issuer when none
+matches. The request selects among configured values and contributes none, which is what keeps this
+different from reflecting a `Host` header — the exposure that removed request-derived addresses from this
+document in the first place. §9.3.1 row 6 carries the same statement from the bootstrap side.
 
 **Test hosts are the exception, and they are the case the setting exists for.** `Gateway.Tests` and
 `DataServicesTestHostFactory` set `RequireHttpsMetadata` to `false` explicitly, because each stands up an
@@ -2113,14 +2225,36 @@ Four properties a reader needs:
   at document level for the four reserved route families, whose response sets stay closed at `{401, 501}`
   because C-D makes that closedness the deferred-service compliance position.
 - **The gRPC surfaces are bounded by their own interceptor**, which answers `ResourceExhausted` rather than
-  a `429`, because a gRPC client cannot read an HTTP status. `MaxSendMessageBytes` is the sharper of the two
-  message bounds: the framework default for the send direction is **unlimited**.
+  a `429`, because a gRPC client cannot read an HTTP status. It carries the same retry interval the REST
+  surface puts on `Retry-After`, under the same name and in the same whole seconds, as a **`retry-after`
+  trailer** — present when the limiter can state an interval and absent when it cannot, which is the same
+  condition the header is subject to. Two refusals share `ResourceExhausted` and the trailer is what tells
+  them apart: an **ingress** refusal clears on its own and carries the interval, whereas a per-caller
+  **handle-ceiling** refusal is answered in band, names `Handles:MaxPerPrincipal`, clears only when the
+  caller releases a handle, and deliberately carries no interval because retrying changes nothing.
+  `MaxSendMessageBytes` is the sharper of the two message bounds: the framework default for the send
+  direction is **unlimited**.
 
 Work budgets sit behind the transport bounds, because a request small enough to accept can still be
 expensive to serve: the token request bounds its scope count and string lengths, RSA generation is capped at
 the largest published modulus, file digesting is capped by size, and the update carrier is capped on rows
 and on values per row. Each answers the legacy return-code algebra's own refusal rather than a new
 vocabulary, and each is published in the contract that carries the operation.
+
+**And a third layer sits behind both, at the container rather than in the code: each service declares a
+memory and a CPU ceiling** in `orchestration/docker-compose.yml`, overridable per service and documented
+with its measurement in [`orchestration/README.md` §6.4](../orchestration/README.md#64-every-service-declares-a-resource-ceiling-and-what-that-ceiling-is-for).
+It belongs in this section because it is the layer the other two cannot express. A transport bound limits one
+message and a work budget limits one operation; neither bounds the *sum* of accepted work, and the service
+whose peak tracks response size rather than message size — Gateway, which materialises a whole REST
+projection before writing it — is bounded by nothing else. The measured behaviour is the argument: with no
+ceiling a container reports the cgroup `max` sentinel as its limit, so the collector has no collection
+pressure and retains without plateau; under a declared ceiling the same load plateaus well below it with
+every response byte-complete and no OOM kill. The CPU value is there for a second reason that is not
+throttling — the runtime derives its thread-pool and server-GC heap counts from the processor count it
+observes, and an unquoted container observes the whole host, so four services on one machine each provision
+as though they owned all of it. **No performance objective is asserted by any of the three layers** (AAP
+§0.8.5): each states a limit, never a target.
 
 ### 9.9 Logging: the redaction obligation a level cannot relax, and the category levels each service ships
 

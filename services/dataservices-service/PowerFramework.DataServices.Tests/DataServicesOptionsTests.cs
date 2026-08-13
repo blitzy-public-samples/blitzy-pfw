@@ -1797,6 +1797,11 @@ public sealed class DataServicesOptionsTests
     /// than validated. What guards against their return is the reflection row in
     /// <c>DataWindowServiceContractTests</c> that asserts neither property exists.
     /// </para>
+    /// <para>
+    /// ⚠ <c>AutoCommit</c> IS SET TRUE HERE ONLY TO PROVE THE KEY BINDS, AND IT IS NOT A DEPLOYABLE
+    /// VALUE. Binding and validation are separate steps, and the validator refuses true at startup -
+    /// see <c>APersistenceSessionAutoCommitOfTrueIsRefused</c> for why.
+    /// </para>
     /// </remarks>
     [Fact]
     public void ThePersistenceSessionKeysBindToTheDescriptorMembers()
@@ -1876,6 +1881,74 @@ public sealed class DataServicesOptionsTests
         string failure = Assert.Single(Failures(options));
 
         Assert.Contains("DataServices:PersistenceSession:Dbms", failure, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A session descriptor that asks for connection-level autocommit is refused at startup, because
+    /// C-08 refuses it on every request.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE REFUSAL IS DOWNSTREAM AND TOTAL, WHICH IS WHY IT BELONGS AT STARTUP. The legacy erases the
+    /// descriptor's autocommit member before it reaches either the connection pool or a transaction object
+    /// [<c>n_cst_thread_task_sqlbase.sru:L118-L119</c>, <c>n_cst_thread_trans.sru:L343-L354</c>], so
+    /// Persistence answers <c>E_INVALID_ARGUMENT</c> to a <c>BeginSession</c> that sets it rather than
+    /// accepting it and quietly discarding it. This service opens a session for EVERY retrieval, update and
+    /// expression host, so the setting does not degrade one operation - it removes all of them. Binding it
+    /// and then failing every request is the graceful degradation the ported fail-fast posture forbids.
+    /// </para>
+    /// <para>
+    /// THE MESSAGE HAS TO NAME THE ROUTE THAT WORKS, or the operator's next move is to conclude that
+    /// autocommit is unavailable. It is available twice over, just not from the connection descriptor:
+    /// C-06's task-level switch (which this service already sets, so a single-call update commits before
+    /// its session ends) and C-08's <c>SetAutoCommit</c>.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void APersistenceSessionAutoCommitOfTrueIsRefused()
+    {
+        DataServicesOptions options = ValidOptions();
+        options.PersistenceSession.AutoCommit = true;
+
+        string failure = Assert.Single(Failures(options));
+
+        Assert.Contains(
+            "DataServices:PersistenceSession:AutoCommit",
+            failure,
+            StringComparison.Ordinal);
+        Assert.Contains("must be false", failure, StringComparison.Ordinal);
+        Assert.Contains("SetAutoCommit", failure, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The shipped settings file states the descriptor's autocommit member as false.
+    /// </summary>
+    /// <remarks>
+    /// ASSERTED SEPARATELY FROM THE DEFAULT because the default only holds for a key nobody wrote, and the
+    /// deployed document is what actually starts the service. The file states the member rather than
+    /// omitting it, which is right for a descriptor that mirrors a legacy structure field by field - the
+    /// row is visible where an operator reads the connection settings, next to the password and the
+    /// connection-parameter string that govern the same session. What must never appear there is
+    /// <c>true</c>: it would refuse every session this service opens, and it would do so on a document the
+    /// validator only sees after an operator has deployed it.
+    /// </remarks>
+    [Fact]
+    public void TheShippedSettingsFileStatesThePersistenceSessionAutoCommitMemberAsFalse()
+    {
+        IConfigurationRoot configuration = DataServicesSettingsDocuments.Base();
+
+        Assert.Equal(
+            "False",
+            configuration["DataServices:PersistenceSession:AutoCommit"],
+            ignoreCase: true);
+
+        Assert.False(DataServicesSettingsDocuments.BindService(configuration)
+            .PersistenceSession
+            .AutoCommit);
+
+        Assert.Null(
+            DataServicesSettingsDocuments.DevelopmentOnly()[
+                "DataServices:PersistenceSession:AutoCommit"]);
     }
 
     /// <summary>

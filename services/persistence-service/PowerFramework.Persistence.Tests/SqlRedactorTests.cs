@@ -1891,4 +1891,348 @@ public sealed class SqlRedactorTests
         /// <inheritdoc />
         public string Redact([AllowNull] string statement) => statement ?? string.Empty;
     }
+
+    // ==============================================================================================
+    //  THE FIELD-CLASS POLICY, PINNED SITE BY SITE
+    // ==============================================================================================
+
+    /// <summary>
+    /// Every redaction call in the service uses the policy its FIELD CLASS calls for, and the two sets of
+    /// files are asserted by name.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE DEFECT THIS CLOSES, AND WHY IT IS PINNED FROM SOURCE.</b> The two policies were split
+    /// across ONE value: an invalid-table <c>Exec</c> published the same provider message at two depths on
+    /// one response, because <c>DbError.sqlerrtext</c> reached <c>RedactProviderDiagnostic</c> while
+    /// <c>ExecResponse.sql_err_text</c> and <c>status.error_text</c> reached the strict <c>Redact</c>. That
+    /// is a property of WHICH METHOD EACH CALL SITE PICKED, and no behavioural test can see a site it does
+    /// not happen to drive - the three services fixed alongside the command path had no disclosure-depth
+    /// test at all before this. Reading the sources names every site, including the ones a harness cannot
+    /// cheaply reach, and makes a future site that picks the wrong policy fail here rather than in
+    /// production.
+    /// </para>
+    /// <para>
+    /// <b>THE TWO CLASSES.</b> Provider-diagnostic fields - anything whose value originates as the driver's
+    /// own message - keep the envelope so the failing condition stays legible while everything quoted inside
+    /// it is still masked. Statement and free-text fields keep the strict policy, because they carry
+    /// interpolated literals by construction or may carry a deployment path. The canonical statement of the
+    /// split lives on <see cref="SqlRedactor.RedactProviderDiagnostic"/>; this test is its enforcement.
+    /// </para>
+    /// <para>
+    /// SKIPPED RATHER THAN FAILED WHEN NO SOURCE TREE IS REACHABLE, on the same terms as the sibling scan in
+    /// <c>UpdateServiceTests</c>: under an out-of-tree artifacts path the production sources are simply not
+    /// there, and a locator failure would report a test-environment problem as a code defect. Reachability
+    /// is asserted separately by <c>TestRepositoryRootTests</c>, so a silently-skipping locator cannot hide.
+    /// </para>
+    /// </remarks>
+    // ==============================================================================================
+    //  THE MEASURED DISCLOSURE THAT MOVED THE LOG SITES OFF THE STRICT POLICY
+    //  --------------------------------------------------------------------------------------------
+    //  🔴 THE STRICT SCANNER IS THE LEAKY ONE ON THIS SHAPE, WHICH INVERTS THE OBVIOUS EXPECTATION and
+    //  is the whole reason the log records were re-routed. A runtime log scan of this service found a
+    //  row value in the clear inside a record that had been masked - so the assertion below states the
+    //  leak explicitly rather than only asserting the fix, because a reader who does not know WHY the
+    //  routing exists is one refactor away from undoing it.
+    // ==============================================================================================
+
+    /// <summary>
+    /// The provider's envelope around a diagnosis that itself quotes a value: two nesting levels of
+    /// single quotes, which is what an unnamed CHECK constraint failure actually produces.
+    /// </summary>
+    private const string NestedQuoteEnvelope =
+        "SQLite Error 19: 'CHECK constraint failed: NAME <> 'Kenneth-Fixture-Secret''.";
+
+    [Fact]
+    public void TheStrictScannerLeaksAValueOutOfANestedQuoteEnvelopeAndTheEnvelopePolicyDoesNot()
+    {
+        SqlRedactor redactor = new();
+
+        // THE LEAK, ASSERTED. The scanner lexes the input as SQL: it opens a literal at the envelope's
+        // quote, closes it at the INNER opening quote, then copies the value through as though it were an
+        // unquoted identifier before treating the trailing pair as a second literal.
+        string strict = redactor.Redact(NestedQuoteEnvelope);
+
+        Assert.Contains("Kenneth-Fixture-Secret", strict, StringComparison.Ordinal);
+
+        // THE FIX. Peeling the wrapper first leaves an interior whose quoting is well formed, so the value
+        // is masked and the condition and result code still read.
+        string envelopeAware = redactor.RedactProviderDiagnostic(NestedQuoteEnvelope);
+
+        Assert.DoesNotContain("Kenneth-Fixture-Secret", envelopeAware, StringComparison.Ordinal);
+        Assert.Contains("CHECK constraint failed", envelopeAware, StringComparison.Ordinal);
+        Assert.Contains("SQLite Error 19", envelopeAware, StringComparison.Ordinal);
+        Assert.Contains(SqlRedactor.DefaultPlaceholder, envelopeAware, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheEnvelopePredicateAnswersExactlyWhatThePolicyItselfDecides()
+    {
+        SqlRedactor redactor = new();
+
+        string[] envelopes =
+        [
+            NestedQuoteEnvelope,
+            "SQLite Error 1: 'no such table: NO_SUCH_TABLE'.",
+            "SQLite Error 5: 'database is locked'.",
+        ];
+
+        string[] others =
+        [
+            "无效的更新数据!",
+            "SELECT * FROM COMPANY WHERE NAME = 'Ada'",
+            "SQLITE Error 19: 'wrong case'.",
+            "SQLite Error : 'no result code'.",
+            "SQLite Error 19: 'no trailing stop'",
+            string.Empty,
+        ];
+
+        // THE PREDICATE AND THE POLICY CANNOT DISAGREE, which is the property that makes a caller's
+        // two-way branch equivalent to letting the policy decide for itself: on an envelope the policy
+        // preserves the wrapper, and off one it returns exactly what the strict method returns.
+        foreach (string candidate in envelopes)
+        {
+            Assert.True(SqlRedactor.IsProviderDiagnostic(candidate), candidate);
+            Assert.StartsWith("SQLite Error ", redactor.RedactProviderDiagnostic(candidate), StringComparison.Ordinal);
+        }
+
+        foreach (string candidate in others)
+        {
+            Assert.False(SqlRedactor.IsProviderDiagnostic(candidate), candidate);
+            Assert.Equal(redactor.Redact(candidate), redactor.RedactProviderDiagnostic(candidate));
+        }
+
+        Assert.False(SqlRedactor.IsProviderDiagnostic(null));
+    }
+
+    [Fact]
+    public void TheFaultRecordMasksAValueQuotedInsideAWrappedProviderMessage()
+    {
+        // THE WHOLE CHAIN, and the provider's message at the BOTTOM of it - which is the shape a task
+        // fault wrapping a command fault wrapping the driver's own actually has.
+        Exception inner = new InvalidOperationException(NestedQuoteEnvelope);
+        Exception outer = new InvalidOperationException("The task could not complete.", inner);
+
+        string record = FaultRecord.RedactedMessages(outer);
+
+        Assert.DoesNotContain("Kenneth-Fixture-Secret", record, StringComparison.Ordinal);
+        Assert.Contains("CHECK constraint failed", record, StringComparison.Ordinal);
+        Assert.Contains("The task could not complete.", record, StringComparison.Ordinal);
+
+        // The types member is unchanged by any of this and still reads no message at all.
+        Assert.Contains("InvalidOperationException", FaultRecord.Types(outer), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EveryRedactionSiteUsesThePolicyItsFieldClassCallsFor()
+    {
+        if (LocateApplicationSourceRoot() is not { } sourceRoot)
+        {
+            return;
+        }
+
+        SortedSet<string> envelopePreserving = new(StringComparer.Ordinal);
+        SortedSet<string> strict = new(StringComparer.Ordinal);
+
+        foreach (string file in Directory.EnumerateFiles(sourceRoot, "*.cs", SearchOption.AllDirectories))
+        {
+            // The intermediate and output directories hold generated copies of the same code; counting them
+            // would double every finding.
+            if (file.Contains(
+                    $"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}",
+                    StringComparison.Ordinal)
+                || file.Contains(
+                    $"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}",
+                    StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            string relative = Path.GetRelativePath(sourceRoot, file).Replace('\\', '/');
+
+            foreach (string line in File.ReadLines(file))
+            {
+                string code = line.TrimStart();
+
+                if (code.StartsWith("//", StringComparison.Ordinal)
+                    || code.StartsWith('*')
+                    || code.StartsWith("/*", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                // 🔴 THE OPENING PARENTHESIS IS DELIBERATELY NOT REQUIRED, AND AN EARLIER REVISION OF THIS
+                // SCAN REQUIRED IT AND MISSED A SITE BECAUSE OF THAT. Errors/FaultRecord.cs passes the
+                // policy as a METHOD GROUP - `DescribeMessages(error, SqlRedactor.Instance.Redact)` - so a
+                // pattern anchored on `.Redact(` saw nothing there at all, and the fifteen log records that
+                // file governs sat outside the audit entirely. That is exactly the class of drift this test
+                // exists to catch, so the name alone is the trigger and the shapes below are matched too.
+                if (code.Contains("RedactProviderDiagnostic", StringComparison.Ordinal))
+                {
+                    envelopePreserving.Add(relative);
+                }
+                else if (ReferencesStrictPolicy(code))
+                {
+                    strict.Add(relative);
+                }
+            }
+        }
+
+        // A GUARD ON THE GUARD: an empty scan would satisfy both assertions below by accident.
+        Assert.NotEmpty(envelopePreserving);
+        Assert.NotEmpty(strict);
+
+        // ------------------------------------------------------------------------------------------
+        //  PROVIDER-DIAGNOSTIC CLASS. Every WIRE field that carries a driver message is here, plus the
+        //  database-error log record that reads the same value.
+        //
+        //    Errors/FaultRecord.cs        EVERY exception message written to a log record - fifteen sites
+        //                                 reach redaction through this one file. 🔴 Strict here LEAKED: the
+        //                                 dominant message is SqliteException's envelope, whose single
+        //                                 quotes NEST when the diagnosis quotes a value, and the SQL literal
+        //                                 scanner pairs them the wrong way round and copies the value
+        //                                 through. Measured in this service's own log, not inferred.
+        //    Errors/SqlRedactor.cs        common.v1.DbError.sqlerrtext, and the method's own definition
+        //    Grpc/CommandService.cs       ExecResponse.sql_err_text AND the command status's error_text
+        //    Grpc/TransactionService.cs   TransactionStatus.sql_err_text
+        //    Grpc/UpdateService.cs        the update path's status error_text
+        //    Grpc/QueryService.cs         the query path's status error_text
+        //    Program.cs                   the status interceptor's exception-message record and the worker
+        //                                 host's framework-error record, for the same measured reason. IN
+        //                                 BOTH SETS: each site asks IsProviderDiagnostic and routes ONLY the
+        //                                 envelope here, so statement text stays on the injected seam and
+        //                                 ISqlRedactor is not widened (C-K).
+        //    Tasks/SqlTaskBase.cs         the database-error log record
+        // ------------------------------------------------------------------------------------------
+        Assert.Equal(
+            [
+                "Errors/FaultRecord.cs",
+                "Errors/SqlRedactor.cs",
+                "Grpc/CommandService.cs",
+                "Grpc/QueryService.cs",
+                "Grpc/TransactionService.cs",
+                "Grpc/UpdateService.cs",
+                "Program.cs",
+                "Tasks/SqlTaskBase.cs",
+            ],
+            [.. envelopePreserving]);
+
+        // ------------------------------------------------------------------------------------------
+        //  STATEMENT AND FREE-TEXT CLASS, each with the reason it stays strict.
+        //
+        //    Concurrency/ConflictDetector.cs   the conflict detail's statement field
+        //    Data/SqliteConnectionFactory.cs   the startup open failure - the record most likely to carry
+        //                                      a deployment PATH inside the provider's own message
+        //    Errors/SqlRedactor.cs             DbError.sqlsyntax, which carries interpolated literals by
+        //                                      construction. THE FILE IS IN BOTH SETS, deliberately: it is
+        //                                      where the two classes meet, one field each.
+        //    Program.cs                        the task-layer notification payload, which is arbitrary free
+        //                                      text; and the STATEMENT-TEXT arm of the interceptor and
+        //                                      worker-host records - the retrieval task composes those from a
+        //                                      fixed prefix and the externally supplied SORT or FILTER
+        //                                      expression, which is what the injected seam was introduced to
+        //                                      let a test govern. IN BOTH SETS, by the branch described above
+        //    Tasks/SqlCommandTask.cs           statement text in log records
+        //    Tasks/SqlQueryTask.cs             the count statement, and the DataWindow `Modify` rejection,
+        //                                      which quotes back the whole rejected
+        //                                      DataWindow.Table.Select='...' assignment
+        //    Tasks/SqlTaskBase.cs              the STATEMENT half of the database-error record. IN BOTH
+        //                                      SETS for the same reason SqlRedactor.cs is - one line each.
+        //    Tasks/SqlUpdateTask.cs            the update error sink's second pass, which is the
+        //                                      DbErrorData overload on ConflictDetector: it masks the
+        //                                      STATEMENT member and touches nothing else, so it is a
+        //                                      statement-class call even though the payload it carries also
+        //                                      has a message member - that member is masked by the wire
+        //                                      projection, on the provider-diagnostic policy.
+        // ------------------------------------------------------------------------------------------
+        Assert.Equal(
+            [
+                "Concurrency/ConflictDetector.cs",
+                "Data/SqliteConnectionFactory.cs",
+                "Errors/SqlRedactor.cs",
+                "Program.cs",
+                "Tasks/SqlCommandTask.cs",
+                "Tasks/SqlQueryTask.cs",
+                "Tasks/SqlTaskBase.cs",
+                "Tasks/SqlUpdateTask.cs",
+            ],
+            [.. strict]);
+
+        // AND NO gRPC SERVICE IS IN THE STRICT SET AT ALL, which is the property stated positively: every
+        // provider message this service puts on the wire now reads at one depth, so no two fields of one
+        // response can disagree again.
+        Assert.DoesNotContain(strict, candidate => candidate.StartsWith("Grpc/", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Reports whether one line of source references the strict policy, in a call or as a method group.
+    /// </summary>
+    /// <param name="code">The line, already trimmed of leading whitespace and known not to be a comment.</param>
+    /// <returns><see langword="true"/> when the line names <c>Redact</c> on some receiver.</returns>
+    /// <remarks>
+    /// FOUR SHAPES, AND THE LAST TWO ARE WHY THIS HELPER EXISTS. A CALL ends in <c>(</c>; a method group
+    /// passed as an argument ends in <c>)</c> or <c>,</c>; one assigned to a delegate ends in <c>;</c>. The
+    /// method-group forms are the ones a paren-anchored pattern misses, and missing one hid fifteen log
+    /// sites from this audit.
+    /// </remarks>
+    private static bool ReferencesStrictPolicy(string code)
+    {
+        int index = code.IndexOf(".Redact", StringComparison.Ordinal);
+
+        while (index >= 0)
+        {
+            int after = index + ".Redact".Length;
+
+            if (after >= code.Length || code[after] is '(' or ')' or ',' or ';')
+            {
+                return true;
+            }
+
+            index = code.IndexOf(".Redact", after, StringComparison.Ordinal);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The <c>PowerFramework.Persistence</c> application project directory, or <see langword="null"/> when
+    /// no source tree is reachable from this run.
+    /// </summary>
+    /// <returns>The directory, or <see langword="null"/>.</returns>
+    /// <remarks>
+    /// The same locator <c>UpdateServiceTests</c> uses, kept identical rather than generalised: the two
+    /// scans want the same directory for the same reason, and a shared helper would have to live in a third
+    /// file for two callers. See <see cref="TestRepositoryRoot"/> for the embedded-root convention.
+    /// </remarks>
+    private static string? LocateApplicationSourceRoot()
+    {
+        const string ProjectDirectory = "PowerFramework.Persistence";
+
+        if (TestRepositoryRoot.Embedded is { } root)
+        {
+            string direct = Path.Combine(root, "services", "persistence-service", ProjectDirectory);
+
+            if (Directory.Exists(direct))
+            {
+                return direct;
+            }
+        }
+
+        DirectoryInfo? probe = new(AppContext.BaseDirectory);
+
+        while (probe is not null)
+        {
+            string candidate = Path.Combine(probe.FullName, ProjectDirectory);
+
+            if (Directory.Exists(candidate)
+                && File.Exists(Path.Combine(candidate, ProjectDirectory + ".csproj")))
+            {
+                return candidate;
+            }
+
+            probe = probe.Parent;
+        }
+
+        return null;
+    }
 }

@@ -2693,7 +2693,14 @@ public sealed class PersistenceRuntimeTests : IDisposable
     [Fact]
     public void AStatementFaultRecordsARedactedChainAndAttachesNoException()
     {
-        const string Literal = "O'Hara-super-secret-salary-99999";
+        // ⚠ NO APOSTROPHE, AND THE CHANGE FROM `O'Hara-...` RESTORES THIS CASE'S OWN STATED INTENT. An
+        // un-escaped apostrophe inside the interpolated value makes the statement SYNTACTICALLY INVALID, so
+        // the provider refused it at PREPARE with `near "Hara": syntax error` and this case never reached
+        // the NOT NULL violation its remarks describe as the fault being exercised - "the provider refuses
+        // the insert AFTER the statement text exists" was not what happened. The apostrophe shape is worth
+        // pinning too, and it is, in the sub-case at the end, where its consequence is stated rather than
+        // relied upon.
+        const string Literal = "Hara-super-secret-salary-99999";
 
         RecordingEngineLogger logger = new();
 
@@ -2723,7 +2730,72 @@ public sealed class PersistenceRuntimeTests : IDisposable
         //    exception type is named, and the redacted message is present rather than dropped.
         Assert.Contains(typeof(SqliteException).FullName!, recorded, StringComparison.Ordinal);
         Assert.Contains("RedactedMessage=", recorded, StringComparison.Ordinal);
-        Assert.Contains(SqlRedactor.DefaultPlaceholder, recorded, StringComparison.Ordinal);
+
+        // 4. 🔴 AND THE DIAGNOSIS ITSELF NOW READS, WHICH IS A CHANGE OF ASSERTION RATHER THAN A CHANGE OF
+        //    POSTURE. This case previously asserted only that the placeholder appeared SOMEWHERE in the
+        //    record, which the strict SQL literal scanner satisfied by masking the provider's result code
+        //    and its whole quoted diagnosis - so the record read
+        //    `SQLite Error <redacted>: '<redacted>'.` and told an operator nothing at all. Worse, on a
+        //    message whose diagnosis quotes a value the same scanner LEAKED that value, because the nested
+        //    single quotes pair the wrong way round; that was measured in this service's log and is pinned
+        //    by SqlRedactorTests. Exception messages therefore go through the envelope-aware policy, and a
+        //    message that quotes no value - which this one does not - is byte for byte unchanged by design.
+        //    The literal absence asserted at 2 is the property that matters and it still holds.
+        Assert.Contains("NOT NULL constraint failed: COMPANY.NAME", recorded, StringComparison.Ordinal);
+
+        // 5. AND WHEN THE PROVIDER'S MESSAGE DOES QUOTE A VALUE, THE VALUE IS MASKED. Without this the
+        //    assertion set above would also pass against a record that redacted nothing whatsoever, so this
+        //    is what makes 4 a statement about policy rather than about this one message. An unnamed CHECK
+        //    constraint is the shape whose failure message embeds the constraint expression, value and all.
+        const string Quoted = "Ada-quoted-inside-the-message";
+
+        logger.Records.Clear();
+
+        Assert.Equal(
+            0L,
+            engine.Execute(
+                "CREATE TABLE IF NOT EXISTS PARITY_CHECK_PROBE ("
+                    + $"NAME TEXT CHECK (NAME <> '{Quoted}'))",
+                TestContext.Current.CancellationToken).SqlCode);
+
+        Assert.NotEqual(
+            0L,
+            engine.Execute(
+                $"INSERT INTO PARITY_CHECK_PROBE (NAME) VALUES ('{Quoted}')",
+                TestContext.Current.CancellationToken).SqlCode);
+
+        string quotedRecord = string.Join("\n", logger.Records);
+
+        Assert.DoesNotContain(Quoted, quotedRecord, StringComparison.Ordinal);
+        Assert.Contains(SqlRedactor.DefaultPlaceholder, quotedRecord, StringComparison.Ordinal);
+        Assert.Contains("CHECK constraint failed", quotedRecord, StringComparison.Ordinal);
+
+        _ = engine.Execute("DROP TABLE IF EXISTS PARITY_CHECK_PROBE", TestContext.Current.CancellationToken);
+
+        // 6. ⚠ THE ONE SHAPE THE STATEMENT SCANNER CANNOT MASK, PINNED SO IT IS A KNOWN LIMIT RATHER THAN A
+        //    SURPRISE. An un-escaped apostrophe makes the statement invalid SQL, and the scanner is a SQL
+        //    literal scanner: it closes the literal at that apostrophe, so the remainder of the value is
+        //    read as structure and copied through. Masking it would mean treating everything between the
+        //    first and last quote as one literal, which for a VALID statement is where the column names
+        //    live - the two shapes are not distinguishable, so the field would lose the structure it exists
+        //    to show. The exposure is bounded by who can produce it: the statement is the CALLER'S OWN,
+        //    malformed by the caller, and `DbError.sqlsyntax` is documented as returning that statement to
+        //    that caller. What the provider's MESSAGE says about it is masked normally, which is the field
+        //    this checkpoint's fix governs.
+        logger.Records.Clear();
+
+        SqlState malformed = engine.Execute(
+            "INSERT INTO COMPANY (NAME, AGE, ADDRESS, SALARY, BIRTH) "
+                + "VALUES ('x', 41, 'O'Hara-1', 1, '1980-01-01')",
+            TestContext.Current.CancellationToken);
+
+        Assert.NotEqual(0L, malformed.SqlCode);
+
+        string malformedRecord = string.Join("\n", logger.Records);
+
+        // The provider names only the offending TOKEN, and the record still attaches no exception.
+        Assert.Contains("syntax error", malformedRecord, StringComparison.Ordinal);
+        Assert.All(logger.Exceptions, Assert.Null);
 
         _ = engine.Disconnect();
     }

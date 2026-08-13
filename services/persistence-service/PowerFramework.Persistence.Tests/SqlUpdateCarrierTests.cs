@@ -338,6 +338,249 @@ public sealed class SqlUpdateCarrierTests
     }
 
     /// <summary>
+    /// 🔴 A modification addressed BY ORDINAL is visible BY NAME and actually suppresses the assignment.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE ALIASING PROOF, AND THE ONE THAT WOULD HAVE CAUGHT A SILENT DATA-INTEGRITY FAULT. In PowerBuilder
+    /// <c>Describe("#5.Update")</c> and <c>Describe("salary.Update")</c> ask ONE column object for ONE
+    /// attribute - the ordinal and the name are two ways of addressing the same object - so a
+    /// <c>Modify</c> through either is visible through both. Storing them as two independent dictionary
+    /// entries broke that, and the break was invisible from either side alone: the reset half of
+    /// <c>_of_updateprepare</c> emits <c>#N.Update = no</c> for every column BY ORDINAL
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L103-L108</c>] while the three arms that re-enable emit
+    /// <c>&lt;name&gt;.Update = yes</c> BY NAME [<c>:L111-L129</c>], and the generator reads them back BY
+    /// NAME. So the reset wrote entries nothing read, the definition seed's own name-addressed <c>yes</c>
+    /// survived for every column, and a descriptor naming one updatable column still generated an
+    /// assignment for all six - writing a column the caller had EXCLUDED.
+    /// </para>
+    /// <para>
+    /// THE THIRD ASSERTION IS THE ONE THAT MATTERS. The two describes prove the alias; storage proves the
+    /// consequence. With the flag cleared by ordinal, the modified salary must NOT reach the row.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AnOrdinalAddressedModificationIsVisibleByNameAndSuppressesTheAssignment()
+    {
+        using CarrierFixture fixture = new();
+
+        fixture.Seed("Ada Lovelace", 36, "London", 92500m, "1815-12-10");
+
+        ISqlUpdateCarrier carrier = fixture.AdaptWithRetrievedRow();
+
+        // THE ALIAS, READ THROUGH A PRODUCTION DESCRIBE. The identity attribute is the one this service
+        // genuinely reads both ways - the prepare step writes it BY NAME [:L127-L129] and the identity round
+        // trip reads it BY ORDINAL [IdentityColumnResolver] - so it is the pair whose divergence was silent.
+        Assert.Equal(string.Empty, carrier.TargetModifier.Modify("#5.Identity=yes"));
+        Assert.Equal(
+            UpdateWhereBuilder.YesLiteral,
+            carrier.Identity.Metadata.DescribeColumnIdentity("salary" + SqlUpdateCarrier.IdentitySuffix));
+
+        // AND THE CONVERSE, so neither direction is privileged.
+        Assert.Equal(string.Empty, carrier.TargetModifier.Modify("salary.Identity=no"));
+        Assert.Equal(
+            UpdateWhereBuilder.NoLiteral,
+            carrier.Identity.Metadata.DescribeColumnIdentity("#5" + SqlUpdateCarrier.IdentitySuffix));
+
+        // Now clear the UPDATABLE flag by ordinal, and modify the column the caller has just excluded.
+        Assert.Equal(string.Empty, carrier.TargetModifier.Modify("#5.Update=no"));
+
+        MarkColumnModified(carrier, column: 5, value: 95000d);
+
+        Assert.Equal(
+            Buffers.DataWindowBufferStore.DataStoreSuccess,
+            carrier.Target.Update(acceptText: true, resetFlag: false, TestContext.Current.CancellationToken));
+
+        // 🔴 THE EXCLUDED COLUMN WAS NOT WRITTEN. Before the alias existed, the surviving name-addressed
+        // `yes` put SALARY in the SET list and this read answered the modified value.
+        Assert.Equal(
+            92500d,
+            Convert.ToDouble(
+                fixture.ScalarDirect("SELECT SALARY FROM COMPANY WHERE NAME = 'Ada Lovelace'"),
+                CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// 🔴 The installed concurrency mode decides which columns the predicate compares.
+    /// </summary>
+    /// <param name="updateWhere">The mode to install.</param>
+    /// <param name="expectMismatch">
+    /// Whether a competing writer's change to a NON-KEY, NON-MODIFIED column must make this update match
+    /// nothing.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// THE MODE WAS PREVIOUSLY WRITTEN AND NEVER READ. The property was installed by the prepare step and
+    /// by the definition seed, and the predicate was composed as key ∪ marked unconditionally - mode 1
+    /// hardcoded - so a caller declaring mode 0 or mode 2 had its declared concurrency policy silently
+    /// replaced by this service's. The mode decides WHICH ROWS a statement matches, so the substitution was
+    /// invisible in every response.
+    /// </para>
+    /// <para>
+    /// THE RACE IS CONSTRUCTED SO THE THREE MODES DISAGREE. A competing writer changes ADDRESS, which is
+    /// neither the key nor the column this update modifies. Mode 1 compares every marked column, so the
+    /// stale ADDRESS original makes the predicate match nothing. Mode 0 compares the key alone and mode 2
+    /// compares the key plus the modified SALARY - neither of which the competitor touched - so both match.
+    /// </para>
+    /// <para>
+    /// THE PREDICATE TEXT IS ASSERTED TOO, because a matching row count alone would also be produced by a
+    /// predicate that compared the wrong columns and happened to agree. The statement is read from the SQL
+    /// preview channel, which is where the generator publishes every statement it runs.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(UpdateWhereBuilder.KeyOnlyMode, false)]
+    [InlineData(UpdateWhereBuilder.KeyAndUpdatableColumnsMode, true)]
+    [InlineData(UpdateWhereBuilder.KeyAndModifiedColumnsMode, false)]
+    public void TheInstalledConcurrencyModeDecidesWhichColumnsThePredicateCompares(
+        long updateWhere,
+        bool expectMismatch)
+    {
+        using CarrierFixture fixture = new();
+
+        fixture.Seed("Ada Lovelace", 36, "London", 92500m, "1815-12-10");
+
+        ISqlUpdateCarrier carrier = fixture.AdaptWithRetrievedRow(updateWhere: updateWhere);
+
+        // The competing writer changes a column that is neither the key nor the one this update modifies.
+        fixture.ExecuteDirect("UPDATE COMPANY SET ADDRESS = 'Somerset' WHERE NAME = 'Ada Lovelace'");
+
+        MarkColumnModified(carrier, column: 5, value: 95000d);
+
+        Assert.Equal(
+            Buffers.DataWindowBufferStore.DataStoreSuccess,
+            carrier.Target.Update(acceptText: true, resetFlag: false, TestContext.Current.CancellationToken));
+
+        ConcurrencyEvidence? evidence = carrier.CaptureConcurrencyEvidence();
+
+        Assert.NotNull(evidence);
+        Assert.False(evidence.ProviderFaulted);
+        Assert.Equal(1L, evidence.RowsExpected);
+        Assert.Equal(expectMismatch ? 0L : 1L, evidence.RowsMatched);
+        Assert.Equal(expectMismatch, ConflictDetector.IsConcurrencyMismatch(evidence));
+
+        // THE PREDICATE ITSELF, so a coincidental row count cannot pass for the right comparison.
+        string generated = Assert.IsType<string>(carrier.Store.Carrier.SqlPreviewStatement);
+
+        Assert.StartsWith(
+            "UPDATE COMPANY SET salary = @p1 WHERE id = @p2",
+            generated,
+            StringComparison.Ordinal);
+
+        switch (updateWhere)
+        {
+            case UpdateWhereBuilder.KeyOnlyMode:
+                // THE KEY AND NOTHING ELSE.
+                Assert.Equal("UPDATE COMPANY SET salary = @p1 WHERE id = @p2", generated);
+
+                break;
+
+            case UpdateWhereBuilder.KeyAndModifiedColumnsMode:
+                // THE KEY PLUS THE ONE COLUMN THIS ROW MODIFIED, and no other.
+                Assert.Equal(
+                    "UPDATE COMPANY SET salary = @p1 WHERE id = @p2 AND salary = @p3",
+                    generated);
+
+                break;
+
+            default:
+                // THE KEY PLUS EVERY MARKED COLUMN - all six of the evidenced fixture's.
+                Assert.Equal(
+                    "UPDATE COMPANY SET salary = @p1 WHERE id = @p2 AND name = @p3 AND age = @p4 "
+                    + "AND address = @p5 AND salary = @p6 AND birth = @p7",
+                    generated);
+
+                break;
+        }
+
+        // NOTHING WAS OVERWRITTEN WHERE THE PREDICATE LOST, and where it won the write is the caller's own.
+        Assert.Equal(
+            expectMismatch ? 92500d : 95000d,
+            Convert.ToDouble(
+                fixture.ScalarDirect("SELECT SALARY FROM COMPANY WHERE NAME = 'Ada Lovelace'"),
+                CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// 🔴 A modification script whose VALUE lies outside a property's domain is refused.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE COMPANION TO THE UNKNOWN-COLUMN REFUSAL ABOVE, on the other half of a script line. PowerBuilder's
+    /// <c>Modify</c> parses a script against the loaded DataWindow's object model and answers a non-empty
+    /// error for a value outside a property's domain exactly as it does for a property whose object does not
+    /// exist, and the caller then takes its <c>if sErr &lt;&gt; ""</c> arm
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L145-L148</c>]. Installing any value into a plain dictionary
+    /// accepted a concurrency mode no DataWindow has.
+    /// </para>
+    /// <para>
+    /// TWO PROPERTIES CARRY A CLOSED DOMAIN and they are the two the descriptor can set. Everything else
+    /// carries free text and is not screened here, which the last two assertions pin so the refusal cannot
+    /// quietly grow into a general value filter.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AModificationScriptStatingAValueOutsideAPropertyDomainIsRefused()
+    {
+        using CarrierFixture fixture = new();
+
+        fixture.Seed("Grace Hopper", 45, "Arlington", 88000m, "1906-12-09");
+
+        ISqlUpdateCarrier carrier = fixture.AdaptWithRetrievedRow();
+
+        foreach (string rejected in new[] { "7", "3", "-1", "yes", string.Empty })
+        {
+            Assert.Equal(
+                UpdateWhereBuilder.UnsupportedUpdateWhereModeMessage,
+                carrier.TargetModifier.Modify(UpdateWhereBuilder.UpdateWhereProperty + "=" + rejected));
+        }
+
+        // THE THREE THAT EXIST ARE ACCEPTED, so the screen is a domain test rather than a narrowing to one.
+        foreach (long accepted in new[]
+        {
+            UpdateWhereBuilder.KeyOnlyMode,
+            UpdateWhereBuilder.KeyAndUpdatableColumnsMode,
+            UpdateWhereBuilder.KeyAndModifiedColumnsMode,
+        })
+        {
+            Assert.Equal(
+                string.Empty,
+                carrier.TargetModifier.Modify(
+                    UpdateWhereBuilder.UpdateWhereProperty
+                    + "="
+                    + accepted.ToString(CultureInfo.InvariantCulture)));
+        }
+
+        // THE KEY-IN-PLACE SETTING IS A TWO-VALUED WORD, not a number and not a boolean [:L137-L141]. The
+        // oracle's own reader is an exact comparison against "no" [:L155], so "true" and "1" both read as
+        // "not no" and silently selected the in-place arm of a key change.
+        Assert.Equal(
+            UpdateWhereBuilder.UnsupportedUpdateKeyInPlaceMessage,
+            carrier.TargetModifier.Modify(SqlUpdateCarrier.UpdateKeyInPlaceProperty + "=true"));
+        Assert.Equal(
+            UpdateWhereBuilder.UnsupportedUpdateKeyInPlaceMessage,
+            carrier.TargetModifier.Modify(SqlUpdateCarrier.UpdateKeyInPlaceProperty + "=1"));
+        Assert.Equal(
+            string.Empty,
+            carrier.TargetModifier.Modify(SqlUpdateCarrier.UpdateKeyInPlaceProperty + "=YES"));
+        Assert.Equal(
+            UpdateWhereBuilder.YesLiteral,
+            carrier.TargetMetadata.DescribeUpdateKeyInPlace(),
+            StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(
+            string.Empty,
+            carrier.TargetModifier.Modify(SqlUpdateCarrier.UpdateKeyInPlaceProperty + "=no"));
+        Assert.Equal(UpdateWhereBuilder.NoLiteral, carrier.TargetMetadata.DescribeUpdateKeyInPlace());
+
+        // EVERY OTHER PROPERTY STILL CARRIES FREE TEXT. The update table is screened by the identifier
+        // gate rather than by a domain, and a per-column flag's reader already has its own yes/no test.
+        Assert.Equal(
+            string.Empty,
+            carrier.TargetModifier.Modify(SqlUpdateCarrier.UpdateTableProperty + "='COMPANY'"));
+        Assert.Equal(string.Empty, carrier.TargetModifier.Modify("salary.Update=whatever"));
+    }
+
+    /// <summary>
     /// A provider fault names the buffer and the row the walk was on, so the payload identifies the
     /// offending row rather than reporting the default pair.
     /// </summary>
@@ -846,8 +1089,14 @@ public sealed class SqlUpdateCarrierTests
         /// Produces a carrier whose store holds the seeded row, retrieved and baselined, with the
         /// evidenced table installed exactly as the update-prepare path installs it.
         /// </summary>
+        /// <param name="expectedRows">How many rows the retrieval must answer.</param>
+        /// <param name="updateWhere">
+        /// The concurrency mode to install, or <see langword="null"/> to leave the data object definition's
+        /// own mode in force - which for the evidenced fixture is
+        /// <see cref="UpdateWhereBuilder.KeyAndUpdatableColumnsMode"/> [<c>dw_sqlite.srd:L14</c>].
+        /// </param>
         /// <returns>A carrier ready to be updated through.</returns>
-        internal ISqlUpdateCarrier AdaptWithRetrievedRow(long expectedRows = 1L)
+        internal ISqlUpdateCarrier AdaptWithRetrievedRow(long expectedRows = 1L, long? updateWhere = null)
         {
             ISqlDataStore store = new SqlDataObjectStore(_carrier, _runtime);
             store.DataObject = Data.DataObjectDefinitionCatalogue.EvidencedDataObject;
@@ -881,6 +1130,17 @@ public sealed class SqlUpdateCarrierTests
             // The identifier column is the key AND the identity, per the oracle's specification.
             script.Add($"{CompanyColumns[0]}{SqlUpdateCarrier.KeySuffix}=yes");
             script.Add($"{CompanyColumns[0]}{SqlUpdateCarrier.IdentitySuffix}=yes");
+
+            if (updateWhere.HasValue)
+            {
+                // The oracle emits this line only when the descriptor states the value
+                // [n_cst_thread_task_sqlupdate.sru:L131-L133], so an absent mode leaves the definition's
+                // own in force rather than installing a default.
+                script.Add(
+                    UpdateWhereBuilder.UpdateWhereProperty
+                    + "="
+                    + updateWhere.Value.ToString(CultureInfo.InvariantCulture));
+            }
 
             Assert.Equal(string.Empty, carrier.TargetModifier.Modify(string.Join('\n', script)));
 

@@ -1040,15 +1040,88 @@ internal static class UpdateWhereBuilder
     internal const string NoUpdatableTableMessage = "没有设置可更新表!";
 
     /// <summary>
+    /// The refusal for an update-where value that names no concurrency mode.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE ONE SETTING WHOSE SILENT SUBSTITUTION COSTS A ROW.</b> The mode decides which columns'
+    /// original values guard the update, so a value outside the three that exist has no defined
+    /// predicate - and installing it anyway meant the update ran under whichever arm an unrecognised
+    /// value happened to reach, protecting the row under a policy the caller never asked for. In
+    /// PowerBuilder the same script line is refused by <c>Modify</c>, whose non-empty answer
+    /// <c>_of_updateprepare</c> turns into <c>E_INTERNAL_ERROR</c>
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L145-L148</c>]; this is that refusal, reached the same way.
+    /// </para>
+    /// <para>
+    /// IT NAMES THE DOMAIN AND NOT THE VALUE (constraint C-F). The caller composed the value and already
+    /// has it; the same sentence reaches the operator channel through the preparer's error hook, and
+    /// echoing caller-supplied text into a log record is how a diagnostic becomes a disclosure. English
+    /// rather than the oracle's Chinese because the string PowerBuilder answers for a rejected
+    /// <c>Modify</c> line is a runtime string that exists nowhere in the read-only legacy tree, so there
+    /// is nothing to reproduce verbatim - what is observable, and what the caller acts on, is that the
+    /// answer is non-empty.
+    /// </para>
+    /// </remarks>
+    internal const string UnsupportedUpdateWhereModeMessage =
+        "DataWindow.Table.UpdateWhere accepts only 0 (key columns), 1 (key and updateable columns) "
+        + "or 2 (key and modified columns).";
+
+    /// <summary>
+    /// The refusal for a key-in-place value that is neither <see cref="YesLiteral"/> nor
+    /// <see cref="NoLiteral"/>.
+    /// </summary>
+    /// <remarks>
+    /// THE SETTING IS A TWO-VALUED WORD IN THE DESCRIBE VOCABULARY, not a number and not a boolean: the
+    /// oracle writes it as <c>yes</c> or <c>no</c> [<c>:L137</c>, <c>:L139</c>] and reads it back by
+    /// comparing against <c>no</c> [<c>:L155</c>]. Anything else read back as "not no" and therefore
+    /// silently selected the in-place arm of a key change - the arm that emits an ordinary UPDATE where
+    /// the caller may have been relying on delete-plus-insert. Domain-named rather than value-echoing,
+    /// for the reason on <see cref="UnsupportedUpdateWhereModeMessage"/>.
+    /// </remarks>
+    internal const string UnsupportedUpdateKeyInPlaceMessage =
+        "DataWindow.Table.UpdateKeyinPlace accepts only 'yes' or 'no'.";
+
+    /// <summary>
+    /// The "key columns only" concurrency mode: the predicate carries the key columns and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// THE WEAKEST OF THE THREE, AND A CALLER MAY ASK FOR IT. It compares no non-key column, so a
+    /// concurrent writer's change to a non-key column does not make the update fail - which is the whole
+    /// point of the mode on a contended table and is emphatically NOT a silent overwrite: the caller
+    /// declared the policy on its own descriptor, and the row-count classifier and the conflict
+    /// projection run unchanged behind it.
+    /// </remarks>
+    internal const long KeyOnlyMode = 0L;
+
+    /// <summary>
     /// The update-where mode the sole evidenced fixture uses: "key and updateable columns"
     /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14</c>].
     /// </summary>
     /// <remarks>
-    /// THE ONLY MODE THIS REPOSITORY EVIDENCES. No other mode's semantics are asserted anywhere in the
-    /// legacy tree, so none is modelled here: guessing what mode 0, 2 or 3 compare would be inventing a
-    /// contract, and C-B forbids it. What mode 1 requires of the payload is stated in the file header.
+    /// THE ONLY MODE THIS REPOSITORY EVIDENCES, and therefore the only one any parity recording covers.
+    /// What it requires of the payload is stated in the file header.
     /// </remarks>
     internal const long KeyAndUpdatableColumnsMode = 1L;
+
+    /// <summary>
+    /// The "key and modified columns" concurrency mode: the predicate carries the key columns plus the
+    /// ORIGINAL value of the columns THIS ROW modified.
+    /// </summary>
+    /// <remarks>
+    /// PER ROW RATHER THAN PER TABLE, which is what makes it different from
+    /// <see cref="KeyAndUpdatableColumnsMode"/> rather than merely narrower: two rows of one update can
+    /// carry different predicates because they modified different columns. A row that modified nothing -
+    /// a pending DELETE, whose columns are all unmodified - therefore degenerates to the key columns
+    /// alone, which is the mode's own arithmetic and not a special case bolted on.
+    /// </remarks>
+    internal const long KeyAndModifiedColumnsMode = 2L;
+
+    /// <summary>
+    /// The three modes, in ascending order, for the domain test and for a diagnostic that has to name
+    /// them.
+    /// </summary>
+    private static readonly long[] UpdateWhereModes =
+        [KeyOnlyMode, KeyAndUpdatableColumnsMode, KeyAndModifiedColumnsMode];
 
     private const string Assignment = " = ";
     private const string ValueQuote = "'";
@@ -1600,6 +1673,49 @@ internal static class UpdateWhereBuilder
     internal static bool IsKeyAndUpdatableColumnsMode(long? effectiveUpdateWhere)
     {
         return effectiveUpdateWhere == KeyAndUpdatableColumnsMode;
+    }
+
+    /// <summary>
+    /// Reports whether a value names one of the three concurrency modes that exist.
+    /// </summary>
+    /// <param name="updateWhere">The candidate mode.</param>
+    /// <returns>
+    /// <see langword="true"/> for <see cref="KeyOnlyMode"/>, <see cref="KeyAndUpdatableColumnsMode"/> and
+    /// <see cref="KeyAndModifiedColumnsMode"/>; <see langword="false"/> for everything else.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// A CLOSED DOMAIN, TESTED IN ONE PLACE. Three callers screen this value - the request boundary
+    /// (<c>Grpc/UpdateService.cs</c>, which answers <c>E_INVALID_ARGUMENT</c> before a task is touched),
+    /// the modification script (<c>Tasks/SqlUpdateCarrier.Modify</c>, which answers
+    /// <see cref="UnsupportedUpdateWhereModeMessage"/> and so reaches <c>E_INTERNAL_ERROR</c> through the
+    /// preparer's own error arm), and the options validator - and three independent membership tests
+    /// would be three chances for one of them to admit a value the others refuse.
+    /// </para>
+    /// <para>
+    /// WHY THE DOMAIN IS THESE THREE AND NOT ONLY MODE 1. Mode 1 is the only mode the read-only legacy
+    /// tree EVIDENCES [<c>dw_sqlite.srd:L14</c>], but the oracle does not implement any of them: it
+    /// passes the descriptor's value straight into <c>Modify("DataWindow.Table.UpdateWhere = " + ...)</c>
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L132</c>] and the PowerBuilder runtime generates the predicate.
+    /// So refusing 0 and 2 here would be a narrowing the legacy does not have - a caller whose DataWindow
+    /// declares key-only concurrency could not use the service at all - while accepting them and
+    /// generating the predicate their names state is what the delegated runtime does. The AAP's narrowing
+    /// licence covers behaviour that CANNOT be reproduced across a network boundary; the membership of a
+    /// where clause can be, and is. What genuinely cannot be reproduced is a value with no mode at all,
+    /// and that is exactly what this test refuses.
+    /// </para>
+    /// </remarks>
+    internal static bool IsUpdateWhereMode(long updateWhere)
+    {
+        foreach (long mode in UpdateWhereModes)
+        {
+            if (mode == updateWhere)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

@@ -136,6 +136,32 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 builder.Logging.Configure(static options => options.ActivityTrackingOptions =
     ActivityTrackingOptions.TraceId | ActivityTrackingOptions.SpanId | ActivityTrackingOptions.ParentId);
 
+// 🔴 AND THE SCOPE IS ACTUALLY RENDERED, WITHOUT WHICH THE LINE ABOVE CHANGES NOTHING OBSERVABLE.
+//
+// ActivityTrackingOptions puts the trace context into a log SCOPE. The console formatter's default is
+// `IncludeScopes = false`, so every one of those identifiers was assembled per record and then dropped
+// before it reached an operator - the mechanism was configured and its output was discarded. A measured
+// sweep of a running deployment found the caller's `traceId` in 39 Gateway records, because Gateway
+// alone also names it in its own message templates, and in ZERO records on this service: the
+// correlation identifier the ingress hands a caller in a problem body could not be joined to the
+// records on the service that actually failed, which is the entire purpose of publishing it.
+//
+// IT MATTERS HERE EVEN THOUGH THIS SERVICE ALREADY RECORDS ITS OWN REFUSALS. Those records name what was
+// refused; without the scope they cannot be attributed to the REQUEST that provoked them, so an operator
+// holding a `traceId` from an ingress failure still could not find the issuance attempt behind it.
+//
+// AddSimpleConsole IS THE MECHANISM, AND IT ADDS NO PACKAGE. Directory.Packages.props deliberately
+// excludes Serilog and the OpenTelemetry family (AAP 0.5.3), so the shared framework's own formatter is
+// what remains. It does NOT add a second console provider: the console registration uses
+// TryAddEnumerable, so this configures the one already present rather than duplicating it - verified by
+// counting ILoggerProvider registrations before and after, which stayed at three, and by confirming one
+// record per event rather than two.
+//
+// SET IN CODE RATHER THAN IN appsettings.json, deliberately. A settings key can be silently dropped by
+// a deployment's own configuration layer, and this estate's settings files are asserted key-for-key by
+// their own coherence tests - so the guarantee belongs where it cannot be overridden by omission.
+builder.Logging.AddSimpleConsole(static options => options.IncludeScopes = true);
+
 // --------------------------------------------------------------------------------------------------
 // 0. FILE-BACKED SECRET MATERIAL, RESOLVED BEFORE ANYTHING READS A SECRET
 //
@@ -558,6 +584,12 @@ const string inboundAuthenticationSection = "Authentication:Jwt";
 // here rather than inline so each string appears exactly once.
 const string issuanceRosterAuthorityCategory = "PowerFramework.Security.IssuanceRosterAuthority";
 const string keyStoreReadinessCategory = "PowerFramework.Security.KeyStoreReadiness";
+
+// The category the listener-side caller-certificate refusals are written under. It follows the same
+// naming rule as the two above, so an operator selecting refusals on the mutual-TLS issuance edge selects
+// this one string and gets exactly them - separate from ClientCertificateTrust's own category, because
+// the two types sit on opposite sides of the same edge and a reader needs to know which refused.
+const string callerCertificateTrustCategory = "PowerFramework.Security.CallerCertificateTrust";
 
 // =================================================================================================
 //  DATA PROTECTION IS EPHEMERAL BY DELIBERATE CHOICE, AND THE CHOICE IS ABOUT KEY MATERIAL AT REST.
@@ -1039,6 +1071,25 @@ _ = app.Services.GetRequiredService<TokenIssuer>();
 // UNSET anchor resolves successfully, records one warning, and trusts nothing - the fail-closed state,
 // which is a legitimate posture rather than a fault.
 _ = app.Services.GetRequiredService<ClientCertificateTrust>();
+
+// 🔴 AND THE LISTENER-SIDE HALF OF THAT SAME STORY IS GIVEN SOMEWHERE TO RECORD ITS REFUSALS.
+//
+// CallerCertificateTrust decides whether a presented client certificate may establish an identity, and it
+// recorded NOTHING when it refused one - so a rejected caller certificate left no trace in any shipped
+// logging profile, making a deliberate attempt to mint another service's token indistinguishable from a
+// network fault. Its own remarks argued for that silence on the grounds that a RESPONSE must not reveal
+// which condition was hit; that argument is about what a caller can observe and never applied to a log.
+// It now records a REASON CLASS per refusal arm and no certificate material at all.
+//
+// ATTACHED HERE, WHICH IS THE ONLY CORRECT PLACE. The type is constructed during listener configuration -
+// the Kestrel callback is assigned there - which is strictly before the container exists, so it cannot
+// take a logger through its constructor. Kestrel accepts no connection until the host runs, and this line
+// executes during startup, so no handshake can land while its discarding default is still in place.
+app.Services
+    .GetRequiredService<CallerCertificateTrust>()
+    .AttachLogger(app.Services
+        .GetRequiredService<ILoggerFactory>()
+        .CreateLogger(callerCertificateTrustCategory));
 
 // Read from the BUILT host's configuration for the same reason section 5 reads from the injected one:
 // this is the only vantage point from which the final, fully-composed configuration is visible.
@@ -1588,10 +1639,26 @@ static void RequireInvariantTokenValidation(IConfiguration configuration, string
 /// platform trust, where the platform's default revocation behaviour applies.
 /// </para>
 /// <para>
-/// NOTHING ABOUT A REFUSED CERTIFICATE IS RECORDED HERE. A false result becomes a handshake failure, and
+/// 🔴 A REFUSAL IS RECORDED, AS A REASON CLASS AND NOTHING MORE - AND THIS PARAGRAPH USED TO SAY THE
+/// OPPOSITE. It read "NOTHING ABOUT A REFUSED CERTIFICATE IS RECORDED HERE", justified by the fact that
 /// the endpoint answers an absent and an untrusted certificate with the same status and the same sentence
-/// so that a response cannot be used to probe which condition was hit. Logging a subject or a thumbprint
-/// here would reintroduce that distinction in the operator record for an unauthenticated caller.
+/// so a RESPONSE cannot be used to probe which condition was hit. That justification is half right and
+/// its conclusion did not follow. Not logging a subject or a thumbprint is correct: those identify a
+/// caller and belong nowhere near an unauthenticated request's record. But the probing concern is about
+/// what a CALLER can observe, and a log record is not something a caller can observe - so it never
+/// argued for silence, only against certificate material. The result was that a rejected caller
+/// certificate left NO trace in any shipped logging profile: a handshake failure with no record is
+/// indistinguishable from a network fault, from a client misconfiguration, and from a deliberate attempt
+/// to mint another service's token by presenting a self-signed certificate naming it. The one edge in the
+/// system where a forged identity is the whole attack was the one edge that said nothing.
+/// </para>
+/// <para>
+/// WHAT IS RECORDED IS THE REASON CLASS ONLY - which of the four refusal arms was taken - carrying no
+/// subject, no common name, no thumbprint, no serial, no issuer and no date. The response is unchanged in
+/// every arm, so the property that makes the arms indistinguishable to a caller is untouched. The posture
+/// and the wording follow <c>Tokens/ClientCertificateTrust.cs</c>, which is this exact problem one edge
+/// over and already records each of its refusals this way, closing each with the same statement that no
+/// part of the certificate is recorded.
 /// </para>
 /// </remarks>
 internal sealed class CallerCertificateTrust
@@ -1612,6 +1679,25 @@ internal sealed class CallerCertificateTrust
     /// the issuance-credential check in Tokens/ClientCertificateTrust.cs.
     /// </remarks>
     private readonly TimeSpan? _maximumLifetime;
+
+    /// <summary>
+    /// Where a refusal is recorded. Never <see langword="null"/>, so no arm has to guard.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A SINK THAT DISCARDS UNTIL THE HOST HANDS IT A REAL ONE, and the default is what makes this type
+    /// safe to construct before the container exists. It is built during listener configuration - the
+    /// Kestrel callback is assigned there - which is strictly earlier than the point where a logger can
+    /// be resolved, so a constructor parameter would have required either an eagerly built factory or a
+    /// service-locator lookup on every handshake.
+    /// </para>
+    /// <para>
+    /// THE WINDOW IN WHICH IT DISCARDS IS EMPTY IN PRACTICE, which is why this is not a gap: Kestrel
+    /// accepts no connection until the host starts, and the host attaches the real logger during startup
+    /// before that happens. So no handshake can occur while this is still the discarding sink.
+    /// </para>
+    /// </remarks>
+    private ILogger _logger = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
 
     /// <summary>
     /// Creates a validator over an already-loaded anchor set and the deployment's certificate posture.
@@ -1739,6 +1825,12 @@ internal sealed class CallerCertificateTrust
     {
         if (certificate is null)
         {
+            _logger.LogWarning(
+                "A caller certificate was refused on the mutual-TLS issuance edge because none was "
+                + "presented, while the edge was configured to require one. The handshake fails and no "
+                + "token is minted. This is ordinarily a client that has not been given a certificate "
+                + "rather than an attack. No part of any certificate is recorded.");
+
             return false;
         }
 
@@ -1746,7 +1838,26 @@ internal sealed class CallerCertificateTrust
         {
             // No anchor configured: the platform already decided, and its decision stands. This is the
             // same verdict Kestrel reaches with no callback installed at all.
-            return errors == SslPolicyErrors.None;
+            if (errors != SslPolicyErrors.None)
+            {
+                // THE PLATFORM'S VERDICT IS NAMED, NOT THE CERTIFICATE. SslPolicyErrors is a flag set this
+                // process produced - not-available, name-mismatch, chain-errors - so it discloses nothing
+                // the caller supplied. It is the one field that tells an operator whether the refusal was
+                // a naming problem or a trust problem, which is the difference between a client
+                // misconfiguration and an unrecognised authority.
+                _logger.LogWarning(
+                    "A caller certificate was refused on the mutual-TLS issuance edge by PLATFORM trust, "
+                    + "because no Security:MutualTls:ClientCaPath anchor is configured and the machine "
+                    + "trust store does not accept it. Platform verdict: {PlatformVerdict}. The documented "
+                    + "topology issues caller certificates from a local authority that is absent from "
+                    + "every container's trust store, so a deployment intending to accept them must "
+                    + "configure the anchor. No part of the certificate is recorded.",
+                    errors);
+
+                return false;
+            }
+
+            return true;
         }
 
         // THE LIFETIME CEILING, CHECKED BEFORE THE CHAIN IS BUILT. A certificate this deployment will not
@@ -1759,6 +1870,25 @@ internal sealed class CallerCertificateTrust
 
         if (_maximumLifetime is { } ceiling && declaredLifetime > ceiling)
         {
+            // THE CEILING AND THE DECLARED WINDOW ARE BOTH IN WHOLE DAYS, WHICH IS DELIBERATE. The ceiling
+            // is this deployment's own configured value, so it discloses nothing; the declared window is a
+            // property of the certificate, and rounding it to days is what keeps it from being a
+            // fingerprint - an exact second-resolution lifetime would help correlate one caller's
+            // certificate across records, which a refusal record for an unauthenticated caller must not do.
+            // Without both numbers the record cannot be acted on: an operator has to know whether to
+            // re-issue the certificate or to raise the ceiling.
+            _logger.LogWarning(
+                "A caller certificate was refused on the mutual-TLS issuance edge because the validity "
+                + "window it declares, {DeclaredLifetimeDays} day(s), is longer than the "
+                + "{CeilingDays} day(s) this deployment permits while revocation is not being checked. "
+                + "With no way to withdraw a certificate, its lifetime is the only bound on a compromised "
+                + "one. Raise Security:MaxCallerCertificateLifetimeDays, or re-issue the caller "
+                + "certificate with a shorter window, or configure a revocation posture other than "
+                + "NoCheck - in which case this ceiling no longer applies. No part of the certificate is "
+                + "recorded.",
+                (long)declaredLifetime.TotalDays,
+                (long)ceiling.TotalDays);
+
             return false;
         }
 
@@ -1779,7 +1909,64 @@ internal sealed class CallerCertificateTrust
         verification.ChainPolicy.VerificationFlags = X509VerificationFlags.NoFlag;
         verification.ChainPolicy.CustomTrustStore.AddRange(_anchors);
 
-        return verification.Build(certificate);
+        if (verification.Build(certificate))
+        {
+            // NOTHING IS RECORDED ON THE ACCEPTING PATH. A successful handshake is ordinary traffic, and
+            // the issuance it leads to is recorded by the endpoint that performs it; a record here would
+            // duplicate that at the rate of every request.
+            return true;
+        }
+
+        // 🔴 THE CHAIN'S STATUS SUMMARY, WHICH IS THE ONLY FIELD THAT MAKES THIS ARM ACTIONABLE - and it
+        // is this process's own verdict rather than caller content. X509ChainStatusFlags is a fixed
+        // enumeration the platform sets: UntrustedRoot means the certificate did not come from the
+        // configured authority (the attack case, and also the wrong-anchor misconfiguration case),
+        // NotTimeValid means it expired, NotValidForUsage means it is not a clientAuth certificate, and
+        // RevocationStatusUnknown means a stricter posture could not reach a responder. Those four send
+        // an operator to four different places, and without them every refusal on this arm reads the same.
+        //
+        // THE SUMMARY IS FLAGS ONLY, NEVER X509ChainStatus.StatusInformation, which carries a
+        // platform-localised sentence that can embed the subject name.
+        X509ChainStatusFlags summary = X509ChainStatusFlags.NoError;
+
+        foreach (X509ChainStatus status in verification.ChainStatus)
+        {
+            summary |= status.Status;
+        }
+
+        _logger.LogWarning(
+            "A caller certificate was refused on the mutual-TLS issuance edge because it does not chain "
+            + "to the configured authority under this deployment's posture. Chain status: {ChainStatus}. "
+            + "The handshake fails and no token is minted, so a caller cannot obtain another service's "
+            + "credential by presenting a certificate that merely names it. No part of the certificate is "
+            + "recorded.",
+            summary);
+
+        return false;
+    }
+
+    /// <summary>
+    /// Gives this validator the logger its refusals are recorded on.
+    /// </summary>
+    /// <param name="logger">The logger.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="logger"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// CALLED ONCE, BY THE COMPOSITION ROOT, AFTER THE CONTAINER EXISTS AND BEFORE THE HOST RUNS. That
+    /// ordering is what makes this safe: this type is constructed while the listener is being configured,
+    /// which is earlier than any logger can be resolved, and Kestrel accepts no connection until the host
+    /// starts - so the discarding default is never the sink for a real handshake.
+    /// </para>
+    /// <para>
+    /// IT REPLACES RATHER THAN COMPOSES, because there is exactly one caller and a second one would mean
+    /// the composition root had been changed in a way this comment should be read against.
+    /// </para>
+    /// </remarks>
+    public void AttachLogger(ILogger logger)
+    {
+        ArgumentNullException.ThrowIfNull(logger);
+
+        _logger = logger;
     }
 
     /// <summary>The ceiling used when the configured value is absent or out of range.</summary>

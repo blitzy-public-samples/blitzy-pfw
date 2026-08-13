@@ -765,6 +765,203 @@ public sealed class DataWindowCompositionTests
             asked => Assert.Equal(DataWindowCatalogue.SqliteFixtureName, asked.DatawindowHandle));
     }
 
+    /// <summary>
+    /// A conversation teardown RESTORES the retained models to their durable host, so no later call can
+    /// reach the conversation it has finished with.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE DEFECT THIS PINS, AND WHY IT IS A REBIND RATHER THAN A GUARD. The four models are retained PER
+    /// DATAWINDOW HANDLE and shared between the streaming chain and the unary read/apply surface, because
+    /// the legacy shares them: one <c>se_cst_dw</c> per DataWindow control holds all five services as
+    /// instance members [<c>se_cst_dw.sru:L80-L84</c>]. A chain's constructor then RE-HOSTS those retained
+    /// models onto itself - the <c>OnInit(this)</c> fan-out at [<c>se_cst_dw.sru:L576-L580</c>], with
+    /// <c>DataWindowServiceBase.OnInit</c> assigning <c>#DataWindow = dw</c>
+    /// [<c>n_cst_dwsvc.sru:L85-L86</c>] - which is harmless in process because the control outlives the
+    /// service, and is NOT harmless here because the chain is per-CONVERSATION and is torn down at stream
+    /// end. The re-hosting is therefore UNDONE at teardown. Giving the chain its own copies instead would
+    /// split state the oracle keeps together, which is why that was not the fix.
+    /// </para>
+    /// <para>
+    /// THE FAULT WAS AN <c>ObjectDisposedException</c> ESCAPING A UNARY RPC AS gRPC UNKNOWN. A caller that
+    /// had opened and closed an event-chain conversation could not afterwards apply a drop-down search on
+    /// the same DataWindow: the retained model raised <c>OnDDSGetFilter</c>
+    /// [<c>DropDownSearchModel.GetBoundFilter</c>, oracle <c>:L342</c>] against a chain whose conversation
+    /// was gone. <c>DestroyService</c> does not detach a model - it disposes only what is
+    /// <c>IDisposable</c>, and none of the four is - so teardown alone left them pointing at the chain.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AConversationTeardownRestoresTheRetainedModelsToTheirDurableHost()
+    {
+        HeadlessDataWindowHostFactory hosts = new(new DataWindowCatalogue());
+        HeadlessDataWindowModelSetProvider models = BuildModelSetProvider(hosts);
+        HeadlessDataWindowEventChainFactory chains = new(models);
+
+        DataServicesOptions configured = new();
+        ValidationSessionRegistry registry = new(configured);
+        ValidationSessionOpenResult opened = registry.Open(DataWindowCatalogue.SqliteFixtureName);
+
+        Assert.NotNull(opened.Session);
+
+        DataWindowModelSet? retained = models.GetOrCreate(DataWindowCatalogue.SqliteFixtureName);
+
+        Assert.NotNull(retained);
+
+        // BEFORE ANY CONVERSATION the retained model is on its durable host, whose semantic bodies are
+        // empty - PowerBuilder's "event with no script attached" - so the ask completes and asks nobody.
+        // The composed filter is captured as the baseline every later call is compared against.
+        RecordingResponder responder = new();
+
+        string durableAnswer = retained.DropDownSearch.GetFilter("Ada");
+
+        Assert.NotEmpty(durableAnswer);
+        Assert.Empty(responder.Asked);
+
+        DataWindowEventChain? created = chains.Create(
+            opened.Session,
+            DataWindowCatalogue.SqliteFixtureName,
+            new RecordingObserver(),
+            responder);
+
+        Assert.NotNull(created);
+
+        // THE CONVERSATION RE-HOSTED THE RETAINED MODEL, which is the behaviour being preserved and not a
+        // side effect being tolerated: the ask now travels to the client that opened the stream.
+        _ = retained.DropDownSearch.GetFilter("Ada");
+
+        Assert.Single(responder.Asked);
+        Assert.Equal(
+            PowerFramework.Contracts.DataServices.V1.EventId.Onddsgetfilter,
+            responder.Asked[0].EventId);
+
+        // The stream ends: the chain is torn down and its conversation disposed.
+        created.Teardown();
+        responder.Disposed = true;
+
+        // ⚠ THIS IS THE DEFECT, ASSERTED RATHER THAN DESCRIBED. Teardown on its own leaves the retained
+        // model pointing at the finished conversation, so the very next unary use of it faults. If the
+        // rebind below were removed, this is the exception a caller received as gRPC UNKNOWN.
+        _ = Assert.Throws<ObjectDisposedException>(() => retained.DropDownSearch.GetFilter("Ada"));
+
+        models.RebindToDurableHost(DataWindowCatalogue.SqliteFixtureName);
+
+        // AND AFTER THE REBIND the same call is served again, against the durable host, asking nobody.
+        // THE ASK COUNT IS THE LOAD-BEARING HALF, not the answer. The answer is identical either way,
+        // because a responder that produces no filter leaves the composed text alone [se_cst_dw.sru:L13] -
+        // so comparing only the string would pass against a model still bound to the conversation. The
+        // count is what shows the ask stopped reaching the dead conversation rather than merely stopping
+        // throwing.
+        Assert.Equal(durableAnswer, retained.DropDownSearch.GetFilter("Ada"));
+        Assert.Single(responder.Asked);
+
+        // THE SAME OBJECT, NOT A REPLACEMENT. The rebind re-hosts the retained models; it does not discard
+        // and rebuild them, which would throw away the state the legacy keeps for the life of the control.
+        Assert.Same(retained, models.GetOrCreate(DataWindowCatalogue.SqliteFixtureName));
+        Assert.Same(retained.DropDownSearch, models.GetOrCreate(DataWindowCatalogue.SqliteFixtureName)!.DropDownSearch);
+    }
+
+    /// <summary>
+    /// ALL FOUR re-hosted models are restored, not only the one the defect was reported on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE CHAIN RE-HOSTS FOUR, SO FOUR ARE RESTORED. The constructor's fan-out covers the context menu,
+    /// the row-selection service, the drop-down search model and the sort model
+    /// [<c>se_cst_dw.sru:L576-L580</c>]; the column-expression engine is the fifth and is deliberately
+    /// EXCLUDED from the restore because the chain builds a fresh one per conversation and therefore owns
+    /// its lifetime - re-hosting an engine the chain destroyed would resurrect a reference to it.
+    /// </para>
+    /// <para>
+    /// ASSERTED ON THE BINDING RATHER THAN ON BEHAVIOUR, AND HERE IS WHY THAT IS THE STRONGER TEST. Only
+    /// ONE unary RPC on this contract can currently reach a semantic ask on a retained model -
+    /// <c>ApplyDropDownSearch</c>, through <c>OnDDSGetFilter</c> - which is exactly why the defect surfaced
+    /// there and nowhere else. <c>GetContextMenuModel</c> deliberately does not invoke the build path (it
+    /// would need a pointer context, which is the deferred rendering half), and the row-selection and sort
+    /// models raise nothing from any unary entry point. A behavioural assertion for those three would
+    /// therefore have nothing to observe today, so the binding itself is asserted: the invariant is "no
+    /// retained model points at a finished conversation", and that stays checkable if a later unary path
+    /// does reach one.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void EveryReHostedModelIsRestoredAndNotOnlyTheOneTheDefectWasReportedOn()
+    {
+        HeadlessDataWindowHostFactory hosts = new(new DataWindowCatalogue());
+        HeadlessDataWindowModelSetProvider models = BuildModelSetProvider(hosts);
+        HeadlessDataWindowEventChainFactory chains = new(models);
+
+        DataServicesOptions configured = new();
+        ValidationSessionRegistry registry = new(configured);
+        ValidationSessionOpenResult opened = registry.Open(DataWindowCatalogue.SqliteFixtureName);
+
+        Assert.NotNull(opened.Session);
+
+        DataWindowModelSet? retained = models.GetOrCreate(DataWindowCatalogue.SqliteFixtureName);
+
+        Assert.NotNull(retained);
+
+        DataWindowServiceHost durable = retained.Host;
+
+        // Every one of the four starts on the durable host.
+        Assert.Same(durable, retained.ContextMenu.DataWindow);
+        Assert.Same(durable, retained.RowSelect.DataWindow);
+        Assert.Same(durable, retained.ColumnSort.DataWindow);
+        Assert.Same(durable, retained.DropDownSearch.DataWindow);
+
+        RecordingResponder responder = new();
+
+        DataWindowEventChain? created = chains.Create(
+            opened.Session,
+            DataWindowCatalogue.SqliteFixtureName,
+            new RecordingObserver(),
+            responder);
+
+        Assert.NotNull(created);
+
+        // The conversation re-hosted all four onto itself - the behaviour being preserved.
+        Assert.Same(created, retained.ContextMenu.DataWindow);
+        Assert.Same(created, retained.RowSelect.DataWindow);
+        Assert.Same(created, retained.ColumnSort.DataWindow);
+        Assert.Same(created, retained.DropDownSearch.DataWindow);
+
+        created.Teardown();
+        responder.Disposed = true;
+
+        models.RebindToDurableHost(DataWindowCatalogue.SqliteFixtureName);
+
+        // And the teardown put all four back. Not one of them still addresses the finished conversation.
+        Assert.Same(durable, retained.ContextMenu.DataWindow);
+        Assert.Same(durable, retained.RowSelect.DataWindow);
+        Assert.Same(durable, retained.ColumnSort.DataWindow);
+        Assert.Same(durable, retained.DropDownSearch.DataWindow);
+
+        // The one path that CAN ask is served again, and asks nobody.
+        Assert.NotEmpty(retained.DropDownSearch.GetFilter("Ada"));
+        Assert.Empty(responder.Asked);
+    }
+
+    /// <summary>
+    /// Rebinding a handle the provider retains nothing for is a no-op rather than a fault.
+    /// </summary>
+    /// <remarks>
+    /// The teardown path calls this unconditionally with the handle the conversation was bound to, and it
+    /// must not care whether anything is still retained for it - a provider that threw here would turn a
+    /// clean stream end into a faulted one.
+    /// </remarks>
+    [Fact]
+    public void RebindingAHandleNothingIsRetainedForIsANoOp()
+    {
+        HeadlessDataWindowHostFactory hosts = new(new DataWindowCatalogue());
+        HeadlessDataWindowModelSetProvider models = BuildModelSetProvider(hosts);
+
+        models.RebindToDurableHost("d_never_transcribed");
+        models.RebindToDurableHost(string.Empty);
+
+        // And the provider still serves a real handle afterwards, so nothing was corrupted by either call.
+        Assert.NotNull(models.GetOrCreate(DataWindowCatalogue.SqliteFixtureName));
+    }
+
     // ==============================================================================================
     //  FIXTURES
     // ==============================================================================================
@@ -873,12 +1070,25 @@ public sealed class DataWindowCompositionTests
         /// <summary>The produced filter, or <see langword="null"/> to leave the field unset.</summary>
         internal string? ProducedFilter { get; set; }
 
+        /// <summary>
+        /// Whether this responder now stands for a conversation that has been disposed.
+        /// </summary>
+        /// <remarks>
+        /// THE PRODUCTION RESPONDER IS <c>DataWindowEventConversation</c>, AND IT IS DISPOSABLE. Its
+        /// <c>AskAsync</c> throws <see cref="ObjectDisposedException"/> once the duplex call it wraps has
+        /// ended, which is the exact fault that escaped a unary RPC as gRPC UNKNOWN. Setting this
+        /// reproduces that state without needing a real stream.
+        /// </remarks>
+        internal bool Disposed { get; set; }
+
         /// <inheritdoc/>
         public ValueTask<WireEventResult> AskAsync(
             EventNotification question,
             CancellationToken cancellationToken)
         {
             ArgumentNullException.ThrowIfNull(question);
+
+            ObjectDisposedException.ThrowIf(Disposed, this);
 
             Asked.Add(question);
 

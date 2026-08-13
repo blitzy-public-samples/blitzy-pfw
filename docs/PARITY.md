@@ -1161,6 +1161,43 @@ optimizations to be unified. They differ in what they carry, in which defects th
 must be synchronized first. A port that implements one and routes both styles through it will pass a
 naive round-trip test and diverge on precisely the cases these four comments exist to describe.
 
+#### 7.5.1 The retrieval stamp — a documented non-defect, recorded because it reads like one
+
+A freshly retrieved, unmodified row arrives on the wire with a **row-level** item status of
+`DataModified!` while **every one of its columns** reads `NotModified!`. That looks wrong on first
+reading, it has been raised as a finding once, and it is **correct**. It is recorded here so it is not
+raised again and, more importantly, so it is not "fixed".
+
+**It is the oracle's own behaviour.** Six loops in
+`ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru` stamp every row of a freshly retrieved
+buffer `DataModified!` at column zero **before** the changeset is extracted:
+
+| # | Locator | Which arm |
+| ---: | --- | --- |
+| 1 | `:L122-L124` | Drop-down child, primary buffer |
+| 2 | `:L126-L128` | Drop-down child, filter buffer |
+| 3 | `:L161-L163` | Temporary carrier, primary buffer |
+| 4 | `:L167-L169` | Temporary carrier, filter buffer |
+| 5 | `:L196-L198` | In-place branch, primary buffer |
+| 6 | `:L201-L203` | In-place branch, filter buffer |
+
+Column zero is not a column; it addresses the row itself. Every one of the six passes zero and
+`DataModified!`.
+
+**And it is load bearing, which is the half that matters.** A changeset carries only rows that changed,
+so the stamp is the transport's **precondition** rather than a claim about the data. With the row left
+`NotModified!` the projection admits no rows at all, so a retrieval over a populated table answers a
+well-formed, entirely **empty** result and reports success — a silent wrong answer far worse than a
+status field that reads oddly. Both halves are pinned executably by
+`ChangesetCodecReceiveTests.ARowStampedNotModifiedIsDroppedFromThePayloadEntirely`, which encodes the same
+carrier twice and changes nothing but the row status.
+
+**What the stamp does not claim** is the reader's real question, and the answer is that nothing downstream
+treats such a row as carrying edits. The per-column statuses stay `NotModified!`, and C-06 measures a
+submitted row against its stated originals — so a retrieved row echoed straight back is refused with
+`E_INVALID_DATA` rather than generating an update. Correcting the stamp would therefore change no
+concurrency outcome while breaking every retrieval, and AAP §0.2.2.5 forbids the correction in any case.
+
 ### 7.6 The self-assignment workaround
 
 `ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L151-L154` carries an explicit
@@ -1503,8 +1540,11 @@ neither substitutes for the other.
 
 ## 9. Known parity risks and limitations
 
-Six risks are carried into implementation. Each states its mitigation, and in the two cases where the
-correct engineering answer is *report blocked rather than approximate*, that is what it says.
+Nine risks are carried into implementation. Each states its mitigation, and in the two cases where the
+correct engineering answer is *report blocked rather than approximate*, that is what it says. The last
+three are **runtime coverage boundaries** rather than parity risks: each was observed by driving the
+running stack, each is legacy-faithful or contract-faithful, and for each the correct response is to
+declare it here rather than to change behaviour.
 
 | ID | Risk | Class | Correct response |
 | --- | --- | --- | --- |
@@ -1514,6 +1554,9 @@ correct engineering answer is *report blocked rather than approximate*, that is 
 | R4 | The stack has been brought up, but no capture has been taken against it | Residual gap, not retired | The bring-up is exercised and reported in one place; what is missing is a **capture** on either side. A bring-up establishes the volume seam a paired capture needs; it is not itself a capture, and no comparison may be claimed from it |
 | R5 | No authoritative legacy build definition exists to translate | Reconstituting the behavioural oracle | Author the .NET build clean; read the legacy definitions for intent only |
 | R6 | The changelog is stale and is not a specification | Evidence discipline | Derive behaviour from source, with a locator on every claim |
+| R7 | Paging is not executable against the one provisioned engine, because the preserved dialect resolver classifies SQLite as SQL Server | Runtime coverage boundary — legacy-faithful | Keep the classification; verify the rewriters as pure string transforms (§6.2). **No code change** |
+| R8 | `MaxRows` is a post-retrieval assertion rather than a truncation bound | Runtime coverage boundary — legacy-faithful | Keep the ordering and the diagnostic; bound result size by the transport and container ceilings instead. **No code change** |
+| R9 | Expression calculation over retrieved data is unreachable through the published contract | Runtime coverage boundary — contract-faithful | Declare the boundary; keep the honest diagnostics. Closing it would be a **new capability** (C-B) |
 
 ### R1 — Pinyin first-letter matching cannot be proven bit-exact from the repository alone
 
@@ -1657,6 +1700,84 @@ carries a source locator (§1.3). The changelog is useful for orientation and is
 discipline applies to the five legacy documents in this folder: two of them are cited here as authoritative
 specifications, and where any legacy document and the source disagree, **the source wins** — and the
 discrepancy is recorded in the .NET tree, never corrected in the legacy file (C-C).
+
+### R7 — Paging is not executable against the one provisioned engine
+
+**The mechanism, and it is one preserved line.** The legacy resolves its dialect discriminator by asking
+whether the upper-cased DBMS identifier *contains* `ORACLE`: if it does the answer is `DBT_ORACLE`, and for
+**everything else — including SQLite, and including an empty string — the answer is `DBT_MSSQL`**
+[`ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L356-L361`]. The port reproduces exactly that,
+and says so at its own point of reproduction: `Transactions/TransactionPool.cs`, on the `GetDbType` member
+of the pooled-object contract. The paging dispatcher then selects a rewriter from that answer, with
+`E_NO_IMPLEMENTATION` for anything neither value covers
+[`n_cst_thread_task_sqlquery.sru:L320-L399`].
+
+**The runtime consequence, observed by driving the stack.** The only provisioned engine is SQLite (§3.4),
+so a paged query on the shipped deployment is rewritten into **SQL Server** syntax — `ROW_NUMBER() OVER`,
+`OFFSET … FETCH`, the `pfwPagedSQL_*` sentinels — and SQLite cannot execute it. The failure is a provider
+error on a statement the rewriter produced correctly, not a fault in the rewriter.
+
+**Why no code change is right, which is the whole of this entry.** Making the resolver recognise SQLite
+would be **correcting a legacy behaviour**, which C-B and AAP §0.2.2.5 forbid outright; it would also mean
+inventing a SQLite paging dialect the oracle has never emitted, so the byte-exact parity criterion (§6.2)
+would have nothing to compare against. And the two dialects the resolver *does* recognise have no schema,
+no connection string and no DDL anywhere in the repository, so provisioning either to execute the output
+would be the fabricated storage engine C-E prohibits.
+
+**Mitigation.** The rewriters are verified as **pure string transforms** — input statement plus page size
+and index yields output statement — byte for byte, with no instance of either DBMS (§6.2). That is the
+whole of what the repository's evidence supports, and it is why the transforms could be characterized at
+all. A deployment that genuinely needs paged execution supplies a SQL Server or Oracle connection, at
+which point the preserved resolver selects correctly for it without any change here.
+
+### R8 — `MaxRows` is a post-retrieval assertion, not a truncation bound
+
+**What the setting does, in the order it does it.** The row cap is tested **after the retrieval has
+completed**: the rows are fetched, the after-retrieve notification fires, the defensive row-count override
+is applied, and only then is the cap compared — at which point an exceeded cap answers `E_OUT_OF_RANGE`
+carrying the legacy's own diagnostic with the cap interpolated into it
+[`n_cst_thread_task_sqlquery.sru:L787-L790`, reproduced in `Tasks/SqlQueryTask.cs` beside those locators].
+The boundary condition is preserved too, and it deliberately differs from its neighbour's: `SetMaxRows`
+rejects only a **negative** value, so zero is accepted here and means "no limit", while `SetChunkSize`
+rejects anything at or below 1000.
+
+**So it bounds what a caller is TOLD, never what the service DOES.** A cap of ten against a
+hundred-thousand-row table still fetches a hundred thousand rows, builds the carrier for them and then
+refuses the result. It is an assertion about the answer, not a `TOP`, a `LIMIT` or a `FETCH FIRST`, and
+reading it as a work bound is the specific misreading this entry exists to prevent.
+
+**Why no code change is right.** Turning it into a truncation bound would change both the generated
+statement and the returned row set — a behaviour correction C-B forbids — and it would silently convert a
+refusal into a partial answer, which is the more dangerous direction: a caller that asked for a bounded
+result and received a truncated one has no way to tell truncation from completeness.
+
+**What bounds result size instead**, stated so the gap is not read as unbounded: the transport ceilings
+(`Ingress:MaxReceiveMessageBytes`, `Ingress:MaxSendMessageBytes`, and the streamed-element bound at the
+REST projection) and the per-container memory ceilings the orchestration manifest declares. Those are
+port-introduced bounds with no legacy counterpart, which is why they may exist at all where a correction
+to `MaxRows` may not.
+
+### R9 — Expression calculation over retrieved data is unreachable through the published contract
+
+**The boundary.** No method of C-04 loads rows into an expression session, and C-03's retrieval cannot
+deposit its result into one: `OpenExpressionSessionRequest` carries logical DataWindow handles only,
+`CalcRequest` / `CalcAllRequest` / `CalcItemRequest` carry no row payload, and `RetrieveRequest` carries no
+session identifier. [`CONTRACTS.md` §7.11](CONTRACTS.md#711-the-boundary-this-contract-does-not-cross-calculation-over-retrieved-data)
+states it against the definitions.
+
+**What that means at runtime, and both answers are truthful.** Against a session whose host holds no rows,
+`Calc` for row 1 answers `E_OUT_OF_RANGE` and `CalcAll` answers success with zero results. Retrieving a
+large result first changes neither, because nothing connects the two.
+
+**Why it is declared rather than closed.** A row-loading RPC would be a **new capability**, and the legacy
+has no counterpart being withheld — its engine reads a DataWindow control in the caller's own address
+space. C-B and AAP §0.2.2.5 forbid adding one.
+
+**What is therefore covered, and what is not.** The engine over populated data — the seven structures, the
+five expansion modes, static versus dynamic expansion (§7.3), the macro channel and the trace — is
+exercised against in-process hosts, which a test can populate directly. What no exercise of the published
+contract can reach is that engine over data **this system fetched**, and this entry is that gap stated
+plainly rather than left to be inferred from two truthful diagnostics.
 
 ---
 

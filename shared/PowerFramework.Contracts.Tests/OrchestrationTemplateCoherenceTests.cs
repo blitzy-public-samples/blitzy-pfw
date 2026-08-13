@@ -173,12 +173,27 @@ public sealed class OrchestrationTemplateCoherenceTests
     /// row that no duplicate guard can see. The grant therefore lives only where the caller is registered.
     /// </para>
     /// <para>
-    /// FOUR <c>_HOST_PORT</c> VARIABLES ARE THE ONLY ENTRIES THAT REACH NO
-    /// application setting at all: they are the LEFT half of each <c>ports:</c> mapping. The container half
+    /// THREE GROUPS REACH NO APPLICATION SETTING AT ALL, and they are the only ones: the four
+    /// <c>_HOST_PORT</c> variables, the four <c>_HOST_BIND</c> variables and the eight resource ceilings.
+    /// Each is consumed by the manifest itself rather than bound by an options type, so no settings file
+    /// can restate or contradict one.
+    /// </para>
+    /// <para>
+    /// The <c>_HOST_PORT</c> four are the LEFT half of each <c>ports:</c> mapping. The container half
     /// stays fixed because it is what Kestrel binds, and a variable for it could only ever disagree with
     /// the settings file. These exist because the documented second-stack recipe
     /// (<c>docker compose -p pfw-2</c>) separates networks, volumes and container names but NOT published
     /// ports, so with four fixed publications it collides on all four and cannot start.
+    /// </para>
+    /// <para>
+    /// <c>SECURITY_HOST_PORT</c> IS THE ONE EXCEPTION, AND DELIBERATELY SO. It additionally composes the
+    /// DEFAULT of <c>SECURITY_PUBLIC_BASE_URL</c>, which the manifest maps onto
+    /// <c>Security__PublishedOrigins__0</c> - how Security declares the HOST origin it answers on, and
+    /// therefore how a host-side consumer receives a <c>jwks_uri</c> it can actually fetch, since the
+    /// in-network issuer name does not resolve there. Defaulting that declaration from the SAME variable
+    /// that publishes the port is what keeps the two from disagreeing when no origin is named explicitly:
+    /// remapping the port cannot leave the declared origin pointing at the old one. A deployment fronted
+    /// by a proxy names the origin outright instead, which is why the variable exists as well.
     /// </para>
     /// <para>
     /// AND <c>INTERNAL_TLS_CA_PATH</c> IS NOT A RESPELLING OF <c>INTERNAL_TLS_TRUSTED_CA_PATH</c> - the two
@@ -250,6 +265,14 @@ public sealed class OrchestrationTemplateCoherenceTests
         "SECURITY_BASE_URL",
         "SECURITY_JWT_AUDIENCE",
         "SECURITY_JWT_ISSUER",
+
+        // ⚠ A PUBLISHED LOCATION, NOT A SECOND IDENTITY, and the distinction is why both names are
+        // declared. SECURITY_JWT_ISSUER above is the `iss` claim every verifier compares byte for
+        // byte; this one is the address a HOST-SIDE consumer reaches Security on, which the
+        // discovery document composes `jwks_uri` and `token_endpoint` from when a request arrives on
+        // it. The document previously composed both from the issuer alone, so a consumer outside the
+        // Compose network was handed a key-set address naming a host only resolvable inside it.
+        "SECURITY_PUBLIC_BASE_URL",
         // ⚠ A PATH TO THE KEY, NOT THE KEY. This variable used to carry the RSA private key
         // itself, which the manifest put into the container ENVIRONMENT - where `docker compose
         // config` renders it in cleartext, `docker inspect` returns it to anyone who can reach
@@ -319,6 +342,39 @@ public sealed class OrchestrationTemplateCoherenceTests
         "DATASERVICES_TLS_CERTIFICATE_KEY_PATH",
         "GATEWAY_TLS_CERTIFICATE_PATH",
         "GATEWAY_TLS_CERTIFICATE_KEY_PATH",
+
+        // THE EIGHT RESOURCE CEILINGS - a memory value and a CPU value per service. Like the four
+        // `_HOST_PORT` and four `_HOST_BIND` entries, they reach NO application setting: they are cgroup
+        // limits Compose applies to the container, so nothing binds them to an options type and nothing
+        // in a settings file can restate them.
+        //
+        // WHY THEY ARE ON THE ROSTER AT ALL. Without a ceiling a container reports the cgroup-v2 "max"
+        // sentinel as its limit, so the collector has no collection pressure and retains: nineteen
+        // identical full REST projections drove Gateway's resident set from 573 MiB to about 1,500 MiB
+        // with no plateau, while the same run under a declared ceiling plateaued at about 85 per cent of
+        // it with zero OOM kills and every response byte-complete. That growth was retention rather than
+        // a leak, and the ceiling is what gives the collector a reason to collect. The CPU value is here
+        // for a second reason that is not throttling: the runtime derives its thread-pool and server-GC
+        // heap counts from the processor count it observes, and an unquoted container observes the whole
+        // host.
+        //
+        // THEY ARE NOT IN THE MUST-BE-EMPTY SET AND MUST NOT BE. They are quantities rather than material
+        // or paths to it, and the template states each one so that the manifest's default is visible to
+        // an operator reading only the template - the same treatment the four ports and four binds get.
+        // Nothing here asserts a performance objective (AAP 0.8.5): a ceiling states the most a service
+        // MAY consume, not what it needs or how fast it is.
+        //
+        // THERE IS NO CEILING FOR ANY DEFERRED SERVICE (C-D), and that absence is load bearing rather
+        // than incidental: a memory limit for a service this phase does not build would be the first
+        // orchestration artifact to imply one exists.
+        "SECURITY_MEMORY_LIMIT",
+        "PERSISTENCE_MEMORY_LIMIT",
+        "DATASERVICES_MEMORY_LIMIT",
+        "GATEWAY_MEMORY_LIMIT",
+        "SECURITY_CPU_LIMIT",
+        "PERSISTENCE_CPU_LIMIT",
+        "DATASERVICES_CPU_LIMIT",
+        "GATEWAY_CPU_LIMIT",
     ];
 
     /// <summary>
@@ -492,6 +548,7 @@ public sealed class OrchestrationTemplateCoherenceTests
         new("DATASERVICES_GRPC_URL", 5102, Uri.UriSchemeHttps),
         new("SECURITY_BASE_URL", 5104, Uri.UriSchemeHttps),
         new("SECURITY_JWT_ISSUER", 5104, Uri.UriSchemeHttps),
+        new("SECURITY_PUBLIC_BASE_URL", 5104, Uri.UriSchemeHttps),
         new("GATEWAY_HEALTH_PROBE_PERSISTENCE_URL", 5101, Uri.UriSchemeHttps),
         new("GATEWAY_HEALTH_PROBE_DATASERVICES_URL", 5102, Uri.UriSchemeHttps),
         new("GATEWAY_HEALTH_PROBE_SECURITY_URL", 5104, Uri.UriSchemeHttps),

@@ -164,10 +164,12 @@ instructions are in [`docs/BUILD.md`](docs/BUILD.md).
 ### Running locally
 
 One manifest brings all four services up together. **The populated environment file is kept outside the
-working tree**, and that is a requirement rather than a preference: the root ignore rules exclude no `.env`
-path, so a populated file written into `orchestration/` is a tracked, stageable file holding an RSA private
-key and three caller secrets, one `git add -A` away from being committed. `--env-file` gives Compose the
-same file from anywhere on disk, so nothing is lost by keeping it out.
+working tree**, and that is a requirement rather than a preference: a populated file written into
+`orchestration/` names the absolute path of every file holding key material in this deployment and may carry
+the operator identity's own secret as a value, and it is one `git add -A` away from being committed.
+`--env-file` gives Compose the same file from anywhere on disk, so nothing is lost by keeping it out. The
+committed ignore rules do exclude `orchestration/.env` for the case where it is kept in place anyway, but the
+path above is still the documented one, because an ignore rule protects only the spelling it names.
 
 From the repository root:
 
@@ -191,23 +193,34 @@ else
   printf 'Created %s from the template - populate it before continuing.\n' "$PFW_ENV"
 fi
 
-# Populate the roster that file documents. SIX values are required for the bring-up and the manifest
-# aborts BY NAME on any one of them: SECURITY_JWT_SIGNING_KEY (an RSA private key - `openssl rand`
-# produces material the host rejects), the two caller secrets SECURITY_CLIENT_SECRET_GATEWAY and
-# SECURITY_CLIENT_SECRET_DATASERVICES, and the three certificate PATHS. A seventh, SECURITY_CLIENT_SECRET,
-# is the operator and end-to-end identity and is optional - `tests/e2e` needs it, the stack does not.
+# Populate the roster that file documents. TWELVE HOST PATHS are required for the bring-up and the
+# manifest aborts BY NAME on any one that is unset, and on the path itself when it names a file that is
+# not there: a certificate and a key PER SERVICE (eight), the one shared CA anchor
+# INTERNAL_TLS_CA_PATH, SECURITY_JWT_SIGNING_KEY_PATH, and the two caller-secret paths
+# SECURITY_CLIENT_SECRET_GATEWAY_PATH and SECURITY_CLIENT_SECRET_DATASERVICES_PATH.
+#
+# EVERY ONE OF THE TWELVE IS A PATH, NOT MATERIAL, and the value spellings are read nowhere: the
+# manifest projects each file as a Compose secret and each service reads the projected path, so
+# material pasted into this file configures nothing. The signing key is an RSA private key -
+# `openssl rand` produces bytes the host rejects at startup, because it publishes an RSA-only key set.
+#
+# A thirteenth variable, SECURITY_CLIENT_SECRET, is the only one that carries a VALUE. It is the
+# operator and end-to-end identity and is optional - `tests/e2e` needs it, the stack does not.
 # docs/ARCHITECTURE.md section 9.3.1 generates the whole set in one block; orchestration/README.md carries
 # the bring-up order. No value for any of them is committed anywhere in this tree.
 
 docker compose -f orchestration/docker-compose.yml --env-file "$PFW_ENV" up --build -d
 ```
 
-The three certificate variables are **paths on your machine**, not paths inside a container: the manifest
-declares each as a Compose secret and projects it read-only under `/run/secrets/internal-tls/`, and each
-service is configured with that fixed projected path. One of them, the server private key, has to remain
-readable once projected — Compose ignores `mode:`, `uid:` and `gid:` outside Swarm, and the images run
-unprivileged — which is why §9.3.1 generates that one key `0644` inside the `0700` directory rather than
-`0600`.
+All twelve are **paths on your machine**, not paths inside a container: the manifest declares each as a
+Compose secret and projects it read-only — the nine transport files under `/run/secrets/internal-tls/` and the
+three non-TLS secrets under `/run/secrets/security/` — and each service is configured with those fixed
+projected paths. **Seven of the twelve have to remain readable once projected** — the four server private
+keys, the signing key and the two caller secrets — because Compose ignores `mode:`, `uid:` and `gid:` outside
+Swarm and the images run unprivileged, which is why §9.3.1 generates those seven `0644` inside the `0700`
+directory rather than `0600`. The three files nothing projects — the CA private key and the two caller
+*certificate* keys — stay `0600`. Getting that split wrong does not degrade the stack: a `0600` server key
+crash-loops one container, and a `0600` projected secret stops the bring-up outright.
 
 The readiness contract, which is also what the container probes and the compose dependencies enforce:
 

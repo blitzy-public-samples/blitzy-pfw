@@ -1056,43 +1056,6 @@ internal sealed class CommandService : GeneratedCommandServiceBase
     }
 
     /// <summary>
-    /// Clears the caller-side driver-error sink, so that a payload read after the task body can only be
-    /// one this execution produced.
-    /// </summary>
-    /// <param name="proxy">The caller-side proxy whose sink is cleared.</param>
-    /// <remarks>
-    /// <para>
-    /// <b>THIS IS THE ORACLE'S OWN CLEARING WRITE, NOT AN INVENTED ONE.</b> The sink is a single field
-    /// on the caller-side object whose ONLY writer is the database-error event, whose entire body is the
-    /// bare assignment <c>_lastDBError = err</c> [<c>n_cst_threading_task_sqlbase.sru:L44</c>]; and the
-    /// oracle clears it by writing an empty structure into that same field -
-    /// <c>_lastDBError = emptyData</c> [<c>:L65</c>], where <c>emptyData</c> is an uninitialized local
-    /// [<c>:L55</c>]. Writing <see cref="DbErrorData.Empty"/> through the event entry point is
-    /// therefore the same write the oracle's reset performs, reached the only way the field can be
-    /// reached from outside the object.
-    /// </para>
-    /// <para>
-    /// <b>Why the caller-side reset is NOT used for this.</b> <c>of_reset</c> would clear the sink, but
-    /// it also delegates to the worker's reset, which restores autocommit to <c>AC_OFF</c> and clears
-    /// the statement [<c>:L34-L35</c>], and it resets the parameter collection and the commit signal
-    /// [<c>n_cst_thread_task_sqlbase.sru:L242-L246</c>]. Calling it inside an execution would therefore
-    /// discard the very configuration the caller had just installed through <c>SetSql</c> and
-    /// <c>SetAutoCommit</c>. The narrow write is the only one that clears the sink and nothing else.
-    /// </para>
-    /// <para>
-    /// The cast is required because the entry point is implemented EXPLICITLY on the caller-side base
-    /// so that the overridable hook stays <see langword="protected"/>. No override exists on the
-    /// command proxy, so the effect here is exactly the bare field assignment.
-    /// </para>
-    /// </remarks>
-    private static void ClearCapturedDbError(SqlCommandTaskProxy proxy)
-    {
-        DbErrorData empty = DbErrorData.Empty;
-
-        ((ISqlTaskProxy)proxy).OnDbError(in empty);
-    }
-
-    /// <summary>
     /// Whether a statement is present but blank - see <c>BlankStatementDiagnostic</c>.
     /// </summary>
     /// <param name="sql">The statement as sent.</param>
@@ -1304,7 +1267,19 @@ internal sealed class CommandService : GeneratedCommandServiceBase
         // operator still learns which condition failed (constraints C-F, C-B). The policy is reached
         // directly rather than injected, exactly as it is for the statement field, so it cannot be
         // weakened from a call site or from a container registration.
-        return SqlRedactor.Instance.Redact(driverText);
+        //
+        // 🔴 THROUGH THE PROVIDER-DIAGNOSTIC POLICY, NOT THE STRICT ONE. This value is the driver's own
+        // message, and Microsoft.Data.Sqlite hands it back inside its own envelope - `SQLite Error 1: 'no
+        // such table: NO_SUCH_TABLE'.` - in which the result code is a numeric literal and the whole
+        // diagnosis is a quoted string, so the strict policy masked both and this field read
+        // `SQLite Error <redacted>: '<redacted>'.` while `DbError.sqlerrtext` on the SAME response read the
+        // condition in full. One value, one response, two disclosure depths: a consumer could not tell
+        // which field to trust, and a caller who named a table that does not exist was told only that a
+        // database error had occurred. The envelope-preserving policy still masks everything quoted INSIDE
+        // the message, and a string that is not that exact envelope falls through to the strict policy
+        // unchanged - see Errors/SqlRedactor.cs, RedactProviderDiagnostic, for the canonical statement of
+        // which field class takes which policy.
+        return SqlRedactor.Instance.RedactProviderDiagnostic(driverText);
     }
 
     // ----------------------------------------------------------------------------------------------
@@ -2015,10 +1990,28 @@ internal sealed class CommandService : GeneratedCommandServiceBase
             }
 
             // -------------------------------------------------------------------------------------------
-            // STEP 4 - clear the driver-error sink, so that what is read after the body belongs to this
-            // execution. The oracle's own clearing write; see ClearCapturedDbError.
+            // STEP 4 - RAISE THE PREPARE EVENT ON BOTH SIDES OF THE PAIR, which is what the substrate does
+            // before it runs a task body [n_cst_thread_task_sqlbase.sru:L725-L729 on the worker,
+            // n_cst_threading_task_sqlbase.sru:L206-L211 on the caller]. Between them the two bodies clear
+            // exactly the state that belongs to ONE execution: the worker's resets the commit signal and
+            // the caller's clears the latched driver error. So what is read after the body below belongs to
+            // this execution and never to a previous one.
+            //
+            // 🔴 THIS STEP USED TO CLEAR ONLY THE DRIVER-ERROR SINK, BY HAND, AND THE COMMIT SIGNAL WAS
+            // LEFT ARMED. `committed` is read from a MANUAL-RESET signal at step 5 below, and only the
+            // worker's prepare body lowers it - so on a REUSED task, which this contract explicitly
+            // supports through repeated SetSql and Exec, the first statement that committed left the
+            // signal set for every later dispatch. A statement that FAILED then answered committed=true
+            // and told the caller that work no statement had performed was durable. The contract states
+            // the rule for this field as "any failing statement -> false, on every mode".
+            //
+            // NEITHER RAISE DISTURBS STEPS 1 TO 3. The caller-side body leaves the installed parameters
+            // and descriptor standing on purpose, the command proxy adds no override of its own, and the
+            // statement lives on the worker rather than in anything either body clears - so the order
+            // here (configure, then prepare, then run) is the oracle's own and not a hazard.
             // -------------------------------------------------------------------------------------------
-            ClearCapturedDbError(task.Proxy);
+            _ = task.Worker.RunPrepare();
+            _ = task.Proxy.RunPrepare();
 
             long rtCode;
             long sqlNRows;
@@ -2137,7 +2130,12 @@ internal sealed class CommandService : GeneratedCommandServiceBase
                 // message [:L101, :L111], so it carries whatever SQLite reported, including the row data
                 // a constraint or type failure echoes. The mask is literal-scoped, so a message quoting no
                 // value is byte-identical after it (constraints C-F, C-B).
-                SqlErrText = SqlRedactor.Instance.Redact(sqlErrText),
+                //
+                // 🔴 PROVIDER-DIAGNOSTIC POLICY, matching `status.error_text` above and
+                // `DbError.sqlerrtext` on the same response. It was the strict policy, which masked the
+                // provider's own envelope and left this field disclosing strictly less than a sibling field
+                // carrying the identical value. See Errors/SqlRedactor.cs, RedactProviderDiagnostic.
+                SqlErrText = SqlRedactor.Instance.RedactProviderDiagnostic(sqlErrText),
 
                 Committed = committed,
             });

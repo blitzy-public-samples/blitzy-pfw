@@ -252,9 +252,14 @@ public static class JwksEndpoints
         "Publishes the minimum discovery metadata a stock JSON Web Token bearer handler needs in "
         + "order to configure itself: the issuer identifier, the absolute address of this service's "
         + "key set, the absolute address of the issuance operation, and the signature algorithm "
-        + "identifiers this issuer uses. Both addresses are composed from the address the request "
-        + "arrived on, so the metadata is always reachable by whoever fetched it and no host is fixed "
-        + "in code. THIS OPERATION IS WHY THIS SURFACE IS PLAIN HTTP RATHER THAN A BINARY PROTOCOL: a "
+        + "identifiers this issuer uses. The issuer identifier is the configured identity and is the "
+        + "same on every response. Both ADDRESSES are composed from a configured base address, chosen "
+        + "from the deployment's declared set by matching the origin this request arrived on, so a "
+        + "consumer reaching this service on an internal name and a consumer reaching it through a "
+        + "published host port are each given a key-set address that resolves for them - while the set "
+        + "of addresses that can be published is exactly the configured set, so no caller-supplied "
+        + "host can be advertised and no host is fixed in code. THIS OPERATION IS WHY THIS SURFACE IS "
+        + "PLAIN HTTP RATHER THAN A BINARY PROTOCOL: a "
         + "consumer points its stock handler here and writes no retrieval code at all, whereas a "
         + "binary protocol would have forced a hand-written key-set retrieval implementation into "
         + "three separate services. Anonymous by design, for the same reason as the key set - a "
@@ -378,6 +383,18 @@ public static class JwksEndpoints
         "The key-set path and the discovery path are configured to the same value. Each publication "
         + "needs an address of its own, because two routes on one address is an ambiguous match at "
         + "request time.";
+
+    /// <summary>
+    /// The bracket pair an IPv6 literal is wrapped in, trimmed from both spellings before an origin's
+    /// host is compared with a request's.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Uri.Host"/> renders an IPv6 literal WITH brackets and <see cref="HostString.Host"/>
+    /// renders it without, so the two would never compare equal for an IPv6 origin. A shared array rather
+    /// than a literal at the call site, so both sides of that comparison are normalised by the same value
+    /// by construction.
+    /// </remarks>
+    private static readonly char[] IpLiteralBrackets = ['[', ']'];
 
     /// <summary>
     /// Declares both publication routes on the supplied route builder.
@@ -580,6 +597,10 @@ public static class JwksEndpoints
     /// how the advertised value and the published key can never disagree.
     /// </param>
     /// <param name="options">The configured issuance settings.</param>
+    /// <param name="request">
+    /// The incoming request, read for its origin ALONE and only in order to CHOOSE among base addresses
+    /// the deployment has already declared. Nothing from it is ever published verbatim.
+    /// </param>
     /// <param name="loggerFactory">
     /// Records one structured classifier on the failure path. Nothing is recorded on success.
     /// </param>
@@ -591,25 +612,52 @@ public static class JwksEndpoints
     /// <remarks>
     /// <para>
     /// EVERY MEMBER IS COMPOSED FROM CONFIGURATION, NEVER FROM THE REQUEST, AND NEVER BY FETCHING
-    /// ANYTHING. Both published addresses are the configured canonical issuer joined to a configured
-    /// path. Nothing outbound is called in order to build the document (constraint C-A), and no host
-    /// appears in code (constraint C-F).
+    /// ANYTHING. Both published addresses are a configured base address joined to a configured path.
+    /// Nothing outbound is called in order to build the document (constraint C-A), and no host appears in
+    /// code (constraint C-F).
     /// </para>
     /// <para>
-    /// THE EARLIER ASYMMETRY - IDENTITY FROM CONFIGURATION, LOCATIONS FROM THE REQUEST - WAS THE DEFECT,
-    /// AND IT IS WORTH STATING WHY IT LOOKED REASONABLE. Reflecting the request's scheme, host and path
-    /// base kept the document reachable through whatever address a consumer happened to arrive on -
-    /// container name, proxy name or test host - with no host named in code. But all three of those are
-    /// caller-controlled, so a request carrying a chosen Host header was answered with a document
-    /// directing every consumer to fetch this issuer's verification keys from that host, and a stock
-    /// bearer handler follows <c>jwks_uri</c> without question. A location and an identity that can
-    /// disagree is precisely the hazard: they are the same configured value, so they cannot.
+    /// THE IDENTITY IS THE CONFIGURED ISSUER ON EVERY RESPONSE. The <c>issuer</c> member is
+    /// <see cref="SecurityOptions.Issuer"/> verbatim and does not vary with the caller, because all three
+    /// consuming services compare the <c>iss</c> claim of every token against that value byte for byte.
     /// </para>
     /// <para>
-    /// The consequence a deployment must know is that the issuer has to be the address consumers can
-    /// actually reach - including any proxy prefix. That is not a new burden: a consumer validates the
-    /// issuer claim of every token against the same value byte for byte, so a wrong issuer already fails
-    /// every validation. The change removes a way for a document to be reachable and forged at once.
+    /// THE LOCATION IS CHOSEN AMONG DECLARED ADDRESSES, WHICH IS A DIFFERENT THING FROM REFLECTING THE
+    /// REQUEST, AND THE DISTINCTION IS THE WHOLE DESIGN. One service is reachable on two addresses on the
+    /// documented topology: the three internal verifiers arrive as the Compose service name, which is
+    /// also the issuer, while an operator, the end-to-end suite and any third-party consumer arrive
+    /// through the published host port on a loopback name. A document composed from the issuer alone
+    /// answered that second group with a <c>jwks_uri</c> naming a host that resolves only inside the
+    /// Compose network - so it parsed, looked correct, and pointed at nothing they could reach, failing
+    /// as a DNS error during key retrieval rather than as a rejected document.
+    /// <see cref="SecurityOptions.PublishedOrigins"/> lets the deployment declare that second address,
+    /// and this method selects between the declared candidates by MATCHING the request's own origin
+    /// against them.
+    /// </para>
+    /// <para>
+    /// WHY THAT DOES NOT REINSTATE THE FORGERY THE EARLIER REVISION REMOVED. Reflecting the request built
+    /// the published address FROM caller-controlled input, so any <c>Host</c> header a caller chose became
+    /// the address every consumer was told to fetch this issuer's keys from - and a stock bearer handler
+    /// follows <c>jwks_uri</c> without question. Here the request cannot contribute a value: it can only
+    /// select one the deployment already configured, and an origin that matches nothing configured falls
+    /// back to the canonical issuer. The set of addresses this document can possibly publish is therefore
+    /// exactly the configured set, whatever any caller sends, so the worst a forged <c>Host</c> header
+    /// achieves is the canonical document it would have received anyway. Host filtering already
+    /// constrains the accepted host NAMES independently; this check is what stops an accepted name being
+    /// treated as a publishable one.
+    /// </para>
+    /// <para>
+    /// THE MATCH IS ON ORIGIN - SCHEME, HOST AND PORT - AND ON NOTHING ELSE. A path base is deliberately
+    /// not read: a path-prefixing proxy remains a deployment configuration matter, expressed by declaring
+    /// the prefixed base address, which is the honest place for it and the position the earlier revision
+    /// established. The comparison is ordinal and case-insensitive because a scheme and a host are
+    /// case-insensitive by specification while a port is numeric.
+    /// </para>
+    /// <para>
+    /// THE PUBLISHED ADDRESS AND THE ISSUER MAY THEREFORE DIFFER IN HOST, AND THAT IS THE POINT RATHER
+    /// THAN A LOOSENED INVARIANT. A consumer arriving on either origin validates against the same
+    /// identity and retrieves keys from an address it can actually resolve. What is no longer required is
+    /// that one address serve two networks, which was never satisfiable.
     /// </para>
     /// <para>
     /// THE ADVERTISED ALGORITHM SET IS DERIVED FROM THE PUBLISHED KEYS THEMSELVES rather than from
@@ -636,10 +684,12 @@ public static class JwksEndpoints
     internal static IResult PublishProviderMetadata(
         SigningKeyProvider signingKeys,
         IOptions<SecurityOptions> options,
+        HttpRequest request,
         ILoggerFactory loggerFactory)
     {
         ArgumentNullException.ThrowIfNull(signingKeys);
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(loggerFactory);
 
         SecurityOptions security = options.Value;
@@ -657,11 +707,17 @@ public static class JwksEndpoints
             return Fail(inconsistency, loggerFactory);
         }
 
+        // The location half. This SELECTS among addresses the deployment declared; it never adopts one
+        // from the request. The identity half below stays the configured issuer regardless.
+        string publishedBase = SelectPublishedBaseAddress(security, request);
+
         ProviderMetadataDocument metadata = new()
         {
+            // The IDENTITY stays the canonical issuer whichever origin asked, because three verifiers
+            // compare the 'iss' claim against it byte for byte.
             Issuer = security.Issuer,
-            JsonWebKeySetUri = BuildAbsoluteAddress(security.Issuer, security.JwksPath),
-            TokenEndpoint = BuildAbsoluteAddress(security.Issuer, security.TokenEndpointPath),
+            JsonWebKeySetUri = BuildAbsoluteAddress(publishedBase, security.JwksPath),
+            TokenEndpoint = BuildAbsoluteAddress(publishedBase, security.TokenEndpointPath),
             SigningAlgorithms =
             [
                 .. published.Keys
@@ -671,6 +727,108 @@ public static class JwksEndpoints
         };
 
         return TypedResults.Ok(metadata);
+    }
+
+    /// <summary>
+    /// Chooses which configured base address the discovery document should publish its two locations
+    /// from, by matching the request's own origin against the declared candidates.
+    /// </summary>
+    /// <param name="security">The configured issuance settings.</param>
+    /// <param name="request">The incoming request, read for scheme, host and port only.</param>
+    /// <returns>
+    /// The matching entry of <see cref="SecurityOptions.PublishedOrigins"/>, or
+    /// <see cref="SecurityOptions.Issuer"/> when the request's origin matches no declared candidate -
+    /// including when it matches the issuer's own origin, which needs no entry.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// THE RETURN VALUE IS ALWAYS A CONFIGURED STRING, NEVER A COMPOSED ONE. Nothing from the request is
+    /// concatenated into the result: the request decides WHICH configured value is returned and cannot
+    /// contribute any part of it. That is the property that separates this from the request-reflecting
+    /// revision that was removed as forgeable, and it is enforced structurally - the only expressions
+    /// that can be returned are <c>security.PublishedOrigins[i]</c> and <c>security.Issuer</c>.
+    /// </para>
+    /// <para>
+    /// THE EMPTY-COLLECTION PATH RETURNS IMMEDIATELY, so a deployment that configures no additional origin
+    /// behaves exactly as it did before this member existed, and pays no per-request cost for a feature it
+    /// does not use. The shipped default is empty.
+    /// </para>
+    /// <para>
+    /// A MALFORMED ENTRY CANNOT REACH HERE - <c>SecurityOptionsValidator</c> refuses startup on one - so
+    /// the parse below is a total function in practice. It is still written defensively rather than with
+    /// an assertion, because a discovery document is the wrong place to throw: an unparseable entry simply
+    /// does not match, and the canonical issuer is published, which is the same safe outcome as an
+    /// unrecognised origin.
+    /// </para>
+    /// <para>
+    /// <see cref="HttpRequest.Host"/> IS USED RATHER THAN THE RAW HEADER because it is the parsed,
+    /// host-filtered value: <c>Host.Value</c> carries the port when one was sent and omits it otherwise,
+    /// which is exactly the shape an origin comparison needs. A request with no host at all - which an
+    /// in-process test host produces - matches nothing and takes the issuer, deliberately.
+    /// </para>
+    /// </remarks>
+    internal static string SelectPublishedBaseAddress(SecurityOptions security, HttpRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(security);
+        ArgumentNullException.ThrowIfNull(request);
+
+        if (security.PublishedOrigins.Count == 0)
+        {
+            return security.Issuer;
+        }
+
+        if (!request.Host.HasValue || string.IsNullOrEmpty(request.Scheme))
+        {
+            return security.Issuer;
+        }
+
+        // BOTH SIDES ARE NORMALISED THROUGH THE SAME PARSER, WHICH MATTERS FOR THE DEFAULT PORT. Uri
+        // renders an authority with its scheme's default port omitted, so a candidate spelled
+        // "https://proxy:443" and a request arriving as "Host: proxy" reduce to one string instead of
+        // missing each other - the case a hand-built comparison gets wrong. Scheme and host are
+        // case-insensitive by specification and the port is numeric, so one case-insensitive ordinal
+        // comparison then covers the whole origin.
+        if (!Uri.TryCreate(
+                string.Concat(request.Scheme, Uri.SchemeDelimiter, request.Host.Value),
+                UriKind.Absolute,
+                out Uri? arrivedOn))
+        {
+            return security.Issuer;
+        }
+
+        string requestOrigin = arrivedOn.GetLeftPart(UriPartial.Authority);
+
+        // THE IN-NETWORK VIEW IS DECIDED BY THE ISSUER RATHER THAN BY THE ROSTER, and the order matters
+        // for one real configuration: a deployment that ALSO lists its primary origin for completeness
+        // must publish exactly what it published before listing it - the issuer's own spelling, not the
+        // roster entry's, which may differ from it by a trailing separator or by case in the host while
+        // naming the same origin.
+        if (Uri.TryCreate(security.Issuer, UriKind.Absolute, out Uri? configuredIssuer)
+            && string.Equals(
+                configuredIssuer.GetLeftPart(UriPartial.Authority),
+                requestOrigin,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return security.Issuer;
+        }
+
+        foreach (string candidate in security.PublishedOrigins)
+        {
+            if (!Uri.TryCreate(candidate, UriKind.Absolute, out Uri? parsed))
+            {
+                continue;
+            }
+
+            if (string.Equals(
+                    parsed.GetLeftPart(UriPartial.Authority),
+                    requestOrigin,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return candidate;
+            }
+        }
+
+        return security.Issuer;
     }
 
     /// <summary>
@@ -971,11 +1129,13 @@ public static class JwksEndpoints
             loggerFactory: loggerFactory);
 
     /// <summary>
-    /// Joins a configured path to the configured canonical issuer.
+    /// Joins a configured path to a configured base address.
     /// </summary>
-    /// <param name="issuer">
-    /// The validated canonical issuer. The caller has already established that it is present and
-    /// absolute.
+    /// <param name="baseAddress">
+    /// A validated configured base address - either the canonical issuer or the entry of
+    /// <see cref="SecurityOptions.PublishedOrigins"/> the request's origin selected. The caller has
+    /// already established that it is present and absolute, and the options validator holds both sources
+    /// to the same shape rule.
     /// </param>
     /// <param name="path">A rooted configured path.</param>
     /// <returns>The absolute address a consumer should fetch.</returns>
@@ -991,29 +1151,37 @@ public static class JwksEndpoints
     /// wrong place to reflect caller input back.
     /// </para>
     /// <para>
-    /// THE ISSUER IS THE RIGHT SOURCE BECAUSE IT IS ALREADY THE ANCHOR OF THIS CONTRACT. It is the
-    /// <c>iss</c> claim of every minted token, the <c>issuer</c> member of this very document, and the
-    /// value all three consuming services validate every token against - so an address composed from it
-    /// cannot disagree with the identity the document is publishing. The options type states this
-    /// outright ("Absolute metadata addresses are composed from Issuer") and explains why no second base
-    /// address setting exists; the code had simply not been doing it.
+    /// THE CALLER MAY SELECT AMONG CONFIGURED BASE ADDRESSES, WHICH IS NOT THE SAME THING AND IS WHY THIS
+    /// PARAMETER IS NO LONGER NAMED FOR THE ISSUER. <c>SelectPublishedBaseAddress</c> matches the
+    /// request's origin against the declared set and returns one of those declared values or the issuer;
+    /// the request contributes no character to what arrives here. So the invariant this method depends on
+    /// is unchanged - every value it composes came from configuration - while the document can name the
+    /// address the consumer actually reached this service on.
+    /// </para>
+    /// <para>
+    /// THE ISSUER REMAINS THE ANCHOR OF THE CONTRACT AND THE DEFAULT SOURCE HERE. It is the <c>iss</c>
+    /// claim of every minted token, the <c>issuer</c> member of this very document, and the value all
+    /// three consuming services validate every token against. It is what this method composes whenever
+    /// the deployment declares no additional origin or the request arrived on an origin that matches none
+    /// - which is every case the previous revision handled, composed identically.
     /// </para>
     /// <para>
     /// A PATH-PREFIXING PROXY IS THEREFORE A DEPLOYMENT CONFIGURATION MATTER, WHICH IS THE HONEST PLACE
     /// FOR IT. Reflecting the request's path base made a prefixed deployment work without configuration
-    /// and made every deployment forgeable. An issuer that includes the prefix produces the same
-    /// published address with none of the exposure, and the issuer has to be correct for a consumer's
-    /// validation to pass regardless.
+    /// and made every deployment forgeable. A configured base address that includes the prefix - the
+    /// issuer, or a declared published origin - produces the same published address with none of the
+    /// exposure, and the issuer has to be correct for a consumer's validation to pass regardless.
     /// </para>
     /// <para>
-    /// One trailing separator on the issuer is dropped before joining. Both spellings of an authority are
-    /// legitimate in configuration, and the joined address must not carry a doubled separator - the
-    /// issuer itself is never rewritten, because it is published verbatim and has to match the token
-    /// claim byte for byte.
+    /// One trailing separator on the base address is dropped before joining. Both spellings of an
+    /// authority are legitimate in configuration, and the joined address must not carry a doubled
+    /// separator - the configured value itself is never rewritten, which matters most for the issuer,
+    /// because that one is also published verbatim as the identity and has to match the token claim byte
+    /// for byte.
     /// </para>
     /// </remarks>
-    private static string BuildAbsoluteAddress(string issuer, string path) =>
-        string.Concat(issuer.TrimEnd('/'), path);
+    private static string BuildAbsoluteAddress(string baseAddress, string path) =>
+        string.Concat(baseAddress.TrimEnd('/'), path);
 
     /// <summary>
     /// Requires a configured metadata path to be rooted and inside the well-known namespace.
@@ -1331,10 +1499,13 @@ public sealed record JsonWebKeyDocument
 /// </para>
 /// <para>
 /// THE ISSUER IS AN IDENTITY AND THE OTHER TWO ARE LOCATIONS, which is why they are sourced differently.
-/// The issuer comes from configuration, because a consumer validates the issuer claim of every inbound
-/// token against it byte for byte and it must therefore be identical whichever address the metadata was
-/// fetched through. The two addresses are composed from the request, because an address that does not
-/// resolve for the caller that read it configures nothing.
+/// The issuer comes from configuration and never varies, because a consumer validates the issuer claim of
+/// every inbound token against it byte for byte and it must therefore be identical whichever address the
+/// metadata was fetched through. The two addresses also come from configuration, but from whichever
+/// declared base address matches the origin the request arrived on - because an address that does not
+/// resolve for the caller that read it configures nothing, and one service on this topology is genuinely
+/// reachable on two addresses. The request SELECTS among declared values and contributes none, so the
+/// locations can vary without becoming forgeable.
 /// </para>
 /// <para>
 /// Declared at file scope for the same reason as its siblings, and its members carry serialization
@@ -1360,8 +1531,10 @@ public sealed record ProviderMetadataDocument
     /// </summary>
     /// <remarks>
     /// THE MEMBER THAT MAKES ZERO-BESPOKE-CODE VERIFICATION POSSIBLE: a consumer points its stock handler
-    /// here and never fetches a key itself. Composed from the address the request arrived on plus the
-    /// configured key-set path, so it resolves for whoever read it and no host is fixed in code.
+    /// here and never fetches a key itself. Composed from a CONFIGURED base address plus the configured
+    /// key-set path - the canonical issuer, or the declared published origin matching the one this request
+    /// arrived on - so it resolves for whoever read it while remaining a value the deployment chose. No
+    /// host is fixed in code and no caller-supplied host is ever published.
     /// </remarks>
     [JsonPropertyName("jwks_uri")]
     [JsonPropertyOrder(2)]

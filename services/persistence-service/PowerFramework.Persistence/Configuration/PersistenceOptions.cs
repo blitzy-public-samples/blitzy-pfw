@@ -2167,19 +2167,21 @@ public sealed class PersistenceOptionsValidator : IValidateOptions<PersistenceOp
                 + "column as the key.");
         }
 
-        if (definition.UpdateWhere != UpdateWhereBuilder.KeyAndUpdatableColumnsMode)
+        if (!UpdateWhereBuilder.IsUpdateWhereMode(definition.UpdateWhere))
         {
             failures.Add(
                 $"Configuration key '{entryPath}:{nameof(DataObjectOptions.UpdateWhere)}' declares mode "
                 + $"{definition.UpdateWhere.ToString(CultureInfo.InvariantCulture)} on a definition that "
-                + "names an update table. The key-and-updateable-columns mode - value "
+                + "names an update table, and that value names no concurrency mode. The three that exist "
+                + "are 0 (the where clause carries the key columns only), "
                 + $"{UpdateWhereBuilder.KeyAndUpdatableColumnsMode.ToString(CultureInfo.InvariantCulture)} "
-                + "- is the only one whose comparison semantics the legacy tree evidences anywhere, so no "
-                + "other mode is modelled and the update path refuses one rather than generating a weaker "
-                + "where clause. This is refused at startup rather than at the first update because the "
-                + "difference between the modes is WHICH ROWS a statement matches, and a weaker check "
-                + "succeeds silently. A retrieve-only definition may declare any mode, because none of it "
-                + "is read.");
+                + "(the key columns plus every column marked for the where clause, each compared against "
+                + "its ORIGINAL value - the mode the evidenced fixture declares) and 2 (the key columns "
+                + "plus the columns each row modified). This is refused at startup rather than at the "
+                + "first update because the difference between the modes is WHICH ROWS a statement "
+                + "matches, and a mode with no predicate at all would let a statement match on a rule "
+                + "nobody chose. A retrieve-only definition may declare any value, because none of it is "
+                + "read.");
         }
     }
 

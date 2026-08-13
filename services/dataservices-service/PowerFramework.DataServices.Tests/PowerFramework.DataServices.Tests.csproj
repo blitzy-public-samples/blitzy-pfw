@@ -49,9 +49,11 @@
 
     Those resolve without an explicit project argument only because `dataservices-service.slnx` is
     the single solution file in the service directory and enumerates exactly this project plus
-    `PowerFramework.DataServices`. Note that the legacy solution filter format is incompatible with
-    the newer XML solution format and fails with MSB4014 during restore, build and test, so no
-    solution filter is used or referenced anywhere in this service.
+    `PowerFramework.DataServices`. No solution filter is used or referenced anywhere in this
+    service, because a filter's project list has to be kept in exact agreement with the solution BY
+    HAND and every drift fails hard. This note used to say the legacy filter format fails with
+    MSB4014 against the XML solution format in all three verbs; that was measured false on the
+    pinned SDK - see docs/BUILD.md section 2.
     ================================================================================================
   -->
 

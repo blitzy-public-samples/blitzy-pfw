@@ -156,6 +156,236 @@ public sealed class CallerCertificatePostureTests
     /// <summary>
     /// The listener reaches the same verdict on the same two certificates.
     /// </summary>
+
+    // ==============================================================================================
+    //  THE REFUSAL RECORD
+    //  ----------------------------------------------------------------------------------------------
+    //  A refused caller certificate left NO trace in any shipped logging profile, so a handshake failure
+    //  on this edge was indistinguishable from a network fault, from a client misconfiguration, and from
+    //  a deliberate attempt to mint another service's token by presenting a self-signed certificate
+    //  naming it. The type's own remarks argued for that silence on the grounds that a RESPONSE must not
+    //  reveal which condition was hit - true, and about what a CALLER can observe, which a log is not.
+    //
+    //  So these cases assert BOTH halves of the correction: that each refusal arm now leaves exactly one
+    //  Warning naming its reason class, and that no arm leaks any part of the certificate.
+    // ==============================================================================================
+
+    /// <summary>
+    /// Each refusal arm leaves exactly one Warning, and the accepting arm leaves none.
+    /// </summary>
+    /// <remarks>
+    /// ONE CASE FOR ALL FIVE OUTCOMES, because what matters is that they are DISTINGUISHABLE from each
+    /// other in the log - asserting each in isolation would not catch two arms that produced the same
+    /// sentence. The accepting arm is included for the same reason: a record on the happy path would be
+    /// written at the rate of every request and would drown the four that matter.
+    /// </remarks>
+    [Fact]
+    public void EveryRefusalArmIsRecordedOnceAndTheAcceptingArmIsSilent()
+    {
+        using CertificateAuthority authority = CertificateAuthority.Create();
+        using CertificateAuthority foreign = CertificateAuthority.Create();
+
+        using X509Certificate2 compliant = authority.IssueCaller(TimeSpan.FromDays(30));
+        using X509Certificate2 overlong = authority.IssueCaller(TimeSpan.FromDays(365));
+        using X509Certificate2 rogue = foreign.IssueCaller(TimeSpan.FromDays(30));
+
+        // ARM 1 - no certificate presented.
+        RecordingRefusalLogger absent = new();
+
+        Assert.False(Listener(authority, absent).Validate(null, chain: null, SslPolicyErrors.None));
+        Assert.Contains("none was presented", Assert.Single(absent.Warnings), StringComparison.Ordinal);
+
+        // ARM 2 - the declared lifetime exceeds this deployment's ceiling.
+        RecordingRefusalLogger tooLong = new();
+
+        Assert.False(Listener(authority, tooLong).Validate(overlong, chain: null, SslPolicyErrors.None));
+
+        string lifetimeRecord = Assert.Single(tooLong.Warnings);
+
+        Assert.Contains("validity window it declares", lifetimeRecord, StringComparison.Ordinal);
+
+        // Both numbers reach the record, because an operator has to know whether to re-issue the
+        // certificate or to raise the ceiling.
+        Assert.Contains("365 day(s)", lifetimeRecord, StringComparison.Ordinal);
+        Assert.Contains("90 day(s)", lifetimeRecord, StringComparison.Ordinal);
+
+        // ARM 3 - a certificate from an authority this deployment does not accept. THE ATTACK CASE.
+        RecordingRefusalLogger untrusted = new();
+
+        Assert.False(Listener(authority, untrusted).Validate(rogue, chain: null, SslPolicyErrors.None));
+
+        string chainRecord = Assert.Single(untrusted.Warnings);
+
+        Assert.Contains("does not chain to the configured authority", chainRecord, StringComparison.Ordinal);
+
+        // THE CHAIN STATUS IS THE FIELD THAT MAKES THIS ARM ACTIONABLE: it separates "not from our
+        // authority" from "expired" and from "not a clientAuth certificate", which send an operator to
+        // three different places. Asserted as "a real flag was reported" rather than as one specific
+        // flag, because WHICH flag appears depends on how the rogue authority differs from the configured
+        // one - and this fixture's two authorities share the subject name CN=powerframework-local-ca, so
+        // the platform matches the anchor by NAME and then fails the signature, reporting
+        // NotSignatureValid where a differently-named authority would report UntrustedRoot or
+        // PartialChain. All three mean the same thing to an operator: it did not come from us.
+        Assert.Contains("Chain status: ", chainRecord, StringComparison.Ordinal);
+        Assert.DoesNotContain("Chain status: NoError", chainRecord, StringComparison.Ordinal);
+        Assert.Contains("NotSignatureValid", chainRecord, StringComparison.Ordinal);
+
+        // ARM 4 - platform trust refused it, with no anchor configured.
+        RecordingRefusalLogger platform = new();
+
+        CallerCertificateTrust unpinned = CallerCertificateTrust.Load(
+            clientCaPath: null,
+            ClientCertificateRevocationModes.NoCheck,
+            maximumLifetimeDays: 90);
+
+        unpinned.AttachLogger(platform);
+
+        Assert.False(unpinned.Validate(rogue, chain: null, SslPolicyErrors.RemoteCertificateChainErrors));
+
+        string platformRecord = Assert.Single(platform.Warnings);
+
+        Assert.Contains("by PLATFORM trust", platformRecord, StringComparison.Ordinal);
+        Assert.Contains("RemoteCertificateChainErrors", platformRecord, StringComparison.Ordinal);
+
+        // THE ACCEPTING ARM - silent, in both postures.
+        RecordingRefusalLogger accepted = new();
+
+        Assert.True(Listener(authority, accepted).Validate(compliant, chain: null, SslPolicyErrors.None));
+        Assert.Empty(accepted.Warnings);
+
+        RecordingRefusalLogger acceptedByPlatform = new();
+
+        CallerCertificateTrust unpinnedAccepting = CallerCertificateTrust.Load(
+            clientCaPath: null,
+            ClientCertificateRevocationModes.NoCheck,
+            maximumLifetimeDays: 90);
+
+        unpinnedAccepting.AttachLogger(acceptedByPlatform);
+
+        Assert.True(unpinnedAccepting.Validate(compliant, chain: null, SslPolicyErrors.None));
+        Assert.Empty(acceptedByPlatform.Warnings);
+    }
+
+    /// <summary>
+    /// No refusal record carries any part of the certificate.
+    /// </summary>
+    /// <remarks>
+    /// <b>THE CONSTRAINT THE ORIGINAL SILENCE WAS PROTECTING, KEPT WHILE THE SILENCE IS REMOVED.</b> The
+    /// subject, the issuer, the thumbprint and the serial each identify a caller, and this edge refuses
+    /// UNAUTHENTICATED callers - so a record naming any of them would attach an identity to a request
+    /// whose identity was never established. Asserted across every refusing arm at once, because the
+    /// constraint is not per arm and a new arm added later must not be the exception.
+    /// </remarks>
+    [Fact]
+    public void NoRefusalRecordCarriesAnyPartOfTheCertificate()
+    {
+        using CertificateAuthority authority = CertificateAuthority.Create();
+        using CertificateAuthority foreign = CertificateAuthority.Create();
+
+        using X509Certificate2 overlong = authority.IssueCaller(TimeSpan.FromDays(365));
+        using X509Certificate2 rogue = foreign.IssueCaller(TimeSpan.FromDays(30));
+
+        RecordingRefusalLogger recorded = new();
+        CallerCertificateTrust listener = Listener(authority, recorded);
+
+        Assert.False(listener.Validate(null, chain: null, SslPolicyErrors.None));
+        Assert.False(listener.Validate(overlong, chain: null, SslPolicyErrors.None));
+        Assert.False(listener.Validate(rogue, chain: null, SslPolicyErrors.None));
+
+        Assert.Equal(3, recorded.Warnings.Count);
+
+        foreach (string record in recorded.Warnings)
+        {
+            Assert.DoesNotContain(CallerCommonName, record, StringComparison.Ordinal);
+            Assert.DoesNotContain("CN=", record, StringComparison.Ordinal);
+            Assert.DoesNotContain(rogue.Thumbprint, record, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(overlong.Thumbprint, record, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(rogue.SerialNumber, record, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("powerframework-local-ca", record, StringComparison.Ordinal);
+
+            // Each record closes with the statement that makes the posture explicit to a reader.
+            Assert.Contains("is recorded.", record, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// A validator that was never given a logger still refuses, and does not throw trying to record.
+    /// </summary>
+    /// <remarks>
+    /// THE WINDOW BEFORE THE COMPOSITION ROOT ATTACHES ONE. This type is constructed while the listener is
+    /// being configured, which is strictly earlier than any logger can be resolved, so its sink starts as
+    /// one that discards. Kestrel accepts no connection until the host runs, so that window is empty in
+    /// practice - but a validator that threw a null-reference on its first refusal would turn a refused
+    /// handshake into a crash, so the default is asserted rather than assumed.
+    /// </remarks>
+    [Fact]
+    public void AValidatorWithNoLoggerAttachedStillRefusesWithoutThrowing()
+    {
+        using CertificateAuthority authority = CertificateAuthority.Create();
+        using X509Certificate2 overlong = authority.IssueCaller(TimeSpan.FromDays(365));
+
+        CallerCertificateTrust listener = authority.BuildListenerTrust(
+            ClientCertificateRevocationModes.NoCheck,
+            maximumLifetimeDays: 90);
+
+        Assert.False(listener.Validate(null, chain: null, SslPolicyErrors.None));
+        Assert.False(listener.Validate(overlong, chain: null, SslPolicyErrors.None));
+    }
+
+    /// <summary>Builds a listener trust decision over the authority, recording onto the given logger.</summary>
+    /// <param name="authority">The authority whose anchor is configured.</param>
+    /// <param name="logger">Where refusals are recorded.</param>
+    /// <returns>The validator.</returns>
+    private static CallerCertificateTrust Listener(
+        CertificateAuthority authority,
+        RecordingRefusalLogger logger)
+    {
+        CallerCertificateTrust listener = authority.BuildListenerTrust(
+            ClientCertificateRevocationModes.NoCheck,
+            maximumLifetimeDays: 90);
+
+        listener.AttachLogger(logger);
+
+        return listener;
+    }
+
+    /// <summary>A logger that keeps the rendered message of every Warning written to it.</summary>
+    /// <remarks>
+    /// WARNINGS ONLY, because that is the level the fix commits to: it is the level every shipped profile
+    /// admits, so a record written at Information would reproduce the finding while appearing to fix it.
+    /// A record at any other level therefore does not count towards these assertions.
+    /// </remarks>
+    private sealed class RecordingRefusalLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        private readonly List<string> _warnings = [];
+
+        /// <summary>The warnings written, in order.</summary>
+        internal IReadOnlyList<string> Warnings => _warnings;
+
+        /// <inheritdoc/>
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        /// <inheritdoc/>
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        /// <inheritdoc/>
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel,
+            Microsoft.Extensions.Logging.EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            ArgumentNullException.ThrowIfNull(formatter);
+
+            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning)
+            {
+                _warnings.Add(formatter(state, exception));
+            }
+        }
+    }
+
     /// <remarks>
     /// This is the row that closes the disagreement the file's banner describes. Before the fix the
     /// listener had no ceiling and no configurable posture at all, so the over-long certificate completed

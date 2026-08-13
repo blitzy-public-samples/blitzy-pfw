@@ -128,6 +128,17 @@ internal sealed class PersistenceWorkScope : IAsyncDisposable
         ErrorText = errorText ?? string.Empty;
     }
 
+    /// <summary>
+    /// Which task contract the acquisition was for.
+    /// </summary>
+    /// <remarks>
+    /// EXPOSED SO A REFUSAL CAN BE DESCRIBED IN THE RIGHT CONTRACT'S TERMS. The kind already governed the
+    /// release call; a failed acquisition needs it too, because the settings the refused create call carried
+    /// are C-05's on a query and C-06's on an update, and a diagnostic that named the wrong set would send a
+    /// caller to the wrong published setter.
+    /// </remarks>
+    internal PersistenceWorkKind Kind => _kind;
+
     /// <summary>The acquired session, or <see langword="null"/> when acquisition did not get that far.</summary>
     internal SessionHandle? Session { get; }
 

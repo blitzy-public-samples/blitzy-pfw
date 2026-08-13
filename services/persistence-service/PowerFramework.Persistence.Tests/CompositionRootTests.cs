@@ -1857,6 +1857,93 @@ public sealed class CompositionRootTests
     }
 
     [Fact]
+    public void TheWorkerHostMasksAValueQuotedInsideTheProvidersOwnEnvelope()
+    {
+        // 🔴 THE SHAPE THE STRICT SCANNER GETS WRONG, AND IT IS THE ORDINARY ONE. One arm of what reaches
+        // this channel is the transaction's own message
+        // [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L390], which arrives inside
+        // Microsoft.Data.Sqlite's envelope. When the diagnosis itself quotes a value - an unnamed CHECK
+        // constraint failure does - the single quotes NEST, the SQL literal scanner closes the outer literal
+        // at the inner opening quote, and the value between the two pairs is copied through verbatim. That
+        // was observed in this service's own log before the routing was fixed, so it is pinned here.
+        const string Envelope = "SQLite Error 19: 'CHECK constraint failed: NAME <> 'Zhang Wei''.";
+
+        QueryFaultRecorder collector = new();
+        RecordingLogger<PersistenceSqlTaskHost> logger = new();
+        PersistenceSqlTaskHost host = new(
+            logger,
+            Errors.SqlRedactor.Instance,
+            collector,
+            new QueryFaultProxy(collector));
+
+        Assert.Equal(
+            Buffers.DataWindowBufferStore.EventContinue,
+            host.OnError(RetCode.E_DB_ERROR, Envelope));
+
+        // IN BAND: byte for byte, exactly as before - the contract channel is never masked (constraint C-B).
+        Assert.Equal(Envelope, collector.Snapshot().ErrorText);
+
+        string record = Assert.Single(logger.Records);
+
+        // THE VALUE IS GONE.
+        Assert.DoesNotContain("Zhang Wei", record, StringComparison.Ordinal);
+        Assert.Contains(Errors.SqlRedactor.DefaultPlaceholder, record, StringComparison.Ordinal);
+
+        // AND THE DIAGNOSIS STILL READS, which is the half the strict policy also destroyed: the result
+        // code and the condition survive, so the record is worth reading rather than merely safe.
+        Assert.Contains("SQLite Error 19", record, StringComparison.Ordinal);
+        Assert.Contains("CHECK constraint failed", record, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheWorkerHostStillSendsStatementBearingTextThroughTheInjectedSeam()
+    {
+        // THE SEAM STILL GOVERNS WHAT IT WAS INTRODUCED FOR. The branch added for the envelope must not
+        // take statement text away from the injected redactor, because that text - a fixed prefix plus the
+        // externally supplied SORT or FILTER expression - is precisely the class a test substitutes a
+        // redactor to govern. A recording redactor proves the seam is still consulted for it.
+        const string StatementBearing =
+            "Cannot set property: DataWindow.Table.Select='SELECT ID FROM COMPANY WHERE AGE = 41'";
+
+        RecordingRedactor recording = new();
+        RecordingLogger<PersistenceSqlTaskHost> logger = new();
+        PersistenceSqlTaskHost host = new(logger, recording);
+
+        Assert.Equal(
+            Buffers.DataWindowBufferStore.EventContinue,
+            host.OnError(RetCode.E_INTERNAL_ERROR, StatementBearing));
+
+        Assert.Equal(StatementBearing, Assert.Single(recording.Seen));
+
+        // AND THE ENVELOPE DOES NOT REACH IT, which is the other half of the same property.
+        recording.Seen.Clear();
+
+        Assert.Equal(
+            Buffers.DataWindowBufferStore.EventContinue,
+            host.OnError(RetCode.E_DB_ERROR, "SQLite Error 19: 'CHECK constraint failed: NAME <> 'Ada''."));
+
+        Assert.Empty(recording.Seen);
+    }
+
+    /// <summary>
+    /// An <see cref="Errors.ISqlRedactor"/> that records what it was asked to mask and then delegates to
+    /// the real policy, so a test can assert WHICH texts reached the seam without weakening any of them.
+    /// </summary>
+    private sealed class RecordingRedactor : Errors.ISqlRedactor
+    {
+        /// <summary>Gets the texts this instance was handed, in order.</summary>
+        internal List<string> Seen { get; } = [];
+
+        /// <inheritdoc/>
+        public string Redact([System.Diagnostics.CodeAnalysis.AllowNull] string statement)
+        {
+            Seen.Add(statement ?? string.Empty);
+
+            return Errors.SqlRedactor.Instance.Redact(statement);
+        }
+    }
+
+    [Fact]
     public void TheWorkerHostMasksNotificationTextOnTheSameGrounds()
     {
         // A LEVEL IS NOT AN ACCESS CONTROL. Notifications are recorded at trace level, but they land in

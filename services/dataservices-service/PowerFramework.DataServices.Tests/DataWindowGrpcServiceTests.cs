@@ -1677,6 +1677,121 @@ public sealed class DataWindowGrpcValidationSessionTests(DataServicesTestHostFac
         Assert.Equal(StatusCode.FailedPrecondition, refused.StatusCode);
     }
 
+    /// <summary>
+    /// A UNARY drop-down search is served after a conversation on the same DataWindow has opened and closed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE REPORTED DEFECT, DRIVEN OVER THE WIRE THE WAY IT WAS FOUND. A caller opened an
+    /// <c>EventChain</c> conversation, let it end, and then applied a drop-down search on the same
+    /// DataWindow - and the call failed with gRPC UNKNOWN carrying an <c>ObjectDisposedException</c> raised
+    /// inside <c>DataWindowEventConversation</c>. The cause is that the four headless models are RETAINED
+    /// PER HANDLE and shared with the streaming chain, because the legacy shares them: one
+    /// <c>se_cst_dw</c> per DataWindow control holds all five services as instance members
+    /// [<c>se_cst_dw.sru:L80-L84</c>]. The chain's constructor re-hosts them onto itself
+    /// [<c>:L576-L580</c>], and the chain is per-CONVERSATION - so once the stream ended, the retained
+    /// drop-down search model was still raising <c>OnDDSGetFilter</c> [oracle <c>:L342</c>] at a
+    /// conversation that was gone.
+    /// </para>
+    /// <para>
+    /// SEARCH VALUES ARE SUPPLIED DELIBERATELY, because the empty request does not reach the fault. The ask
+    /// is raised from inside the filter composer, so a request with no terms and no <c>clear</c> takes a
+    /// path that never asks - which is why the four apply RPCs all passed standalone in the report that
+    /// found this and only this shape failed.
+    /// </para>
+    /// <para>
+    /// THE CONTROL CALL BEFORE THE CONVERSATION IS PART OF THE ASSERTION, not scene-setting: it shows the
+    /// same request is served both before and after, so the case cannot pass by the operation being
+    /// unsupported at both ends.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AUnaryDropDownSearchIsServedAfterAConversationOnTheSameDataWindowHasClosed()
+    {
+        DataWindowContractClient client = new(host.CreateAuthenticatedGrpcChannel());
+
+        ApplyDropDownSearchRequest search = new()
+        {
+            DatawindowHandle = DataWindowCatalogue.SqliteFixtureName,
+            ColumnName = "name",
+        };
+
+        search.SearchValues.Add("Ada");
+
+        ApplyDropDownSearchResponse before = await client.ApplyDropDownSearchAsync(
+            search,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(WireRetCode.Ok, before.RetCode);
+
+        string session = await OpenAsync(client);
+
+        await using (EventChainDriver driver = EventChainDriver.Open(
+            client,
+            session,
+            TestContext.Current.CancellationToken))
+        {
+            await driver.NotifyAsync(
+                DataWindowEventNotifications.Build(EventId.Ondwnsetfocus, "dds-lifecycle"),
+                OrderingDiscipline.Sequenced,
+                TestContext.Current.CancellationToken);
+
+            _ = await driver.ReadOutcomeAsync(
+                EventId.Ondwnsetfocus,
+                TestContext.Current.CancellationToken);
+
+            await driver.CompleteAsync();
+            await driver.DrainAsync(TestContext.Current.CancellationToken);
+        }
+
+        // ⚠ THIS IS THE CALL THAT FAILED WITH gRPC UNKNOWN. It must be SERVED - not translated into a
+        // defined refusal, and certainly not answered with a fabricated filter. The models were restored to
+        // their durable host when the conversation was torn down, so the semantic ask reaches a host whose
+        // body is empty, which is PowerBuilder's own "event with no script attached".
+        ApplyDropDownSearchResponse after = await client.ApplyDropDownSearchAsync(
+            search,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(WireRetCode.Ok, after.RetCode);
+        Assert.Null(after.Error);
+
+        // AND THE SAME ANSWER, not merely a successful one. A model that had lost its state or been rebuilt
+        // would answer differently while still returning OK.
+        Assert.Equal(before.State.FilterExpression, after.State.FilterExpression);
+        Assert.Equal(before.State.FilterType, after.State.FilterType);
+        Assert.Equal(before.State.RowCount, after.State.RowCount);
+        Assert.Equal(before.State.FilteredCount, after.State.FilteredCount);
+
+        // A SECOND CONVERSATION AND A THIRD CALL, because a restore that only worked once would pass every
+        // assertion above.
+        string second = await OpenAsync(client);
+
+        await using (EventChainDriver again = EventChainDriver.Open(
+            client,
+            second,
+            TestContext.Current.CancellationToken))
+        {
+            await again.NotifyAsync(
+                DataWindowEventNotifications.Build(EventId.Ondwnkillfocus, "dds-lifecycle-2"),
+                OrderingDiscipline.Sequenced,
+                TestContext.Current.CancellationToken);
+
+            _ = await again.ReadOutcomeAsync(
+                EventId.Ondwnkillfocus,
+                TestContext.Current.CancellationToken);
+
+            await again.CompleteAsync();
+            await again.DrainAsync(TestContext.Current.CancellationToken);
+        }
+
+        ApplyDropDownSearchResponse third = await client.ApplyDropDownSearchAsync(
+            search,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(WireRetCode.Ok, third.RetCode);
+        Assert.Equal(before.State.FilterExpression, third.State.FilterExpression);
+    }
+
     private static async Task<string> OpenAsync(DataWindowContractClient client) =>
         (await client.OpenValidationSessionAsync(
             new OpenValidationSessionRequest

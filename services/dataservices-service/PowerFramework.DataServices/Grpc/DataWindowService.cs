@@ -411,6 +411,43 @@ public interface IDataWindowModelSetProvider
     /// mistyped a handle must learn that, not receive a second empty DataWindow.
     /// </returns>
     DataWindowModelSet? GetOrCreate(string dataWindowHandle);
+
+    /// <summary>
+    /// Re-binds a handle's retained models to the DURABLE host, undoing the re-hosting a validation
+    /// session's event chain performed while it was open.
+    /// </summary>
+    /// <param name="dataWindowHandle">
+    /// The handle whose conversation has just ended. A handle this provider never served is a no-op
+    /// rather than a fault - the teardown path cannot know whether a chain was ever built.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>WITHOUT THIS EVERY UNARY OPERATION FAILED FOR THE REST OF THE HANDLE'S LIFE ONCE ONE
+    /// VALIDATION SESSION HAD OPENED AND CLOSED.</b> The legacy has ONE <c>se_cst_dw</c> per DataWindow
+    /// control and its five services are instance members of it [<c>se_cst_dw.sru:L80-L84</c>], so the
+    /// event chain and the read/apply surface are necessarily looking at the same objects - which is why
+    /// <see cref="GetOrCreate"/> retains them. But the chain's constructor RE-HOSTS those retained models
+    /// onto itself: it raises <c>OnInit(this)</c> on all five [<c>:L576-L580</c>], and the service base's
+    /// init assigns <c>#DataWindow = dw</c> and <c>#Eventful = dw.Eventful</c>
+    /// [<c>n_cst_dwsvc.sru:L85-L86</c>]. In process that is harmless because the control outlives the
+    /// service; across this boundary the chain is per-CONVERSATION and is torn down when the stream ends,
+    /// so the retained models were left pointing at a disposed conversation and the next unary call that
+    /// raised a semantic event threw rather than answered.
+    /// </para>
+    /// <para>
+    /// SO THE RE-HOSTING IS UNDONE RATHER THAN PREVENTED. Preventing it - giving the chain its own four
+    /// models - would split the state the legacy shares, and a caller's <c>ApplyColumnSort</c> would stop
+    /// being visible to the event chain that is validating the same DataWindow. Undoing it keeps the
+    /// sharing and restores the invariant that the retained set is hosted by something that outlives every
+    /// request.
+    /// </para>
+    /// <para>
+    /// ON THE INTERFACE RATHER THAN ON THE IMPLEMENTATION, so a substituted provider cannot forget it. A
+    /// provider that retains nothing implements it as a no-op and says so; one that retains has to answer
+    /// the question this member asks, which is the whole point of putting it in the contract.
+    /// </para>
+    /// </remarks>
+    void RebindToDurableHost(string dataWindowHandle);
 }
 
 /// <summary>
@@ -2582,15 +2619,98 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
             scope.ReturnCode,
             status);
 
+        // 🔴 THE STEP IS NAMED, AND NAMING IT IS THE HALF THAT WAS MISSING (issue INFO-2).
+        //
+        //    "Could not acquire a Persistence work handle" reads as plumbing - a registry at capacity, a
+        //    session that would not open - and that is what a caller acted on. Measured: a retrieval with
+        //    chunk_size 1 answered InvalidArgument with "The retrieval could not acquire a Persistence work
+        //    handle (outcome -3). " and nothing after it, while the actual cause was C-05's preserved
+        //    chunk-size guard refusing the value the caller had sent
+        //    [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L410]. Not one word of that
+        //    sentence was false. It described the wrong thing, because the two steps of an acquisition -
+        //    opening the session, and creating the task WITH THIS OPERATION'S SETTINGS ON IT - were
+        //    reported identically, and only the second can be the caller's fault.
+        //
+        //    The scope records which step it reached, so the distinction is already there to be read: no
+        //    session means the session never opened, a session with no task means the create call was
+        //    refused. NOTHING IS INVENTED - Persistence is not asked for a message it deliberately does not
+        //    compose, and where it did send one that text is still relayed verbatim ahead of anything this
+        //    method adds.
+        string step = scope.Session is null
+            ? "opening a Persistence session for it"
+            : "creating its Persistence work task (the call that carries this operation's own settings)";
+
+        string detail = scope.ErrorText.Length > 0
+            ? scope.ErrorText
+            : scope.Session is null
+                ? NoUpstreamSessionDiagnosticText
+                : scope.Kind == PersistenceWorkKind.Query
+                    ? NoUpstreamQuerySettingDiagnosticText
+                    : NoUpstreamUpdateSettingDiagnosticText;
+
         return new RpcException(new Status(
             status,
             string.Format(
                 CultureInfo.InvariantCulture,
-                "The {0} could not acquire a Persistence work handle (outcome {1}). {2}",
+                "The {0} could not acquire its Persistence work handles: {1} failed with outcome {2}. {3}",
                 operation,
+                step,
                 scope.ReturnCode,
-                scope.ErrorText)));
+                detail)));
     }
+
+    /// <summary>
+    /// Answered when the session step of an acquisition failed and the upstream sent no text with it.
+    /// </summary>
+    /// <remarks>
+    /// A SESSION REFUSAL IS NOT THE CALLER'S SETTINGS. The descriptor a session is opened with is this
+    /// service's configuration, not anything on the request, so there is nothing for the caller to correct
+    /// and the sentence says so rather than implying a retry with different arguments would help.
+    /// </remarks>
+    private const string NoUpstreamSessionDiagnosticText =
+        "Persistence sent no diagnostic text with this outcome. The session is opened with this service's "
+        + "own configured connection descriptor rather than with anything on the request, so nothing in the "
+        + "request can be corrected to change the answer; the outcome code identifies the refusal and this "
+        + "service's operator log records it.";
+
+    /// <summary>
+    /// Answered when the query-task step of an acquisition failed and the upstream sent no text with it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE SILENCE IS DOCUMENTED UPSTREAM BEHAVIOUR AND IS REPORTED AS SUCH. Where C-05 owns a refusal it
+    /// carries a diagnostic naming it, and that text is relayed instead of this. Where the refusal is
+    /// DELEGATED to a preserved legacy setter, C-05 returns the setting's own code and composes no message -
+    /// which is its deliberate fidelity choice, not a gap for this service to fill with a guess. What this
+    /// service can honestly add is WHICH call was refused and WHAT that call carried, both of which it
+    /// knows for certain.
+    /// </para>
+    /// <para>
+    /// THE CHUNK-SIZE BOUND IS QUOTED BECAUSE IT IS PUBLISHED, not because a bound is being disclosed. C-05
+    /// declares the at-or-below-1000 refusal in its own contract text, so naming it here restates the
+    /// published surface and is what turns an unactionable outcome code into the caller's next move.
+    /// </para>
+    /// </remarks>
+    private const string NoUpstreamQuerySettingDiagnosticText =
+        "Persistence sent no diagnostic text with this outcome, which is its documented answer where a "
+        + "setting's refusal is delegated to the preserved legacy setter: the setting's own code is "
+        + "returned and no message is composed. The settings this create call carried are the ones on the "
+        + "retrieve request - the DataWindow name, the positional arguments and the chunk size - and the "
+        + "chunk size is the one C-05 refuses with an invalid-argument code at or below 1000. Send the "
+        + "settings one at a time through C-05's published setters to learn which was refused.";
+
+    /// <summary>
+    /// Answered when the update-task step of an acquisition failed and the upstream sent no text with it.
+    /// </summary>
+    /// <remarks>
+    /// SEPARATE FROM THE QUERY WORDING BECAUSE THE SETTINGS DIFFER. An update's create call carries no
+    /// chunk size, so quoting that bound here would send a caller looking at a value it never sent.
+    /// </remarks>
+    private const string NoUpstreamUpdateSettingDiagnosticText =
+        "Persistence sent no diagnostic text with this outcome, which is its documented answer where a "
+        + "setting's refusal is delegated to the preserved legacy setter: the setting's own code is "
+        + "returned and no message is composed. Send the update's table contract through C-06's published "
+        + "PrepareUpdate on its own to learn which part of it was refused.";
 
     // =================================================================================================
     //  RETRIEVAL - the first third of the retrieval / validation / update triple
@@ -2736,12 +2856,18 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         //
         // WHAT THAT DOES AND DOES NOT GIVE THE CALLER, STATED EXACTLY BECAUSE IT WAS MEASURED. Where C-05
         // owns the refusal - a missing clause, an invalid modification style, an inadmissible statement, a
-        // bad parameter - it carries a diagnostic naming it. Where the refusal is DELEGATED to a legacy
-        // setter, C-05 answers the bare code with no text of its own [QuerySettingOutcome.From], so the
-        // acquisition failure below reads "(outcome -3)" with nothing after it. That is C-05's deliberate
-        // choice and not a gap to paper over here: the code is the machine-readable answer, and inventing
-        // an explanation this service does not have would be worse than a terse one. A caller needing to
-        // know WHICH setting was refused sends them one at a time through the published setters.
+        // bad parameter - it carries a diagnostic naming it, and that text is relayed verbatim. Where the
+        // refusal is DELEGATED to a legacy setter, C-05 answers the bare code with no text of its own
+        // [QuerySettingOutcome.From], and that silence is C-05's deliberate fidelity choice rather than a
+        // gap to fill with a guess: it is not asked for a message it does not compose.
+        //
+        // WHAT THIS SERVICE ADDS INSTEAD IS WHAT IT KNOWS FOR CERTAIN (issue INFO-2). A bare
+        // "(outcome -3)" with nothing after it described a chunk size the caller had sent as though a work
+        // handle could not be obtained, so AcquisitionFailure now names WHICH of the two acquisition steps
+        // was refused and, for the create step, WHAT that call carried - the DataWindow name, the
+        // positional arguments and the chunk size, with C-05's published at-or-below-1000 bound quoted
+        // because it is published. A caller needing to know precisely which setting was refused still
+        // sends them one at a time through the published setters.
         await using PersistenceWorkScope scope = await _persistence
             .OpenQueryScopeAsync(BuildQuerySpec(request), BuildSessionRequest(), cancellationToken)
             .ConfigureAwait(false);
@@ -4653,6 +4779,13 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         bool strictOrdering = _eventChain.StrictOrdering;
 
         string? boundSessionId = null;
+
+        // CAPTURED AT BIND TIME AND READ IN THE FINALLY. The teardown gives the retained models their
+        // durable host back, and it must not depend on the session still being resolvable at that point:
+        // a client that closed its session before half-closing the stream would otherwise leave them
+        // re-hosted onto a disposed conversation - the exact state the re-binding exists to prevent.
+        string? boundHandle = null;
+
         DataWindowEventConversation? conversation = null;
         DataWindowEventChain? chain = null;
         SequentialNotificationDispatcher? dispatcher = null;
@@ -4684,7 +4817,7 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
 
                     if (boundSessionId is null)
                     {
-                        (boundSessionId, conversation, chain) =
+                        (boundSessionId, boundHandle, conversation, chain) =
                             BindConversation(request.SessionId, responseStream);
 
                         // THE DISPATCHER IS CREATED WITH THE CONVERSATION, NOT WITH THE CALL, because it
@@ -4813,6 +4946,22 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
             // still-running dispatch was using - which is also why the dispatcher is waited for above.
             conversation?.Dispose();
             chain?.Teardown();
+
+            // 🔴 AND THEN GIVE THE RETAINED MODELS THEIR DURABLE HOST BACK, WHICH IS THE THIRD STEP OF THIS
+            // TEARDOWN AND NOT AN AFTERTHOUGHT. Building the chain RE-HOSTED the four retained models onto
+            // it - the constructor raises OnInit(this) on all five [se_cst_dw.sru:L576-L580] - so once the
+            // conversation above is disposed those models are pointing at a disposed object. Every later
+            // unary operation that raises a semantic event then threw instead of answering: a drop-down
+            // search carrying any term, a context-menu build, a row-select item change. It is unconditional
+            // and it is in the finally for the same reason the two calls above are - an abnormal exit leaves
+            // the models re-hosted just as surely as a clean one, and the handle outlives both.
+            //
+            // IDEMPOTENT AND HANDLE-SCOPED, so a stream that never built a chain, one whose handle was
+            // never resolvable, and a second teardown of the same handle are all no-ops.
+            if (boundHandle is { Length: > 0 })
+            {
+                _models.RebindToDurableHost(boundHandle);
+            }
         }
     }
 
@@ -5233,7 +5382,13 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// </summary>
     /// <param name="sessionId">The session the first message named.</param>
     /// <param name="responseStream">The response writer the conversation will own.</param>
-    /// <returns>The bound identifier, conversation and chain.</returns>
+    /// <returns>
+    /// The bound identifier, the session's DataWindow handle, the conversation and the chain. The HANDLE
+    /// travels out because the caller's teardown needs it to give the retained models their durable host
+    /// back, and re-resolving the session at that point would fail for a session that had meanwhile been
+    /// closed - leaving the models re-hosted onto a disposed conversation, which is the defect the
+    /// re-binding exists to close.
+    /// </returns>
     /// <exception cref="RpcException">
     /// <c>FailedPrecondition</c> when the session is unknown or its DataWindow handle can be bound to no
     /// chain.
@@ -5251,7 +5406,11 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// which is what keeps the token sequence a record of real traffic rather than of handshakes.
     /// </para>
     /// </remarks>
-    private (string SessionId, DataWindowEventConversation Conversation, DataWindowEventChain Chain)
+    private (
+        string SessionId,
+        string DataWindowHandle,
+        DataWindowEventConversation Conversation,
+        DataWindowEventChain Chain)
         BindConversation(string sessionId, IServerStreamWriter<EventChainResponse> responseStream)
     {
         ValidationSessionResolution resolved = ResolveSession(sessionId);
@@ -5302,7 +5461,7 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
 
         conversation.Bind(chain.Sequencer);
 
-        return (session.SessionId, conversation, chain);
+        return (session.SessionId, session.DataWindowHandle, conversation, chain);
     }
 
     /// <summary>
@@ -6121,6 +6280,151 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     };
 
     /// <summary>
+    /// Every bit the row-selection style's two defined members occupy, and no other.
+    /// </summary>
+    /// <remarks>
+    /// COMPOSED FROM THE MODEL'S OWN CONSTANTS RATHER THAN WRITTEN AS A LITERAL, so a third member added
+    /// to the ported service widens this mask by editing one place. The two are
+    /// <c>RS_SINGLE = 1</c> and <c>RS_MULTIPLE = 2</c>
+    /// [<c>n_cst_dwsvc_rowselect.sru</c>, reproduced verbatim on the model], and their union is 3 - which
+    /// is why the legal set is exactly {1, 2, 3} and the test is a mask rather than an equality: 3 is the
+    /// documented combination, not an accident.
+    /// </remarks>
+    private const ulong DefinedRowSelectStyleMask =
+        (ulong)RowSelectService.RS_SINGLE | (ulong)RowSelectService.RS_MULTIPLE;
+
+    /// <summary>
+    /// Builds the error reported for a row-selection style carrying a bit no member defines.
+    /// </summary>
+    /// <param name="requested">The style the caller asked for.</param>
+    /// <returns>The error.</returns>
+    /// <remarks>
+    /// <c>E_INVALID_ARGUMENT</c> rather than <c>E_NO_SUPPORT</c>, and the distinction is not cosmetic: the
+    /// value is not a supported feature this boundary declines to serve, it is a number that names no
+    /// selection mode. It is the same code the ported setter answers for zero, which is the other value
+    /// that names none. Not localized - a boundary-created diagnostic with no legacy dialog behind it.
+    /// The requested value IS echoed here, unlike the diagnostics on the Persistence side: it is a small
+    /// integer the caller composed and it carries no identifier, no statement text and no row data, so
+    /// naming it costs nothing and telling a caller which value was refused is the whole use of the
+    /// message.
+    /// </remarks>
+    private static StructuredError UndefinedRowSelectStyleError(ulong requested) => new()
+    {
+        Title = string.Empty,
+        Text = string.Format(
+            CultureInfo.InvariantCulture,
+            "A row-selection style of {0} carries bits outside the two the service defines. The accepted "
+                + "values are {1} (single-row), {2} (multiple-row) and {3} (their documented combination, "
+                + "which propagates like multiple-row and re-selects the clicked row like single-row). A "
+                + "value outside them is refused rather than stored, because every behavioural test in the "
+                + "ported model compares the style with an inequality - so an undefined style would leave "
+                + "the DataWindow in a selection mode with no defined behaviour while the response "
+                + "reported success.",
+            requested,
+            RowSelectService.RS_SINGLE,
+            RowSelectService.RS_MULTIPLE,
+            RowSelectService.RS_SINGLE + RowSelectService.RS_MULTIPLE),
+        Localized = false,
+        Category = 0L,
+        Severity = Severity.StopSign,
+        RetCode = DataWindowWireProjection.ToWireRetCode(RetCode.E_INVALID_ARGUMENT),
+    };
+
+    /// <summary>
+    /// The property suffix that asks a DataWindow object for its one-based column number.
+    /// </summary>
+    /// <remarks>
+    /// THE ORACLE'S OWN IDIOM FOR "DOES THIS COLUMN EXIST", spelled the oracle's way. Two independent
+    /// legacy sites resolve a name this way and read a non-positive answer as "no such column":
+    /// <c>_of_updateprepare</c> resolves each declared key column with
+    /// <c>Long(Data.Describe(name + ".Id"))</c> and refuses the whole preparation when the answer is not
+    /// positive [<c>n_cst_thread_task_sqlupdate.sru:L118-L122</c>], and the expansion engine binds an
+    /// expression by resolving its target column the same way
+    /// [<c>n_cst_dwsvc_columnexp.sru:L1541-L1542</c>]. Using the same probe here means this boundary
+    /// agrees with the two places in the legacy that already ask the question, rather than inventing a
+    /// third answer to it.
+    /// </remarks>
+    private const string ColumnIdentifierProperty = ".Id";
+
+    /// <summary>
+    /// Resolves a caller-supplied column name to its one-based column number, or to zero when the name
+    /// does not address a column of this DataWindow.
+    /// </summary>
+    /// <param name="host">The host the models are bound to.</param>
+    /// <param name="columnName">The name as the caller spelled it.</param>
+    /// <returns>The one-based column number, or <c>0</c> when the name addresses no column.</returns>
+    /// <remarks>
+    /// <para>
+    /// THREE DISTINCT NON-ANSWERS COLLAPSE ONTO ZERO, and each is a genuine "no such column" rather than
+    /// a parsing convenience. An EMPTY name is short-circuited without a probe, because an empty property
+    /// expression is not a question the host can be asked. An UNRECOGNISED object name makes the host
+    /// answer its invalid-expression sentinel <c>"!"</c>
+    /// [<c>HeadlessDataWindowHost.Describe</c>, final arm], which does not parse as a number. And a
+    /// recognised object that is NOT a column - a text label, a computed field's decoration - answers
+    /// <c>"0"</c> by the host's own documented convention, which parses and is non-positive. All three
+    /// name nothing sortable, so all three answer zero and the caller is told so.
+    /// </para>
+    /// <para>
+    /// THE PROBE IS DELIBERATELY NOT <c>DataWindow.Objects</c>. That property answers every object the
+    /// definition declares, columns and decorations alike, so a name matching a text label would pass a
+    /// membership test and then fail to sort. The identifier probe distinguishes them, which is why the
+    /// two legacy sites use it and why this one does.
+    /// </para>
+    /// </remarks>
+    private static long ResolveColumnOrdinal(DataWindowServiceHost host, string columnName)
+    {
+        if (columnName.Length == 0)
+        {
+            return 0L;
+        }
+
+        return long.TryParse(
+            host.Describe(columnName + ColumnIdentifierProperty),
+            NumberStyles.Integer,
+            CultureInfo.InvariantCulture,
+            out long ordinal)
+            ? ordinal
+            : 0L;
+    }
+
+    /// <summary>
+    /// Builds the error reported for a sort entry naming a column this DataWindow does not have.
+    /// </summary>
+    /// <param name="columnName">The name as the caller spelled it.</param>
+    /// <returns>The error.</returns>
+    /// <remarks>
+    /// <para>
+    /// <c>E_INVALID_ARGUMENT</c>, and the name IS echoed. The name is a short identifier the caller
+    /// composed and it carries no statement text, no row data and no credential, so naming it back is the
+    /// entire use of the message - a caller who mistyped a column has no other way to find out. This
+    /// matches <see cref="UnknownHandleError"/>, which echoes the handle for the same reason, and it is
+    /// distinct from the Persistence side's identifier diagnostics, which withhold the identifier because
+    /// there it travels inside generated SQL.
+    /// </para>
+    /// <para>
+    /// NOT LOCALIZED: a boundary-created diagnostic with no legacy dialog behind it, so there is no
+    /// oracle text to preserve and no category to report. Marking it localized would claim a translation
+    /// table answered when none did.
+    /// </para>
+    /// </remarks>
+    private static StructuredError UnknownSortColumnError(string columnName) => new()
+    {
+        Title = string.Empty,
+        Text = string.Format(
+            CultureInfo.InvariantCulture,
+            "A sort was requested on '{0}', which names no column of this DataWindow. The request is "
+                + "refused rather than skipped: the clause composer falls back to the bare name for any "
+                + "column it cannot classify, so an unknown name would be published as a sort expression "
+                + "that no DataWindow can apply, and the response would report success for a sort that "
+                + "never happened.",
+            columnName),
+        Localized = false,
+        Category = 0L,
+        Severity = Severity.StopSign,
+        RetCode = DataWindowWireProjection.ToWireRetCode(RetCode.E_INVALID_ARGUMENT),
+    };
+
+    /// <summary>
     /// Reads the column-sort state.
     /// </summary>
     /// <param name="request">The DataWindow.</param>
@@ -6193,6 +6497,65 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         }
 
         ColumnSortModel model = set.ColumnSort;
+
+        // =============================================================================================
+        //  EVERY STATED COLUMN IS RESOLVED BEFORE ANY CLAUSE IS COMPOSED - a narrowing under AAP 0.1.5.
+        //  -------------------------------------------------------------------------------------------
+        //  WHAT WAS WRONG. A name addressing no column reached `GetClause`, fell through all four of its
+        //  stages to the bare-name fallback [n_cst_dwsvc_columnsort.sru:L329], and was published as a
+        //  clause - so `columnName:'nope'` produced the expression "nope A" and the response reported
+        //  OK for a sort that could never be applied. The four stages are all Describe probes, and the
+        //  host answers its invalid-expression sentinel for every one of them on an unknown name, so
+        //  none of the special cases fires and the cascade cannot distinguish "no special handling
+        //  needed" from "no such column". That is not a defect in the ported model: in process the model
+        //  is attached to a real DataWindow control and the only names reaching it come from that
+        //  control's own object list, so the situation does not arise. It arises HERE, because across
+        //  this boundary the name is caller-supplied text.
+        //
+        //  WHY REFUSED AND NOT SKIPPED. Skipping would compose a shorter expression than the caller
+        //  asked for and still answer OK, which is the silent-wrong-answer shape AAP 0.1.5 forbids: the
+        //  contract is NARROWED WITH A DEFINED ERROR, never widened with a guess. The ported
+        //  `GetClause` and `Update` are untouched (C-B) - the refusal lives at the boundary, which is
+        //  where the caller-supplied name enters the system.
+        //
+        //  A SORT_NONE ENTRY IS DELIBERATELY NOT RESOLVED, AND THE ORACLE IS WHY. `_of_getclause` tests
+        //  for SORT_NONE as its very first statement and returns the empty string
+        //  [n_cst_dwsvc_columnsort.sru:L292] - BEFORE any of the four stages and therefore before any
+        //  Describe call at all. The legacy consequently never asks whether a column it is not sorting by
+        //  exists, so refusing such an entry here would be a narrowing with no oracle behind it, and the
+        //  entry is inert either way: it composes no clause, so there is no malformed expression and no
+        //  false claim of success to prevent. Only entries that WILL compose a clause are resolved, which
+        //  is exactly the set the oracle itself would have probed.
+        //
+        //  THE RESOLUTION IS A PRE-PASS OVER THE WHOLE LIST, so a refusal cannot leave a partly applied
+        //  sort behind. An EMPTY `columns` list states no column at all and is untouched by this loop: it
+        //  composes the empty expression, which is how a sort is CLEARED.
+        // =============================================================================================
+        foreach (ColumnSortState.Types.ColumnSort declared in request.Columns)
+        {
+            // The same test the composing loop below applies, drawn from the same helper so the two
+            // cannot disagree about which entries carry a direction.
+            if (ToLegacySortType(declared.Direction) == 0L)
+            {
+                continue;
+            }
+
+            string declaredName = declared.ColumnName ?? string.Empty;
+
+            if (ResolveColumnOrdinal(set.Host, declaredName) > 0L)
+            {
+                continue;
+            }
+
+            return Task.FromResult(new ApplyColumnSortResponse
+            {
+                // The model's CURRENT state, because nothing has been applied to it. Reporting the
+                // requested sort here would describe a sort that was refused.
+                State = ProjectColumnSort(model),
+                RetCode = DataWindowWireProjection.ToWireRetCode(RetCode.E_INVALID_ARGUMENT),
+                Error = UnknownSortColumnError(declaredName),
+            });
+        }
 
         // In request order, which IS the sort order. Composed through the model so the clause text is the
         // oracle's rather than this file's.
@@ -6673,12 +7036,38 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
 
         if (request.HasStyle)
         {
-            if (request.Style > long.MaxValue)
+            // 🔴 A STYLE CARRYING A BIT NO MEMBER DEFINES IS REFUSED HERE, AT THE BOUNDARY, AND NOWHERE
+            // ELSE. The ported setter screens only ZERO - `if style = 0 then return E_INVALID_ARGUMENT`
+            // [n_cst_dwsvc_rowselect.sru:L168-L169] - and that is correct for it: RS_SINGLE is 1,
+            // RS_MULTIPLE is 2, and their SUM of 3 is a legal combination the framework's own demo passes
+            // [:L58]. So the setter admits any non-zero number, and in process that was harmless because
+            // the only party that could name a style was code in the same application, holding the two
+            // constants. Across this boundary a remote caller composes the number, and 4 or 999 was stored
+            // and read back verbatim by GetRowSelectStyle - a value every behavioural test in the model
+            // compares with `<>` and therefore treats as "not RS_SINGLE and not RS_MULTIPLE", so the
+            // DataWindow ended up in a selection mode with no defined behaviour at all and the response
+            // said it had been accepted.
+            //
+            // THE SETTER IS LEFT VERBATIM (C-B) and the screen is a mask test rather than a value list, so
+            // 1, 2 and 3 are all admitted and only bits outside the two members are refused. Refusing
+            // inside the model would make the port unfaithful and would reject in-process callers the
+            // legacy accepts; refusing here is the same narrow-with-a-defined-error posture AAP 0.1.5
+            // prescribes and that this file already applies to the pinyin flags and the filter type.
+            //
+            // IT ALSO SUBSUMES THE RANGE CHECK THAT USED TO STAND HERE. A `request.Style > long.MaxValue`
+            // guard preceded this, existing only to make the cast below safe, and it answered
+            // E_INVALID_ARGUMENT with NO structured error - so the same refusal arrived with a diagnostic
+            // or without one depending on how large the number was. Every value that passes the mask is at
+            // most RS_SINGLE|RS_MULTIPLE = 3, so the cast cannot overflow and the separate guard was
+            // redundant as well as inconsistent. It is removed rather than left unreachable, and every
+            // refused style now carries the same diagnostic.
+            if ((request.Style & ~DefinedRowSelectStyleMask) != 0UL)
             {
                 return Task.FromResult(new ApplyRowSelectStyleResponse
                 {
                     State = ProjectRowSelect(model, host),
                     RetCode = DataWindowWireProjection.ToWireRetCode(RetCode.E_INVALID_ARGUMENT),
+                    Error = UndefinedRowSelectStyleError(request.Style),
                 });
             }
 

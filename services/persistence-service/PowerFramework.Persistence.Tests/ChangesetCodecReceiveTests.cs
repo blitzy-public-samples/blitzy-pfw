@@ -1944,6 +1944,76 @@ public sealed class ChangesetPayloadCodecTests
         Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
     }
 
+    [Fact]
+    public void ARowStampedNotModifiedIsDroppedFromThePayloadEntirely()
+    {
+        // ==========================================================================================
+        //  🔴 THE DISPOSITION OF QA ISSUE MED-2, PINNED AS EXECUTABLE EVIDENCE RATHER THAN AS PROSE.
+        //
+        //  MED-2 observed that a freshly retrieved, unmodified row arrives with a ROW-level item status
+        //  of DataModified! while every one of its columns is NotModified!, and proposed that the row
+        //  should read NotModified!. It is NOT A DEFECT, and this row is what stops the proposal being
+        //  applied by a later reader who reaches the same first impression.
+        //
+        //  IT IS THE ORACLE'S OWN BEHAVIOUR (constraint C-B). Six loops in
+        //  ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru stamp every row of a
+        //  freshly retrieved buffer DataModified! at column zero BEFORE the changeset is extracted -
+        //  :L122-L124 and :L126-L128 for a drop-down child, :L161-L163 and :L167-L169 for the temporary
+        //  carrier, :L196-L198 and :L201-L203 for the in-place branch. Correcting it would be correcting
+        //  a legacy behaviour, which AAP 0.2.2.5 forbids as firmly as it forbids removing one.
+        //
+        //  AND IT IS LOAD BEARING, WHICH IS THE HALF PROSE CANNOT PROVE. A changeset carries only rows
+        //  that changed, so the stamp is the changeset transport's PRECONDITION rather than a claim
+        //  about the data: with the row stamped NotModified! the projection admits nothing at all, and
+        //  EVERY RETRIEVAL WOULD RETURN ZERO ROWS while reporting success. That is asserted below by
+        //  encoding the identical carrier twice, changing nothing but the row status.
+        //
+        //  WHAT THE STAMP DOES NOT CLAIM IS ALSO ASSERTED, because that is the reader's real question:
+        //  the per-column statuses stay NotModified!, so nothing downstream reads the row as carrying
+        //  edits. C-06 measures a submitted row against its stated originals, so a retrieved row cannot
+        //  be echoed back as an update - the sibling refusal answers E_INVALID_DATA for exactly that.
+        // ==========================================================================================
+        ChangesetPayloadCodec codec = new();
+
+        DataWindowBufferStore stamped = new() { Processing = new DataWindowProcessing(1L) };
+        long stampedRow = stamped.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
+        _ = stamped.SetItemValue(stampedRow, 2, DwBuffer.Primary, "retrieved");
+        stamped.RowAt(stampedRow, DwBuffer.Primary).Baseline();
+
+        // The retrieval's own stamp, at column ZERO, which addresses the row rather than a column.
+        _ = stamped.SetItemStatus(
+            stampedRow,
+            ItemStatusMachine.RowStatusColumn,
+            DwBuffer.Primary,
+            ItemStatus.DataModified);
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            codec.TryEncode(stamped, out CarrierState? stampedState));
+
+        DataWindowRow projected = Assert.Single(stampedState!.Segments[0].Rows);
+
+        // The row says modified; not one of its columns does. Both halves are the observed shape.
+        Assert.Equal(ItemStatus.DataModified, projected.ItemStatus);
+        Assert.All(
+            projected.Columns,
+            column => Assert.Equal(ItemStatus.NotModified, column.ItemStatus));
+
+        // AND NOW THE SAME CARRIER WITHOUT THE STAMP - the shape MED-2 asked for.
+        DataWindowBufferStore unstamped = new() { Processing = new DataWindowProcessing(1L) };
+        long unstampedRow = unstamped.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
+        _ = unstamped.SetItemValue(unstampedRow, 2, DwBuffer.Primary, "retrieved");
+        unstamped.RowAt(unstampedRow, DwBuffer.Primary).Baseline();
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            codec.TryEncode(unstamped, out CarrierState? unstampedState));
+
+        // Encoding still SUCCEEDS, which is precisely why the proposal is dangerous: the answer is a
+        // well-formed, entirely empty result for a carrier that holds a row.
+        Assert.Empty(unstampedState!.Segments[0].Rows);
+    }
+
     /// <summary>
     /// Asserts that <paramref name="state"/> answers the legacy failure code and that the target is
     /// completely untouched afterwards.

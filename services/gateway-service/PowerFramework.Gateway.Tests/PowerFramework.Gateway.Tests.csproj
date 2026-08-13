@@ -33,8 +33,10 @@
     solution file in services/gateway-service, a bare `dotnet restore`, `dotnet build` or
     `dotnet test` run from that directory resolves it automatically, which is what lets the
     documented per-service command run verbatim. Keep this file's name and directory exactly as
-    those solutions declare them, and never add a .slnf filter: legacy solution filters are
-    incompatible with the .slnx format and fail with MSB4014 during restore, build and test.
+    those solutions declare them, and never add a .slnf filter - because a filter's project list has
+    to be kept in exact agreement with the solution BY HAND and every drift fails hard. This note
+    used to say such a filter fails with MSB4014 over a .slnx in all three verbs; that was measured
+    false on the pinned SDK, and docs/BUILD.md section 2 carries the measurement.
   -->
 
   <PropertyGroup>

@@ -57,8 +57,10 @@
 #    * No pfw.i18n.xml. Unlike Gateway and DataServices, this service references no localization
 #      project, so the literal Content item that makes that file a build input is not in this restore
 #      closure. Copying it would put read-only legacy data into an image with no consumer for it.
-#    * No .slnf solution filter, anywhere, ever. Legacy solution filters are incompatible with the
-#      .slnx XML solution format and fail with MSB4014 during restore, build and test.
+#    * No .slnf solution filter, anywhere, ever - because a filter's project list has to be kept in
+#      exact agreement with the solution BY HAND and every drift fails hard, not because filters
+#      are broken. This line used to claim they fail with MSB4014 over a .slnx in all three verbs;
+#      that was measured false on the pinned SDK (docs/BUILD.md section 2).
 #    * No NuGet.config. The repository has none; naming a path that does not exist fails the COPY.
 #    * No docs/, .github/, orchestration/, tests/e2e/ or characterization/ path. All are excluded
 #      from the build context, so referencing any of them would break the build.

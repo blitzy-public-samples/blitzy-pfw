@@ -951,6 +951,157 @@ public sealed class SystemErrorObservabilityTests
     }
 
     // ----------------------------------------------------------------------------------------------
+    //  THE HONOURED 4xx: WHAT THE CALLER ACTUALLY RECEIVES.
+    //
+    //  These assert through TryHandleAsync and read the written body, NOT the two resolvers in
+    //  isolation. That distinction is the whole point of them and was established by measurement: the
+    //  unit-level assertions on ResolveClientErrorTitle/ResolveClientErrorDetail in
+    //  [DataServicesProxySessionBindingTests] pass unchanged when the CALL SITE is reverted to the old
+    //  binary `serverFault ? … : ClientErrorProblemTitle`, because reverting the call site leaves the
+    //  resolvers themselves correct. A test that proves a resolver computes the right answer proves
+    //  nothing about whether the response uses it. These do.
+    // ----------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// THE TITLE THE CALLER RECEIVES NAMES THE STATUS BESIDE IT. The framework's bad-request exception
+    /// carries its own 4xx and the handler honours it, so a 413 and a 415 reach this path as readily as
+    /// a 400 - and before the fix all three announced themselves as "Bad Request", contradicting the
+    /// status member in the same document.
+    /// </summary>
+    /// <param name="frameworkStatus">The status the framework's exception carries.</param>
+    /// <param name="expectedTitle">The title the body must publish for it.</param>
+    /// <returns>A task representing the assertion.</returns>
+    [Theory]
+    [InlineData(StatusCodes.Status400BadRequest, "Bad Request")]
+    [InlineData(StatusCodes.Status413PayloadTooLarge, "Payload Too Large")]
+    [InlineData(StatusCodes.Status415UnsupportedMediaType, "Unsupported Media Type")]
+    public async Task TheHonouredClientErrorPublishesATitleNamingItsOwnStatus(
+        int frameworkStatus,
+        string expectedTitle)
+    {
+        HttpContext httpContext = CreateHttpContext(path: "/v1/datawindow/retrieve");
+
+        bool handled = await CreateHandler(new RecordingLogger(), out _).TryHandleAsync(
+            httpContext,
+            new BadHttpRequestException("framework prose that is never echoed", frameworkStatus),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(handled);
+        Assert.Equal(frameworkStatus, httpContext.Response.StatusCode);
+
+        JsonElement body = await ReadProblemBodyAsync(httpContext);
+
+        // The two members that contradicted each other before the fix, asserted together.
+        Assert.Equal(expectedTitle, body.GetProperty("title").GetString());
+        Assert.Equal(frameworkStatus, body.GetProperty("status").GetInt32());
+
+        // An honoured client error is the caller's request to correct, so the wire code is the
+        // structural one rather than the server-fault code [SystemErrorHandler:L1866].
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, body.GetProperty("retCode").GetInt64());
+
+        // The framework's own message names the parameter it could not bind and is therefore shaped by
+        // caller content (C-F). It never reaches the body, whatever the status.
+        Assert.DoesNotContain(
+            "framework prose",
+            body.ToString() ?? string.Empty,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A SIZE REFUSAL DESCRIBES A SIZE REFUSAL. The shared client-error prose speaks of a parameter that
+    /// could not be bound, which for a body refused before it was ever read sends the caller to inspect
+    /// fields that were never examined. The 413 detail replaces that, and publishes no limit value -
+    /// telling an unauthenticated caller exactly how large a body it may send is a disclosure the bound
+    /// exists to avoid.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    [Fact]
+    public async Task ASizeRefusalReachesTheCallerDescribedAsASizeRefusal()
+    {
+        HttpContext oversized = CreateHttpContext(path: "/v1/datawindow/retrieve");
+
+        await CreateHandler(new RecordingLogger(), out _).TryHandleAsync(
+            oversized,
+            new BadHttpRequestException(
+                "Request body too large.",
+                StatusCodes.Status413PayloadTooLarge),
+            TestContext.Current.CancellationToken);
+
+        string detail = (await ReadProblemBodyAsync(oversized))
+            .GetProperty("detail").GetString() ?? string.Empty;
+
+        Assert.Contains("exceeded the size", detail, StringComparison.Ordinal);
+        Assert.Contains("before it was read or parsed", detail, StringComparison.Ordinal);
+
+        // The misdescription this replaced.
+        Assert.DoesNotContain("required parameter is absent", detail, StringComparison.Ordinal);
+
+        // The bound's value is not published in any spelling.
+        Assert.DoesNotContain("MiB", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("bytes", detail, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"\d{4,}", detail);
+
+        // AND THE OTHER HONOURED STATUSES ARE UNCHANGED - the 413 got its own prose, it did not
+        // replace everyone's. A 415 still carries the shared bind prose.
+        HttpContext unsupported = CreateHttpContext(path: "/v1/datawindow/retrieve");
+
+        await CreateHandler(new RecordingLogger(), out _).TryHandleAsync(
+            unsupported,
+            new BadHttpRequestException("媒体类型", StatusCodes.Status415UnsupportedMediaType),
+            TestContext.Current.CancellationToken);
+
+        string shared = (await ReadProblemBodyAsync(unsupported))
+            .GetProperty("detail").GetString() ?? string.Empty;
+
+        Assert.Contains("required parameter is absent", shared, StringComparison.Ordinal);
+        Assert.NotEqual(detail, shared);
+    }
+
+    /// <summary>
+    /// THE SERVER-FAULT PROSE IS UNTOUCHED BY THE DERIVATION. A 500 keeps the title and detail that are
+    /// statements about this service, and does not acquire a framework reason phrase.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    [Fact]
+    public async Task AServerFaultKeepsItsOwnTitleAndDetail()
+    {
+        HttpContext httpContext = CreateHttpContext();
+
+        await CreateHandler(new RecordingLogger(), out _).TryHandleAsync(
+            httpContext,
+            CreateHostileException(),
+            TestContext.Current.CancellationToken);
+
+        JsonElement body = await ReadProblemBodyAsync(httpContext);
+
+        Assert.Equal(StatusCodes.Status500InternalServerError, body.GetProperty("status").GetInt32());
+
+        // Not "Internal Server Error" from the framework table - this service's own statement.
+        Assert.NotEqual(
+            "Bad Request",
+            body.GetProperty("title").GetString());
+        Assert.Equal(RetCode.UNKNOWN, body.GetProperty("retCode").GetInt64());
+    }
+
+    /// <summary>
+    /// Reads back the problem document the handler wrote, so an assertion is made against what the
+    /// caller receives rather than against a resolver's return value.
+    /// </summary>
+    /// <param name="httpContext">The context whose response body to read.</param>
+    /// <returns>The root element of the written document.</returns>
+    private static async Task<JsonElement> ReadProblemBodyAsync(HttpContext httpContext)
+    {
+        httpContext.Response.Body.Position = 0;
+
+        using JsonDocument document = await JsonDocument.ParseAsync(
+            httpContext.Response.Body,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        // Cloned because the document is disposed on return.
+        return document.RootElement.Clone();
+    }
+
+    // ----------------------------------------------------------------------------------------------
     //  FIXTURE CONSTRUCTION.
     // ----------------------------------------------------------------------------------------------
 

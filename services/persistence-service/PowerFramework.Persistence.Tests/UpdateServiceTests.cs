@@ -1648,15 +1648,27 @@ public sealed class UpdateServiceTests
     }
 
     /// <summary>
-    /// A descriptor declaring a SUBSET of the definition's columns is admitted, in any letter case.
+    /// 🔴 A descriptor declaring a SUBSET of the definition's updatable columns, with the multi-table
+    /// switch OFF, is REFUSED rather than accepted and then ignored.
     /// </summary>
     /// <remarks>
-    /// The existence test must not become a flag or completeness test: a caller that declares only the
-    /// columns it intends to write is neither wrong nor harmful, and with the switch off the definition's own
-    /// flags govern regardless.
+    /// <para>
+    /// THE ARM THAT CLOSES A SILENT DATA-INTEGRITY FAULT. With the switch off the descriptor array is never
+    /// applied, so a caller stating two updatable columns previously received <c>RetCode.OK</c> and then had
+    /// every column of the definition written - a modification to a column the caller had EXCLUDED reached
+    /// storage, and the response asserted the restriction had been accepted. A misdirected write reported as
+    /// a success is the same hazard the different-update-table arm already refuses, and it is worse here,
+    /// because a wrong table is visible in storage a caller can read while an unauthorised column is not.
+    /// </para>
+    /// <para>
+    /// THE CODE IS <c>E_INVALID_ARGUMENT</c>, matching the table arm rather than the undeclared-column arm:
+    /// the column names all EXIST, so the oracle's 无效的列名: is the wrong answer - nothing here failed to
+    /// resolve. What is wrong is the combination of a stated contract with the switch that would apply it
+    /// turned off.
+    /// </para>
     /// </remarks>
     [Fact]
-    public async Task ADescriptorDeclaringASubsetOfDeclaredColumnsIsAdmitted()
+    public async Task ADescriptorRestrictingUpdatableColumnsWithoutMultiTableIsRefused()
     {
         (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
 
@@ -1668,7 +1680,7 @@ public sealed class UpdateServiceTests
             Identitycolumn = string.Empty,
         };
 
-        PrepareUpdateResponse admitted = await service.PrepareUpdate(
+        PrepareUpdateResponse refused = await service.PrepareUpdate(
             new PrepareUpdateRequest
             {
                 Task = handle,
@@ -1678,8 +1690,283 @@ public sealed class UpdateServiceTests
             },
             Context);
 
+        Assert.Equal(WireRetCode.EInvalidArgument, refused.Status.RetCode);
+        Assert.Equal(UpdateService.DisagreeingDescriptorDiagnostic, refused.Status.ErrorText);
+
+        // ATOMIC: nothing was cleared, switched, added or installed.
+        Assert.Empty(surface.Calls);
+        Assert.Empty(surface.Adds);
+    }
+
+    /// <summary>
+    /// The SAME restricting descriptor with the multi-table switch ON is admitted, because then it governs.
+    /// </summary>
+    /// <remarks>
+    /// THE PAIR THAT PROVES THE REFUSAL IS ABOUT INERTNESS AND NOT ABOUT THE SUBSET. A restricted updatable
+    /// set is a legitimate contract - it is the whole point of the descriptor array - and with the switch on
+    /// <c>_of_updateprepare</c> resets every column's flags and re-enables only the stated ones
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L104-L129</c>], so the caller gets exactly what it asked for.
+    /// </remarks>
+    [Fact]
+    public async Task ARestrictingDescriptorWithMultiTableIsAdmitted()
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        PrepareUpdateResponse admitted = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = true,
+                DataObject = EvidencedDataObject,
+                Tables =
+                {
+                    new TableUpdateContract
+                    {
+                        Name = "COMPANY",
+                        Updatablecolumns = { "NAME", "salary" },
+                        Keycolumns = { "ID" },
+                        Identitycolumn = string.Empty,
+                    },
+                },
+            },
+            Context);
+
         Assert.Equal(WireRetCode.Ok, admitted.Status.RetCode);
         Assert.Equal("COMPANY", Assert.Single(surface.Adds).Name);
+    }
+
+    /// <summary>
+    /// A descriptor stating the definition's FULL contract is admitted with the switch off, whatever the
+    /// letter case, whatever the order, and with a duplicate.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 THE SHAPE THIS SYSTEM'S OWN DATASERVICES CONSUMER SENDS ON EVERY UPDATE. It derives the descriptor
+    /// FROM the definition and sends <c>MultiTableUpdate = false</c>, so the agreement test has to admit it
+    /// or the only cross-service update path in the estate breaks. The comparison is therefore a
+    /// case-insensitive SET comparison rather than a sequence comparison: order carries no meaning in the
+    /// oracle's script, which emits one independent line per column [<c>:L111-L129</c>], nor in the generated
+    /// statement, whose column order comes from the carrier's own one-based model.
+    /// </remarks>
+    [Fact]
+    public async Task ADescriptorAgreeingWithTheDefinitionIsAdmittedInAnyCaseOrderOrMultiplicity()
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        PrepareUpdateResponse admitted = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = false,
+                DataObject = EvidencedDataObject,
+                Tables =
+                {
+                    new TableUpdateContract
+                    {
+                        Name = "company",
+                        Updatablecolumns =
+                        {
+                            "BIRTH", "salary", "ADDRESS", "age", "NAME", "id", "NAME",
+                        },
+                        Keycolumns = { "id", "ID" },
+                        Identitycolumn = "Id",
+                        Updatewhere = UpdateWhereBuilder.KeyAndUpdatableColumnsMode,
+                        Updatekeyinplace = false,
+                    },
+                },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, admitted.Status.RetCode);
+        Assert.Equal("company", Assert.Single(surface.Adds).Name);
+    }
+
+    /// <summary>
+    /// A descriptor that states NOTHING beyond the table is admitted with the switch off: an empty array and
+    /// an empty identity column mean "unstated", not "stated empty".
+    /// </summary>
+    /// <remarks>
+    /// THE LIMIT THAT KEEPS THE NARROWING MINIMAL. A repeated field cannot distinguish absent from empty on
+    /// the wire, and the identity column's emptiness is already read as "no identity column" rather than as a
+    /// name everywhere in this class [<c>:L127-L129</c>]. So a caller naming only the table has contradicted
+    /// nothing and is asking for exactly the definition's own behaviour, which is what it gets.
+    /// </remarks>
+    [Fact]
+    public async Task ADescriptorStatingOnlyTheTableIsAdmittedWithoutMultiTable()
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        PrepareUpdateResponse admitted = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = false,
+                DataObject = EvidencedDataObject,
+                Tables = { new TableUpdateContract { Name = "COMPANY", Identitycolumn = string.Empty } },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, admitted.Status.RetCode);
+        Assert.Equal("COMPANY", Assert.Single(surface.Adds).Name);
+    }
+
+    /// <summary>
+    /// Each of the four remaining stated fields is refused on its own when it differs from the definition's.
+    /// </summary>
+    /// <param name="keyColumns">The stated key set, empty for unstated.</param>
+    /// <param name="identityColumn">The stated identity column, empty for unstated.</param>
+    /// <param name="updateWhere">The stated concurrency mode, <see langword="null"/> for unstated.</param>
+    /// <param name="updateKeyInPlace">The stated key handling, <see langword="null"/> for unstated.</param>
+    /// <remarks>
+    /// FOUR SEPARATE MISDIRECTIONS, EACH REPORTED THE SAME WAY. A stated key set that differs means the
+    /// predicate addresses different rows than declared; a stated identity column means the write-back
+    /// reports a different column; a stated <c>updatewhere</c> means the row is guarded under a policy the
+    /// caller did not choose; a stated <c>updatekeyinplace</c> means a key change takes the other statement
+    /// shape. Every one of them was previously accepted and silently discarded.
+    /// </remarks>
+    [Theory]
+    [InlineData("NAME", "", null, null)]
+    [InlineData("", "NAME", null, null)]
+    [InlineData("", "", UpdateWhereBuilder.KeyOnlyMode, null)]
+    [InlineData("", "", UpdateWhereBuilder.KeyAndModifiedColumnsMode, null)]
+    [InlineData("", "", null, true)]
+    public async Task EachStatedFieldDifferingFromTheDefinitionIsRefusedWithoutMultiTable(
+        string keyColumns,
+        string identityColumn,
+        long? updateWhere,
+        bool? updateKeyInPlace)
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        TableUpdateContract descriptor = new()
+        {
+            Name = "COMPANY",
+            Identitycolumn = identityColumn,
+        };
+
+        if (keyColumns.Length != 0)
+        {
+            descriptor.Keycolumns.Add(keyColumns);
+        }
+
+        if (updateWhere.HasValue)
+        {
+            descriptor.Updatewhere = updateWhere.Value;
+        }
+
+        if (updateKeyInPlace.HasValue)
+        {
+            descriptor.Updatekeyinplace = updateKeyInPlace.Value;
+        }
+
+        PrepareUpdateResponse refused = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = false,
+                DataObject = EvidencedDataObject,
+                Tables = { descriptor },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, refused.Status.RetCode);
+        Assert.Equal(UpdateService.DisagreeingDescriptorDiagnostic, refused.Status.ErrorText);
+        Assert.Empty(surface.Calls);
+        Assert.Empty(surface.Adds);
+    }
+
+    /// <summary>
+    /// 🔴 An <c>updatewhere</c> outside the three modes is refused whatever the multi-table switch says.
+    /// </summary>
+    /// <param name="multiTableUpdate">Both switch positions.</param>
+    /// <param name="updateWhere">Values that name no mode, on both sides of the domain.</param>
+    /// <remarks>
+    /// <para>
+    /// THE MODE DECIDES WHICH COLUMNS GUARD THE ROW, so a value naming no mode has no predicate and was
+    /// previously installed anyway - the update then ran under whichever arm an unrecognised value reached,
+    /// which is a concurrency policy of the service's choosing substituted for the caller's.
+    /// </para>
+    /// <para>
+    /// BOTH SWITCH POSITIONS, because the descriptor array is replaced wholesale and the switch is settable
+    /// on a later prepare, so admitting a mode now would leave it in place for a call that does apply it.
+    /// This refusal therefore precedes the agreement arm, which is why the mode-specific diagnostic and not
+    /// <see cref="UpdateService.DisagreeingDescriptorDiagnostic"/> is what a caller sees.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(false, 7L)]
+    [InlineData(true, 7L)]
+    [InlineData(false, 3L)]
+    [InlineData(true, -1L)]
+    [InlineData(true, long.MaxValue)]
+    public async Task AnUpdateWhereOutsideTheThreeModesIsRefusedOnBothSwitchPositions(
+        bool multiTableUpdate,
+        long updateWhere)
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        PrepareUpdateResponse refused = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = multiTableUpdate,
+                DataObject = EvidencedDataObject,
+                Tables =
+                {
+                    new TableUpdateContract
+                    {
+                        Name = "COMPANY",
+                        Identitycolumn = string.Empty,
+                        Updatewhere = updateWhere,
+                    },
+                },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, refused.Status.RetCode);
+        Assert.Equal(UpdateService.UnsupportedUpdateWhereDiagnostic, refused.Status.ErrorText);
+        Assert.Empty(surface.Calls);
+        Assert.Empty(surface.Adds);
+    }
+
+    /// <summary>
+    /// Each of the three modes that DO exist is admitted with the multi-table switch on.
+    /// </summary>
+    /// <param name="updateWhere">The three modes.</param>
+    /// <remarks>
+    /// THE COMPANION TO THE REFUSAL ABOVE, and the proof that the domain test screens rather than narrows to
+    /// one. The oracle does not implement any mode itself: it passes the value straight into
+    /// <c>Modify("DataWindow.Table.UpdateWhere = " + String(...))</c>
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L132</c>] and the runtime generates the predicate. Refusing 0 or 2
+    /// would therefore be a narrowing the legacy does not have.
+    /// </remarks>
+    [Theory]
+    [InlineData(UpdateWhereBuilder.KeyOnlyMode)]
+    [InlineData(UpdateWhereBuilder.KeyAndUpdatableColumnsMode)]
+    [InlineData(UpdateWhereBuilder.KeyAndModifiedColumnsMode)]
+    public async Task EachRealUpdateWhereModeIsAdmittedWithMultiTable(long updateWhere)
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        PrepareUpdateResponse admitted = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = true,
+                DataObject = EvidencedDataObject,
+                Tables =
+                {
+                    new TableUpdateContract
+                    {
+                        Name = "COMPANY",
+                        Identitycolumn = string.Empty,
+                        Updatewhere = updateWhere,
+                    },
+                },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, admitted.Status.RetCode);
+        Assert.Equal(updateWhere, Assert.Single(surface.Adds).UpdateWhere);
     }
 
     /// <summary>

@@ -1711,6 +1711,155 @@ public sealed class CommandAndTransactionServiceTests
     }
 
     /// <summary>
+    /// Every field on ONE response that carries the provider's message discloses at the SAME depth.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE DEFECT THIS CLOSES.</b> One provider message reached this response through three fields at
+    /// two different depths. <c>Microsoft.Data.Sqlite</c> does not hand back a bare message - it wraps it,
+    /// <c>SQLite Error 1: 'no such table: NO_SUCH_TABLE'.</c> - and in that shape the result code is a
+    /// numeric literal and the whole diagnosis is a quoted string. <c>DbError.sqlerrtext</c> went through the
+    /// envelope-preserving policy and read the condition in full, while <c>ExecResponse.sql_err_text</c> and
+    /// <c>status.error_text</c> went through the strict one and read
+    /// <c>SQLite Error &lt;redacted&gt;: '&lt;redacted&gt;'.</c> Same value, same response, two depths: a
+    /// consumer could not tell which field to trust, and a caller that named a table which does not exist
+    /// was told only that a database error had occurred.
+    /// </para>
+    /// <para>
+    /// <b>THE ASSERTION IS EQUALITY AGAINST THE POLICY, NOT A SUBSTRING SEARCH.</b> Each field is compared
+    /// with <c>RedactProviderDiagnostic</c>'s output over the same input, so a field that masked a little
+    /// differently would fail here rather than pass a "contains the column name" check.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task EveryFieldCarryingTheProviderMessageDisclosesAtTheSameDepth()
+    {
+        const string Envelope = "SQLite Error 1: 'no such table: NO_SUCH_TABLE'.";
+
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        harness.Engine.ExecuteResult = SqlState.Failed(1, Envelope);
+
+        ExecResponse response = await harness.Commands.Exec(
+            new ExecRequest
+            {
+                Task = handle,
+                Sql = "INSERT INTO NO_SUCH_TABLE (A) VALUES (?)",
+                Parameters = { Positional(BoundLiteral) },
+                Autocommit = AutoCommitMode.AcOff,
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.EDbError, response.Status.RetCode);
+        Assert.NotNull(response.Status.DbError);
+
+        string expected = SqlRedactor.Instance.RedactProviderDiagnostic(Envelope);
+
+        // THE THREE FIELDS AGREE, and each equals the policy's own output.
+        Assert.Equal(expected, response.Status.DbError.Sqlerrtext);
+        Assert.Equal(expected, response.SqlErrText);
+        Assert.Equal(expected, response.Status.ErrorText);
+
+        // AND THE CONDITION IS LEGIBLE, which is what the depth is for. The envelope quotes no value, so
+        // the whole message survives - this is the row that shows the defect was a loss of diagnosis rather
+        // than a difference of formatting.
+        Assert.Equal(Envelope, expected);
+        Assert.Contains("no such table", response.SqlErrText, StringComparison.Ordinal);
+        Assert.Contains("no such table", response.Status.ErrorText, StringComparison.Ordinal);
+
+        // THE STATEMENT FIELD IS UNAFFECTED AND STILL STRICTLY MASKED. The widening is per field class, so
+        // the field that carries interpolated literals by construction keeps the strict policy (C-F).
+        Assert.DoesNotContain(BoundLiteral, response.Status.DbError.Sqlsyntax, StringComparison.Ordinal);
+        Assert.Contains(RedactionPlaceholder, response.Status.DbError.Sqlsyntax, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A value the provider quoted INSIDE its message is still masked in every one of those fields.
+    /// </summary>
+    /// <remarks>
+    /// <b>THIS IS THE ROW THAT MAKES THE WIDENING SAFE RATHER THAN A HOLE.</b> Preserving the envelope
+    /// preserves the wrapper and the result code only; the interior still goes through the identical
+    /// literal-scoped scan. Without this row, "the fields now agree" would be indistinguishable from
+    /// "masking was switched off on two of them".
+    /// </remarks>
+    [Fact]
+    public async Task AValueQuotedInsideTheProviderMessageIsStillMaskedOnEveryField()
+    {
+        const string Secret = "Kenneth-Fixture-Secret";
+        const string Envelope = "SQLite Error 19: 'CHECK constraint failed: name > '" + Secret + "''.";
+
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        harness.Engine.ExecuteResult = SqlState.Failed(19, Envelope);
+
+        ExecResponse response = await harness.Commands.Exec(
+            new ExecRequest
+            {
+                Task = handle,
+                Sql = "UPDATE COMPANY SET NAME = ? WHERE ID = ?",
+                Parameters = { Positional(BoundLiteral), Positional(7L) },
+                Autocommit = AutoCommitMode.AcOff,
+            },
+            Context);
+
+        Assert.NotNull(response.Status.DbError);
+
+        foreach (string field in new[]
+        {
+            response.Status.DbError.Sqlerrtext,
+            response.SqlErrText,
+            response.Status.ErrorText,
+        })
+        {
+            Assert.DoesNotContain(Secret, field, StringComparison.Ordinal);
+            Assert.Contains(RedactionPlaceholder, field, StringComparison.Ordinal);
+
+            // The condition survives even though the value does not.
+            Assert.Contains("CHECK constraint failed", field, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// A diagnostic that is NOT the provider's envelope is masked exactly as it was before.
+    /// </summary>
+    /// <remarks>
+    /// The shape must match the WHOLE input or not at all, so a framework-authored sentence, a bare message
+    /// and a statement-bearing string all take the strict path unchanged. This is what confines the widening
+    /// to the one shape it was written for, and it is asserted on the WIRE fields rather than only on the
+    /// redactor, because the redactor's own contract test cannot see which policy a projection selected.
+    /// </remarks>
+    [Theory]
+    [InlineData("NOT NULL constraint failed: COMPANY.NAME")]
+    [InlineData("SELECT * FROM COMPANY WHERE name = 'Kenneth-Fixture-Row'")]
+    [InlineData("SQLITE Error 19: 'NOT NULL constraint failed: COMPANY.NAME'.")]
+    public async Task ADiagnosticThatIsNotTheProviderEnvelopeIsMaskedExactlyAsBefore(string diagnostic)
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+
+        harness.Engine.ExecuteResult = SqlState.Failed(19, diagnostic);
+
+        ExecResponse response = await harness.Commands.Exec(
+            new ExecRequest
+            {
+                Task = handle,
+                Sql = "UPDATE COMPANY SET NAME = ? WHERE ID = ?",
+                Parameters = { Positional(BoundLiteral), Positional(7L) },
+                Autocommit = AutoCommitMode.AcOff,
+            },
+            Context);
+
+        string strict = SqlRedactor.Instance.Redact(diagnostic);
+
+        Assert.NotNull(response.Status.DbError);
+        Assert.Equal(strict, response.Status.DbError.Sqlerrtext);
+        Assert.Equal(strict, response.SqlErrText);
+        Assert.Equal(strict, response.Status.ErrorText);
+    }
+
+    /// <summary>
     /// The outbound projection CANNOT be weakened by handing it a permissive redactor - it reaches its
     /// policy directly and takes no policy argument at all.
     /// </summary>
@@ -2285,6 +2434,173 @@ public sealed class CommandAndTransactionServiceTests
 
         Assert.Equal(WireRetCode.Ok, end.Status.RetCode);
         Assert.Equal(0, harness.Sessions.Count);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    //  THE DESCRIPTOR'S autocommit MEMBER - REFUSED, NEVER APPLIED, NEVER PART OF THE POOL KEY
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// A begin request whose descriptor sets <c>autocommit</c> is refused <c>E_INVALID_ARGUMENT</c>,
+    /// no session is minted, no pool reference is taken and no connection is opened.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>ACCEPTING IT SILENTLY WAS A LOST UPDATE REPORTED AS A SUCCESS, AND THAT IS WHAT THIS PINS.</b>
+    /// The oracle erases the member before it can reach anything - <c>_transData.AutoCommit = false</c>
+    /// under 擦除连接目标无关的参数
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L118-L119</c>] - and its
+    /// descriptor-to-transaction transfer is the SEVEN-field copy that touches neither <c>autocommit</c>
+    /// nor <c>userparm</c> [<c>n_cst_thread_trans.sru:L343-L354</c>]. Because <c>of_addref</c> keys pool
+    /// entries on WHOLE-descriptor equality, a session that kept the flag resolved to a DIFFERENT pooled
+    /// connection from the tasks created on it, which acquire with the erased descriptor: the caller's
+    /// commit met the auto-committing engine and was refused by the oracle's own guard, while its write sat
+    /// in the other engine's explicit transaction and was rolled back when the task's lease dropped.
+    /// </para>
+    /// <para>
+    /// The refusal is AAP §0.1.5 applied literally - narrow with a defined error rather than widen with a
+    /// guess - and it is asserted by EFFECT as well as by code: nothing was applied, nothing connected and
+    /// the registry stayed empty, because a refusal that still took a pool reference would leak one.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ADescriptorThatSetsAutoCommitIsRefusedAndNothingIsAcquired()
+    {
+        Harness harness = new();
+
+        TransactionDescriptor descriptor = Descriptor();
+        descriptor.Autocommit = true;
+
+        BeginSessionResponse response = await harness.Transactions.BeginSession(
+            new BeginSessionRequest { Descriptor_ = descriptor },
+            Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, response.Status.RetCode);
+
+        // The refusal NAMES the member and every supported route to the same effect, so a caller can act
+        // on it, and quotes no handle or credential.
+        Assert.Contains("autocommit", response.Status.ErrorText, StringComparison.Ordinal);
+        Assert.Contains("SetAutoCommit", response.Status.ErrorText, StringComparison.Ordinal);
+        Assert.Contains("UpdateRequest", response.Status.ErrorText, StringComparison.Ordinal);
+        Assert.Contains("ExecRequest", response.Status.ErrorText, StringComparison.Ordinal);
+        Assert.DoesNotContain(SentinelLogPass, response.Status.ErrorText, StringComparison.Ordinal);
+
+        // Nothing was acquired: no session handle, no descriptor application, no connect, no pool entry.
+        Assert.Null(response.Session);
+        Assert.Equal(0, harness.Engine.ApplyCalls);
+        Assert.Equal(0, harness.Engine.Handle);
+        Assert.Equal(0, harness.Sessions.Count);
+        Assert.Equal(0, harness.Pool.UpperBound);
+    }
+
+    /// <summary>
+    /// An explicitly false <c>autocommit</c> member is admitted, because false and absent are the same
+    /// request and both ask for the default.
+    /// </summary>
+    /// <remarks>
+    /// The member is a plain proto3 <c>bool</c>, so the guard can only distinguish true from
+    /// not-true - which is exactly the distinction that matters, since only true asks for behaviour the
+    /// oracle has no route for. The fixture descriptor already sets it false, so this is the ordinary path
+    /// every other case in this file takes; asserted explicitly so a future tightening of the guard into
+    /// "the field was present" fails here rather than in production.
+    /// </remarks>
+    [Fact]
+    public async Task AnExplicitlyFalseAutoCommitMemberIsAdmitted()
+    {
+        Harness harness = new();
+
+        TransactionDescriptor descriptor = Descriptor();
+        descriptor.Autocommit = false;
+
+        BeginSessionResponse response = await harness.Transactions.BeginSession(
+            new BeginSessionRequest { Descriptor_ = descriptor },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
+        Assert.NotNull(response.Session);
+    }
+
+    /// <summary>
+    /// The descriptor never moves the engine's auto-commit mode: the seven-field transfer does not carry
+    /// the member, so only <c>SetAutoCommit</c> writes it.
+    /// </summary>
+    /// <remarks>
+    /// The oracle's transfer copies dbms, servername, database, logid, logpass, dbparm and lock
+    /// [<c>n_cst_thread_trans.sru:L343-L354</c>] and touches neither <c>autocommit</c> nor
+    /// <c>userparm</c>; the pooled transaction's own interface says the same in its contract. An engine
+    /// that adopted the member from a descriptor was the second half of the lost update, because it made
+    /// the session's mode disagree with the mode its tasks' connection was in. Asserted through the
+    /// recorded writes rather than the flag's value, so an adoption that happened to write the same value
+    /// still fails.
+    /// </remarks>
+    [Fact]
+    public async Task ApplyingADescriptorWritesNoAutoCommitMode()
+    {
+        Harness harness = new();
+        SessionHandle session = await OpenSession(harness);
+
+        Assert.Equal(1, harness.Engine.ApplyCalls);
+        Assert.Empty(harness.Engine.AutoCommitWrites);
+
+        // The one member that does move it, so the emptiness above is a fact about the descriptor path
+        // rather than about a double that ignores the mode altogether.
+        SetTransactionAutoCommitResponse moved = await harness.Transactions.SetAutoCommit(
+            new SetTransactionAutoCommitRequest { Session = session, Autocommit = true },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, moved.Status.RetCode);
+        Assert.Equal([true], harness.Engine.AutoCommitWrites);
+    }
+
+    /// <summary>
+    /// A commit and a rollback on an auto-committing session answer the oracle's plain <c>FAILED</c> WITH
+    /// a diagnostic beside it, rather than a bare code and an empty string.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The CODE is the oracle's and is unchanged: <c>if AutoCommit then return RetCode.FAILED</c> is the
+    /// first test in both verbs [<c>n_cst_thread_trans.sru:L185</c>, <c>:L240</c>]. What is asserted here
+    /// is the text, in a field PowerScript has no channel for - a function returning <c>long</c> cannot
+    /// carry one - because a bare <c>-1</c> on a refusal that means "your work was never in a transaction"
+    /// is unreadable, and reading it was how a caller lost a write without learning anything.
+    /// </para>
+    /// <para>
+    /// The engine is NOT reached on either arm, which is the guard's own shape: the oracle returns before
+    /// it touches the transaction.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task CommitAndRollbackUnderAutoCommitCarryADiagnosticBesideTheOraclesFailedCode()
+    {
+        Harness harness = new();
+        SessionHandle session = await OpenSession(harness);
+
+        SetTransactionAutoCommitResponse enabled = await harness.Transactions.SetAutoCommit(
+            new SetTransactionAutoCommitRequest { Session = session, Autocommit = true },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, enabled.Status.RetCode);
+
+        CommitResponse commit = await harness.Transactions.Commit(
+            new CommitRequest { Session = session },
+            Context);
+
+        Assert.Equal(WireRetCode.Failed, commit.Status.RetCode);
+        Assert.NotEmpty(commit.Status.ErrorText);
+        Assert.Contains("auto-committing", commit.Status.ErrorText, StringComparison.Ordinal);
+        Assert.Contains("SetAutoCommit", commit.Status.ErrorText, StringComparison.Ordinal);
+        Assert.Null(commit.Status.DbError);
+
+        RollbackResponse rollback = await harness.Transactions.Rollback(
+            new RollbackRequest { Session = session },
+            Context);
+
+        Assert.Equal(WireRetCode.Failed, rollback.Status.RetCode);
+        Assert.Contains("auto-committing", rollback.Status.ErrorText, StringComparison.Ordinal);
+
+        // The oracle returns before it reaches the transaction on both arms.
+        Assert.Equal(0, harness.Engine.CommitCalls);
+        Assert.Equal(0, harness.Engine.RollbackCalls);
     }
 
     /// <summary>

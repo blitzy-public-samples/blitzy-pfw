@@ -2558,6 +2558,43 @@ internal abstract class SqlTaskProxyBase : ISqlTaskProxy, IDisposable
     }
 
     /// <summary>
+    /// The composition root's entry point into <see cref="OnPrepare"/> - the port of the substrate
+    /// DISPATCHING <c>onprepare</c> on the CALLER side before the worker's body runs.
+    /// </summary>
+    /// <returns><see cref="OnPrepare"/>'s answer, which is the substrate's continue convention.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this exists at all.</b> <see cref="OnPrepare"/> is <see langword="protected"/> because the
+    /// oracle declares it as an EVENT, and an event is raised by the substrate rather than called by a
+    /// peer. This service has no PowerBuilder substrate, so whichever component dispatches the task plays
+    /// that part, and this is the seam it raises the caller-side event through. It is the exact mirror of
+    /// <c>Tasks/SqlTaskBase.RunPrepare</c>, which raises the WORKER-side event; the oracle raises both on
+    /// every dispatch, so a port that reaches only one of them diverges.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>PER DISPATCH, AND WHAT WAS ACTUALLY MISREPORTED WITHOUT IT.</b> The caller-side prepare body
+    /// clears the state that belongs to ONE run: the latched database error here in the base
+    /// [<c>n_cst_threading_task_sqlbase.sru:L208</c>], and in the update proxy's override the three row
+    /// counters and the per-table identity blocks [<c>n_cst_threading_task_sqlupdate.sru:L295-L298</c>].
+    /// Those counters ACCUMULATE - <c>_nRowsInserted += inserted</c> [<c>:L66</c>] - because the oracle
+    /// fires its count event once per updated TABLE and a total has to survive the loop. So without a
+    /// per-dispatch raise a second update on the same task reported the SUM of both runs: one inserted row
+    /// answered "2 inserted" and handed back two identity blocks for one table. A caller reading either
+    /// number acts on it - the counts are how it learns what its payload did, and the identity blocks are
+    /// how it learns which keys the database assigned - so the misreport is a data-integrity fault rather
+    /// than a cosmetic one.
+    /// </para>
+    /// <para>
+    /// <b>What it deliberately does NOT disturb, which is why raising it after the setters is safe.</b>
+    /// Neither <see cref="TransDataInstalled"/> nor <see cref="ParamsInstalled"/> is touched, and the
+    /// update proxy's override leaves the multi-table flag and the retained update object standing - only
+    /// <see cref="Reset"/> clears those. Configuration installed for a run therefore survives INTO that
+    /// run, which is the divergence between the two paths that <see cref="Reset"/> documents.
+    /// </para>
+    /// </remarks>
+    internal long RunPrepare() => OnPrepare();
+
+    /// <summary>
     /// Attaches the worker and borrows its commit signal - the port of <c>event oninit</c>
     /// [<c>n_cst_threading_task_sqlbase.sru:L213-L221</c>].
     /// </summary>

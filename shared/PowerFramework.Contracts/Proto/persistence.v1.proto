@@ -2543,6 +2543,31 @@ message PoolKeepAliveSettings {
 //  autocommit does not survive into a task, and per-statement commit policy is C-07's AutoCommitMode
 //  instead. Preserved, not corrected (C-B).
 //
+//  🔴 CONSEQUENTLY, SETTING autocommit ON A BeginSession DESCRIPTOR IS REFUSED `E_INVALID_ARGUMENT`, AND
+//  THE FIELD STAYS ON THE MESSAGE. The two facts above leave the member nothing to do: the oracle erases
+//  it before it can reach the pool, and its descriptor-to-transaction transfer never copies it, so there
+//  is no legacy behaviour for a set flag to reproduce and honouring one would be behaviour this port
+//  invented (C-B). Accepting it silently was worse than either, and was measured: because of_addref keys
+//  entries on WHOLE-descriptor equality, a session opened with the flag set resolved to a DIFFERENT
+//  pooled connection from the tasks created on it - which acquire with the ERASED descriptor - so the
+//  caller's Commit met the auto-committing engine and was refused by the oracle's own guard
+//  [n_cst_thread_trans.sru:L185, :L240] while its write sat in the other engine's explicit transaction
+//  and was rolled back when the task's lease dropped. An Update answered `ret_code: OK` with
+//  `rows_updated: 1` and storage still held the old row, with no diagnostic anywhere. This is AAP §0.1.5
+//  applied literally - narrow the contract with a defined error rather than widen it with a guess - and
+//  it matches how BeginSession already answers the sibling incoherence on keep_alive. The FIELD remains
+//  because this message mirrors the legacy STRUCTURE field for field; the REFUSAL is about the request.
+//
+//  THE THREE SUPPORTED ROUTES TO A COMMIT POLICY, none of which is this field:
+//      TransactionService.SetAutoCommit    the session's connection-level mode  (C-08)
+//      UpdateRequest.autocommit           commit one update                    (C-06, plain bool)
+//      ExecRequest.autocommit             per-statement AutoCommitMode         (C-07, three-valued)
+//
+//  AND A COMMIT OR ROLLBACK ON AN AUTO-COMMITTING SESSION ANSWERS THE ORACLE'S PLAIN `FAILED` WITH A
+//  SENTENCE BESIDE IT. The code is unchanged [n_cst_thread_trans.sru:L185, :L240]; only error_text is
+//  populated, a field PowerScript has no channel for, because a bare -1 on a data-integrity refusal is
+//  unreadable.
+//
 //  ================= logpass : WRITE-ONLY, AND ENFORCED STRUCTURALLY =========================
 //  THE RULE: it may be SUPPLIED ON A REQUEST. It is NEVER RETURNED ON A RESPONSE and NEVER WRITTEN TO
 //  A LOG. This is a C-F obligation as much as a design choice - it is a password field, so its
@@ -2615,6 +2640,10 @@ message TransactionDescriptor {
   //
   // Note the two quirks recorded above: the legacy accessors never copy this field, and a task erases
   // it outright when handed the descriptor.
+  //
+  // 🔴 SETTING IT TRUE ON BeginSession IS REFUSED `E_INVALID_ARGUMENT`. Leave it unset and choose a
+  // commit policy with SetAutoCommit, UpdateRequest.autocommit or ExecRequest.autocommit. The header
+  // above this message records the measurement that made the refusal necessary.
   bool autocommit = 8;
 
   // The provider-specific extra parameter string - NINTH and last.

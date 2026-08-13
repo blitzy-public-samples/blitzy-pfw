@@ -446,6 +446,102 @@ public sealed class DataServicesProxySessionBindingTests
     /// <c>500</c> or <c>399</c> falls back rather than being trusted as a classification.
     /// </para>
     /// </remarks>
+
+    /// <summary>
+    /// The problem title FOLLOWS the resolved status instead of announcing "Bad Request" for every
+    /// honoured client status.
+    /// </summary>
+    /// <param name="responseStatus">The status the response carries.</param>
+    /// <param name="expectedTitle">The title the document must carry.</param>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THE DEFECT WAS A TITLE THAT CONTRADICTED THE STATUS ON THE SAME LINE OF THE SAME DOCUMENT. The
+    /// handler chose between two fixed strings on a single <c>status &gt;= 500</c> test, so every 4xx it
+    /// honoured - a 413 from the ingress size bound, a 415 from an unacceptable media type - answered
+    /// <c>{"title":"Bad Request","status":413}</c>. A consumer keying on the title and a consumer keying on
+    /// the status read two different answers, and neither can work around the other.
+    /// </para>
+    /// <para>
+    /// THE 413 SPELLING IS THE FRAMEWORK TABLE'S, NOT RFC 9110'S. That table still returns RFC 7231's
+    /// "Payload Too Large" where RFC 9110 renamed the status "Content Too Large". Both name the same
+    /// status, a consumer branches on the number, and this service's OTHER problem-producing path already
+    /// titles from the same table - so asserting the table's spelling is what keeps ONE title source for
+    /// the whole service rather than reintroducing a second that can disagree.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(StatusCodes.Status400BadRequest, "Bad Request")]
+    [InlineData(StatusCodes.Status413PayloadTooLarge, "Payload Too Large")]
+    [InlineData(StatusCodes.Status415UnsupportedMediaType, "Unsupported Media Type")]
+    [InlineData(StatusCodes.Status408RequestTimeout, "Request Timeout")]
+    [InlineData(StatusCodes.Status431RequestHeaderFieldsTooLarge, "Request Header Fields Too Large")]
+    public void TheProblemTitleFollowsTheResolvedStatus(int responseStatus, string expectedTitle) =>
+        Assert.Equal(expectedTitle, SystemErrorHandler.ResolveClientErrorTitle(responseStatus));
+
+    /// <summary>
+    /// A status the framework's phrase table does not name still produces a non-empty title.
+    /// </summary>
+    /// <remarks>
+    /// THE FALLBACK IS WHY THE OLD CONSTANT IS KEPT RATHER THAN DELETED. The table answers an unassigned
+    /// code with an empty string, and a problem document whose title is empty is worse than one whose title
+    /// is approximate - so the fixed string survives as the fallback for a status nothing names.
+    /// </remarks>
+    [Fact]
+    public void AStatusTheFrameworkDoesNotNameStillCarriesATitle()
+    {
+        string title = SystemErrorHandler.ResolveClientErrorTitle(499);
+
+        Assert.False(string.IsNullOrWhiteSpace(title));
+    }
+
+    /// <summary>
+    /// A size refusal describes a size refusal, and every other client status keeps the shared prose.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THE SHARED PROSE ACTIVELY MISDESCRIBED THIS ONE CASE rather than merely being generic. A 413
+    /// carried "A required parameter is absent, or a value supplied cannot be bound to the shape the
+    /// operation publishes" - which sends a caller to audit field names and types for a body that was
+    /// never parsed at all. The refusal happens at the ingress bound before any binding, so no amount of
+    /// correcting the body's shape helps; what helps is sending less, and that is what the detail now says.
+    /// </para>
+    /// <para>
+    /// THE CONFIGURED LIMIT IS ASSERTED ABSENT. Publishing it would tell an unauthenticated caller exactly
+    /// how large a request it may send before being refused, which is the one fact that makes the bound
+    /// easy to probe. The contract states that a bound exists; its value is a property of a deployment.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ASizeRefusalDescribesASizeRefusalAndNothingElseChanges()
+    {
+        string oversized =
+            SystemErrorHandler.ResolveClientErrorDetail(StatusCodes.Status413PayloadTooLarge);
+
+        Assert.Contains("exceeded the size", oversized, StringComparison.Ordinal);
+        Assert.Contains("before it was read or parsed", oversized, StringComparison.Ordinal);
+        Assert.Contains("Send a smaller body", oversized, StringComparison.Ordinal);
+
+        // The misdescription is gone: nothing here sends a caller to check its field shapes.
+        Assert.DoesNotContain("required parameter is absent", oversized, StringComparison.Ordinal);
+        Assert.DoesNotContain("cannot be bound", oversized, StringComparison.Ordinal);
+
+        // AND THE BOUND ITSELF IS NOT PUBLISHED. No byte count, and no unit that would carry one.
+        Assert.DoesNotContain("MiB", oversized, StringComparison.Ordinal);
+        Assert.DoesNotContain("bytes", oversized, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"\d{4,}", oversized);
+
+        // EVERY OTHER CLIENT STATUS KEEPS THE SHARED PROSE, because for each of them it is accurate: they
+        // really are shape-or-parameter problems. A bespoke sentence per status would be prose for its own
+        // sake and would multiply the places a wording can drift.
+        string shared = SystemErrorHandler.ResolveClientErrorDetail(StatusCodes.Status400BadRequest);
+
+        Assert.Contains("required parameter is absent", shared, StringComparison.Ordinal);
+
+        Assert.Equal(
+            shared,
+            SystemErrorHandler.ResolveClientErrorDetail(StatusCodes.Status415UnsupportedMediaType));
+    }
+
     [Theory]
 
     // HONOURED: the client range, at both ends and in the middle.

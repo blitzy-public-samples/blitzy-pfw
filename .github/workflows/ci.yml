@@ -90,9 +90,12 @@
 #
 #  5. TOOLCHAIN FACTS THAT BREAK THE BUILD IF A READER MISSES THEM
 #
-#    * .NET 10 emits the XML `.slnx` solution format, and legacy `.slnf` solution FILTERS are
-#      incompatible with it: a hand-authored `.slnf` pointing at a `.slnx` fails with MSB4014 during
-#      restore, build AND test. There is no `.slnf` in this repository and none may be added. Build
+#    * .NET 10 emits the XML `.slnx` solution format. There is no `.slnf` solution FILTER in this
+#      repository and none may be added - because a filter's project list must be kept in exact
+#      agreement with the solution BY HAND and every drift fails hard, not because filters are
+#      broken. An earlier form of this note claimed a filter over a `.slnx` fails with MSB4014 in
+#      all three verbs; that was measured false on the pinned SDK, and docs/BUILD.md section 2
+#      carries the measurement and the code's real trigger. Build
 #      scoping is done by the per-service `.slnx` files, and EXACTLY ONE of them sits in each service
 #      directory - which is what lets the bare `dotnet restore`, `dotnet build` and `dotnet test`
 #      verbs below resolve it with no `-p`, `--project` or `-s` argument, and what makes each service
@@ -308,24 +311,36 @@ jobs:
   #     something is CharacterizationWorkflowGuardTests in shared/PowerFramework.Contracts.Tests. The
   #     `solution` job below executes it BY NAME, ahead of the contract suites, precisely so a store
   #     failure is attributable on the job summary rather than arriving as one red line among several
-  #     hundred. What runs HERE is the single assertion that guard cannot make without an SDK: the
-  #     ROSTER, checked with `find` in milliseconds on the one leg that has no `needs`.
+  #     hundred.
   #
-  #     NO EXTERNAL VALIDATOR IS INSTALLED, and that is worth stating because an earlier revision of
-  #     this job installed one: `python3 -m pip install --break-system-packages
-  #     'check-jsonschema==0.35.0'` ran here and validated the definitions against the schema. It was
-  #     removed for three reasons that all point the same way. It MUTATED the runner's system Python
-  #     interpreter in order to work, and `--break-system-packages` is the flag that says so out loud.
-  #     Its version lived in this file, while Directory.Packages.props is this repository's only
-  #     authoritative dependency inventory and has no expression for a pip package - so the one
-  #     dependency CI added was the one dependency nothing could audit. And it duplicated a guard the
-  #     repository already owns, already tests and already runs. The C# guard is strictly the stronger
-  #     of the two: it resolves every legacy locator to a real line of a real file, requires every
-  #     determinism mask to apply to BOTH halves of a pair, checks each workflow's recordings against
-  #     its declared execution status, and fails when the schema grows a member it does not yet cover -
-  #     none of which a JSON Schema validator can do at all. The cost of the removal is recorded rather
-  #     than hidden: the schema verdict now arrives in the `solution` job after a restore and a build
-  #     instead of within seconds here.
+  #     THREE STEPS RUN HERE, IN THIS ORDER, AND EACH DOES SOMETHING THE NEXT CANNOT. The ROSTER is
+  #     asserted with `find` first, because `check-jsonschema` passes VACUOUSLY on an empty file list -
+  #     a glob that matched nothing reports "ok" and proves nothing. Then the SCHEMA is validated
+  #     against all fifteen definitions, from a hash-locked closure installed into a directory. Both
+  #     run on the one leg that has no `needs`, so a malformed definition fails in seconds rather than
+  #     after a restore and a build.
+  #
+  #     AN EXTERNAL VALIDATOR *IS* INSTALLED, AND ITS TWO EARLIER PROBLEMS WERE FIXED RATHER THAN
+  #     TRADED AWAY. The first revision ran `python3 -m pip install --break-system-packages
+  #     'check-jsonschema==0.35.0'`, which MUTATED the runner's system interpreter - the flag says so
+  #     out loud - and pinned one distribution while letting pip resolve fourteen more from whatever
+  #     was current at install time (CWE-1357). Both are addressed at the install step below: the
+  #     closure is `--require-hashes` locked across every transitive requirement, refuses a source
+  #     distribution with `--only-binary :all:`, and is installed `--target` a disposable directory
+  #     reached through PYTHONPATH rather than over the system Python. Its requirements file is the
+  #     inventory for it, and that file states its own scope - Directory.Packages.props governs NuGet
+  #     and has no expression for a pip package, so a second inventory is the honest answer rather than
+  #     a gap.
+  #
+  #     AND IT DOES NOT DUPLICATE THE C# GUARD - the two own different halves. The schema owns
+  #     `additionalProperties: false`, the enums, the conditional exemptions, the required-member sets
+  #     and the artifact filename patterns. The guard owns what no schema validator can express:
+  #     resolving every legacy locator to a real line of a real file, requiring every determinism mask
+  #     to apply to BOTH halves of a pair, checking each workflow's recordings against its declared
+  #     execution status, and failing when the schema grows a member it does not yet cover. An earlier
+  #     revision deleted the invocation on the reasoning that the guard subsumes it; it does not, and
+  #     the deletion left the closure installed and never used, so the job paid for a dependency and
+  #     enforced nothing with it.
   #
   #  2. THE WHITESPACE GATE, and the revision it diffs against is the whole point. A bare
   #     `git diff --check` compares the WORKING TREE with the index and therefore exits 0 on a clean
@@ -461,6 +476,37 @@ jobs:
             exit 1
           fi
           test -f characterization/workflows/workflow.schema.json
+
+      # ------------------------------------------------------------------------------------------
+      #  AND THE SCHEMA IS ACTUALLY RUN AGAINST THEM, WHICH IS THE STEP THAT WAS MISSING
+      #
+      #  The closure above was installed and PYTHONPATH was exported, and then nothing invoked the
+      #  validator - so the job carried the cost of a hash-locked dependency and got none of its
+      #  benefit, while three statements in two files described a schema gate that did not run. The
+      #  header for this job says why it belongs HERE rather than only in `solution`: this is the one
+      #  leg with no `needs`, so a malformed definition fails in seconds instead of after a restore
+      #  and a build.
+      #
+      #  IT DOES NOT DUPLICATE THE C# GUARD, AND THE DIVISION IS THE POINT. The schema owns what a
+      #  schema can own and nothing else can: `additionalProperties: false` on every object, the
+      #  enums, the conditional exemptions, the required-member sets and the artifact filename
+      #  patterns. CharacterizationWorkflowGuardTests owns what no schema validator can express -
+      #  resolving every legacy locator to a real line of a real file, requiring each determinism mask
+      #  to apply to BOTH halves of a pair, checking recordings against declared execution status, and
+      #  failing when the schema grows a member it does not cover. Neither is a substitute for the
+      #  other; running only the second was the state this step corrects.
+      #
+      #  REACHED THROUGH THE PYTHONPATH'D CLOSURE via `python3 -m`, never through a `check-jsonschema`
+      #  entry point on PATH: the closure was installed with `--target`, so no console script exists,
+      #  and resolving a bare name from PATH could pick up a different interpreter's copy.
+      # ------------------------------------------------------------------------------------------
+      - name: Validate the characterization workflow definitions against the schema
+        run: |
+          set -euo pipefail
+          python3 -m check_jsonschema \
+            --schemafile characterization/workflows/workflow.schema.json \
+            characterization/workflows/*.yaml
+          echo 'Every characterization workflow definition conforms to workflow.schema.json.'
 
       # Diffed from git's empty tree to HEAD rather than from the working tree - see this job's header
       # for why a bare `git diff --check` cannot catch this class at all.

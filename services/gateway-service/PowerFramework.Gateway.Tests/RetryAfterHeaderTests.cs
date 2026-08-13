@@ -17,6 +17,7 @@
 // =====================================================================================================
 
 using System.Globalization;
+using Grpc.Core;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
@@ -185,6 +186,125 @@ public sealed class RetryAfterHeaderTests
             .ToString(CultureInfo.InvariantCulture);
 
         Assert.Equal(expected, Assert.Single(context.Response.Headers[HeaderName].ToArray()));
+    }
+
+    /// <summary>
+    /// An interval the UPSTREAM stated is preferred over this gateway's configured delta.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE TWO NUMBERS ARE DELIBERATELY DIFFERENT AND THE UPSTREAM'S IS THE LARGER, which is the case that
+    /// matters: substituting the shorter configured delta would send the caller back before the upstream's
+    /// window has replenished, into a refusal the upstream had already told it how to avoid (issue INFO-3).
+    /// </para>
+    /// <para>
+    /// Only an upstream INGRESS refusal states an interval. A session or handle ceiling answered in band as
+    /// <c>E_BUSY</c> states none - it clears when something is released rather than on a schedule - and the
+    /// rows above prove that case still answers with the configured delta.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AnUpstreamStatedIntervalIsPreferredOverTheConfiguredDelta()
+    {
+        DefaultHttpContext context = NewContext(TimeSpan.FromSeconds(5));
+
+        _ = DataServicesProxyEndpoints.BuildProblem(
+            context,
+            Refusal(StatusCodes.Status429TooManyRequests) with { RetryAfterSeconds = 60L });
+
+        Assert.Equal("60", Assert.Single(context.Response.Headers[HeaderName].ToArray()));
+    }
+
+    /// <summary>
+    /// A status other than a capacity refusal carries no delta even when an upstream stated one.
+    /// </summary>
+    /// <remarks>
+    /// The condition on the header is the STATUS, not the availability of a number. A 503 carrying an
+    /// upstream interval would be a fabricated availability promise - the thing AAP 0.8.5 forbids this
+    /// refactor from asserting - so the presence of a stated interval must not widen the condition.
+    /// </remarks>
+    [Theory]
+    [InlineData(StatusCodes.Status503ServiceUnavailable)]
+    [InlineData(StatusCodes.Status409Conflict)]
+    [InlineData(StatusCodes.Status500InternalServerError)]
+    public void AStatedIntervalDoesNotWidenTheConditionToOtherStatuses(int httpStatus)
+    {
+        DefaultHttpContext context = NewContext(TimeSpan.FromSeconds(5));
+
+        _ = DataServicesProxyEndpoints.BuildProblem(
+            context,
+            Refusal(httpStatus) with { RetryAfterSeconds = 30L });
+
+        Assert.False(
+            context.Response.Headers.ContainsKey(HeaderName),
+            $"Status {httpStatus} carried a {HeaderName} header because an upstream stated an interval. The "
+                + "condition is the status, not the availability of a number - see ApplyRetryAfter.");
+    }
+
+    /// <summary>
+    /// The trailer is read rather than trusted: only a positive whole number is accepted.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>"0"</c> IS THE ROW THAT MATTERS. Relaying it would tell a caller to retry immediately, which is
+    /// the one answer a capacity refusal must not give - and it would do so while looking like a considered
+    /// value. Every rejected shape falls back to the configured delta rather than to no header at all.
+    /// </para>
+    /// <para>
+    /// The leading-space case is not pedantry: the parse admits no whitespace and no sign, so a producer
+    /// that formatted the value loosely is treated as having stated nothing rather than being guessed at.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("60", 60L)]
+    [InlineData("1", 1L)]
+    [InlineData("0", null)]
+    [InlineData("-5", null)]
+    [InlineData("", null)]
+    [InlineData("soon", null)]
+    [InlineData(" 60", null)]
+    [InlineData("60.5", null)]
+    public void OnlyAPositiveWholeNumberOfSecondsIsAcceptedFromAnUpstream(string stated, long? expected)
+    {
+        Metadata trailers = [];
+
+        trailers.Add(DataServicesProxyEndpoints.UpstreamRetryAfterTrailer, stated);
+
+        RpcException failure = new(
+            new Status(StatusCode.ResourceExhausted, "An ingress bound was met."),
+            trailers);
+
+        Assert.Equal(expected, DataServicesProxyEndpoints.UpstreamRetryAfterSeconds(failure));
+    }
+
+    /// <summary>
+    /// A refusal that states nothing reads as nothing, so the configured delta stands.
+    /// </summary>
+    /// <remarks>
+    /// This is the upstream CONCURRENCY-link refusal and every pre-existing producer: no trailer at all.
+    /// Reading it must answer null rather than raising, because that path is the common one.
+    /// </remarks>
+    [Fact]
+    public void ARefusalCarryingNoTrailerStatesNoInterval()
+    {
+        RpcException failure = new(new Status(StatusCode.ResourceExhausted, "An ingress bound was met."));
+
+        Assert.Null(DataServicesProxyEndpoints.UpstreamRetryAfterSeconds(failure));
+    }
+
+    /// <summary>
+    /// The trailer name is the wire spelling both upstreams use.
+    /// </summary>
+    /// <remarks>
+    /// Written literally rather than read from the upstream projects, which this service cannot reference at
+    /// all (C-A): only the published contract crosses a service boundary, so the spelling is the agreement
+    /// and a rename on either side has to fail here rather than degrade this header back to the configured
+    /// delta in silence.
+    /// </remarks>
+    [Fact]
+    public void TheTrailerNameIsTheWireSpellingBothUpstreamsUse()
+    {
+        Assert.Equal("retry-after", DataServicesProxyEndpoints.UpstreamRetryAfterTrailer);
     }
 
     /// <summary>Builds a projection carrying the given status.</summary>

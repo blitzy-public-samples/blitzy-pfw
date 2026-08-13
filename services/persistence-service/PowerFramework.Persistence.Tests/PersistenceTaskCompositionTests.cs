@@ -209,6 +209,90 @@ public sealed class PersistenceTaskCompositionTests : IDisposable
     }
 
     /// <summary>
+    /// 🔴 Each dispatch on one reused task reports ITS OWN row counts and identity blocks, not the running
+    /// total of every dispatch before it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE COUNTERS ACCUMULATE BY DESIGN, WHICH IS WHY THE PER-DISPATCH CLEAR IS LOAD BEARING. The oracle
+    /// fires its count event ONCE PER UPDATED TABLE and the proxy's handler adds -
+    /// <c>_nRowsInserted += inserted</c> [<c>n_cst_threading_task_sqlupdate.sru:L66</c>] - so a total can
+    /// survive the multi-table loop. The counters and the per-table identity blocks are therefore reset by
+    /// the CALLER-SIDE prepare event [<c>:L295-L298</c>], which the substrate raises before every run.
+    /// While that event went unraised, a second insert on the same task answered "2 inserted" for one row
+    /// and handed back two identity blocks for one table - and both numbers are ones a caller acts on: the
+    /// counts are how it learns what its payload did, and the identity blocks carry the keys the database
+    /// assigned.
+    /// </para>
+    /// <para>
+    /// TWO IDENTICAL DISPATCHES ARE THE WHOLE TEST. If the clear were missing the first would pass and the
+    /// second would report two, so asserting the SECOND is what makes the case meaningful; the first is
+    /// asserted as well so that a harness which silently stopped inserting could not pass by reporting
+    /// zero twice. Storage is read at the end so the counts are checked against what actually happened
+    /// rather than against each other.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void EachDispatchOnAReusedTaskReportsItsOwnCountsAndIdentityBlocks()
+    {
+        using TaskHarness harness = new(this);
+
+        Assert.Equal(RetCode.OK, harness.Task.SetDataObject(DwSqliteFixture.DataObjectName));
+
+        // THE MULTI-TABLE PATH, BECAUSE THE IDENTITY BLOCKS ARE ONLY OBSERVABLE ON IT. The write-back
+        // reports one block per PREPARED table [n_cst_thread_task_sqlupdate.sru:L243, reached from the
+        // loop at :L364-L369], and the single-table arm performs no prepare at all [:L370-L371] - so a
+        // descriptor is what makes the accumulating list reachable, and it is the same shape the runtime
+        // reproduction used.
+        Assert.Equal(RetCode.OK, harness.Task.SetMultiTableUpdate(true));
+        Assert.Equal(
+            RetCode.OK,
+            harness.Task.AddUpdatableTable(
+                DwSqliteFixture.UpdateTableName,
+                DwSqliteFixture.ColumnNames,
+                DwSqliteFixture.KeyColumnNames,
+                DwSqliteFixture.IdentityColumnName,
+                DwSqliteFixture.UpdateWhereMode,
+                DwSqliteFixture.UpdateKeyInPlace));
+
+        Assert.Equal(RetCode.OK, harness.Task.SetUpdateData(NewRowChangeset(), 1L));
+
+        UpdateRunResult first = harness.Task.Execute(TestContext.Current.CancellationToken);
+
+        Assert.True(Predicates.IsSucceeded(first.Code), first.ErrorText);
+        Assert.Equal(1L, first.Counts.Inserted);
+
+        int identityBlocksPerDispatch = first.Identity.Count;
+
+        // THE SAME TASK, A SECOND IDENTICAL PAYLOAD. One row again, so one insert and one identity block
+        // again - never the sum of the two dispatches.
+        Assert.Equal(RetCode.OK, harness.Task.SetUpdateData(NewRowChangeset(), 1L));
+
+        UpdateRunResult second = harness.Task.Execute(TestContext.Current.CancellationToken);
+
+        Assert.True(Predicates.IsSucceeded(second.Code), second.ErrorText);
+        Assert.Equal(1L, second.Counts.Inserted);
+        Assert.Equal(0L, second.Counts.Updated);
+        Assert.Equal(0L, second.Counts.Deleted);
+
+        // THE BLOCK LIST IS NOT ACCUMULATED EITHER, and the assertion is written against the FIRST
+        // dispatch's own count rather than against a literal so that it holds whatever the composed
+        // identity resolver answers here: the write-back only reports a block where the identity column's
+        // database name resolves through the update table's prefix match [:L217, :L221], so the number is
+        // a property of the definition rather than of the defect. What the defect changed was that the
+        // list GREW by that number on every dispatch.
+        Assert.Equal(identityBlocksPerDispatch, second.Identity.Count);
+
+        // AND THE LATCHED DRIVER ERROR IS CLEAR TOO, which is the base's half of the same prepare body
+        // [n_cst_threading_task_sqlbase.sru:L208].
+        Assert.Null(second.LastDbError);
+
+        // AGAINST STORAGE, so the counts are checked against what happened rather than against each other:
+        // two dispatches of one row each is two rows.
+        Assert.Equal("2", harness.ScalarText("SELECT COUNT(*) FROM COMPANY WHERE AGE = 23"));
+    }
+
+    /// <summary>
     /// A cancelled dispatch reports cancellation and still lowers the running flag.
     /// </summary>
     /// <remarks>

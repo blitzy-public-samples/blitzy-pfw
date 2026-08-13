@@ -72,6 +72,17 @@ public sealed class IssuerIdentityTests
     /// </remarks>
     private const string IssuerKey = SecurityOptions.SectionName + ":Issuer";
 
+    /// <summary>
+    /// The configuration key every published-origin refusal must name, composed the same way.
+    /// </summary>
+    /// <remarks>
+    /// NEITHER KEY CONTAINS THE OTHER AS A SUBSTRING, which is what keeps the two settings' failure
+    /// filters independent: a row about the location cannot pass on a failure about the identity, and the
+    /// reverse. That is a property of these two spellings rather than of the filters, so it is recorded
+    /// here where a rename would have to confront it.
+    /// </remarks>
+    private const string PublishedOriginsKey = SecurityOptions.SectionName + ":PublishedOrigins";
+
     /// <summary>The secret embedded in the userinfo row, asserted absent from that row's refusal.</summary>
     private const string UserInfoSecret = "an-issuer-embedded-credential";
 
@@ -545,8 +556,295 @@ public sealed class IssuerIdentityTests
     }
 
     // ==============================================================================================
+    //  GROUP 6 - THE PUBLISHED LOCATION, WHICH IS A SECOND SETTING AND NOT A SECOND IDENTITY.
+    //
+    //  Security:PublishedOrigins declares the OTHER addresses this one service is reachable on, so the
+    //  discovery document can name a key-set address the caller can actually resolve. The identity above
+    //  is unaffected by it and every row here leaves it alone.
+    //
+    //  WHY THE RULES ARE THE ISSUER'S RULES. Each entry is composed with the well-known paths in exactly
+    //  the way the issuer is, so an entry the issuer's rule would reject produces exactly the same
+    //  unfetchable document. A looser rule here would mean the two sources of one published address
+    //  disagreed about what a valid address is.
+    // ==============================================================================================
+
+    /// <summary>
+    /// Every published-origin spelling that must refuse to start, drawn from the ISSUER's own refusal
+    /// corpus so the two rules cannot drift apart.
+    /// </summary>
+    /// <returns>One row per refused spelling.</returns>
+    /// <remarks>
+    /// REUSING THE ISSUER CORPUS IS THE ASSERTION. If a shape is added to <see cref="RefusedSpellings"/>
+    /// for the issuer, this rule is required to refuse it too, with no second list to remember to update.
+    /// The two blank rows are excluded and driven separately: a blank entry has its own diagnostic here
+    /// because an empty LIST ENTRY means something different from an absent setting.
+    /// </remarks>
+    public static TheoryData<string, string> RefusedPublishedOrigins()
+    {
+        TheoryData<string, string> rows = new();
+
+        foreach ((string origin, string offence) in RefusedSpellings)
+        {
+            if (string.IsNullOrWhiteSpace(origin))
+            {
+                continue;
+            }
+
+            rows.Add(origin, offence);
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Every published-origin spelling a deployment legitimately uses, which the rule must not refuse.
+    /// </summary>
+    /// <returns>One row per accepted spelling.</returns>
+    /// <remarks>
+    /// The issuer's accepted corpus is NOT reused wholesale here, because every one of its entries would
+    /// collide with the configured issuer's own origin on at least one row and be refused as a duplicate -
+    /// correctly. These are distinct origins covering the same shape rules: a non-default port, a default
+    /// port, plain http, a path-scoped base for a prefixing proxy, and a mixed-case scheme.
+    /// </remarks>
+    public static TheoryData<string> AcceptedPublishedOrigins()
+    {
+        TheoryData<string> rows = new();
+
+        foreach (string origin in (string[])
+            [
+                "https://localhost:5104",
+                "https://security.published.invalid",
+                "http://localhost:5104",
+                "https://proxy.published.invalid/security",
+                "HTTPS://other.published.invalid:8443",
+            ])
+        {
+            rows.Add(origin);
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The shipped default - no declared origin at all - validates, because it is the behaviour that
+    /// preceded the setting.
+    /// </summary>
+    /// <remarks>
+    /// THIS ROW IS THE COMPATIBILITY GUARANTEE. An empty collection must not be a fault, or every existing
+    /// deployment would stop starting the moment the setting was introduced. It also pins the intended
+    /// default: <c>appsettings.json</c> ships an empty list and the endpoint composes from the issuer
+    /// alone under it.
+    /// </remarks>
+    [Fact]
+    public void DeclaringNoPublishedOriginIsValidBecauseItIsTheShippedDefault()
+    {
+        SecurityOptions options = Bootable();
+
+        Assert.Empty(options.PublishedOrigins);
+        Assert.Empty(PublishedOriginFailures(options));
+    }
+
+    /// <summary>
+    /// Every spelling the issuer rule refuses is refused here too, and the refusal names the indexed key.
+    /// </summary>
+    /// <param name="origin">The spelling this row configures.</param>
+    /// <param name="offence">The rule it offends, carried only so a failing row reads legibly.</param>
+    [Theory]
+    [MemberData(nameof(RefusedPublishedOrigins))]
+    public void EveryBogusPublishedOriginSpellingIsRefusedByTheValidator(string origin, string offence)
+    {
+        SecurityOptions options = Bootable();
+        options.PublishedOrigins.Add(origin);
+
+        string refusal = Assert.Single(PublishedOriginFailures(options));
+
+        // THE INDEX IS NAMED, not merely the collection. A deployment sets these through an indexed
+        // environment variable, so a diagnostic that named only the collection would leave an operator
+        // reading every entry to find the one at fault.
+        Assert.Contains(PublishedOriginsKey + "[0]", refusal, StringComparison.Ordinal);
+        Assert.False(
+            string.IsNullOrWhiteSpace(offence),
+            "Every row states the rule it offends so a failure is readable.");
+    }
+
+    /// <summary>
+    /// No published-origin refusal echoes the configured value, so a rejected address carrying a
+    /// credential cannot reach a log through the diagnostic.
+    /// </summary>
+    /// <param name="origin">The spelling this row configures.</param>
+    /// <param name="offence">The rule it offends, carried only so a failing row reads legibly.</param>
+    /// <remarks>
+    /// THE SAME POSTURE THE ISSUER'S REFUSALS TAKE, ASSERTED SEPARATELY BECAUSE IT IS A SEPARATE CODE
+    /// PATH. One corpus row embeds a credential specifically so this row has something to catch: a
+    /// diagnostic that quoted the offending entry would write that credential into the startup log of a
+    /// service whose whole purpose is holding secrets.
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(RefusedPublishedOrigins))]
+    public void NoPublishedOriginRefusalEchoesTheConfiguredValue(string origin, string offence)
+    {
+        SecurityOptions options = Bootable();
+        options.PublishedOrigins.Add(origin);
+
+        foreach (string refusal in PublishedOriginFailures(options))
+        {
+            Assert.DoesNotContain(UserInfoSecret, refusal, StringComparison.Ordinal);
+            Assert.DoesNotContain(origin, refusal, StringComparison.Ordinal);
+        }
+
+        Assert.False(
+            string.IsNullOrWhiteSpace(offence),
+            "Every row states the rule it offends so a failure is readable.");
+    }
+
+    /// <summary>
+    /// Every legitimate published-origin spelling validates, so the refusals above are falsifiable.
+    /// </summary>
+    /// <param name="origin">The spelling this row configures.</param>
+    [Theory]
+    [MemberData(nameof(AcceptedPublishedOrigins))]
+    public void EveryLegitimatePublishedOriginSpellingStillValidates(string origin)
+    {
+        SecurityOptions options = Bootable();
+        options.PublishedOrigins.Add(origin);
+
+        Assert.Empty(PublishedOriginFailures(options));
+    }
+
+    /// <summary>
+    /// A blank entry is refused on its own branch, distinctly from the malformed branch.
+    /// </summary>
+    /// <remarks>
+    /// AN EMPTY LIST ENTRY IS NOT THE SAME FAULT AS AN ABSENT SETTING, which is why it gets its own
+    /// message rather than falling into "must be an absolute address". An absent setting is a supported
+    /// state; an empty entry is a slot a deployment believes it filled.
+    /// </remarks>
+    [Fact]
+    public void ABlankPublishedOriginEntryIsRefusedAsBlankRatherThanAsMalformed()
+    {
+        SecurityOptions options = Bootable();
+        options.PublishedOrigins.Add("   ");
+
+        string refusal = Assert.Single(PublishedOriginFailures(options));
+
+        Assert.Contains("must not be blank", refusal, StringComparison.Ordinal);
+        Assert.DoesNotContain("absolute address", refusal, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An entry restating the configured ISSUER's own origin is refused as the duplicate it is.
+    /// </summary>
+    /// <remarks>
+    /// THE ISSUER'S ORIGIN IS ALREADY PUBLISHED AND NEEDS NO ENTRY - it is the fallback the endpoint uses
+    /// whenever nothing else matches - so an entry for it cannot change any published address. Reporting
+    /// it matters because a deployment that added it is expressing an intent the setting cannot carry, and
+    /// silently accepting it would leave that misunderstanding in place. The comparison is on ORIGIN
+    /// rather than on the whole string, so a trailing separator does not disguise it.
+    /// </remarks>
+    [Fact]
+    public void AnEntryRepeatingTheIssuersOwnOriginIsRefused()
+    {
+        SecurityOptions options = Bootable();
+        options.PublishedOrigins.Add(ValidIssuer + "/");
+
+        string refusal = Assert.Single(PublishedOriginFailures(options));
+
+        Assert.Contains("repeats an origin", refusal, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Two entries naming one origin are refused, and case in the host does not disguise it.
+    /// </summary>
+    /// <remarks>
+    /// ONE ORIGIN RESOLVES TO ONE PUBLISHED ADDRESS, so a second entry for it cannot take effect: the
+    /// endpoint returns the first match. A deployment that wrote two therefore intended two addresses and
+    /// has one silently ignored, which is the state this refusal exists to prevent. A host is
+    /// case-insensitive by specification, so the two spellings below are one origin.
+    /// </remarks>
+    [Fact]
+    public void TwoEntriesNamingOneOriginAreRefusedEvenWhenTheirCaseDiffers()
+    {
+        SecurityOptions options = Bootable();
+        options.PublishedOrigins.Add("https://published.invalid:5104");
+        options.PublishedOrigins.Add("https://PUBLISHED.invalid:5104");
+
+        string refusal = Assert.Single(PublishedOriginFailures(options));
+
+        Assert.Contains(PublishedOriginsKey + "[1]", refusal, StringComparison.Ordinal);
+        Assert.Contains("repeats an origin", refusal, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A host configured with a bogus published origin refuses to START, not merely to validate.
+    /// </summary>
+    /// <param name="origin">The spelling this row configures.</param>
+    /// <param name="offence">The rule it offends, carried only so a failing row reads legibly.</param>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE VALIDATOR ROWS ABOVE PROVE THE RULE; THIS ONE PROVES IT IS WIRED. A validator nobody registers
+    /// refuses nothing, and the failure mode of a SKIPPED entry is the exact fault the whole setting
+    /// exists to fix - consumers arriving on the declared origin receive the canonical document, with the
+    /// configuration apparently correct. So a malformed entry has to stop the host.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(RefusedPublishedOrigins))]
+    public async Task AHostConfiguredWithABogusPublishedOriginRefusesToStart(string origin, string offence)
+    {
+        Assert.NotNull(offence);
+
+        // The collection is MUTATED rather than replaced, which is what ShapeOptions exists for: an
+        // indexed configuration override would be merged with the application's own list by the binder,
+        // and this row needs the entry under test to be the only one present.
+        await using SecurityAppFactory factory = new()
+        {
+            ShapeOptions = options => options.PublishedOrigins.Add(origin),
+        };
+
+        OptionsValidationException refusal =
+            Assert.Throws<OptionsValidationException>(() => factory.CreateClient());
+
+        Assert.Contains(
+            refusal.Failures,
+            failure => failure.Contains(PublishedOriginsKey, StringComparison.Ordinal));
+
+        // The startup diagnostic must not echo the rejected address either, for the same reason the
+        // validator's own message must not: one corpus row embeds a credential.
+        foreach (string failure in refusal.Failures)
+        {
+            Assert.DoesNotContain(UserInfoSecret, failure, StringComparison.Ordinal);
+        }
+    }
+
+    // ==============================================================================================
     //  BUILDERS.
     // ==============================================================================================
+
+    /// <summary>
+    /// Runs the validator and returns only the failures that name the published-origin setting.
+    /// </summary>
+    /// <param name="options">The instance to validate.</param>
+    /// <returns>The published-origin-naming failures, materialized.</returns>
+    /// <remarks>
+    /// FILTERED FOR THE SAME REASON <see cref="IssuerFailures"/> IS. The filter also keeps the two
+    /// settings' rows independent: this key does not contain the issuer key as a substring and the issuer
+    /// key does not contain this one, so neither filter can pick up the other's failure.
+    /// </remarks>
+    private static IReadOnlyList<string> PublishedOriginFailures(SecurityOptions options)
+    {
+        List<string> named = [];
+
+        foreach (string failure in Validate(options))
+        {
+            if (failure.Contains(PublishedOriginsKey, StringComparison.Ordinal))
+            {
+                named.Add(failure);
+            }
+        }
+
+        return named;
+    }
 
     /// <summary>Runs the options validator and returns its failure messages.</summary>
     /// <param name="options">The instance to validate.</param>

@@ -449,7 +449,16 @@ public sealed class TransactionServiceTests
         Logpass = Password,
         Dbparm = "DisableBind=1,NCharBind=1",
         Lock = "RU",
-        Autocommit = true,
+
+        // 🔴 FALSE, AND IT USED TO BE TRUE. Setting this member is now refused `E_INVALID_ARGUMENT` at
+        // BeginSession, because the oracle erases it before it can reach either the pool key or a
+        // transaction object [n_cst_thread_task_sqlbase.sru:L118-L119, n_cst_thread_trans.sru:L343-L354]
+        // and accepting it silently split a session away from its own tasks' pooled connection - an update
+        // answered `rows_updated: 1` while storage kept the old row. The fixture asserted a request the
+        // contract cannot serve, so the FIXTURE moved; every case in this file that genuinely exercises the
+        // mode does it the supported way, through SetAutoCommit. The refusal itself is asserted in
+        // CommandAndTransactionServiceTests.
+        Autocommit = false,
         Userparm = UserParm,
     };
 
@@ -628,22 +637,49 @@ public sealed class TransactionServiceTests
     //  4. THE COPY ASYMMETRY - userparm never copied, autocommit never read back
     // ---------------------------------------------------------------------------------------------
 
+    /// <summary>
+    /// The outbound accessor never carries <c>autocommit</c>, and a descriptor that SETS it never opens a
+    /// session at all.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This case used to open a session with <c>autocommit = true</c> and assert only that the read-back
+    /// was false. Both halves are asserted now, because the second was the more important one and was
+    /// missing: supplying the member is refused, since the oracle erases it before it reaches either the
+    /// pool key or a transaction object [<c>n_cst_thread_task_sqlbase.sru:L118-L119</c>,
+    /// <c>n_cst_thread_trans.sru:L343-L354</c>], and accepting it silently put a session on a different
+    /// pooled connection from its own tasks - an update that answered <c>rows_updated: 1</c> while storage
+    /// kept the old row.
+    /// </para>
+    /// <para>
+    /// The read-back stays false for an ADMITTED descriptor for the original reason: <c>of_gettransdata</c>
+    /// copies SEVEN fields and <c>autocommit</c> is not among them [<c>:L410-L416</c>], so the cleared
+    /// receiver value survives. Preserved defect.
+    /// </para>
+    /// </remarks>
     [Fact]
-    public async Task AutocommitIsNeverReadBackByTheOutboundAccessorEvenWhenSuppliedTrue()
+    public async Task AutocommitIsRefusedInboundAndNeverReadBackOutbound()
     {
         Harness harness = new();
 
-        // The descriptor supplies autocommit = true.
-        Assert.True(Descriptor().Autocommit);
+        TransactionDescriptor supplied = Descriptor();
+        supplied.Autocommit = true;
 
+        BeginSessionResponse refused = await harness.Service.BeginSession(
+            new BeginSessionRequest { Descriptor_ = supplied },
+            Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, refused.Status.RetCode);
+        Assert.Null(refused.Session);
+        Assert.Contains("autocommit", refused.Status.ErrorText, StringComparison.Ordinal);
+
+        // And on the admitted path the outbound accessor still does not carry the member.
         SessionHandle session = await Open(harness);
 
         GetTransactionDataResponse response = await harness.Service.GetTransactionData(
             new GetTransactionDataRequest { Session = session },
             null!);
 
-        // of_gettransdata copies SEVEN fields and autocommit is not among them
-        // [n_cst_thread_trans.sru:L410-L416], so the cleared receiver value survives. Preserved defect.
         Assert.False(response.Descriptor_.Autocommit);
     }
 
@@ -728,6 +764,65 @@ public sealed class TransactionServiceTests
         Assert.Equal(7, state.SqlNrows);
         Assert.Equal("original driver message", state.SqlErrText);
         Assert.Equal("original return data", state.SqlReturnData);
+    }
+
+    /// <summary>
+    /// The session state's provider message keeps the driver's envelope, so a locked or busy database names
+    /// its own condition.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE DEFECT THIS CLOSES.</b> <c>Microsoft.Data.Sqlite</c> wraps its message -
+    /// <c>SQLite Error 5: 'database is locked'.</c> - and in that shape the result code is a numeric literal
+    /// and the diagnosis is a quoted string, so the strict redaction policy masked both and this field read
+    /// <c>SQLite Error &lt;redacted&gt;: '&lt;redacted&gt;'.</c> while <c>DbError.sqlerrtext</c> elsewhere on
+    /// the same wire read the condition in full. The same value disclosed at two depths depending on which
+    /// path a caller happened to read it through.
+    /// </para>
+    /// <para>
+    /// <b>THE INTERIOR IS STILL MASKED.</b> The second row quotes a value inside the message, which is the
+    /// assertion that separates "the envelope is preserved" from "masking was switched off".
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task TheSessionStatesProviderMessageKeepsItsEnvelopeAndMasksItsInterior()
+    {
+        const string Locked = "SQLite Error 5: 'database is locked'.";
+        const string Secret = "sentinel-row-value";
+
+        Harness harness = new();
+        SessionHandle session = await Open(harness);
+
+        Assert.True(harness.Registry.TryResolve(session, out TransactionSession? live));
+
+        live!.Transaction.StampSqlState(new SqlState(-1, 5, 0, Locked, string.Empty));
+
+        GetSessionStateResponse locked = await harness.Service.GetSessionState(
+            new GetSessionStateRequest { Session = session },
+            null!);
+
+        // The envelope quotes no value, so the whole message survives and the condition is legible.
+        Assert.Equal(Locked, locked.SqlErrText);
+        Assert.Contains("database is locked", locked.SqlErrText, StringComparison.Ordinal);
+
+        // And it equals the policy's own output over the same input, rather than merely containing a phrase.
+        Assert.Equal(SqlRedactor.Instance.RedactProviderDiagnostic(Locked), locked.SqlErrText);
+
+        live.Transaction.StampSqlState(
+            new SqlState(
+                -1,
+                19,
+                0,
+                "SQLite Error 19: 'CHECK constraint failed: name > '" + Secret + "''.",
+                string.Empty));
+
+        GetSessionStateResponse constraint = await harness.Service.GetSessionState(
+            new GetSessionStateRequest { Session = session },
+            null!);
+
+        Assert.DoesNotContain(Secret, constraint.SqlErrText, StringComparison.Ordinal);
+        Assert.Contains(SqlRedactor.DefaultPlaceholder, constraint.SqlErrText, StringComparison.Ordinal);
+        Assert.Contains("CHECK constraint failed", constraint.SqlErrText, StringComparison.Ordinal);
     }
 
     // ---------------------------------------------------------------------------------------------

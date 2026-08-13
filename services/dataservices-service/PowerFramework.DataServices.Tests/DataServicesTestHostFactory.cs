@@ -2884,6 +2884,31 @@ internal sealed class BoundDataWindowModelSetProvider : IDataWindowModelSetProvi
         return _sets.GetOrAdd(dataWindowHandle, Build(host));
     }
 
+    /// <inheritdoc/>
+    /// <remarks>
+    /// THE DOUBLE HAS TO DO THIS FOR REAL, because the suites that drive an event chain and then a unary
+    /// operation on the same handle are exactly the ones that would otherwise pass while the production
+    /// provider's re-binding was missing. The four init calls are the same ones <see cref="Build"/> makes
+    /// and are idempotent - the service base's init is a two-member assignment
+    /// [<c>n_cst_dwsvc.sru:L85-L86</c>] - so re-issuing them restores the durable host without disturbing
+    /// any per-handle state. The column-expression engine is absent because the chain owns that one.
+    /// </remarks>
+    public void RebindToDurableHost(string dataWindowHandle)
+    {
+        ArgumentNullException.ThrowIfNull(dataWindowHandle);
+
+        if (!_sets.TryGetValue(dataWindowHandle, out DataWindowModelSet? retained)
+            || retained.Host is not FakeDataWindowHost host)
+        {
+            return;
+        }
+
+        retained.ContextMenu.OnInit(host);
+        retained.RowSelect.OnInit(host);
+        retained.DropDownSearch.OnInit(host);
+        retained.ColumnSort.OnInit(host);
+    }
+
     /// <summary>Builds and attaches one model set for a host.</summary>
     /// <param name="host">The host the four models attach to.</param>
     /// <returns>The attached set.</returns>

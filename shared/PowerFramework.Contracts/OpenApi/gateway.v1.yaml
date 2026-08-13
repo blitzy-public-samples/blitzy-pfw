@@ -732,18 +732,31 @@ paths:
 
         Each row names the buffer it came from - `Primary!`, `Delete!` or `Filter!`.
 
-        **A FRESHLY RETRIEVED ROW CARRIES NO `originalValues`, AND THAT IS CORRECT RATHER THAN A GAP.**
+        **A FRESHLY RETRIEVED ROW CARRIES `originalValues`, AND ITS ENTRIES EQUAL THE CURRENT ONES.**
         A retrieval baselines every row as it lands, so each column's original value *is* its current
-        value, and the carrier serialization omits an original that equals its current. This document
-        used to claim that a retrieved row carries both sets and that "a retrieval that discarded them
-        would leave a caller unable to construct an update at all" - which disagreed with
-        `common.v1.ColumnValue`, disagreed with what the route returns, and is the wrong way round: the
-        originals a caller needs are the values it just read, so it **supplies the retrieved current
-        values as `originalValues`** when it submits an update. That is what makes the
-        `updatewhere=1` concurrency check meaningful - the one updatable DataWindow in the legacy estate
-        declares it with all six columns marked, so the generated `WHERE` clause carries the key column
-        plus the original value of every marked column. See the update operation for the payload shape
-        in full.
+        value - and the pair is transmitted anyway, one entry per column the row carries, with **no
+        omit-when-equal allowance**. `common.v1.DataWindowRow.original_values` states that rule without
+        an exemption and this document is bound by it.
+
+        > **A CORRECTION TO AN EARLIER REVISION OF THIS PARAGRAPH.** It claimed the opposite - that a
+        > retrieved row carries no `originalValues` because "the carrier serialization omits an original
+        > that equals its current". That was measurably untrue of the running service, which returns the
+        > member populated, and it contradicted the protobuf contract this document projects. The
+        > compression it described is one the carrier codecs may make about their own payloads and a
+        > consumer of this contract cannot be asked to: it would leave a freshly retrieved row carrying no
+        > baseline for any column, so a caller building the concurrency predicate would have to
+        > reconstruct it from an absence - and reading that absence the other legal way, as "no baseline
+        > exists", drops the predicate and silently overwrites.
+
+        **An EMPTY `originalValues` therefore means exactly one thing: the row has no prior state.** That
+        is an insert-shaped row, which has nothing to compare against and whose generated statement
+        carries no `WHERE` clause at all. It is not a signal that the originals were elided.
+
+        A caller submitting an update **supplies the retrieved current values as `originalValues`**. That
+        is what makes the `updatewhere=1` concurrency check meaningful - the one updatable DataWindow in
+        the legacy estate declares it with all six columns marked, so the generated `WHERE` clause carries
+        the key column plus the original value of every marked column. See the update operation for the
+        payload shape in full.
 
         **Row status against column status on a retrieved row.** The row carries
         `ITEM_STATUS_DATA_MODIFIED` while every column carries `ITEM_STATUS_NOT_MODIFIED`. That is the
@@ -829,6 +842,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -889,6 +904,8 @@ paths:
           $ref: '#/components/responses/Conflict'
         '404':
           $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -966,8 +983,13 @@ paths:
         Per row: the buffer tag, the one-based ordinal, the ROW's own `itemStatus`, the current value of
         every column being submitted, and - for an update of an existing row - `originalValues` carrying
         what the caller believes is currently stored. The originals are the values a preceding retrieval
-        returned as its **current** values; a retrieved row carries no `originalValues` of its own,
-        because a retrieval baselines every row it lands.
+        returned as its **current** values. A retrieved row also carries `originalValues` of its own, with
+        entries equal to those current values, because the member is populated in both directions with no
+        omit-when-equal allowance; a caller may therefore echo the retrieved row's `originalValues` back or
+        copy its current values into them, and the two are equivalent by construction. An earlier revision
+        of this sentence claimed a retrieved row carries no `originalValues`, which contradicted both
+        `common.v1.DataWindowRow` and the running service - see the retrieve operation's own correction
+        note.
 
         **Per-column `itemStatus` is optional, and what its ABSENCE means on this path is defined rather
         than left to a reader.** When a row is stamped `ITEM_STATUS_DATA_MODIFIED` or
@@ -1001,9 +1023,28 @@ paths:
 
         A row that says it changed while every column of it says it did not - or that carries no
         updatable column at all - cannot express an update. It is refused with **`400`** and
-        `retCode -9` (`E_INVALID_DATA`), naming the rule and the number of offending rows. It is
-        deliberately **not** a `409`: no statement was generated, so nothing was contended, and reporting
-        a concurrency conflict would send a caller to re-read and re-send a payload that can never apply.
+        `retCode -9` (`E_INVALID_DATA`). It is deliberately **not** a `409`: no statement was generated, so
+        nothing was contended, and reporting a concurrency conflict would send a caller to re-read and
+        re-send a payload that can never apply.
+
+        **What that `400` body contains, stated exactly, because this document previously overstated it.**
+        The body is the standard problem document described under this operation's `400` response: `status`,
+        `title`, a FIXED `detail` classifying the refusal, `retCode`, `instance` and `traceId`. It does
+        **not** name the offending row, the offending column, or a count of them. An earlier revision of
+        this sentence said it named "the rule and the number of offending rows", and the sibling
+        `DataWindowRow` note said a missing baseline was answered "naming the row, the column and its
+        type" - neither was true of the ingress, and a consumer that built field-level feedback on those
+        sentences would have found the fields absent.
+
+        **The field-level diagnostic exists; it is on the operator channel, keyed by `traceId`.** The
+        upstream validator does identify each rejected column - the row, the column name, its one-based
+        ordinal and the reason class - and DataServices records it. This ingress deliberately does not
+        forward it: the same relay path also carries a database error whose statement text is the complete
+        generated SQL including interpolated literal values, and an earlier revision that attached upstream
+        detail to the caller's body was corrected for exactly that reason. So the response classifies and
+        the log identifies, and the `traceId` in the body is what joins the two. A caller needing
+        field-level feedback in-band should validate against `dataservices.v1`'s own contract, which
+        publishes the per-column failure shape.
 
         ## The 409 is the substantive part of this operation
 
@@ -1052,6 +1093,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1156,6 +1199,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1205,6 +1250,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1285,6 +1332,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1339,6 +1388,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1389,6 +1440,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1441,6 +1494,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1499,6 +1554,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1551,6 +1608,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1603,6 +1662,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1662,6 +1723,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1774,6 +1837,8 @@ paths:
           $ref: '#/components/responses/Conflict'
         '404':
           $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1888,6 +1953,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1938,6 +2005,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1996,6 +2065,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2047,6 +2118,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2098,6 +2171,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2152,6 +2227,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2209,6 +2286,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2261,6 +2340,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2310,6 +2391,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2360,6 +2443,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2436,6 +2521,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2489,6 +2576,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2541,6 +2630,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2605,6 +2696,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2661,6 +2754,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2717,6 +2812,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2774,6 +2871,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2824,6 +2923,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2876,6 +2977,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2927,6 +3030,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -3000,6 +3105,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -3112,6 +3219,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/ContentTooLarge'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -4052,6 +4161,33 @@ components:
     #  both can produce one. See `IngressInternalError` for the path.
     # ==============================================================================================
 
+    ContentTooLarge:
+      description: |-
+        **The request body exceeded the size this deployment accepts, and it was refused at the ingress
+        bound before it was read or parsed.** No upstream was called and nothing about the body's shape was
+        assessed - so this is not a statement that the payload was malformed, and re-shaping it will not
+        help. `retCode` carries `E_INVALID_ARGUMENT` (-3), because the offending part of the request is an
+        argument the caller supplied.
+
+        **The configured bound is deliberately not published, here or in the body.** It is a property of a
+        deployment rather than of this contract, and stating it would tell a caller exactly how large a
+        request it may send before being refused. That a bound exists is contract; its value is not.
+
+        **Declared on this operation because this operation reads a request body.** An operation that reads
+        none cannot produce this status: the bound is enforced when the body is read, so a body sent to a
+        route that never reads one is simply ignored - measured directly, an oversized body on a body-less
+        route answers that route's ordinary result rather than a refusal. Those operations therefore do not
+        declare `413`, which is what keeps this document's status surface a statement about what each
+        operation can actually answer.
+
+        The bound exists for the same reason the capacity ceiling does: decomposition created this system's
+        first listening socket (C-B), so an unsolicited request of unbounded size is a failure mode the
+        in-process legacy could not have had and for which there was no legacy limit to port.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
     IngressBusy:
       description: |-
         **A capacity ceiling refused the request, and this is a refusal rather than a fault.** No upstream
@@ -4368,6 +4504,59 @@ components:
             - UNKNOWN
         dbError:
           $ref: '#/components/schemas/DbError'
+          description: |-
+            The database-layer detail, present when - and only when - the failure originated in the data
+            path and the upstream reported a payload for it. **Optional**: its presence is decided by the
+            payload, never by the status, and a caller must branch on presence rather than on the status
+            line.
+
+            ## What it is for, in one sentence
+
+            It names what the storage engine objected to. The canonical case is a `NOT NULL` refusal on
+            `updateDataWindow`: `sqlerrtext` carries the provider's own diagnostic - for example
+            `SQLite Error 19: 'NOT NULL constraint failed: COMPANY.AGE'.` - which identifies the offending
+            **column**. Without it a caller who omitted a required field receives `400` and fixed prose
+            naming nothing, and has no corrective action available to it.
+
+            ## What it does NOT carry
+
+            `sqlsyntax` is **redacted** and empty is both valid and common - see the `DbError` schema for
+            the commitment and its reason. The upstream's free-form diagnostic prose is never relayed here
+            or anywhere in this document; `retCode` and this member are the whole of what a failure body
+            carries beyond the fixed `detail`. Values the caller sent are masked by the service that owns
+            the masking before this member is composed.
+
+            ## Where it appears
+
+            On any operation that projects a C-03 or C-04 method, because an in-band failure can carry one.
+            In practice the update is the only operation that produces one today, and it is the only
+            operation whose summary promises it - exactly as `conflict` is declared widely and populated by
+            one operation.
+        validationErrors:
+          type: array
+          maxItems: 32
+          description: |-
+            Per-row validation refusals, **identity only**, present when the upstream reported which
+            rows and columns it refused. Read alongside `dbError`: the two describe the same class of
+            refusal reaching this ingress from two different places - the storage engine rejecting a
+            row, which arrives as `dbError`, and the DataWindow service's own row validator rejecting
+            one, which arrives here. Both are the same HTTP status, so a client that wants to know
+            which column failed reads whichever member is present.
+
+            **Identity, and deliberately not values.** Each element names the buffer, the one-based row
+            ordinal, the column name, the column ordinal and the column type - schema metadata, plus
+            the caller's own addressing of the row it just sent. No element carries a column VALUE, the
+            generated statement, or the upstream's own diagnostic prose: a value may not have
+            originated with this caller, and the statement carries interpolated literals because the
+            legacy runs without bind variables when `DisableBind` is set. The corrective action needs
+            the identity and never the value.
+
+            **Bounded at 32 elements by the gateway**, so what crosses the system's only external
+            ingress is bounded here rather than by whatever an upstream produced. Truncation is
+            unmarked: a caller with more than 32 refused columns has a payload-shaped problem rather
+            than a per-column one, and the corrective action does not change with the count.
+          items:
+            $ref: '#/components/schemas/RowValidationIdentity'
         upstream:
           type: string
           enum: [persistence, dataservices, security]
@@ -4793,6 +4982,62 @@ components:
             particular row", which is what the framework reports for a connection- or statement-level
             failure not attributable to one row.
 
+    RowValidationIdentity:
+      type: object
+      title: RowValidationIdentity
+      additionalProperties: false
+      required: [buffer, row, columnName, columnId, columnType]
+      description: |-
+        Which row and which column a validation refusal names - **the identity of the fault and none of
+        the data behind it**.
+
+        **A GATEWAY-AUTHORED NARROWING of `dataservices.v1.RowValidationError`, and it deliberately
+        carries no `x-proto-message` marker.** That marker declares a schema to be the faithful wire
+        projection of a descriptor, and the fidelity gates hold every marked schema to declaring
+        *exactly* its descriptor's members - correctly, because a marked schema that quietly dropped one
+        would misdescribe the wire. This shape is not that: `RowValidationError` is already published
+        under its own name as the full projection, and this is the ingress's screened subset of it. The
+        provenance is stated here in prose instead, which is where a narrowing belongs.
+
+        **What the narrowing removes is the sixth field**, the upstream record's own structured error,
+        whose message is legacy operator prose. This gateway authors the one piece of prose in the
+        problem body - the `detail` member - so that no upstream text reaches a caller and none can be
+        inferred from the response shape. What a client needs in order to fix its request is the
+        identity, and the identity is complete without the prose.
+
+        **Every member below is schema metadata or the caller's own addressing.** The column name,
+        ordinal and type describe the table; the buffer and row ordinal describe the row the caller just
+        sent. Nothing here is a value, so nothing here can disclose data the caller did not supply -
+        which is what makes this member safe to publish at the system's only external ingress while the
+        whole upstream message is not.
+      properties:
+        buffer:
+          $ref: '#/components/schemas/DwBuffer'
+        row:
+          type: [integer, string]
+          format: int64
+          description: >-
+            The refused row, **one-based** like every legacy row ordinal - so a single-row payload
+            reports row 1 and never row 0.
+        columnName:
+          type: string
+          description: >-
+            The column the refusal names, spelled as the schema spells it. This is the member that makes
+            the refusal actionable: a caller told only that its data was refused has no corrective
+            action available to it, and the column name is schema metadata rather than row data.
+        columnId:
+          type: [integer, string]
+          format: int64
+          description: >-
+            The column's **one-based** ordinal, carried beside the name so a client addressing columns
+            positionally does not have to resolve the name itself.
+        columnType:
+          type: string
+          description: >-
+            The column's declared type as the DataWindow reports it. Present because the legacy coerces
+            a value by the first five characters of this type, so it is what explains WHY a value was
+            refused rather than merely which column refused it.
+
     ConflictRow:
       type: object
       title: ConflictRow
@@ -4902,8 +5147,16 @@ components:
         modifiable buffer - and requires none for a `New!`/`NewModified!` row, which generates an
         `INSERT` with no predicate and no prior state, or a `NotModified!` row, which generates no
         statement at all. A blanket `required` would refuse both of those conforming payloads while
-        preventing nothing. A row missing a baseline it needs is answered with a structured validation
-        failure naming the row, the column and its type.
+        preventing nothing.
+
+        A row missing a baseline it needs is refused with `400` and `retCode -3`
+        (`E_INVALID_ARGUMENT`) - the code is the STRUCTURAL one because what is wrong is the shape of the
+        request rather than a value in it. `UpdateRowValidator` is the component that decides this, and it
+        does identify the row, the column, its one-based ordinal and the reason class - but that detail
+        reaches the OPERATOR CHANNEL and not the caller's body, which carries a fixed classifying `detail`
+        plus the `traceId` that joins the two. An earlier revision of this sentence promised the naming
+        in-band; see the update operation's own note for why the ingress withholds upstream detail and
+        where a consumer that needs it in-band should get it.
       additionalProperties: false
       properties:
         buffer:
@@ -8724,8 +8977,14 @@ components:
             every marked column - see common.v1.DataWindowRow.original_values and
             common.v1.ConflictDetail for why the original-value shadow is not optional under
             `updatewhere=1`. The originals are the values a preceding retrieval returned as its
-            CURRENT values; a retrieved row carries no original_values of its own, because a
-            retrieval baselines every row it lands.
+            CURRENT values - and because a retrieval baselines every row it lands, it returns those
+            same values in `originalValues` too, so a caller may echo the retrieved row's
+            `originalValues` back unchanged or restate the retrieved CURRENT values; both name the
+            same baseline. An earlier revision of this sentence claimed a retrieved row carries no
+            `original_values` of its own, which contradicted
+            `common.v1.DataWindowRow.original_values` - the authoritative statement, which mandates
+            one entry per column IN BOTH DIRECTIONS with no omit-when-equal allowance - as well as
+            the runtime, which populates it on every projected row.
 
             PER-COLUMN item_status IS OPTIONAL AND ITS ABSENCE IS DEFINED ON THIS PATH: when a
             MODIFIED row carries no per-column status at all, the row's own status governs every

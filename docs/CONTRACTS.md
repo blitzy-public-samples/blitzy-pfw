@@ -328,6 +328,25 @@ application **without demanding one**, so row 1 validates it *per operation* whi
 the listener was measured and rejected: it aborts the handshake for any client presenting none, which
 takes the anonymous `/health` probe with it so the readiness chain gating Gateway could never open.
 
+**Row 3 publishes ONE identity and TWO kinds of location, and a consumer has to know which is which.**
+The `issuer` member is a configured identity: it is the same on every response and is what a bearer
+handler compares the `iss` claim of every token against byte for byte. `jwks_uri` and `token_endpoint` are
+locations, and **they may legitimately differ between two consumers of the same service**, because one
+service on this topology is reachable on two addresses — its in-network name, which is also the issuer,
+and the published host port an operator, the end-to-end suite or a third party reaches it through. Both
+were previously composed from the issuer alone, so a consumer outside the service network was handed a
+`jwks_uri` naming a host that resolves only inside it: the document parsed and looked correct, and the
+handler following it failed to *resolve* the address rather than being told anything was wrong. Each
+address is now composed from a base address **the deployment declared**, chosen by matching the origin the
+request arrived on, with the issuer as the fallback — so the set of publishable addresses is exactly the
+configured set and no caller-supplied host is ever advertised. `orchestration/.env.example` declares the
+additional address as `SECURITY_PUBLIC_BASE_URL`. A declared entry may carry a path prefix, which is
+how a path-prefixing proxy is expressed: the well-known path is *concatenated* onto the declared base, so
+the prefix survives into the published address. The host of every declared origin must also be admitted by
+Security's `AllowedHosts`, which is the coarser control deciding whether the request is answered at all. Note that the canonical server entry this schema
+publishes, `https://localhost:5104`, is itself the host-side address rather than the in-network one, which
+is precisely the second location that had no way to be advertised.
+
 Rows 2 and 3 are the verification material every other service trusts, so a channel an attacker can
 rewrite would let that attacker choose the keys used to validate every token in the system. **That is why
 this listener terminates TLS in every environment** — the exposure is closed rather than accepted, and
@@ -1684,6 +1703,42 @@ publishes the expression model, and 25 and 26 are the two inverted streams. If C
 C-03, all three would have to version in lockstep with the event chain
 ([§15.5](#155-folding-c-04-into-c-03--rejected)).
 
+### 7.11 The boundary this contract does *not* cross: calculation over retrieved data
+
+**No method above loads rows into an expression session, and that is a property of the published contract
+rather than a defect in a service.** It is stated here because the runtime consequence is easy to
+misdiagnose, and because closing it would take a new capability rather than a fix.
+
+The three shapes of the boundary, each read off the definitions themselves:
+
+- `OpenExpressionSessionRequest` carries **logical DataWindow handles only** — names that scope
+  foreign-variable resolution ([§7.7](#77-the-one-hard-limit--cross-session-foreign-variables)). A handle
+  is not a rowset and does not fetch one.
+- `CalcRequest`, `CalcAllRequest` and `CalcItemRequest` carry **no row payload**. They name what to
+  calculate, never the data to calculate it over.
+- C-03's `RetrieveRequest` carries **no expression-session identifier**, so a retrieval cannot deposit its
+  result into a session even though both live in the same service.
+
+**What a caller therefore observes at runtime, and both answers are truthful.** Against a session whose
+host holds no rows, `Calc` for row 1 answers `E_OUT_OF_RANGE` — there is no row 1 — and `CalcAll` answers
+success with **zero** results, because calculating every row of an empty host is a complete piece of work
+with an empty answer. Neither is an error report about the engine, and neither should be read as one:
+performing a large retrieval first does not change either answer, because nothing connects the two.
+
+**Why it is declared rather than closed.** A row-loading RPC — or a session identifier on
+`RetrieveRequest` — would be a **new capability**, and this refactor adds none: the legacy engine reads a
+DataWindow control in the caller's own address space, so there is no legacy behaviour being withheld here
+and nothing to preserve by adding one. Constraint C-B and AAP §0.2.2.5 forbid the addition; the honest
+diagnostics above are the correct answer under the contract as published.
+
+**What is consequently covered elsewhere rather than here.** The expansion engine's behaviour over
+populated data — the seven structures, the five expansion modes, static versus dynamic expansion, the
+macro channel and the trace — is exercised against in-process hosts by this service's own test suites,
+which can populate a host directly. What no runtime exercise of the published contract can reach is that
+same engine over data **fetched by this system**, and
+[`PARITY.md` §9 R9](PARITY.md#r9--expression-calculation-over-retrieved-data-is-unreachable-through-the-published-contract)
+carries that as a declared coverage boundary.
+
 ---
 
 ## 8. C-05 — `persistence.v1.QueryService`
@@ -2704,13 +2759,15 @@ statuses back. The status mapping is the substantive part:
 | `DeadlineExceeded` | `504` | The deadline this service sets on the outbound call elapsed |
 | `AlreadyExists` | `409` | Shares the status with the concurrency conflict, and stays distinguishable from it by problem type, title and `retCode` |
 | `Internal` / `Unknown` | `500` | With the statement field redacted per [§8.6](#86-errors-and-the-two-fields-that-must-be-redacted) |
+| *(no gRPC call)* | **`413`** | The ingress refused the request body for exceeding the configured size bound, before any upstream was called and before the body was read. Not a projection of any gRPC status: it is Gateway's own bound, and it is declared on the **thirty-six** projected operations that read a body rather than on all thirty-nine, because an operation that reads none cannot produce it. Carries `E_INVALID_ARGUMENT` (-3). The configured limit is deliberately published nowhere: that a bound exists is contract, its value is a property of a deployment |
 
 Each operation declares the responses it can **actually** produce rather than the whole table, because a
 status every generated client must branch on but no operation can return hides the real surface. That rule
 cuts both ways, and applying it honestly settles every row of the table above.
 
-**The declared surface is now identical across all thirty-nine projected operations, and getting there
-closed a defect in the harder direction of that rule.** A status declared but unreachable is noise; a status
+**The declared surface is identical across all thirty-nine projected operations except for the two
+statuses that are conditional on reading a body, and getting there closed a defect in the harder direction
+of that rule.** A status declared but unreachable is noise; a status
 **reachable but undeclared** leaves a generated client with no branch for a response it will receive, and it
 survives review precisely because nothing about it fails until the response arrives. Two statuses were in
 that second class, and in both cases the suppression was deliberate and its reasoning was right about a
@@ -2732,8 +2789,46 @@ narrower question than the one it decided:
   `E_OBJECT_NOT_FOUND` for a name no host binds and `E_NOT_EXISTS` for a session that closed underneath the
   open. All three are `404` in the in-band map, so both operations really produced a status neither declared.
 
+**A refused write now names the offending column, and closing that gap needed a producer rather than a new
+status.** `400` with `retCode` `E_INVALID_DATA` was already the right answer for a row the caller can
+correct — a row omitting a value for a `NOT NULL` column, for instance — but the body named nothing: fixed
+prose saying the data was refused, the numeric outcome, the upstream, a trace identifier. The failing column
+reached the ingress and was discarded there, because the in-band failure renderer deliberately attaches no
+part of the upstream message. So the caller was told its payload was wrong and not told which part, and the
+corrective action was available to the caller and to nobody else. Two problem extension members now carry
+the **identity** of the refusal, one per upstream path:
+
+- **`dbError`** — the storage engine's refusal, as the closed `DbError` shape: the provider code, the
+  condition line (`NOT NULL constraint failed: COMPANY.AGE`, which the upstream redaction rule keeps legible
+  precisely because a column name is schema metadata), the buffer and the one-based row. **The member was
+  published by this contract before anything produced it**, which is worse than an absent member because it
+  documents a capability the system did not have; it now has a producer. Its `sqlsyntax` member is emitted
+  **empty** rather than omitted — the shape is closed and requires it — so the generated statement never
+  crosses even though the upstream redacts it, because a disclosure control that depends on another service
+  having got it right is not a control at the only external ingress.
+- **`validationErrors`** — the DataWindow service's own row validator refusal, as an array of
+  `RowValidationIdentity`: buffer, one-based row, column name, column ordinal, column type. A deliberate
+  **narrowing** of `dataservices.v1.RowValidationError`, dropping that message's structured-error field so
+  that no upstream prose reaches a caller through the member added to keep prose out of the body. Bounded at
+  32 elements by the gateway rather than by whatever an upstream produced, and each relayed string is
+  length-bounded, because an unbounded relay is a response size the caller controls.
+
+**The line both members are drawn on is identity versus data.** A column name, ordinal and type are schema
+metadata; a buffer and row ordinal are the caller's own addressing of the row it just sent. A **value** is
+different in kind — it may not have originated with this caller, and the generated statement interpolates
+literals — so identity crosses and values do not. Neither member is fabricated when the upstream reported
+no identity: absence keeps meaning "not told", never "told there was none".
+
 Only the `400` remains conditional, and only because three operations bind no request body at all. Both
 directions are now asserted rather than assumed — against the authored contract by
+**Two statuses remain conditional, and both for the same reason: three operations bind no request body at
+all.** The `400` reports a body that would not bind, and the `413` reports one refused at the ingress size
+bound before it was read - so an operation that reads no body can produce neither. That the 413 is genuinely
+unreachable there was measured rather than reasoned: a 9 MiB body sent to `POST /v1/datawindow/retrieve`
+answered `413`, and the same body sent to `DELETE /v1/datawindow/sessions/{sessionId}` answered `200`,
+because a body a route never reads is never measured against the bound. Declaring `413` on those three would
+publish a status they can never answer, which is the defect this section refuses in the other direction.
+Both directions are now asserted rather than assumed — against the authored contract by
 `GatewayContractTests.NoProjectedOperationDeclaresAStatusItCannotProduce`, and against each generated
 document by `DataServicesRouteCensusTests.EveryProjectedRoutePublishesExactlyTheStatusSurfaceItsMappingProduces`
 on Gateway and its counterpart on the DataServices projection.
@@ -2787,6 +2882,27 @@ problem type, title and `retCode` — the concurrency conflict carrying `E_RETRY
 detail-free `Aborted` carrying `E_RETRY` without one, and `AlreadyExists` carrying `E_INVALID_ARGUMENT`.
 `503` additionally appears on `/health` on C-10's own account rather than from this mapping, and carries the
 aggregate report rather than a problem document.
+
+**The `dbError` member was the same defect one level down — declared on `ProblemDetails` since the contract
+was authored and populated by nothing — and it is now populated on exactly one path.** A `NOT NULL` refusal
+on the update path is an **in-band** failure: the transport answers OK and the body answers
+`E_INVALID_DATA`, so it never travels the success path that forwards an upstream message whole. Gateway's
+failure renderer discarded the whole message, and with it the only thing a caller who omitted a required
+column could act on — the provider diagnostic naming the column, which Persistence had preserved through its
+provider-envelope redaction rule and DataServices had relayed intact. So the identity survived two service
+boundaries and was dropped at the third, and the caller received `400` with fixed prose naming nothing.
+`RenderInBandFailure` now attaches that one declared member and nothing else.
+
+**Attaching one declared member is not the same act as attaching the upstream message, and the distinction is
+what keeps the earlier disclosure closed.** The retired `response` extension was unbounded, undeclared and
+unscreened. `dbError` is a `$ref` to the mirrored five-member `DbError` shape with `additionalProperties:
+false`; its one dangerous member is a **published commitment** rather than an assumption — `sqlsyntax`
+carries placeholders only, empty is valid and common (C-G) — and it is the same kind of payload the
+`conflict` member already forwards one status along, which is richer still and is forwarded for the identical
+reason: a caller that cannot see what the database objected to cannot construct a corrected request. The
+upstream's free-text diagnostic remains unrelayed; only the declared, schema-bounded payload travels. The
+member is **optional**, so declaring it publishes "a database payload may be present", never "one will be" —
+and a default-valued payload is treated as absent rather than published as an empty diagnosis.
 
 **The two authenticated diagnostic operations declare two statuses that no code in their own files
 produces.** `/v1/ping` and `/v1/capabilities` project no gRPC method, so the mapping table above does not
@@ -2904,7 +3020,7 @@ anywhere in this system ([§14.7](#147-no-service-level-objective-is-asserted-an
 would read as one. Both the ingress and the service behind it refuse to start on a window that could not
 fire before the request it bounds is abandoned.
 
-**Every projected body is published as a concrete, closed schema — 133 of the contract's 144 schemas,
+**Every projected body is published as a concrete, closed schema — 133 of the contract's 145 schemas,
 covering the complete transitive closure of 118 messages and 15 enums.** Each carries `x-proto-message` or
 `x-proto-enum` naming the descriptor it publishes, `additionalProperties: false`, canonical
 lowerCamelCase member names, the canonical scalar encodings — 64-bit integers as `[integer, string]`

@@ -81,10 +81,37 @@ internal static class FaultRecord
     /// <param name="error">The fault, or <see langword="null"/>.</param>
     /// <returns>The redacted messages joined outermost-first.</returns>
     /// <remarks>
+    /// <para>
     /// THE WHOLE CHAIN, NOT THE OUTERMOST MESSAGE. A provider fault is habitually wrapped - a task
     /// fault wrapping a command fault wrapping the driver's own - and the interpolated statement sits
     /// at the BOTTOM, so redacting only the outer message would leave the common case fully exposed.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>THE PROVIDER-DIAGNOSTIC POLICY, AND THE STRICT ONE HERE WAS A MEASURED DISCLOSURE RATHER
+    /// THAN MERELY AN INCONSISTENCY.</b> Every message this member reads is an EXCEPTION MESSAGE, and
+    /// the dominant producer is <c>Microsoft.Data.Sqlite.SqliteException</c>, whose message is the
+    /// driver's envelope around its own diagnosis - <c>SQLite Error 19: '&lt;text&gt;'.</c>. That is not
+    /// statement text, and
+    /// <see cref="ISqlRedactor.Redact(string)"/> is a SQL LITERAL SCANNER: handed a string whose
+    /// single quotes nest, it lexes them as SQL would and pairs them the wrong way round. On the real
+    /// message a failing unnamed CHECK constraint produces -
+    /// <c>SQLite Error 19: 'CHECK constraint failed: NAME &lt;&gt; 'Ada''.</c> - the scanner closes the
+    /// outer literal at the INNER opening quote, so the value between the pairs is copied through
+    /// VERBATIM and the record read
+    /// <c>SQLite Error &lt;redacted&gt;: '&lt;redacted&gt;'Ada'&lt;redacted&gt;'.</c>, publishing the row
+    /// value the mask existed to remove. That was observed in this service's own log, not inferred.
+    /// </para>
+    /// <para>
+    /// <b>WHY THE ENVELOPE-AWARE POLICY IS STRICTLY SAFER HERE, NOT MERELY DIFFERENT.</b>
+    /// <see cref="SqlRedactor.RedactProviderDiagnostic(string)"/> peels the wrapper FIRST and scans only
+    /// the interior, where the quoting is well formed - so the same message masks to
+    /// <c>SQLite Error 19: 'CHECK constraint failed: NAME &lt;&gt; '&lt;redacted&gt;''.</c>: the condition
+    /// and the result code still read, the value does not. It falls through to the strict scan for any
+    /// text that is not the whole envelope, so nothing that was masked before is masked less now. See
+    /// <c>Errors/SqlRedactor.cs</c>, <c>RedactProviderDiagnostic</c>, for the canonical field-class
+    /// statement this brings the log path into line with (constraints C-F, C-K).
+    /// </para>
     /// </remarks>
     internal static string RedactedMessages(Exception? error) =>
-        ExceptionChain.DescribeMessages(error, SqlRedactor.Instance.Redact);
+        ExceptionChain.DescribeMessages(error, SqlRedactor.Instance.RedactProviderDiagnostic);
 }

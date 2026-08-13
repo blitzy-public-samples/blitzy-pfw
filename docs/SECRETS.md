@@ -726,27 +726,38 @@ settings file, container definition or source file:
 | Input | Carries | Empty means |
 | --- | --- | --- |
 | `SECURITY_JWT_SIGNING_KEY` (supplied as `SECURITY_JWT_SIGNING_KEY_PATH` → projected file → `SECURITY_JWT_SIGNING_KEY_FILE`) | The ACTIVE private key. Mints every token | Refusal to start — there is no default for a secret |
-| `SECURITY_JWT_RETIRING_SIGNING_KEY` | The outgoing private key. **Published, never used to mint** | No rollover in progress: the steady state |
+| `SECURITY_JWT_RETIRING_SIGNING_KEY` (or, preferred, `SECURITY_JWT_RETIRING_SIGNING_KEY_FILE` → a projection the operator declares for the length of the rollover) | The outgoing private key. **Published, never used to mint** | No rollover in progress: the steady state |
 | `SECURITY_JWT_RETIRING_SIGNING_KEY_ID` | The outgoing key's `kid`, bound at `Security:RetiringSigningKeyId` | As above; the two are a matched pair |
 
 Plus `SECURITY_JWT_SIGNING_KEY_ID`, the active `kid`, which is an identifier rather than a secret — a `kid`
 is published anonymously in the key set by design — and which exists as a variable so that the incoming key
 can be given a NEW identifier without rebuilding the image.
 
-**The procedure. Step 5 is the one that must not be shortened.**
+**The procedure. Step 6 is the one that must not be shortened, and step 5 is the one that must not be
+skipped.** [`../orchestration/README.md`](../orchestration/README.md) §8.1.1 carries the operator-facing form
+of the same steps, including the override the preferred retiring form needs.
 
-1. Generate the incoming key: `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -outform DER | base64 -w0`.
-2. Move the CURRENT signing key into `SECURITY_JWT_RETIRING_SIGNING_KEY` and the current `kid` into
+1. Generate the incoming key **into a new file beside the current one**, so the outgoing key stays readable
+   for the overlap: `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out <new file>`. Give it
+   the same permissions every projected file gets.
+2. Give Security the OUTGOING key as verification material — through
+   `SECURITY_JWT_RETIRING_SIGNING_KEY_FILE` and a projection declared for the length of the rollover, or as a
+   value in `SECURITY_JWT_RETIRING_SIGNING_KEY` — and put the current `kid` in
    `SECURITY_JWT_RETIRING_SIGNING_KEY_ID`.
-3. Write the new key to the file `SECURITY_JWT_SIGNING_KEY_PATH` names, and put a **new, different** `kid` in
-   `SECURITY_JWT_SIGNING_KEY_ID`.
+3. **Repoint `SECURITY_JWT_SIGNING_KEY_PATH` at the file from step 1**, and put a **new, different** `kid` in
+   `SECURITY_JWT_SIGNING_KEY_ID`. The path is what rotates the active key: nothing reads a
+   `SECURITY_JWT_SIGNING_KEY` **value**, so material written there rotates nothing while still publishing a
+   second identifier — the outgoing key would go on minting under the new name.
 4. Restart Security only. Both keys are now published; new tokens carry the new `kid`; tokens minted under
    the old one keep verifying.
-5. **Wait out the overlap** — at least `Security:TokenLifetime` (five minutes as shipped) **plus** the
+5. **Confirm two keys AND two distinct moduli.** `.keys | length` is not sufficient on its own: a no-op
+   rotation publishes two identifiers over one modulus and satisfies it completely, so compare
+   `[.keys[].n] | unique | length` as well. Both must be `2`.
+6. **Wait out the overlap** — at least `Security:TokenLifetime` (five minutes as shipped) **plus** the
    verifiers' clock skew (30 seconds) **plus** however long a verifier's cached key set may remain stale.
    Nothing enforces this wait, which is precisely why it is written down here.
-6. Clear both retiring variables and restart Security again. One key is published; the rollover is
-   complete, and the retired material can be destroyed at its source.
+7. Clear the retiring pair and restart Security again. One key is published, carrying the new identifier; the
+   rollover is complete, and the retired material can be destroyed at its source.
 
 **What the host refuses, so a half-applied rollover cannot run silently.** Material with no identifier (a
 key set entry cannot exist without a `kid`); an identifier with no material (publishes nothing while reading
@@ -754,9 +765,9 @@ as a rollover in progress); two keys sharing one identifier (an ambiguous key se
 select the wrong key and report what looks like forgery); and a retiring key below the 2048-bit floor. Each
 is a startup failure naming the configuration key and never the material.
 
-**Nothing is replaced on disk.** Both variables carry key material rather than a path, so a rollover edits
-the configured secret values, or the objects in the secret store that supply them — not a file in this
-repository, of which there is none.
+**Nothing in this repository is replaced.** A rollover edits the operator's own environment file and the
+files it names on the operator's own host — or the objects in whatever secret store supplies them — and
+touches no file here, of which there is none carrying key material in any form.
 
 **The transport identity is a separate set of files.** `POST /v1/tokens` authenticates its caller with
 either a shared secret presented as an HTTP `Basic` credential or a client certificate — **either
@@ -840,6 +851,11 @@ must agree word for word.
 > # write the key to a file and point SECURITY_JWT_SIGNING_KEY_PATH at it -- it is an RSA PRIVATE key,
 > # not random bytes:
 > #   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -outform DER | base64 -w0
+> # THE KEY FILE IS 0644 INSIDE THAT 0700 DIRECTORY, NOT 0600, because the manifest PROJECTS it and
+> # Compose ignores `mode:`, `uid:` and `gid:` outside Swarm -- at 0600 security-service cannot read it
+> # and refuses to start. The same applies to the two caller issuance credential files. The 0600 above
+> # is the ENVIRONMENT file, which is never projected. docs/ARCHITECTURE.md section 9.3.1 part 4b
+> # decides every mode in one place.
 > cd orchestration && docker compose --env-file "$PFW_ENV" up --build -d
 > ```
 >

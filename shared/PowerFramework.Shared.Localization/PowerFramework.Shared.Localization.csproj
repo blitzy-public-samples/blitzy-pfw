@@ -288,8 +288,10 @@
         Nothing in this refactor publishes these libraries as NuGet packages; they are consumed by
         ProjectReference, and the shipped artifacts are four container images, one per in scope
         service.
-      * Any solution filter. .NET 10 emits the XML .slnx solution format and legacy .slnf filters are
-        incompatible with it, failing with MSB4014 during restore, build and test (AAP §0.3.2.1).
+      * Any solution filter. .NET 10 emits the XML .slnx solution format, and no .slnf filter is
+        authored because a filter's project list must be kept in exact agreement with the solution
+        BY HAND and every drift fails hard. AAP §0.3.2.1's MSB4014-in-all-three-verbs claim was
+        measured false on the pinned SDK; docs/BUILD.md section 2 carries the correction.
         Build scoping is done by the per service .slnx files together with the root property sheets.
   -->
 

@@ -258,8 +258,8 @@ public sealed class ServiceConfigurationCoherenceTests
     ];
 
     /// <summary>
-    /// The complete authoritative leaf set of the <c>Security</c> section - twenty-one entries, no
-    /// twenty-second.
+    /// The complete authoritative leaf set of the <c>Security</c> section - twenty-two entries, no
+    /// twenty-third.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -285,8 +285,11 @@ public sealed class ServiceConfigurationCoherenceTests
     /// mutual-TLS fallback's trust anchor and revocation strictness configurable instead of assumed. It
     /// grew once more, to twenty-one, when signing-key ROLLOVER became expressible: replacing the one
     /// signing key in the estate without publishing the outgoing one alongside it refuses every token
-    /// already in flight, so the retiring key's identifier is a leaf. All of them are read by the options
-    /// type and documented in the orchestration template, which is what qualifies a leaf as authoritative.
+    /// already in flight, so the retiring key's identifier is a leaf. The twenty-second arrived with the
+    /// same kind of finding in the opposite direction - the deployment is reached under two origins and the
+    /// discovery document could only describe one of them, so the additional origins it answers on became
+    /// declarable. All of them are read by the options type and documented in the orchestration template,
+    /// which is what qualifies a leaf as authoritative.
     /// </para>
     /// <para>
     /// THE SHRINKING DIRECTION IS THE MORE INTERESTING ONE. Giving the roster entries
@@ -302,6 +305,17 @@ public sealed class ServiceConfigurationCoherenceTests
     private static readonly string[] AuthoritativeSecurityLeafPaths =
     [
         "Security:Issuer",
+
+        // THE PUBLISHED LOCATION, WHICH IS A DIFFERENT FACT FROM THE IDENTITY ABOVE AND IS WHY BOTH
+        // LEAVES EXIST. `Issuer` is the `iss` claim all three verifiers compare byte for byte; this is
+        // the set of OTHER addresses this one service is reachable on, and the discovery document
+        // composes `jwks_uri` and `token_endpoint` from whichever of them a request arrived on. Both
+        // addresses used to be composed from the issuer alone, which handed every consumer outside the
+        // Compose network a key-set address naming a host only resolvable inside it. Declared here as a
+        // leaf because the base settings file ships it EMPTY - the shipped default reproduces the
+        // issuer-only behaviour exactly - and an empty collection still has to be a member the options
+        // type reads rather than dead configuration.
+        "Security:PublishedOrigins",
         "Security:Audiences",
 
         // WHICH caller may obtain a token for WHICH audience, carrying WHICH scopes. Separate from

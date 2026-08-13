@@ -53,9 +53,13 @@
     body below follows that shape exactly. No .sln text format file exists anywhere in this
     repository, and the required name for this file carries the .slnx extension.
 
-    Do not author a .slnf solution filter here or anywhere else. The planning record documents a
-    legacy filter failing against a .slnx format solution with MSB4014 during restore, during build
-    AND during test, and a filter would be pointless here regardless: this solution has two members
+    Do not author a .slnf solution filter here or anywhere else. The planning record described a
+    legacy filter failing against a .slnx format solution with MSB4014 in all three verbs; that was
+    MEASURED FALSE on the pinned SDK, where a well formed filter over an existing .slnx restores,
+    builds and tests cleanly, and docs/BUILD.md section 2 records the measurement and the code's
+    real trigger. The prohibition is unaffected, because it rests on maintenance rather than on a
+    tooling defect: a filter's project list must be kept in exact agreement with the solution BY
+    HAND. And a filter would be pointless here regardless: this solution has two members
     and neither is one you would ever want filtered out. The per service .slnx design IS the
     resolution that a filter would have been reached for.
 

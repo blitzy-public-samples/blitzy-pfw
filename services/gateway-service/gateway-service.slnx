@@ -28,8 +28,11 @@
     required path for this file carries the .slnx extension.
 
   NEVER ADD A SOLUTION FILTER, AND NEVER ADD A SECOND SOLUTION, TO THIS DIRECTORY
-    Do not author a .slnf solution filter here. The planning record documents legacy .slnf filters
-    failing against a .slnx format solution with MSB4014 during restore, build and test, and a
+    Do not author a .slnf solution filter here. The planning record described legacy .slnf filters
+    failing against a .slnx format solution with MSB4014 in all three verbs; that was MEASURED
+    FALSE on the pinned SDK - see docs/BUILD.md section 2, which carries the measurement, the four
+    situations that DO fail and the code's real trigger. The prohibition rests on the hand
+    maintained project list instead, which is the durable reason. And a
     filter would be pointless here regardless: this solution has two members and neither of them is
     ever the one you would want to filter out. A second solution file is worse than pointless. With
     more than one solution in the directory the bare commands above stop working entirely and fail

@@ -39,15 +39,25 @@
 
 using System.Globalization;
 using System.Reflection;
+using System.Text.Json;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using PowerFramework.Contracts.Common.V1;
+using PowerFramework.Gateway.Configuration;
 using OperationStatus = PowerFramework.Contracts.Persistence.V1.OperationStatus;
 using UpdateResponse = PowerFramework.Contracts.Persistence.V1.UpdateResponse;
 using Xunit;
+using DataServicesUpdateResponse = PowerFramework.Contracts.DataServices.V1.UpdateResponse;
+using DropDownStateResponse =
+    PowerFramework.Contracts.DataServices.V1.GetDropDownSearchStateResponse;
+using InBandStatus = PowerFramework.Gateway.Endpoints.DataServicesProxyEndpoints.InBandStatus;
 using RetCode = PowerFramework.Shared.Kernel.RetCode;
+using StatusProjection = PowerFramework.Gateway.Endpoints.DataServicesProxyEndpoints.StatusProjection;
+using StructuredError = PowerFramework.Contracts.DataServices.V1.StructuredError;
+using WireDwBuffer = PowerFramework.Contracts.Common.V1.DwBuffer;
 using WireRetCode = PowerFramework.Contracts.Common.V1.RetCode.Types.Value;
 
 namespace PowerFramework.Gateway.Tests;
@@ -269,31 +279,36 @@ public sealed class DataServicesProxyInBandStatusTests(GatewayTestHostFixture ho
     }
 
     /// <summary>
-    /// The whole upstream message is never attached to a problem body.
+    /// The whole upstream message is never attached to a problem body, and the ONE member that is
+    /// attached is the one the contract declares.
     /// </summary>
     /// <remarks>
     /// <para>
     /// 🔴 THE SECOND HALF OF THE SAME DISCLOSURE, AND THE SHARPER HALF. Withholding the upstream's
     /// <c>detail</c> prose achieves nothing if the entire upstream response is serialised into the same
     /// body under a <c>response</c> extension - which is what the in-band failure renderer used to do. A
-    /// relayed <c>db_error</c> carries <c>sqlsyntax</c>, the complete generated statement, and the legacy
-    /// interpolates literal VALUES into it with no redaction anywhere in its logger (AAP 0.6.4). So the
-    /// extension was an unbounded channel through which row data and internal structure could leave the
-    /// system in a body nobody had screened.
+    /// whole upstream message is an unbounded, unreviewed payload under a member no contract declared, and
+    /// "it is redacted before it arrives" was doing all the work in the argument for it: a disclosure
+    /// control that depends on another service having got it right is not a control at this boundary.
     /// </para>
     /// <para>
-    /// THE OLD JUSTIFICATION WAS THAT THE FIELD IS REDACTED BEFORE IT ARRIVES. That was doing all the work
-    /// in the argument, and a disclosure control that depends on another service having got it right is not
-    /// a control at this boundary - Gateway is the system's only external ingress and owns what crosses it.
+    /// 🔴 <b>AND WHY THIS ROW NO LONGER BANS THE FORMATTER OUTRIGHT, WHICH IS A STRENGTHENING RATHER THAN A
+    /// RELAXATION.</b> The previous form asserted that <c>ResponseFormatter.Format</c> appeared nowhere
+    /// inside the renderer, as a proxy for "no payload is attached". That proxy was too strong in one
+    /// direction and too weak in the other. Too strong, because it also forbade attaching the <c>dbError</c>
+    /// member the contract DECLARES - and forbidding it is what left a caller whose <c>NOT NULL</c>
+    /// violation was refused with no way to learn which column, the finding this file's production
+    /// counterpart now closes. Too weak, because moving the identical call one method away satisfies it
+    /// while changing nothing about the body: a guard that a rename defeats is not a guard.
     /// </para>
     /// <para>
-    /// A SOURCE GUARD RATHER THAN A RENDERED-BODY ASSERTION, and the choice is deliberate. What must hold
-    /// is that NO in-band failure path attaches the message, for every outcome and every operation; a
-    /// rendered check would cover only whichever failure a test could provoke, which is precisely how the
-    /// extension survived unnoticed. The member name is still declared on <c>InBandStatus</c> so this row
-    /// can name what must not appear. The conflict path is untouched and is asserted elsewhere: its
-    /// <c>conflict</c> extension carries the current row state AAP 0.6.3.8 requires, which is a reviewed,
-    /// bounded payload rather than a whole relayed message.
+    /// SO THE INVARIANT IS STATED DIRECTLY AND IN BOTH DIRECTIONS. The negative half stays a SOURCE guard
+    /// because it must hold for every outcome and every operation, not only for failures a test can
+    /// provoke: the retired member name appears nowhere, and nothing anywhere formats the RESPONSE into a
+    /// problem extension. The positive half is asserted on the RENDERED DOCUMENT by the two rows below,
+    /// which is the only place "exactly one extension, and it is <c>dbError</c>" can actually be observed.
+    /// The conflict path is untouched and is asserted elsewhere; its <c>conflict</c> extension is the same
+    /// kind of thing - a reviewed, schema-declared, bounded payload rather than a whole relayed message.
     /// </para>
     /// </remarks>
     [Fact]
@@ -315,11 +330,79 @@ public sealed class DataServicesProxyInBandStatusTests(GatewayTestHostFixture ho
             text,
             StringComparison.Ordinal);
 
-        // AND THE FORMATTER IS NOT REACHED FROM THE FAILURE RENDERER AT ALL, which is what stops the same
-        // payload being attached under a different member name. `ResponseFormatter.Format` legitimately
-        // serves the SUCCESS paths, so its presence in the file is expected; what must not exist is a call
-        // inside the in-band failure renderer.
-        int renderer = text.IndexOf("private static IResult RenderInBandFailure", StringComparison.Ordinal);
+        // NOTHING ANYWHERE IN THE FILE RENDERS THE RESPONSE INTO A PROBLEM EXTENSION. The success renderer
+        // formats the response into the RESPONSE BODY, which is its whole job, and does so through
+        // `Results.Text`; what must not exist is the message being turned into a node for attachment. Both
+        // spellings are named so that neither the direct call nor the payload helper can be handed a
+        // response, wherever in the file it is written.
+        Assert.DoesNotContain("ToDeclaredPayload(response", text, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "JsonNode.Parse(ResponseFormatter.Format(response",
+            text,
+            StringComparison.Ordinal);
+
+        // AND THE MEMBERS THE FAILURE PATH MAY ATTACH ARE EXACTLY THE TWO THE CONTRACT DECLARES, NAMED.
+        // The renderer itself attaches none directly - it delegates to AttachRefusalIdentity, which is the
+        // one method holding the upstream message - so the enumeration is read from THAT body. Both members
+        // are declared in gateway.v1.yaml's ProblemDetails and both are bounded, reviewed shapes: dbError
+        // for a refusal the storage engine raised, validationErrors for one the DataWindow service's own
+        // row validator raised. A third member added there fails this row by name rather than by a
+        // coverage gap, and a whole-message relay cannot be spelled as either of these two constants.
+        Assert.DoesNotContain(
+            "problem.Extensions[",
+            RendererBody(text),
+            StringComparison.Ordinal);
+
+        string[] attachments =
+        [
+            .. AttachBody(text)
+                .Split('\n')
+                .Select(static line => line.Trim())
+                .Where(static line =>
+                    line.StartsWith("problem.Extensions[", StringComparison.Ordinal)),
+        ];
+
+        Assert.Equal(2, attachments.Length);
+
+        Assert.Contains(
+            attachments,
+            static line => line.StartsWith(
+                "problem.Extensions[DatabaseErrorExtensionMember]",
+                StringComparison.Ordinal));
+
+        Assert.Contains(
+            attachments,
+            static line => line.StartsWith(
+                "problem.Extensions[ValidationErrorsExtensionMember]",
+                StringComparison.Ordinal));
+
+        // AND THE SAME RULE FOLLOWS THE ONE METHOD THE RENDERER NOW DELEGATES TO, because a guard that
+        // stopped at the renderer's own closing brace would be satisfied by moving the forbidden call one
+        // frame down. AttachRefusalIdentity is the only method the failure path calls with the upstream
+        // message in hand, and it is allowed to read NAMED FIELDS while being forbidden the whole-message
+        // formatter - which is precisely the distinction between relaying an identity and relaying a
+        // payload. This half of the guard was added with that method: the letter of the check above would
+        // have passed without it.
+        string attachBody = AttachBody(text);
+
+        Assert.DoesNotContain("ResponseFormatter.Format", attachBody, StringComparison.Ordinal);
+
+        // NOR THE UPSTREAM'S OWN PROSE. The per-row record's sixth field is a structured error whose
+        // message is legacy operator text; relaying it would put upstream prose in a caller's body through
+        // the very member added to keep prose out of it. Named here as the field accessor rather than as a
+        // rendered string, so the guard fails on the attempt rather than on a payload that happens to
+        // contain one.
+        Assert.DoesNotContain("refusal.Error", attachBody, StringComparison.Ordinal);
+    }
+
+    /// <summary>Delimits the in-band failure renderer's own body in the production source.</summary>
+    /// <param name="text">The production file's text.</param>
+    /// <returns>The renderer's body.</returns>
+    private static string RendererBody(string text)
+    {
+        int renderer = text.IndexOf(
+            "internal static IResult RenderInBandFailure",
+            StringComparison.Ordinal);
 
         Assert.True(renderer >= 0, "RenderInBandFailure was not found, so this guard is reading nothing.");
 
@@ -327,10 +410,211 @@ public sealed class DataServicesProxyInBandStatusTests(GatewayTestHostFixture ho
 
         Assert.True(rendererEnd > renderer, "The renderer's body could not be delimited.");
 
-        Assert.DoesNotContain(
-            "ResponseFormatter.Format",
-            text[renderer..rendererEnd],
+        return text[renderer..rendererEnd];
+    }
+
+    /// <summary>
+    /// Delimits the one method the failure path calls with the upstream message in hand.
+    /// </summary>
+    /// <param name="text">The production file's text.</param>
+    /// <returns>That method's body.</returns>
+    /// <remarks>
+    /// A guard that stopped at the renderer's own closing brace would be satisfied by moving a forbidden
+    /// call one frame down, which is why every rule this row states is applied here as well.
+    /// </remarks>
+    private static string AttachBody(string text)
+    {
+        int attach = text.IndexOf(
+            "static void AttachRefusalIdentity",
             StringComparison.Ordinal);
+
+        Assert.True(
+            attach >= 0,
+            "AttachRefusalIdentity was not found. Either it was renamed - in which case this guard must "
+                + "follow it - or the failure path no longer reads the upstream message at all, in which "
+                + "case the refusal has stopped naming the offending column.");
+
+        int attachEnd = text.IndexOf("\n    }", attach, StringComparison.Ordinal);
+
+        Assert.True(attachEnd > attach, "AttachRefusalIdentity's body could not be delimited.");
+
+        return text[attach..attachEnd];
+    }
+
+    /// <summary>
+    /// An in-band failure carrying a database payload publishes it under the declared <c>dbError</c>
+    /// member, with the offending column legible and no other member added.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THIS ROW IS THE FINDING. An insert nulling a <c>NOT NULL</c> column is refused by the storage
+    /// engine, which answers an IN-BAND failure - transport OK, body carrying <c>E_INVALID_DATA</c> - so it
+    /// arrives on the failure renderer and not on the success path that forwards a message whole. The
+    /// renderer discarded the response, so the payload naming the column was thrown away at the last
+    /// boundary after Persistence and DataServices had each carried it intact, and a caller received
+    /// <c>400</c> with fixed prose and nothing to act on.
+    /// </para>
+    /// <para>
+    /// THE COLUMN NAME IS ASSERTED OVER THE SERIALISED BODY rather than one member, matching how the
+    /// end-to-end suite asserts it: which member carries the driver's text is an implementation detail of
+    /// the relay, and the requirement is that the identity reaches the caller at all.
+    /// </para>
+    /// <para>
+    /// AND THE EXTENSION SET IS ASSERTED EXACTLY. <c>retCode</c>, <c>upstream</c>, <c>traceId</c> and
+    /// <c>dbError</c> - four members, every one declared in <c>gateway.v1.yaml</c>'s <c>ProblemDetails</c>,
+    /// and no fifth. That is what stops the payload's arrival being accompanied by anything else, which is
+    /// the half of the retired guard worth keeping.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ADatabaseFailureIsPublishedUnderTheDeclaredMemberAndNamesTheColumn()
+    {
+        const string providerDiagnostic = "SQLite Error 19: 'NOT NULL constraint failed: COMPANY.AGE'.";
+
+        DataServicesUpdateResponse response = new()
+        {
+            RetCode = (WireRetCode)(int)RetCode.E_INVALID_DATA,
+            Error = new DbError
+            {
+                Sqldbcode = 1299L,
+                Sqlerrtext = providerDiagnostic,
+
+                // REDACTED BY THE SERVICE THAT OWNS THE REDACTION, and empty is the contract's own
+                // documented common case - so an empty value here is the realistic input rather than a
+                // convenience.
+                Sqlsyntax = string.Empty,
+                Buffer = WireDwBuffer.Primary,
+                Row = 1L,
+            },
+        };
+
+        ProblemDetails problem = RenderAndReadProblem(response);
+
+        Assert.Equal(StatusCodes.Status400BadRequest, problem.Status);
+        Assert.True(
+            problem.Extensions.ContainsKey("dbError"),
+            "The declared member must be present when the response carries a database payload.");
+
+        Assert.DoesNotContain(
+            InBandStatus.ResponseExtensionMember,
+            problem.Extensions.Keys,
+            StringComparer.Ordinal);
+
+        Assert.Equal(
+            ["dbError", "retCode", "traceId", "upstream"],
+            [.. problem.Extensions.Keys.Order(StringComparer.Ordinal)]);
+
+        string serialized = JsonSerializer.Serialize(problem.Extensions["dbError"]);
+
+        Assert.Contains("AGE", serialized.ToUpperInvariant(), StringComparison.Ordinal);
+        Assert.Contains("1299", serialized, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An in-band failure with no database payload publishes no <c>dbError</c> member at all.
+    /// </summary>
+    /// <remarks>
+    /// THE PAIRED NEGATIVE, AND IT IS NOT A FORMALITY. A renderer that attached the member unconditionally
+    /// would satisfy the row above and would publish a payload carrying a zero code, empty text and row
+    /// zero on every unrelated failure - a database error that did not happen, which a consumer branching
+    /// on the member's presence would act on. The same outcome code is used as the row above, so presence
+    /// is decided by the PAYLOAD and demonstrably not by the status.
+    /// </remarks>
+    [Fact]
+    public void AFailureWithoutADatabasePayloadPublishesNoDatabaseMember()
+    {
+        ProblemDetails problem = RenderAndReadProblem(Failing(RetCode.E_INVALID_DATA));
+
+        Assert.DoesNotContain("dbError", problem.Extensions.Keys, StringComparer.Ordinal);
+        Assert.Equal(
+            ["retCode", "traceId", "upstream"],
+            [.. problem.Extensions.Keys.Order(StringComparer.Ordinal)]);
+    }
+
+    /// <summary>
+    /// A default-valued database payload is treated as ABSENT rather than published as an empty one.
+    /// </summary>
+    /// <remarks>
+    /// A producer that assigned an all-defaults instance - which protobuf cannot distinguish from a
+    /// deliberate one once it is set - would otherwise publish <c>dbError</c> saying a database failure
+    /// occurred with no code, no text and no row. Emptiness is decided by the payload's own equality, so
+    /// this row keeps holding when a member is added to the shape.
+    /// </remarks>
+    [Fact]
+    public void ADefaultValuedDatabasePayloadIsTreatedAsAbsent()
+    {
+        DataServicesUpdateResponse response = new()
+        {
+            RetCode = (WireRetCode)(int)RetCode.E_INVALID_DATA,
+            Error = new DbError(),
+        };
+
+        Assert.False(
+            InBandStatus.TryReadDatabaseError(response, out _),
+            "An all-defaults payload carries no diagnosis and must not be published as one.");
+
+        Assert.DoesNotContain(
+            "dbError",
+            RenderAndReadProblem(response).Extensions.Keys,
+            StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// The payload is located by its TYPE, so a same-named field of a different shape is never published
+    /// as a database error.
+    /// </summary>
+    /// <remarks>
+    /// <c>error</c> is the field name of the update response's <c>common.v1.DbError</c> AND of a
+    /// <c>StructuredError</c> on several model responses - a different shape with different members. Matching
+    /// the NAME would relay one under a member the contract declares as the other, which is a contract
+    /// break that a schema with <c>additionalProperties: false</c> turns into a consumer failure.
+    /// </remarks>
+    [Fact]
+    public void APayloadOfAnotherShapeUnderTheSameFieldNameIsNotPublished()
+    {
+        DropDownStateResponse response = new()
+        {
+            RetCode = (WireRetCode)(int)RetCode.E_INVALID_DATA,
+            Error = new StructuredError { Text = "a structured error is not a database error" },
+        };
+
+        // The field is named `error` on this shape too, and it is populated - so a name-matched read would
+        // find it.
+        Assert.NotNull(response.Error);
+        Assert.False(
+            InBandStatus.TryReadDatabaseError(response, out _),
+            "Only a common.v1.DbError may be published under the dbError member.");
+    }
+
+    /// <summary>
+    /// Renders an in-band failure through the deployed renderer and returns the problem document it built.
+    /// </summary>
+    /// <param name="response">The upstream response to render.</param>
+    /// <returns>The document.</returns>
+    /// <remarks>
+    /// THE DEPLOYED RENDERER RATHER THAN A COPY OF ITS LOGIC, which is the point of these rows: the
+    /// invariant is a property of the document this code path builds, so a reimplementation here would
+    /// assert nothing about it. The context carries only what the renderer reads - logging, options and the
+    /// request line.
+    /// </remarks>
+    private static ProblemDetails RenderAndReadProblem(Google.Protobuf.IMessage response)
+    {
+        ServiceCollection services = new();
+        _ = services.AddLogging();
+        _ = services.Configure<GatewayOptions>(static _ => { });
+
+        DefaultHttpContext context = new() { RequestServices = services.BuildServiceProvider() };
+        context.Request.Method = HttpMethods.Post;
+        context.Request.Path = "/v1/datawindow/update";
+
+        StatusProjection failure = AssertProjects(response);
+
+        IResult rendered = PowerFramework.Gateway.Endpoints.DataServicesProxyEndpoints
+            .RenderInBandFailure(context, response, failure);
+
+        ProblemHttpResult problem = Assert.IsType<ProblemHttpResult>(rendered);
+
+        return problem.ProblemDetails;
     }
 
     /// <summary>Locates the proxy endpoint source file, or null when no source tree is reachable.</summary>

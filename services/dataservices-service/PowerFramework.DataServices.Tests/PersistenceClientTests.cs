@@ -295,6 +295,26 @@ internal sealed class FakeQueryServiceClient : QueryService.QueryServiceClient
     /// <summary>Every method invoked, by name, so the wiring of each member can be asserted.</summary>
     internal List<string> Calls { get; } = [];
 
+    /// <summary>
+    /// The outcome code the next query-task creation answers with. <c>0</c> is <c>RetCode.OK</c>.
+    /// </summary>
+    /// <remarks>
+    /// A FAILING CODE ANSWERS WITHOUT A HANDLE, as a producer must, so it reaches the acquisition's SECOND
+    /// refusal - the one where a session HAS been obtained and must still be ended. That is the step whose
+    /// diagnostic has to name the CREATE call rather than the session, because only the create call carries
+    /// the caller's own settings.
+    /// </remarks>
+    internal long CreateTaskCode { get; set; }
+
+    /// <summary>The diagnostic the scripted refusal carries.</summary>
+    /// <remarks>
+    /// EMPTY BY DEFAULT, AND THAT IS THE INTERESTING CASE RATHER THAN AN OVERSIGHT. C-05 answers a bare
+    /// code with no text of its own wherever a setting's refusal is delegated to the preserved legacy setter
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L410</c>], which is exactly the
+    /// shape that used to produce a caller-facing sentence ending in "(outcome -3). " with nothing after it.
+    /// </remarks>
+    internal string CreateTaskErrorText { get; set; } = string.Empty;
+
     /// <inheritdoc/>
     public override AsyncUnaryCall<CreateQueryTaskResponse> CreateQueryTaskAsync(
         CreateQueryTaskRequest request,
@@ -303,6 +323,18 @@ internal sealed class FakeQueryServiceClient : QueryService.QueryServiceClient
         Calls.Add(nameof(CreateQueryTaskAsync));
         CreateTaskRequests.Add(request);
         LastOptions = options;
+
+        if (CreateTaskCode != 0L)
+        {
+            return PersistenceCallFactory.Unary(Task.FromResult(new CreateQueryTaskResponse
+            {
+                Status = new OperationStatus
+                {
+                    RetCode = (WireRetCode)(int)CreateTaskCode,
+                    ErrorText = CreateTaskErrorText,
+                },
+            }));
+        }
 
         return PersistenceCallFactory.Unary(Task.FromResult(new CreateQueryTaskResponse
         {
@@ -878,6 +910,16 @@ internal sealed class FakeTransactionServiceClient : TransactionService.Transact
         }));
     }
 
+    /// <summary>
+    /// The outcome code the next session begin answers with. <c>0</c> is <c>RetCode.OK</c>.
+    /// </summary>
+    /// <remarks>
+    /// REACHES THE FIRST REFUSAL, where nothing at all was acquired - which is the step a diagnostic must
+    /// NOT describe as a rejected setting, because the descriptor a session is opened with is this
+    /// service's own configuration and nothing on the request can change it.
+    /// </remarks>
+    internal long BeginSessionCode { get; set; }
+
     /// <inheritdoc/>
     public override AsyncUnaryCall<BeginSessionResponse> BeginSessionAsync(
         BeginSessionRequest request,
@@ -885,6 +927,14 @@ internal sealed class FakeTransactionServiceClient : TransactionService.Transact
     {
         BeginRequests.Add(request);
         LastOptions = options;
+
+        if (BeginSessionCode != 0L)
+        {
+            return PersistenceCallFactory.Unary(Task.FromResult(new BeginSessionResponse
+            {
+                Status = new OperationStatus { RetCode = (WireRetCode)(int)BeginSessionCode },
+            }));
+        }
 
         return PersistenceCallFactory.Unary(Task.FromResult(new BeginSessionResponse
         {

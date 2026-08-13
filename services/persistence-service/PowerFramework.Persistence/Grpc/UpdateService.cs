@@ -1487,6 +1487,50 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
         + "are parameterized and identifiers cannot be, so a name outside that shape is refused rather "
         + "than quoted or escaped - the generated statement is byte-exact by contract.";
 
+    /// <summary>
+    /// The diagnostic for a descriptor whose stated concurrency mode names no mode that exists.
+    /// </summary>
+    /// <remarks>
+    /// IT NAMES THE THREE MODES AND QUOTES NOTHING. The mode decides which columns' original values guard
+    /// the row, so a value outside the three has no predicate at all - and the previous behaviour was to
+    /// accept it, report success, and then run the update under whichever arm an unrecognised value reached.
+    /// The three accepted values and their meanings are what a caller cannot know without being told; the
+    /// value it sent it already has (constraint C-F).
+    /// </remarks>
+    internal const string UnsupportedUpdateWhereDiagnostic =
+        "A descriptor in this request states an updatewhere value that names no concurrency mode. The "
+        + "accepted values are 0 (the predicate carries the key columns only), 1 (the key columns plus "
+        + "every column marked for the where clause, each compared against its ORIGINAL value) and 2 (the "
+        + "key columns plus the columns that row modified, again against their original values). Omit the "
+        + "field to take the data object definition's own mode.";
+
+    /// <summary>
+    /// The diagnostic for a descriptor that states an update contract differing from the one that will
+    /// actually govern, while multi-table update is off.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THE SIBLING OF <see cref="DescriptorsWithoutMultiTableDiagnostic"/>, AND IT CLOSES THE SAME
+    /// HAZARD ON THE FIELDS THAT DECIDE WHAT IS WRITTEN RATHER THAN WHERE. A caller that states a
+    /// restricted updatable-column set with the switch off previously received <c>RetCode.OK</c> and then
+    /// had every column of the definition written - the response said the restriction was accepted and the
+    /// storage said otherwise. The remedy is the same as the table arm's, so the wording follows it: turn
+    /// the switch on to have the descriptor applied, send one that agrees, or send none.
+    /// </para>
+    /// <para>
+    /// IT NAMES THE FIELD KIND AND NOTHING ELSE - no column name, no table name, no value (constraint C-F).
+    /// </para>
+    /// </remarks>
+    internal const string DisagreeingDescriptorDiagnostic =
+        "A descriptor in this request states an updatable-column set, key-column set, identity column, "
+        + "updatewhere mode or updatekeyinplace setting that differs from the one the data object's own "
+        + "definition declares, while multi_table_update is false. In that mode the descriptor array is "
+        + "never applied and the definition governs, so the update would have been generated from the "
+        + "definition's contract rather than the stated one and still reported as a success - writing "
+        + "columns the descriptor excluded, or guarding the row under a concurrency mode it did not ask "
+        + "for. Set multi_table_update to true to have the descriptor applied, send a descriptor that "
+        + "agrees with the definition, or omit the differing fields.";
+
     private readonly IUpdateTaskFactory _factory;
     private readonly UpdateTaskRegistry _tasks;
 
@@ -1631,7 +1675,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
     /// </returns>
     /// <remarks>
     /// <para>
-    /// TWO CONTRADICTIONS ARE REFUSED, EACH WITH THE CODE ITS OWN PATH ALREADY USES:
+    /// THREE CONTRADICTIONS ARE REFUSED, EACH WITH THE CODE ITS OWN PATH ALREADY USES:
     /// </para>
     /// <para>
     /// (1) A DIFFERENT UPDATE TABLE - <c>E_INVALID_ARGUMENT</c>. This is the misdirection: the write lands
@@ -1646,8 +1690,43 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
     /// name, which is the oracle's own arm and wording for a column name that will not resolve
     /// [<c>n_cst_thread_task_sqlupdate.sru:L118-L122</c>]. It is the SAME answer this descriptor would get
     /// with the switch ON, arriving one call earlier - so the two paths agree rather than one accepting what
-    /// the other refuses. Only EXISTENCE is checked, never the update, key or identity FLAGS: a caller may
-    /// legitimately declare a subset, and with the switch off the definition's own flags govern anyway.
+    /// the other refuses.
+    /// </para>
+    /// <para>
+    /// (3) 🔴 A STATED CONTRACT THAT DIFFERS FROM THE ONE THAT WILL GOVERN - <c>E_INVALID_ARGUMENT</c> with
+    /// <see cref="DisagreeingDescriptorDiagnostic"/>. This is the same misdirection as (1) moved from WHERE
+    /// the write lands to WHAT it writes and HOW the row is guarded, and it is the arm that closes the
+    /// data-integrity fault: a caller stating <c>updatablecolumns</c> of one column, with the switch off,
+    /// previously received <c>RetCode.OK</c> and then had every column of the definition written. The
+    /// response asserted a restriction the storage did not honour, and nothing in it revealed that. The
+    /// same applies to a stated key set (the predicate addresses different rows than declared), a stated
+    /// identity column (the write-back reports a different column), a stated <c>updatewhere</c> (the row is
+    /// guarded under a policy the caller did not choose) and a stated <c>updatekeyinplace</c> (a key change
+    /// takes the other statement shape).
+    /// </para>
+    /// <para>
+    /// AN UNSTATED FIELD IS NOT A DISAGREEMENT, and that distinction is what keeps this the minimum
+    /// narrowing rather than a wholesale refusal of the inert-descriptor shape. An EMPTY array and an EMPTY
+    /// identity column mean "not stated" - the same reading the identity column already has everywhere in
+    /// this class [<c>:L127-L129</c>] - and the two optional scalars carry explicit presence on the wire, so
+    /// absence is unambiguous. A caller that names only the table therefore still gets the pre-existing
+    /// behaviour, and a caller that DERIVES its descriptor from the definition agrees on every field by
+    /// construction: that shape is not hypothetical, it is what this system's own DataServices consumer
+    /// sends on every update, and refusing it would break the only cross-service update path in the estate.
+    /// </para>
+    /// <para>
+    /// SET COMPARISON, NOT SEQUENCE COMPARISON, on the two arrays. Order carries no meaning in either the
+    /// oracle's script - it emits one line per column and the lines are independent [<c>:L111-L129</c>] - or
+    /// in the generated statement, whose column order comes from the carrier's own one-based model. So a
+    /// descriptor listing the same columns in another order, or listing one twice, AGREES. Case-insensitive
+    /// for the reason the table comparison is: these are identifiers, and the oracle itself matches
+    /// DataWindow column metadata without regard to case [<c>:L217</c>, <c>:L221</c>].
+    /// </para>
+    /// <para>
+    /// THE UPDATABLE SET IS COMPARED AGAINST EVERY DECLARED COLUMN, because that is what the definition
+    /// makes updatable: the carrier's own definition seed installs <c>update=yes</c> for every column of the
+    /// model, which is what the evidenced fixture declares for all six of its columns
+    /// [<c>dw_sqlite.srd:L8-L14</c>] and the ordinary shape of a DataWindow over one table.
     /// </para>
     /// <para>
     /// THE GOVERNING DATA OBJECT IS THE REQUEST'S OWN WHEN IT NAMES ONE, and otherwise the one the task
@@ -1711,27 +1790,159 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
                 return true;
             }
 
-            if (!TryFindUndeclaredColumn(table, definition, out string undeclared))
+            if (TryFindUndeclaredColumn(table, definition, out string undeclared))
+            {
+                // THE COLUMN NAME IS NOT LOGGED EITHER, for the same reason the table name is not: the
+                // caller sent it and gets it back in the response, and a log record is read by someone who
+                // did not.
+                _logger?.LogWarning(
+                    "PrepareUpdate refused an update-table descriptor on task {TaskId}: it names a column "
+                    + "the governing data object's definition does not declare. No table name, column name "
+                    + "or value is recorded.",
+                    LogSafeText.Render(entry.TaskId));
+
+                refusal = UpdateWireCodes.Status(
+                    RetCode.E_INTERNAL_ERROR,
+                    UpdateWhereBuilder.InvalidColumnNameMessage + undeclared);
+
+                return true;
+            }
+
+            if (!StatesDifferentContract(table, definition, settings, out string differingField))
             {
                 continue;
             }
 
-            // THE COLUMN NAME IS NOT LOGGED EITHER, for the same reason the table name is not: the caller
-            // sent it and gets it back in the response, and a log record is read by someone who did not.
+            // THE FIELD KIND IS NAMED, THE FIELD'S CONTENTS ARE NOT (constraint C-F). Which of the five
+            // fields disagreed is diagnostic and carries no caller text; the columns, the mode and the
+            // setting are all the caller's own and reach it in the response.
             _logger?.LogWarning(
-                "PrepareUpdate refused an update-table descriptor on task {TaskId}: it names a column the "
-                + "governing data object's definition does not declare. No table name, column name or "
-                + "value is recorded.",
-                LogSafeText.Render(entry.TaskId));
+                "PrepareUpdate refused an update-table descriptor on task {TaskId}: multi-table update is "
+                + "off, so the descriptor array is never applied and the data object's own definition "
+                + "governs - and the stated {DifferingField} differs from the definition's. No table "
+                + "name, column name or value is recorded.",
+                LogSafeText.Render(entry.TaskId),
+                LogSafeText.Render(differingField));
 
             refusal = UpdateWireCodes.Status(
-                RetCode.E_INTERNAL_ERROR,
-                UpdateWhereBuilder.InvalidColumnNameMessage + undeclared);
+                RetCode.E_INVALID_ARGUMENT,
+                DisagreeingDescriptorDiagnostic);
 
             return true;
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Decides whether a descriptor STATES an update contract differing from the definition's own, which
+    /// with the multi-table switch off is a contract the update will not honour.
+    /// </summary>
+    /// <param name="table">The descriptor under test.</param>
+    /// <param name="definition">The governing definition and its declared columns.</param>
+    /// <param name="settings">The governing definition's table-level update settings.</param>
+    /// <param name="differingField">
+    /// Receives the KIND of the first differing field, for the log record. Empty when nothing differs.
+    /// </param>
+    /// <returns><see langword="true"/> when a stated field differs.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE VISIT ORDER IS THE ORACLE'S - updatable columns, key columns, identity column, then the two
+    /// table-level settings [<c>n_cst_thread_task_sqlupdate.sru:L111-L141</c>] - so the field reported is
+    /// the one the preparer would have applied first.
+    /// </para>
+    /// <para>
+    /// EVERY ARM IS PRESENCE-GATED, and the gate differs per field because the wire says different things
+    /// about absence: a repeated field cannot distinguish absent from empty, so empty is read as unstated;
+    /// the identity column is a string whose emptiness this class already reads as "no identity column"
+    /// rather than as a name; and the two scalars carry explicit field presence, so <c>HasUpdateWhere</c>
+    /// and <c>HasUpdateKeyInPlace</c> answer the question directly.
+    /// </para>
+    /// <para>
+    /// A RETRIEVE-ONLY DEFINITION IS EXEMPT ENTIRELY. It declares no update table, so it has no contract to
+    /// differ from and an update against it fails for want of one before any statement is generated - the
+    /// same exemption the table arm makes, for the same reason.
+    /// </para>
+    /// </remarks>
+    private static bool StatesDifferentContract(
+        TableUpdateContract table,
+        DataObjectDefinitionEntry definition,
+        DataObjectUpdateSettings settings,
+        out string differingField)
+    {
+        differingField = string.Empty;
+
+        if (settings.Table.Length == 0)
+        {
+            return false;
+        }
+
+        if (table.Updatablecolumns.Count != 0
+            && !SameColumnSet(
+                table.Updatablecolumns,
+                [.. definition.Columns.Select(static column => column.Name)]))
+        {
+            differingField = "updatable-column set";
+
+            return true;
+        }
+
+        if (table.Keycolumns.Count != 0 && !SameColumnSet(table.Keycolumns, settings.KeyColumns))
+        {
+            differingField = "key-column set";
+
+            return true;
+        }
+
+        if (table.Identitycolumn.Length != 0
+            && !string.Equals(
+                table.Identitycolumn,
+                settings.IdentityColumn,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            differingField = "identity column";
+
+            return true;
+        }
+
+        if (table.HasUpdatewhere && table.Updatewhere != settings.UpdateWhereMode)
+        {
+            differingField = "updatewhere mode";
+
+            return true;
+        }
+
+        if (table.HasUpdatekeyinplace && table.Updatekeyinplace != settings.UpdateKeyInPlace)
+        {
+            differingField = "updatekeyinplace setting";
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Compares two column name lists as case-insensitive SETS.
+    /// </summary>
+    /// <param name="stated">The names the descriptor states.</param>
+    /// <param name="governing">The names the governing definition declares.</param>
+    /// <returns><see langword="true"/> when the two cover the same columns.</returns>
+    /// <remarks>
+    /// SETS RATHER THAN SEQUENCES because order carries no meaning on either side - the oracle emits one
+    /// independent script line per column [<c>:L111-L129</c>] and the generated statement takes its column
+    /// order from the carrier's one-based model - so a reordered or duplicated list names the same contract.
+    /// Case-insensitive because these are identifiers and the oracle itself matches DataWindow column
+    /// metadata without regard to case [<c>:L217</c>, <c>:L221</c>].
+    /// </remarks>
+    private static bool SameColumnSet(
+        IReadOnlyList<string> stated,
+        IReadOnlyList<string> governing)
+    {
+        HashSet<string> statedSet = new(stated, StringComparer.OrdinalIgnoreCase);
+        HashSet<string> governingSet = new(governing, StringComparer.OrdinalIgnoreCase);
+
+        return statedSet.SetEquals(governingSet);
     }
 
     /// <summary>
@@ -1914,7 +2125,16 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
         // 没有设置可更新表!, 无效的更新数据!, 无效的数据源对象! and 无效的列名: plus a column name - quote no
         // literal and arrive byte for byte (constraints C-F, C-B). The driver PAYLOAD is masked separately
         // and already, by the one sanctioned projection in Errors/SqlRedactor.cs.
-        string errorText = SqlRedactor.Instance.Redact(result.ErrorText);
+        //
+        // 🔴 PROVIDER-DIAGNOSTIC POLICY, so this field and the `DbError.sqlerrtext` attached beside it
+        // disclose at the SAME depth. Under the strict policy they did not: the transaction arm's value
+        // arrives inside Microsoft.Data.Sqlite's own envelope, whose result code is a numeric literal and
+        // whose diagnosis is a quoted string, so a constraint failure reached a caller here as
+        // `SQLite Error <redacted>: '<redacted>'.` while the payload field beside it named the failing
+        // column. The framework-authored Chinese sentences listed above are unaffected either way - they do
+        // not match the envelope, so they take the strict path and, quoting no literal, arrive byte for
+        // byte exactly as before. See Errors/SqlRedactor.cs, RedactProviderDiagnostic.
+        string errorText = SqlRedactor.Instance.RedactProviderDiagnostic(result.ErrorText);
 
         // ============ THE UPDATE WAS NEVER ATTEMPTED, WHICH IS AN ORDINARY OUTCOME ==================
         // Every arm of ondotask that returns before _of_Update leaves nothing to classify: the failed
@@ -2530,6 +2750,60 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             }
 
             // ==========================================================================================
+            //  🔴 THE CONCURRENCY MODE IS A CLOSED DOMAIN OF THREE VALUES, AND A FOURTH HAS NO PREDICATE.
+            //
+            //  The mode decides WHICH columns' original values guard the row: 0 the key columns alone, 1
+            //  the key columns plus every marked column, 2 the key columns plus the columns that row
+            //  modified. A value outside those three names no predicate at all - so accepting it meant the
+            //  update ran under whichever arm an unrecognised value happened to reach, which is a
+            //  concurrency policy of this service's choosing substituted for the caller's on the one
+            //  setting that decides whether a concurrent writer's row survives.
+            //
+            //  REFUSED AT THE BOUNDARY AND AGAIN AT THE SCRIPT, exactly as the empty-array arm is. Here it
+            //  answers E_INVALID_ARGUMENT before a task is touched; Tasks/SqlUpdateCarrier.Modify answers
+            //  UpdateWhereBuilder.UnsupportedUpdateWhereModeMessage for the same value, which reaches the
+            //  caller as E_INTERNAL_ERROR through the preparer's own `if sErr <> ""` arm
+            //  [n_cst_thread_task_sqlupdate.sru:L145-L148]. That is PowerBuilder's own answer for a Modify
+            //  line whose value lies outside a property's domain, and guarding one condition on both sides
+            //  is the legacy's own habit - the command task checks its empty statement in the setter AND
+            //  again in the worker.
+            //
+            //  EVERY DESCRIPTOR IS TESTED WHATEVER THE SWITCH SAYS, for the identifier gate's reason: the
+            //  array is replaced wholesale [:L67] and the switch is settable on a later prepare, so
+            //  admitting a mode now would leave it in place for a call that does apply it.
+            //
+            //  AN OMITTED FIELD IS NOT TESTED. Absence means "take the data object definition's own mode",
+            //  which the carrier's definition seed installs, and the oracle likewise emits the line only
+            //  when the value is not null [:L131-L133].
+            // ==========================================================================================
+            for (int index = 0; index < request.Tables.Count; index++)
+            {
+                TableUpdateContract candidate = request.Tables[index];
+
+                if (!candidate.HasUpdatewhere
+                    || UpdateWhereBuilder.IsUpdateWhereMode(candidate.Updatewhere))
+                {
+                    continue;
+                }
+
+                // THE ORDINAL AND THE COUNT, NEVER THE VALUE (constraint C-F).
+                _logger?.LogWarning(
+                    "PrepareUpdate refused update table descriptor {Ordinal} of {TableCount} on task "
+                    + "{TaskId}: its updatewhere states no concurrency mode that exists. The value is not "
+                    + "recorded.",
+                    index + OneBasedIndex.FirstIndex,
+                    request.Tables.Count,
+                    LogSafeText.Render(entry.TaskId));
+
+                return Task.FromResult(new PrepareUpdateResponse
+                {
+                    Status = UpdateWireCodes.Status(
+                        RetCode.E_INVALID_ARGUMENT,
+                        UnsupportedUpdateWhereDiagnostic),
+                });
+            }
+
+            // ==========================================================================================
             //  🔴 THE MIRROR OF THE ARM ABOVE, AND THE ONE THAT CLOSES A SILENT-MISDIRECTION HAZARD.
             //
             //  WITH THE SWITCH OFF THE DESCRIPTOR ARRAY IS NEVER APPLIED. That is the oracle's own shape,
@@ -2550,21 +2824,33 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             //  wholesale [:L67], so a descriptor sent with the switch off can never be applied by any later
             //  call either.
             //
-            //  SO THE MISDIRECTION IS REFUSED AND NOTHING ELSE IS. The refusal is scoped to the descriptor
-            //  that NAMES A DIFFERENT TABLE from the one the request's own data object declares, because
-            //  that - and only that - is the case where the write lands somewhere the caller did not ask
-            //  for. A descriptor that AGREES with the definition is admitted exactly as before: it is still
-            //  inert, but inert and agreeing is not a misdirection, and it is the shape a caller that
-            //  derives its descriptor FROM the definition necessarily sends. That shape is not
-            //  hypothetical - it is what this system's own DataServices consumer sends on every update, and
-            //  refusing it would break the only cross-service update path in the estate while protecting
-            //  nobody.
+            //  SO EVERY MISDIRECTION IS REFUSED AND NOTHING ELSE IS. A descriptor that AGREES with the
+            //  definition is admitted exactly as before: it is still inert, but inert and agreeing is not a
+            //  misdirection, and it is the shape a caller that derives its descriptor FROM the definition
+            //  necessarily sends. That shape is not hypothetical - it is what this system's own DataServices
+            //  consumer sends on every update, and refusing it would break the only cross-service update
+            //  path in the estate while protecting nobody.
+            //
+            //  🔴 THE REFUSAL COVERS WHAT IS WRITTEN AND NOT ONLY WHERE. It once scoped to the descriptor
+            //  that names a different TABLE, on the reasoning that a differing COLUMN set still lands in the
+            //  table the caller named and the definition's own flags are the legacy's answer anyway. That
+            //  reasoning was wrong by this very block's own argument: a caller stating an updatable set of
+            //  one column received RetCode.OK and then had all six of the definition's columns written -
+            //  which is a write the caller believes did not happen, reported as a success, with nothing in
+            //  the response to reveal it. That is the same hazard as the table arm's, and it is worse,
+            //  because a misdirected table is visible in the storage a caller can read while an unauthorised
+            //  column is not. TryRefuseInertDescriptor therefore also refuses a STATED updatable set, key
+            //  set, identity column, updatewhere mode or updatekeyinplace setting that differs from the
+            //  definition's - see StatesDifferentContract for why an unstated field is not a disagreement.
             //
             //  WHAT IS DELIBERATELY NOT REFUSED, so the narrowing stays the minimum that closes the hazard:
-            //    * a descriptor whose COLUMN sets differ from the definition's. The write still lands in the
-            //      table the caller named; only which columns are updatable, keyed or identity differs, and
-            //      the definition's own answer there is the legacy's. On the multi-table path those names
-            //      ARE resolved and an unknown one is refused with 无效的列名: by the preparer itself.
+            //    * an UNSTATED field - an empty column array, an empty identity column, or an absent
+            //      updatewhere or updatekeyinplace. A caller that names only the table has stated no
+            //      contract to contradict, and reading emptiness as a statement would refuse a request that
+            //      asks for exactly the definition's own behaviour.
+            //    * a descriptor whose column sets differ in ORDER or carry a DUPLICATE. Neither changes the
+            //      contract: the oracle emits one independent script line per column and the generated
+            //      statement's column order comes from the carrier's own model.
             //    * a data object that resolves to no definition, or to a retrieve-only one. Neither can
             //      misdirect a write: the update fails on its own for want of an update table.
             //    * a request whose source is a SQL SYNTAX rather than a data object. Its update table comes

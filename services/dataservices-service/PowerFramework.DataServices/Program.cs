@@ -159,6 +159,28 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 builder.Logging.Configure(static options => options.ActivityTrackingOptions =
     ActivityTrackingOptions.TraceId | ActivityTrackingOptions.SpanId | ActivityTrackingOptions.ParentId);
 
+// 🔴 AND THE SCOPE IS ACTUALLY RENDERED, WITHOUT WHICH THE LINE ABOVE CHANGES NOTHING OBSERVABLE.
+//
+// ActivityTrackingOptions puts the trace context into a log SCOPE. The console formatter's default is
+// `IncludeScopes = false`, so every one of those identifiers was assembled per record and then dropped
+// before it reached an operator - the mechanism was configured and its output was discarded. A measured
+// sweep of a running deployment found the caller's `traceId` in 39 Gateway records, because Gateway
+// alone also names it in its own message templates, and in ZERO records on this service: the
+// correlation identifier the ingress hands a caller in a problem body could not be joined to the
+// records on the service that actually failed, which is the entire purpose of publishing it.
+//
+// AddSimpleConsole IS THE MECHANISM, AND IT ADDS NO PACKAGE. Directory.Packages.props deliberately
+// excludes Serilog and the OpenTelemetry family (AAP 0.5.3), so the shared framework's own formatter is
+// what remains. It does NOT add a second console provider: the console registration uses
+// TryAddEnumerable, so this configures the one already present rather than duplicating it - verified by
+// counting ILoggerProvider registrations before and after, which stayed at three, and by confirming one
+// record per event rather than two.
+//
+// SET IN CODE RATHER THAN IN appsettings.json, deliberately. A settings key can be silently dropped by
+// a deployment's own configuration layer, and this estate's settings files are asserted key-for-key by
+// their own coherence tests - so the guarantee belongs where it cannot be overridden by omission.
+builder.Logging.AddSimpleConsole(static options => options.IncludeScopes = true);
+
 // --------------------------------------------------------------------------------------------------
 // 0. FILE-BACKED SECRET MATERIAL, RESOLVED BEFORE ANYTHING READS A SECRET
 //
@@ -378,10 +400,16 @@ _ = OutboundCallPolicy.Verify();
 // UNAUTHENTICATED gRPC call does gain a problem body on its 401, which changes nothing a gRPC client
 // observes: the client maps the HTTP status before it ever looks at the content type.
 //
-// Nothing else is added. There is still no CORS policy (no browser reaches this service - Gateway is the
-// sole ingress), no HTTPS redirection (both shipped endpoints are already https, so a redirection
+// Almost nothing else is added. There is still no CORS policy (no browser reaches this service - Gateway is
+// the sole ingress), no HTTPS redirection (both shipped endpoints are already https, so a redirection
 // middleware would have nothing to redirect and would only add a hop that could rewrite an HTTP/2 gRPC
-// call into an HTTP/1.1 one), no response compression and no rate limiter.
+// call into an HTTP/1.1 one) and no rate limiter beyond the ingress bound below.
+//
+// RESPONSE COMPRESSION IS ADDED, FOR THE REST PROJECTION AND FOR NOTHING ELSE. The registration in section
+// 4 carries the full reasoning; the two parts that matter at this position are that its media-type
+// allowlist names only application/json and application/problem+json, so a gRPC response - which always
+// carries application/grpc - is never a candidate and the gRPC edge is untouched, and that it must sit
+// outside every middleware that can write a body or it cannot compress what they wrote.
 // --------------------------------------------------------------------------------------------------
 // THE PROTECTIVE RESPONSE HEADERS, INSTALLED FIRST SO THEY REACH EVERY RESPONSE. It is registered ahead of
 // the exception handler and of authentication deliberately: it works by registering a response-starting
@@ -390,6 +418,12 @@ _ = OutboundCallPolicy.Verify();
 // well as a handler's own response. It overrides nothing a route set for itself - see the file's own banner
 // for the three directives and the reason for each.
 SecurityResponseHeaders.Use(app);
+
+// See the registration in section 4. Positioned immediately inside the response-header middleware and
+// outside everything else, because compression must wrap every middleware that can write a body and cannot
+// compress one that has already been written. It stays inside the header middleware because that one works
+// by registering a response-starting callback rather than by writing bytes, so the two do not contend.
+app.UseResponseCompression();
 
 app.UseExceptionHandler();
 app.UseStatusCodePages();
@@ -932,6 +966,20 @@ internal static class DataServicesComposition
                 // publishes it - one spelling on the wire, in a log record and in a characterization
                 // recording.
                 bearer.MapInboundClaims = false;
+
+                // 🔴 THE REFUSAL RECORDS, WITHOUT WHICH THIS BOUNDARY ENFORCED CORRECTLY AND SILENTLY.
+                //
+                // Every 401 and every 403 this service answered produced NO operator record in any
+                // shipped logging profile: the framework's own records sit at Information under
+                // `Microsoft.AspNetCore.*` and every profile here caps that category at Warning, so a
+                // measured probe - no credential, a forged signature, and an authenticated caller
+                // without the entitlement - produced not one line for any of the three. Credential
+                // stuffing against this ingress would have looked exactly like no traffic at all. The
+                // hooks cover this service's gRPC surface as well as its REST one, because
+                // authentication and authorization run in the shared middleware pipeline ahead of any
+                // interceptor. Authorization/AuthenticationRefusalRecord.cs carries what a record may
+                // contain and why the failure event deliberately writes nothing of its own.
+                AuthenticationRefusalRecord.Attach(bearer);
             });
 
                 // 🔴 THE THIRD DURATION, WHICH THE TWO ABOVE DO NOT BOUND: how long a SUPERSEDED key set
@@ -2093,11 +2141,19 @@ internal static class DataServicesComposition
         {
             options.IgnoreUnknownServices = true;
 
-            // OUTERMOST AND THE ONLY INTERCEPTOR ON THIS SERVER, because a bound exists to shed work before
-            // it is done. Its refusal is an RpcException carrying RESOURCE_EXHAUSTED, which is the canonical
-            // gRPC status for a bound met rather than a fault and is distinct from the ABORTED this service
-            // forwards when Persistence reports an update conflict.
+            // OUTERMOST, because a bound exists to shed work before it is done. Its refusal is an
+            // RpcException carrying RESOURCE_EXHAUSTED, which is the canonical gRPC status for a bound met
+            // rather than a fault and is distinct from the ABORTED this service forwards when Persistence
+            // reports an update conflict.
             options.Interceptors.Add<GrpcIngressLimitInterceptor>();
+
+            // INSIDE THE BOUND, so a translated fault has still been accounted against ingress. It touches
+            // the UNARY surface only and translates exactly one condition - a unary call that raced an
+            // event-chain teardown for the same DataWindow - into FAILED_PRECONDITION instead of letting an
+            // ObjectDisposedException escape as UNKNOWN. It answers no question and fabricates no result.
+            // See Grpc/AbandonedConversation.cs for why the streaming handlers are deliberately not
+            // intercepted.
+            options.Interceptors.Add<AbandonedConversationInterceptor>();
         });
 
         // THE TWO MESSAGE CEILINGS, APPLIED THROUGH A DEPENDENT CONFIGURE because AddGrpc's delegate takes
@@ -2113,6 +2169,50 @@ internal static class DataServicesComposition
                 grpc.MaxReceiveMessageSize = ingress.Value.MaxReceiveMessageBytes;
                 grpc.MaxSendMessageSize = ingress.Value.MaxSendMessageBytes;
             });
+
+        // ==========================================================================================
+        //  CONTENT NEGOTIATION ON THE REST PROJECTION'S RESPONSES
+        // ==========================================================================================
+        //
+        //  THIS IS HONOURED CONTENT NEGOTIATION, NOT THE BEHAVIOUR IMPROVEMENT CONSTRAINT C-B FORBIDS.
+        //  C-B freezes LEGACY behaviour, and there is none here to freeze: the legacy is an in-process
+        //  library that hands a DataWindow carrier over BY POINTER and composes no response at all
+        //  [AAP 0.1.5]. The HTTP response representation is surface the decomposition created from
+        //  nothing, exactly as the bearer requirement on every internal edge is. A caller that advertises
+        //  no encoding receives byte for byte what it received before, so no ported behaviour moves.
+        //
+        //  MEASURED. The projection's JSON is 1,465 bytes per row against ~352 bytes per row on the
+        //  protobuf gRPC leg - a 4.2x amplification, of which `originalValues` is 36.6% and is
+        //  CONTRACTUALLY REQUIRED by `updatewhere=1` [AAP 0.6.3.2] rather than a gratuitous graph. The
+        //  body is highly repetitive as a direct consequence, and a client that says it can decode gzip
+        //  or brotli was being ignored.
+        //
+        //  NO PERFORMANCE OBJECTIVE IS ASSERTED AND NOTHING IS TUNED (AAP 0.8.5). Both providers keep
+        //  their framework compression levels; choosing one would be making the tuning claim the AAP
+        //  forbids. NO PACKAGE IS ADDED (AAP 0.5.3) - this ships in Microsoft.AspNetCore.App.
+        //
+        //  THE ALLOWLIST IS REPLACED RATHER THAN EXTENDED, AND THAT IS WHAT KEEPS THE gRPC EDGE OUT OF
+        //  IT. The framework's default set includes text/html, text/css and application/javascript, none
+        //  of which this service serves; naming only the two media types the projection produces means a
+        //  gRPC response - always application/grpc - is never a candidate, so gRPC's own message
+        //  compression and framing are untouched.
+        //
+        //  HTTPS IS OPTED INTO, AND THE BREACH QUESTION IS ANSWERED RATHER THAN WAVED AWAY. The framework
+        //  defaults it off because compressing a TLS body that mixes attacker-influenced input with a
+        //  SECRET leaks the secret through response length. Neither half holds for this surface: no
+        //  response here carries a cookie, a bearer token or key material, and the bodies at issue carry
+        //  the caller's OWN rows. Security - whose bodies DO carry token and key material - is
+        //  deliberately left uncompressed, which is why the question is answered per service.
+        _ = services.AddResponseCompression(static options =>
+        {
+            options.EnableForHttps = true;
+
+            options.MimeTypes =
+            [
+                "application/json",
+                "application/problem+json",
+            ];
+        });
 
         _ = services.AddDataServicesHealthChecks();
 

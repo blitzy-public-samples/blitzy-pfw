@@ -31,6 +31,7 @@
 //  behaviour to preserve here. See Configuration/IngressOptions.cs for the argument in full.
 // ==================================================================================================
 
+using System.Globalization;
 using System.Threading.RateLimiting;
 
 using Grpc.Core;
@@ -62,10 +63,42 @@ internal sealed class GrpcIngressLimiter : IDisposable
     /// <summary>The partition key used when neither a principal nor a peer is available.</summary>
     internal const string UnattributedPartitionKey = "unattributed";
 
+    /// <summary>
+    /// The trailer name a refusal carries its retry interval on, in whole seconds.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE SAME NAME AND THE SAME UNITS AS THE REST SURFACE'S HEADER, DELIBERATELY.</b> The
+    /// request-layer limiter already emits <c>Retry-After</c> in whole seconds from the same limiter
+    /// metadata [<c>Configuration/IngressHardening.cs</c>], so a caller reading one transport learns the
+    /// same fact the same way on the other. gRPC declares no standard for this - the alternative would be a
+    /// <c>google.rpc.RetryInfo</c> detail, which needs a package this refactor deliberately does not add
+    /// (AAP 0.5.3) - so an ASCII trailer named for the header it mirrors is the least surprising form.
+    /// </para>
+    /// <para>
+    /// <b>IT IS WHAT MAKES THE TWO REFUSALS TELLABLE APART, WHICH IS THE POINT (issue INFO-3).</b> Both this
+    /// bound and the per-caller HANDLE ceiling reach a caller as <c>ResourceExhausted</c> - and at the REST
+    /// edge as 429 - but the remedies are opposite: an ingress refusal clears on its own and should be
+    /// retried after the stated interval, whereas a handle refusal clears only when the caller RELEASES a
+    /// handle and retrying changes nothing. The handle refusal deliberately carries no interval, and names
+    /// <c>Handles:MaxPerPrincipal</c> in its own diagnostic instead, so the presence of this trailer is the
+    /// discriminator.
+    /// </para>
+    /// </remarks>
+    internal const string RetryAfterTrailer = "retry-after";
+
     /// <summary>The status detail a refused call carries.</summary>
+    /// <remarks>
+    /// IT POINTS AT THE TRAILER RATHER THAN QUOTING THE INTERVAL, and the conditional wording is not
+    /// hedging: the limiter reports an interval only when it can actually say when, so a detail that
+    /// promised one unconditionally would be wrong for the chained concurrency link. Neither the bound nor
+    /// this caller's consumption of it is reported, because both are facts about this deployment's capacity
+    /// and about its other callers.
+    /// </remarks>
     internal const string RefusalDetail =
-        "The call was refused because an ingress bound was met. Neither the bound nor this caller's "
-            + "consumption of it is reported.";
+        "The call was refused because an ingress bound was met. Retry after the interval the retry-after "
+            + "trailer states, if one is present. Neither the bound nor this caller's consumption of it is "
+            + "reported.";
 
     private readonly PartitionedRateLimiter<ServerCallContext> _limiter;
 
@@ -181,7 +214,8 @@ internal sealed class GrpcIngressLimiter : IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="context"/> is <see langword="null"/>.</exception>
     /// <exception cref="RpcException">
     /// A bound was met. <see cref="StatusCode.ResourceExhausted"/>, carrying a detail that reports
-    /// neither the bound nor this caller's consumption of it.
+    /// neither the bound nor this caller's consumption of it, and - when the limiter could state one - a
+    /// <see cref="RetryAfterTrailer"/> trailer carrying the retry interval in whole seconds.
     /// </exception>
     internal async ValueTask<RateLimitLease> AcquireAsync(ServerCallContext context)
     {
@@ -196,12 +230,50 @@ internal sealed class GrpcIngressLimiter : IDisposable
             return lease;
         }
 
+        // 🔴 THE INTERVAL IS READ BEFORE THE LEASE IS RELEASED, AND THE ORDER IS THE WHOLE FIX (issue
+        //    INFO-3). The limiter puts its retry interval on the REFUSED LEASE, so the disposal below is the
+        //    last moment it can be read - and reading it afterwards is not a bug that shows up as an
+        //    exception, it simply answers nothing. That is exactly what used to happen: the REST surface
+        //    emitted `Retry-After` from this same metadata while the gRPC surface discarded it, so one
+        //    transport told a caller when to come back and the other did not.
+        //
+        //    ONLY WHEN THE LIMITER CAN ACTUALLY SAY WHEN, on the same terms the REST path states: a
+        //    fabricated interval would be worse than none, because a caller that honoured it would wait for
+        //    a window that had already replenished and one that ignored it would be refused again at once
+        //    with a hint that had misinformed it. The chained CONCURRENCY link carries no interval - a
+        //    permit frees when a call in flight finishes, which is not a time - so a refusal from that link
+        //    legitimately arrives without one.
+        bool hasInterval = lease.TryGetMetadata(MetadataName.RetryAfter, out TimeSpan retryAfter);
+
         // RELEASED BEFORE REFUSING. A refused lease still holds whatever the chain acquired before the
         // link that said no, and a lease left undisposed on the refusal path leaks a permit per refusal -
         // which turns a flood into a permanent outage rather than a temporary refusal.
         lease.Dispose();
 
-        throw new RpcException(new Status(StatusCode.ResourceExhausted, RefusalDetail));
+        // THE TYPE NAME IS SPELLED OUT RATHER THAN TARGET-TYPED, DELIBERATELY. UpdateServiceTests'
+        // ThisTypeIsTheSoleAbortedThrowSiteInTheService counts the EXPLICIT status constructions in this
+        // file by source scan, to pin the interceptor to exactly one status and stop a later edit
+        // repurposing it into a general-purpose throw site. A target-typed construction is the same thing
+        // to the compiler and invisible to that guard, so this spelling is what keeps the guard load
+        // bearing. One status, two throw sites: the only difference between them is the trailer.
+        Status status = new Status(StatusCode.ResourceExhausted, RefusalDetail);
+
+        if (!hasInterval)
+        {
+            throw new RpcException(status);
+        }
+
+        // WHOLE SECONDS, ROUNDED UP, which is the REST header's own form: a caller that waits the stated
+        // interval must land AFTER the window replenishes, and truncation would land it just before.
+        Metadata trailers = new()
+        {
+            {
+                RetryAfterTrailer,
+                ((int)Math.Ceiling(retryAfter.TotalSeconds)).ToString(CultureInfo.InvariantCulture)
+            },
+        };
+
+        throw new RpcException(status, trailers);
     }
 
     /// <inheritdoc/>

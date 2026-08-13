@@ -3540,13 +3540,23 @@ components:
           description: >-
             The issuer identifier. A consumer's bearer handler validates the `iss` claim of every
             inbound token against this value, so it must match byte for byte what this service mints.
+            It is a configured IDENTITY and is therefore the same on every response, whichever address
+            this document was fetched through - which is what makes it comparable byte for byte at all.
+            The two address members below are LOCATIONS and may differ between two consumers; that
+            asymmetry is deliberate and is described on `jwks_uri`.
         jwks_uri:
           type: string
           format: uri
           description: >-
             The absolute location of this service's key set, which is `/.well-known/jwks.json` on
             this same service. This is the member that makes zero-bespoke-code verification possible:
-            a consumer points its handler here and never fetches a key itself.
+            a consumer points its handler here and never fetches a key itself. It is composed from a
+            base address the DEPLOYMENT declared, selected by matching the origin this request arrived
+            on - so a consumer inside the service network and a consumer reaching the same service
+            through a published host port each receive an address that resolves for them, while the set
+            of addresses this document can publish remains exactly the configured set. A request
+            arriving on an origin the deployment did not declare receives the issuer-composed address,
+            so no caller-supplied host is ever advertised here.
         token_endpoint:
           type: string
           format: uri

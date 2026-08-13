@@ -1159,10 +1159,89 @@ namespace PowerFramework.Persistence.Tasks
                     value = value[1..^1];
                 }
 
-                _properties[property] = value;
+                // 🔴 THE VALUE MUST BE ONE THIS PROPERTY CAN HOLD, AND THAT IS PowerBuilder'S OWN
+                // ANSWER RATHER THAN A NEW SCREEN. Modify parses a script against the loaded
+                // DataWindow's object model and answers a non-empty error for a value outside a
+                // property's domain, exactly as it does for a property whose object does not exist -
+                // and `_of_updateprepare` then takes its `if sErr <> ""` arm
+                // [n_cst_thread_task_sqlupdate.sru:L145-L148] and answers E_INTERNAL_ERROR. Installing
+                // any value at all into a plain dictionary instead accepted a concurrency mode no
+                // DataWindow has, and the update then ran under whatever arm an unrecognised mode fell
+                // into - a silent substitution of a mode the caller did not ask for, on the one setting
+                // that decides whether a concurrent writer's row is protected.
+                //
+                // TWO PROPERTIES CARRY A CLOSED DOMAIN and they are the two the descriptor can set:
+                // the concurrency mode, whose three values are the oracle's own
+                // [Concurrency/UpdateWhereBuilder.cs], and the key-in-place setting, which the composer
+                // emits as the words yes or no [:L135-L141]. Every other property carries free text -
+                // the update table is an identifier, a column flag is already domain-checked by the
+                // yes/no reader - so nothing else is screened here and no value is normalised.
+                if (!IsAdmissibleValue(property, value, out string valueRefusal))
+                {
+                    return valueRefusal;
+                }
+
+                _properties[CanonicalPropertyKey(property)] = value;
             }
 
             return string.Empty;
+        }
+
+        /// <summary>
+        /// Whether a modification script's value lies inside the domain of the property it addresses.
+        /// </summary>
+        /// <param name="property">The property name, already trimmed.</param>
+        /// <param name="value">The value, already unquoted.</param>
+        /// <param name="refusal">
+        /// Receives the non-empty error a rejected value produces, in the shape
+        /// <see cref="Modify"/> answers; the empty string when the value is admissible.
+        /// </param>
+        /// <returns><see langword="true"/> when the value may be installed.</returns>
+        /// <remarks>
+        /// THE REFUSAL NAMES THE PROPERTY AND THE DOMAIN AND NOT THE VALUE (constraint C-F): the caller
+        /// composed the value and gets the sentence back, while the same sentence reaches the operator
+        /// channel through the preparer's error hook, and a log record is read by somebody who did not
+        /// send it. The wording is this boundary's own because PowerBuilder's driver text for a rejected
+        /// Modify line is a runtime string that exists nowhere in the read-only legacy tree and therefore
+        /// cannot be reproduced verbatim; what IS observable, and what the caller acts on, is that the
+        /// answer is non-empty.
+        /// </remarks>
+        private static bool IsAdmissibleValue(string property, string value, out string refusal)
+        {
+            if (string.Equals(
+                    property,
+                    UpdateWhereBuilder.UpdateWhereProperty,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                if (long.TryParse(
+                        value,
+                        NumberStyles.AllowLeadingSign,
+                        CultureInfo.InvariantCulture,
+                        out long mode)
+                    && UpdateWhereBuilder.IsUpdateWhereMode(mode))
+                {
+                    refusal = string.Empty;
+
+                    return true;
+                }
+
+                refusal = UpdateWhereBuilder.UnsupportedUpdateWhereModeMessage;
+
+                return false;
+            }
+
+            if (string.Equals(property, UpdateKeyInPlaceProperty, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(value, UpdateWhereBuilder.YesLiteral, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(value, UpdateWhereBuilder.NoLiteral, StringComparison.OrdinalIgnoreCase))
+            {
+                refusal = UpdateWhereBuilder.UnsupportedUpdateKeyInPlaceMessage;
+
+                return false;
+            }
+
+            refusal = string.Empty;
+
+            return true;
         }
 
         /// <inheritdoc/>
@@ -1360,36 +1439,16 @@ namespace PowerFramework.Persistence.Tasks
         /// </summary>
         /// <param name="stem">The stem, either a column name or <c>#&lt;ordinal&gt;</c>.</param>
         /// <returns><see langword="true"/> when the stem names a column of this carrier.</returns>
-        private bool ResolvesToColumn(string stem)
-        {
-            if (stem.Length == 0)
-            {
-                return false;
-            }
-
-            string[] columns = ColumnModel();
-
-            if (stem.StartsWith(UpdateWhereBuilder.ColumnOrdinalPrefix, StringComparison.Ordinal))
-            {
-                return int.TryParse(
-                        stem[UpdateWhereBuilder.ColumnOrdinalPrefix.Length..],
-                        NumberStyles.None,
-                        CultureInfo.InvariantCulture,
-                        out int ordinal)
-                    && ordinal >= 1
-                    && ordinal <= columns.Length;
-            }
-
-            foreach (string column in columns)
-            {
-                if (string.Equals(column, stem, StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
+        /// <remarks>
+        /// ONE RESOLVER, NOT TWO. This delegates to <see cref="ResolveColumnOrdinal"/> rather than
+        /// repeating its two addressing arms, because a second implementation of "does this stem name a
+        /// column" is a second implementation that can disagree with the one
+        /// <see cref="CanonicalPropertyKey"/> uses - and a disagreement there means a property this
+        /// method admits is stored under a key nothing reads. The seed has already run by the time this
+        /// is reached: <see cref="Modify"/> raises <see cref="EnsureDefinitionContract"/> before it
+        /// validates a line.
+        /// </remarks>
+        private bool ResolvesToColumn(string stem) => ResolveColumnOrdinal(stem) > 0;
 
         /// <summary>
         /// Removes a property suffix, answering the column name in front of it.
@@ -1411,7 +1470,128 @@ namespace PowerFramework.Persistence.Tasks
         {
             EnsureDefinitionContract();
 
-            return _properties.TryGetValue(property, out string? value) ? value : UnsetDescribeResult;
+            return _properties.TryGetValue(CanonicalPropertyKey(property), out string? value)
+                ? value
+                : UnsetDescribeResult;
+        }
+
+        /// <summary>
+        /// Reduces a property name to the single key this carrier stores it under, so that a
+        /// column-scoped property addressed BY NAME and the same property addressed BY ORDINAL are one
+        /// property rather than two.
+        /// </summary>
+        /// <param name="property">The property name as a caller wrote it.</param>
+        /// <returns>
+        /// The canonical key, which is <c>#&lt;ordinal&gt;&lt;attribute&gt;</c> for a property whose stem
+        /// resolves to a column, and the property unchanged for anything else.
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// 🔴 <b>WITHOUT THIS THE PREPARE STEP'S RESET DID NOT REACH THE FLAGS THE GENERATOR READS, AND A
+        /// CALLER'S DESCRIPTOR COULD ONLY WIDEN THE UPDATE - NEVER NARROW IT.</b> In PowerBuilder
+        /// <c>Describe("#3.Update")</c> and <c>Describe("age.Update")</c> ask ONE column object for ONE
+        /// attribute; the ordinal and the name are two ways of addressing the same object, and a
+        /// <c>Modify</c> through either is visible through both. Storing them as two dictionary entries
+        /// broke that, and the break was invisible until the two halves of
+        /// <c>_of_updateprepare</c> were read together: its reset emits
+        /// <c>#N.Update = no</c> / <c>#N.Key = no</c> / <c>#N.Identity = no</c> for every column BY
+        /// ORDINAL [<c>n_cst_thread_task_sqlupdate.sru:L103-L108</c>], while the three arms that
+        /// re-enable emit <c>&lt;name&gt;.Update = yes</c> and <c>&lt;name&gt;.Key = yes</c> BY NAME
+        /// [<c>:L111-L129</c>], and <see cref="BuildPlan"/> reads them back BY NAME. So the reset wrote
+        /// six ordinal-addressed entries nothing read, the definition seed's own name-addressed
+        /// <c>yes</c> survived for every column, and a descriptor naming one updatable column still
+        /// generated an assignment for all six - writing columns the caller had explicitly excluded,
+        /// which is a silent data-integrity fault rather than a diagnostic one.
+        /// </para>
+        /// <para>
+        /// THE ORDINAL IS THE CANONICAL FORM RATHER THAN THE NAME, because the ordinal is the identifier
+        /// the carrier is indexed by throughout - <see cref="UpdateColumn.Number"/>, every buffer read
+        /// and every buffer write - so canonicalizing onto it keeps one identifier for one column across
+        /// the whole file. R9: it is ONE-BASED in the describe vocabulary exactly as it is in the loops,
+        /// and no rebasing happens here.
+        /// </para>
+        /// <para>
+        /// A TABLE-LEVEL PROPERTY IS RETURNED UNTOUCHED, and the test is the same
+        /// <see cref="DataWindowPropertyPrefix"/> one <see cref="IsInstallableProperty"/> applies, so the
+        /// two members cannot disagree about which properties are column-scoped.
+        /// </para>
+        /// <para>
+        /// AN UNRESOLVABLE STEM IS ALSO RETURNED UNTOUCHED rather than refused here. Refusal belongs to
+        /// <see cref="Modify"/>, which answers the oracle's own <c>无效的列名:</c> for it; a read of an
+        /// unresolvable property must simply answer nothing, which the unchanged key does because no such
+        /// entry was ever installed.
+        /// </para>
+        /// <para>
+        /// IT DOES NOT SEED. <see cref="ColumnModelCore"/> is used rather than
+        /// <see cref="ColumnModel"/>, because <see cref="EnsureDefinitionContract"/> canonicalizes the
+        /// keys it installs and going through the seeding entry point would recurse.
+        /// </para>
+        /// </remarks>
+        private string CanonicalPropertyKey(string property)
+        {
+            if (property.StartsWith(DataWindowPropertyPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return property;
+            }
+
+            int lastDot = property.LastIndexOf('.');
+
+            if (lastDot <= 0)
+            {
+                return property;
+            }
+
+            string stem = property[..lastDot].Trim();
+            int ordinal = ResolveColumnOrdinal(stem);
+
+            return ordinal > 0
+                ? UpdateWhereBuilder.ColumnOrdinalPrefix
+                    + ordinal.ToString(CultureInfo.InvariantCulture)
+                    + property[lastDot..]
+                : property;
+        }
+
+        /// <summary>
+        /// Resolves a column stem to its one-based ordinal, accepting either addressing form.
+        /// </summary>
+        /// <param name="stem">The stem, either a column name or <c>#&lt;ordinal&gt;</c>.</param>
+        /// <returns>The one-based ordinal, or zero when the stem names no column of this carrier.</returns>
+        /// <remarks>
+        /// ZERO MEANS UNRESOLVED, which is the same convention <c>Describe("&lt;name&gt;.Id")</c> answers
+        /// through <see cref="GetColumnId"/> and the same non-positive test
+        /// <c>_of_updateprepare</c> applies to it [<c>n_cst_thread_task_sqlupdate.sru:L119</c>].
+        /// </remarks>
+        private int ResolveColumnOrdinal(string stem)
+        {
+            if (stem.Length == 0)
+            {
+                return 0;
+            }
+
+            string[] columns = ColumnModelCore();
+
+            if (stem.StartsWith(UpdateWhereBuilder.ColumnOrdinalPrefix, StringComparison.Ordinal))
+            {
+                return int.TryParse(
+                        stem[UpdateWhereBuilder.ColumnOrdinalPrefix.Length..],
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture,
+                        out int ordinal)
+                    && ordinal >= 1
+                    && ordinal <= columns.Length
+                    ? ordinal
+                    : 0;
+            }
+
+            for (int index = 0; index < columns.Length; index++)
+            {
+                if (string.Equals(columns[index], stem, StringComparison.OrdinalIgnoreCase))
+                {
+                    return index + 1;
+                }
+            }
+
+            return 0;
         }
 
         /// <summary>
@@ -1505,10 +1685,10 @@ namespace PowerFramework.Persistence.Tasks
                 // ordinary shape of a DataWindow built over one table. `updatewhere=1` is what makes the
                 // where-clause membership load bearing: the generated predicate carries the ORIGINAL value
                 // of every marked column, which is the whole optimistic-concurrency check.
-                InstallBoth(UpdateSuffix, UpdateWhereBuilder.YesLiteral);
-                InstallBoth(UpdateWhereClauseSuffix, UpdateWhereBuilder.YesLiteral);
-                InstallBoth(KeySuffix, key);
-                InstallBoth(IdentitySuffix, identity);
+                Install(UpdateSuffix, UpdateWhereBuilder.YesLiteral);
+                Install(UpdateWhereClauseSuffix, UpdateWhereBuilder.YesLiteral);
+                Install(KeySuffix, key);
+                Install(IdentitySuffix, identity);
 
                 // THE DATABASE NAME EQUALS THE DATAWINDOW NAME for every column of the evidenced fixture,
                 // which is the ordinary case for a DataWindow built over one table. It is installed rather
@@ -1516,21 +1696,22 @@ namespace PowerFramework.Persistence.Tasks
                 // update table name against it [n_cst_thread_task_sqlupdate.sru:L221], and a fallback that
                 // handed back the describe property's own stem would answer "#3" for an ordinal-addressed
                 // column - a string no table name can prefix, so the match would silently never fire.
-                InstallBoth(DbNameSuffix, column);
+                Install(DbNameSuffix, column);
 
-                // BOTH ADDRESSING FORMS FOR EVERY PROPERTY, because PowerBuilder's Describe accepts both
-                // and the two are used by different callers in this service: the modification script the
-                // update preparer composes addresses columns BY NAME
-                // [UpdateWhereBuilder, `columnName + ".Update"`], while the identity round trip addresses
-                // them BY ORDINAL [IdentityColumnResolver, `"#" + String(nIndex) + ".Identity"`]. Seeding
-                // only one form leaves the other answering nothing, and the identity round trip's failure
-                // mode is silent: it finds no identity column, falls through to its first-wins arm, and
-                // reports identity values for the wrong column.
-                void InstallBoth(string suffix, string value)
-                {
-                    _properties[column + suffix] = value;
-                    _properties[ordinal + suffix] = value;
-                }
+                // 🔴 ONE ENTRY PER PROPERTY, ADDRESSED BY ORDINAL, BECAUSE THE ORDINAL IS THE CANONICAL
+                // FORM. This seed previously wrote BOTH `<name><suffix>` and `#<ordinal><suffix>` so that
+                // either addressing form would answer, because the two callers in this service address
+                // columns differently: the modification script the update preparer composes addresses them
+                // BY NAME [UpdateWhereBuilder, `columnName + ".Update"`] while the identity round trip
+                // addresses them BY ORDINAL [IdentityColumnResolver, `"#" + String(nIndex) + ".Identity"`].
+                // Two entries answered both reads but were two INDEPENDENT properties, so a `Modify`
+                // through one form was invisible through the other - and that is precisely how the prepare
+                // step's ordinal-addressed reset [n_cst_thread_task_sqlupdate.sru:L103-L108] failed to
+                // clear the name-addressed flags the generator reads. Now <see cref="CanonicalPropertyKey"/>
+                // reduces BOTH forms to this one key on every read and every write, so one entry serves
+                // both callers AND a modification through either form is visible through both, which is
+                // what PowerBuilder does: `#3.Update` and `age.Update` are one attribute of one object.
+                void Install(string suffix, string value) => _properties[ordinal + suffix] = value;
             }
 
             static bool Contains(IReadOnlyList<string> names, string candidate)
@@ -1974,6 +2155,11 @@ namespace PowerFramework.Persistence.Tasks
         /// descriptor array [<c>n_cst_thread_task_sqlupdate.sru:L104-L129</c>], which is precisely what
         /// arrives here through <see cref="Modify"/>. Re-deriving them from the definition would discard
         /// the caller's descriptor and generate a statement for columns it never asked to update.
+        /// <para>
+        /// THE TABLE-LEVEL MODE IS READ BACK THE SAME WAY, for the same reason: it is installed by the
+        /// prepare step [<c>:L132</c>] and consumed by <see cref="AppendWhere"/>, and re-deriving it from
+        /// the definition would silently restore the definition's mode over the descriptor's.
+        /// </para>
         /// </remarks>
         private UpdateColumnPlan BuildPlan()
         {
@@ -2007,7 +2193,46 @@ namespace PowerFramework.Persistence.Tasks
                 }
             }
 
-            return new UpdateColumnPlan(all, updatable, keys, whereColumns);
+            return new UpdateColumnPlan(all, updatable, keys, whereColumns, ReadUpdateWhereMode());
+        }
+
+        /// <summary>
+        /// Reads the installed table-level concurrency mode back.
+        /// </summary>
+        /// <returns>
+        /// The installed mode, or <see cref="UpdateWhereBuilder.KeyAndUpdatableColumnsMode"/> when none is
+        /// installed.
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// MODE 1 IS THE FALLBACK, AND IT IS THE SAFE ONE RATHER THAN THE CONVENIENT ONE. An absent mode
+        /// means no definition seeded one and no descriptor set one, and the three candidate answers are
+        /// not equivalent: mode 0 would compare only the keys, so a row a concurrent writer had changed
+        /// would be overwritten without a word - the single failure this whole contract exists to prevent.
+        /// Mode 1 compares every marked column, which is the STRICTEST of the three and is also the mode
+        /// the sole evidenced fixture declares [<c>dw_sqlite.srd:L14</c>], so the fallback and the
+        /// evidenced value coincide.
+        /// </para>
+        /// <para>
+        /// AN OUT-OF-DOMAIN VALUE FALLS BACK TOO, and cannot arrive: <see cref="Modify"/> refuses it and
+        /// <see cref="EnsureDefinitionContract"/> installs only what a resolved definition declares. The
+        /// arm exists because a reader that trusted the string would turn a value that somehow bypassed
+        /// both into an undefined predicate, and falling back to the strictest mode is the failure that
+        /// cannot lose a row.
+        /// </para>
+        /// </remarks>
+        private long ReadUpdateWhereMode()
+        {
+            string installed = Describe(UpdateWhereBuilder.UpdateWhereProperty);
+
+            return long.TryParse(
+                    installed,
+                    NumberStyles.AllowLeadingSign,
+                    CultureInfo.InvariantCulture,
+                    out long mode)
+                && UpdateWhereBuilder.IsUpdateWhereMode(mode)
+                ? mode
+                : UpdateWhereBuilder.KeyAndUpdatableColumnsMode;
         }
 
         /// <summary>
@@ -2403,6 +2628,15 @@ namespace PowerFramework.Persistence.Tasks
         /// The key columns come first and the marked columns follow, which is the order PowerBuilder
         /// generates and therefore the order a characterization recording compares.
         /// </para>
+        /// <para>
+        /// 🔴 <b>WHICH COLUMNS FOLLOW THE KEYS IS THE INSTALLED MODE'S ANSWER AND NOT THIS METHOD'S.</b>
+        /// This predicate was previously composed as key ∪ marked unconditionally - mode 1 hardcoded - so a
+        /// descriptor that declared <c>updatewhere=0</c> or <c>updatewhere=2</c> was screened, installed,
+        /// and then had no effect on a single generated character. The mode is the caller's declared
+        /// concurrency policy, so ignoring it substituted a policy of this service's choosing on the one
+        /// setting that decides whether a concurrent writer's row is protected. See
+        /// <see cref="SelectPredicateColumns"/> for the three arms.
+        /// </para>
         /// </remarks>
         private void AppendWhere(
             StringBuilder statement,
@@ -2415,8 +2649,7 @@ namespace PowerFramework.Persistence.Tasks
 
             bool first = true;
 
-            foreach (UpdateColumn column in plan.KeyColumns.Concat(
-                plan.WhereClauseColumns.Where(candidate => !plan.KeyColumns.Contains(candidate))))
+            foreach (UpdateColumn column in SelectPredicateColumns(plan, buffer, row))
             {
                 if (!first)
                 {
@@ -2447,9 +2680,75 @@ namespace PowerFramework.Persistence.Tasks
                 // NO PREDICATE MEANS NO STATEMENT MAY RUN. A where-clause-less update or delete would
                 // affect every row in the table, so an always-false predicate is appended instead: the
                 // statement runs, affects nothing, and the shortfall reaches the classifier as a mismatch
-                // rather than as a silent mass overwrite.
+                // rather than as a silent mass overwrite. This is ALSO the answer for a descriptor that
+                // declared key-only concurrency and then named no key column: the caller gets a mismatch
+                // it can read rather than an unbounded write it cannot undo.
                 _ = statement.Append("1 = 0");
             }
+        }
+
+        /// <summary>
+        /// Selects the columns whose ORIGINAL values compose one row's concurrency predicate, per the
+        /// installed table-level mode.
+        /// </summary>
+        /// <param name="plan">The installed column plan, carrying the mode.</param>
+        /// <param name="buffer">The buffer the row lives in.</param>
+        /// <param name="row">The one-based row number within that buffer.</param>
+        /// <returns>The predicate columns, keys first, each appearing once, in model order within a group.</returns>
+        /// <remarks>
+        /// <para>
+        /// THE KEY COLUMNS ARE IN EVERY MODE, which is why all three arms start from them: every mode's
+        /// name begins with "key", and a predicate without the key would not address a row at all.
+        /// </para>
+        /// <para>
+        /// <b>MODE 0 - KEY COLUMNS ONLY.</b> Nothing follows the keys. A concurrent writer's change to a
+        /// non-key column does not make this update fail, which is the mode's purpose on a contended table
+        /// and is the caller's own declared policy rather than a silent overwrite by this service.
+        /// </para>
+        /// <para>
+        /// <b>MODE 1 - KEY AND UPDATEABLE COLUMNS.</b> The keys plus every column carrying
+        /// <c>updatewhereclause=yes</c>, which on the sole evidenced fixture is all six
+        /// [<c>dw_sqlite.srd:L8-L13</c>]. THE UNCHANGED ARM: this is what the predicate was before the mode
+        /// was honoured, so every existing parity assertion, every characterization recording and the one
+        /// cross-service update path in the estate - which sends the definition's own contract, and the
+        /// definition declares mode 1 - generate byte-identically to before.
+        /// </para>
+        /// <para>
+        /// <b>MODE 2 - KEY AND MODIFIED COLUMNS.</b> The keys plus the columns THIS ROW modified, read from
+        /// the same per-column item statuses the SET list is built from, so the predicate and the assignment
+        /// list name the same columns and the predicate still compares ORIGINALS. Per row rather than per
+        /// table, so two rows of one update legitimately carry different predicates. A row that modified
+        /// nothing - every pending DELETE, whose columns are all unmodified - degenerates to the keys alone,
+        /// which is the mode's own arithmetic rather than a special case: there is no modified column to
+        /// compare.
+        /// </para>
+        /// <para>
+        /// THE MARKED SET IS FILTERED AGAINST THE KEYS AND NOT THE OTHER WAY AROUND, so a column that is
+        /// both a key and marked appears once and appears in the key group - which keeps the emitted order
+        /// stable against a descriptor that lists the same column twice.
+        /// </para>
+        /// </remarks>
+        private IEnumerable<UpdateColumn> SelectPredicateColumns(
+            UpdateColumnPlan plan,
+            DwBuffer buffer,
+            long row)
+        {
+            if (plan.UpdateWhereMode == UpdateWhereBuilder.KeyOnlyMode)
+            {
+                return plan.KeyColumns;
+            }
+
+            if (plan.UpdateWhereMode == UpdateWhereBuilder.KeyAndModifiedColumnsMode)
+            {
+                return plan.KeyColumns.Concat(
+                    plan.AllColumns.Where(candidate =>
+                        !plan.KeyColumns.Contains(candidate)
+                        && _store.Carrier.GetItemStatus(row, candidate.Number, buffer)
+                            != ItemStatus.NotModified));
+            }
+
+            return plan.KeyColumns.Concat(
+                plan.WhereClauseColumns.Where(candidate => !plan.KeyColumns.Contains(candidate)));
         }
 
         /// <summary>
@@ -2516,11 +2815,20 @@ namespace PowerFramework.Persistence.Tasks
         /// <param name="UpdatableColumns">The columns marked updatable, in column order.</param>
         /// <param name="KeyColumns">The columns marked as keys, in column order.</param>
         /// <param name="WhereClauseColumns">The columns marked for the concurrency predicate.</param>
+        /// <param name="UpdateWhereMode">
+        /// The installed table-level concurrency mode, which decides WHICH of the three column sets above
+        /// the predicate is composed from. One of <see cref="UpdateWhereBuilder.KeyOnlyMode"/>,
+        /// <see cref="UpdateWhereBuilder.KeyAndUpdatableColumnsMode"/> or
+        /// <see cref="UpdateWhereBuilder.KeyAndModifiedColumnsMode"/>; a value outside the three cannot
+        /// reach here because <see cref="Modify"/> refuses it and the definition seed installs the
+        /// definition's own.
+        /// </param>
         private sealed record UpdateColumnPlan(
             IReadOnlyList<UpdateColumn> AllColumns,
             IReadOnlyList<UpdateColumn> UpdatableColumns,
             IReadOnlyList<UpdateColumn> KeyColumns,
-            IReadOnlyList<UpdateColumn> WhereClauseColumns)
+            IReadOnlyList<UpdateColumn> WhereClauseColumns,
+            long UpdateWhereMode)
         {
             /// <summary>
             /// Every column's NAME positioned by its one-based number, for
@@ -2565,6 +2873,18 @@ namespace PowerFramework.Persistence.Tasks
             /// conflict - and a caller rebasing a retry needs all of them. Reporting the UPDATABLE set
             /// instead would omit a key-only or marked-only column, which is the column most likely to be
             /// the one that moved; reporting only the keys would omit the values that actually mismatched.
+            /// </para>
+            /// <para>
+            /// THE UNION IS REPORTED UNDER EVERY MODE, INCLUDING THE TWO NARROWER ONES, and that is
+            /// deliberate rather than an oversight in the sentence above. Under
+            /// <see cref="UpdateWhereBuilder.KeyOnlyMode"/> only the keys decided the conflict and under
+            /// <see cref="UpdateWhereBuilder.KeyAndModifiedColumnsMode"/> only the keys plus that row's
+            /// modified columns did - but the payload's job is to let a caller REBASE, and a caller cannot
+            /// rebase a column whose current value it was not told. So the extra columns are informational
+            /// under a narrower mode rather than decisive, which costs a caller nothing and withholding
+            /// them would cost it the retry. Narrowing the payload per row would additionally make two
+            /// conflict rows of one update carry different column lists, which no consumer can line up
+            /// position by position.
             /// </para>
             /// <para>
             /// MODEL ORDER IS PRESERVED because a consumer comparing two value lists position by position

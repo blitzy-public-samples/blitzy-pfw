@@ -267,15 +267,25 @@ environment file can enter a build context or an image layer — this template i
 
 ### 3.2 Step 2 — generate the local material
 
-Two kinds of artifact are required, and they are produced by different commands. Conflating them is the
-single most common way to get a stack that starts and then fails on its first token.
+Three kinds of artifact are required — the signing identity, one credential per roster caller, and the
+certificate set — and they are produced by different commands. Conflating them is the single most common way
+to get a stack that starts and then fails on its first token.
+
+**The roster has THREE callers on the documented bring-up, and the count is the thing to get right.** Two
+are services (Gateway and DataServices); the third is the operator / end-to-end identity `pfw-e2e-suite`,
+which Security's **Development** overlay registers and which
+[`.env.example`](.env.example)'s own `ASPNETCORE_ENVIRONMENT` default selects. Security resolves every
+credential its roster names at startup and reports the roster **position** of any that resolves to nothing,
+so a missing third credential is not a disabled identity — it is a refusal to start, and the other three
+services then never clear their readiness gates behind it.
 
 | Variable | Kind | What it receives |
 | --- | --- | --- |
 | `SECURITY_JWT_SIGNING_KEY_PATH` | **A host path, not material** | A path to a FILE holding the signing key. It used to be the value itself, which put the RSA private key that signs every token in the estate into the container environment — where `docker compose config` renders it in cleartext, `docker inspect` returns it to anyone who can reach the daemon socket, and every child process inherits it. The file’s contents may be base64 of the PKCS#8 DER on one line, or PEM, which is tried first |
 | `SECURITY_JWT_RETIRING_SIGNING_KEY`, `SECURITY_JWT_RETIRING_SIGNING_KEY_ID`, `SECURITY_JWT_SIGNING_KEY_ID` | Material, then two identifiers | **Empty in the steady state.** The rollover trio: the outgoing key, its `kid`, and the active `kid`. Set together only while rotating — see the rollover procedure below |
-| `SECURITY_CLIENT_SECRET_GATEWAY`, `SECURITY_CLIENT_SECRET_DATASERVICES` | Material | One shared secret **per caller** that may ask Security for a token. A different value each. Holding one lets a service *ask* for a token; it does not let it *mint* one |
-| `SECURITY_TLS_CERTIFICATE_PATH` / `SECURITY_TLS_CERTIFICATE_KEY_PATH`, `PERSISTENCE_TLS_CERTIFICATE_PATH` / `PERSISTENCE_TLS_CERTIFICATE_KEY_PATH`, `DATASERVICES_TLS_CERTIFICATE_PATH` / `DATASERVICES_TLS_CERTIFICATE_KEY_PATH`, `GATEWAY_TLS_CERTIFICATE_PATH` / `GATEWAY_TLS_CERTIFICATE_KEY_PATH`, plus `INTERNAL_TLS_CA_PATH` | **Paths on THIS HOST** | A server certificate and key **per service**, and the one CA that signed all four. Every listener in this stack terminates TLS and every image probe verifies the certificate it is presented, so all three are **required**: the manifest declares each as a Compose **secret source** and projects it read-only into all four containers under `/run/secrets/internal-tls/`. Bring-up aborts by name if one is unset **or names a file that does not exist**. Do not point them at `/run/secrets/...` — that is where they land, not where they come from |
+| `SECURITY_CLIENT_SECRET_GATEWAY_PATH`, `SECURITY_CLIENT_SECRET_DATASERVICES_PATH` | **Host paths, not material** | One shared secret **per caller** that may ask Security for a token, each written to its own file and NAMED here. A different value each. Holding one lets a service *ask* for a token; it does not let it *mint* one. Paths for the same reason the signing key is: the manifest declares each as a Compose **secret source** and projects it, so the value never enters a container environment. One file backs both ends of each pair — Security verifies the credential and the calling service presents it, so the same projected file is granted to both containers |
+| `SECURITY_CLIENT_SECRET` | Material | The **third** roster credential: the operator / end-to-end identity `pfw-e2e-suite`, registered in Security's **Development** overlay, which is the environment the documented bring-up selects. It is a VALUE rather than a path because this identity ships unused and a Compose secret's `file:` must name a path that already exists — declaring one would abort every bring-up that does not use it. `SECURITY_CLIENT_SECRET_FILE` is the file form for a deployment that puts it to work, and setting both is **refused** rather than resolved. **Security resolves every credential its roster names at startup, so leaving this empty refuses the host** — see the generation block below and [§5.2](#52-health-is-anonymous-v1ping-is-not), which uses this identity. **Being a value has the cost the first row describes, and it applies here too:** a value reaches the container environment, so `docker compose config` renders this one in cleartext and `docker inspect` returns it to anyone who can reach the daemon socket. That is acceptable for a local development identity and is *not* acceptable for a deployment that puts it to work — which is what makes `SECURITY_CLIENT_SECRET_FILE` the preferred form there rather than merely the alternative. Nothing else in this roster is a value, and the signing key deliberately stopped being one |
+| `SECURITY_TLS_CERTIFICATE_PATH` / `SECURITY_TLS_CERTIFICATE_KEY_PATH`, `PERSISTENCE_TLS_CERTIFICATE_PATH` / `PERSISTENCE_TLS_CERTIFICATE_KEY_PATH`, `DATASERVICES_TLS_CERTIFICATE_PATH` / `DATASERVICES_TLS_CERTIFICATE_KEY_PATH`, `GATEWAY_TLS_CERTIFICATE_PATH` / `GATEWAY_TLS_CERTIFICATE_KEY_PATH`, plus `INTERNAL_TLS_CA_PATH` | **Paths on THIS HOST** | A server certificate and key **per service**, and the one CA that signed all four. Every listener in this stack terminates TLS and every image probe verifies the certificate it is presented, so **all nine are required**: the manifest declares each as a Compose **secret source** and projects it read-only into the container that owns it — the four pairs land at `/run/secrets/internal-tls/server.crt` and `…/server.key`, and the shared anchor at `…/ca.crt`, in all four services. Bring-up aborts by name if one is unset **or names a file that does not exist**. Do not point them at `/run/secrets/...` — that is where they land, not where they come from |
 | `SECURITY_MTLS_CLIENT_CA_PATH`, and the two `*_MTLS_CERT_PATH` / `*_MTLS_KEY_PATH` pairs | Paths | **Optional.** The client-certificate alternative on the issuance edge — see [§8.3](#83-mutual-tls-is-a-documented-fallback-not-scaffolding) |
 
 **The signing key is an RSA private key, not random bytes.** Security signs **RS256** over a closed
@@ -294,72 +304,102 @@ set -euo pipefail
 install -d -m 700 "$HOME/.config/powerframework/secrets"
 cd "$HOME/.config/powerframework/secrets"
 
-# The signing identity. The single base64 line is the VALUE of SECURITY_JWT_SIGNING_KEY, never a path.
-# It is written to a file rather than printed, so it never reaches your scrollback or shell history.
+# The signing identity. SECURITY_JWT_SIGNING_KEY_PATH names one of these two FILES -- it is a path, not
+# the material. Both spellings are accepted (PEM is tried first, then base64 of the PKCS#8 DER on one
+# line), so generate both and name whichever you prefer. Written to files rather than printed, so the
+# key never reaches your scrollback or shell history.
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out security-signing.key
-chmod 600 security-signing.key
 openssl pkey -in security-signing.key -outform DER | base64 -w0 > security-signing.b64
-chmod 600 security-signing.b64
-# Copy the one line out of security-signing.b64 into the environment file. Do not echo it.
+# 0644, NOT 0600, and the paragraph below this block is why: the manifest PROJECTS whichever of these
+# two files you name, and a projected file keeps its host mode. The 0700 directory above is the control.
+chmod 644 security-signing.key security-signing.b64
+# Then set SECURITY_JWT_SIGNING_KEY_PATH to the ABSOLUTE path of the file you chose. Nothing is copied.
 
-# One shared secret per caller. Written to a 0600 file rather than printed, for the same reason the
-# signing key is: `openssl rand -base64 32` on its own puts the value in your terminal scrollback, and
-# from there into any session log or screen capture. Run this once PER CALLER and use a DIFFERENT value
-# for each -- a shared value makes the callers indistinguishable to the permission matrix.
-for caller in gateway dataservices; do
-  ( umask 077; openssl rand -base64 32 > "caller-${caller}.secret" )
+# One shared secret per caller that may ask Security for a token. Written to a file rather than printed,
+# because `openssl rand -base64 32` on its own puts the value in your terminal scrollback, and from
+# there into any session log or screen capture. Run this once PER CALLER and use a DIFFERENT value for
+# each -- a shared value makes the callers indistinguishable to the permission matrix.
+#
+# THREE CALLERS, NOT TWO, AND THE THIRD IS THE ONE THAT USED TO BE MISSING HERE. Gateway and DataServices
+# are the two SERVICES that request tokens; `e2e-suite` is the operator/end-to-end identity
+# `pfw-e2e-suite`, which Security's DEVELOPMENT overlay registers and which the documented bring-up
+# therefore requires. Security resolves EVERY credential its roster names at startup and reports the
+# roster POSITION of any that resolves to nothing, so omitting the third does not disable that identity --
+# it refuses the host, and the whole stack then fails its readiness gates behind it.
+for caller in gateway dataservices e2e-suite; do
+  openssl rand -base64 32 > "caller-${caller}.secret"
 done
-# Copy each one line into the environment file. Do not echo it, and do not pass it on a command line --
-# section 5.2 shows the form that keeps it off argv.
+# The two SERVICE credentials are projected files: 0644 for the same reason the signing key is, and
+# SECURITY_CLIENT_SECRET_GATEWAY_PATH / SECURITY_CLIENT_SECRET_DATASERVICES_PATH name them by ABSOLUTE
+# path. Nothing is copied out of them.
+chmod 644 caller-gateway.secret caller-dataservices.secret
+# The THIRD is a VALUE rather than a path -- see the roster table above for why -- so copy its one line
+# into SECURITY_CLIENT_SECRET, and set SECURITY_CLIENT_ID to `pfw-e2e-suite`. It stays 0600 because
+# nothing projects it. Do not echo it, and do not pass it on a command line -- section 5.2 shows the
+# form that keeps it off argv.
+chmod 600 caller-e2e-suite.secret
 ```
 
-**One permission in the certificate recipe looks lax and is required.** The server private key is the one
-file the manifest **projects into the containers**, and Compose accepts `mode:`, `uid:` and `gid:` on a
-secret while **ignoring all three outside Swarm** — measured, not assumed. A host key at `0600` therefore
-arrives inside the container as `-rw------- root root`, every image runs as an unprivileged account, and
-Kestrel refuses to start for want of read permission. §9.3.1 generates that one key `0644` inside the `0700`
-directory created above; the directory is the real host control, and the file never leaves your machine. The
-signing key, the CA key and the two caller keys are **not** projected and stay `0600`.
+**One permission in this recipe looks lax and is required, and it applies to more files than the
+certificate.** Compose accepts `mode:`, `uid:` and `gid:` on a secret and **ignores all three outside
+Swarm** — measured, not assumed — so a projected file arrives inside the container with its host mode and
+ownership numerically unchanged, and every image drops to the unprivileged `app` account (UID 1654). A host
+file at `0600` owned by your account therefore arrives as `-rw------- root root` and is **unreadable**
+there: Kestrel refuses to start for want of a certificate key, and Security refuses to start for want of
+the signing key or a caller credential, naming the unreadable file. The enclosing `0700` directory is the
+real host control, which is why `0644` on a file inside it is not the weakening it looks like, and none of
+these files ever leaves your machine.
+
+**Exactly seven files are projected, and it is worth naming them because getting this wrong is the failure
+above.** The four `*-server.key` private keys that §9.3.1 generates `0644`, and the three non-TLS files
+this block generates `0644`: the signing key you named, `caller-gateway.secret` and
+`caller-dataservices.secret`. What is **not** projected, and correctly stays `0600`, is the CA private key,
+the two mutual-TLS *caller* keys of the optional fallback, and `caller-e2e-suite.secret` — whose value is
+carried in the environment file rather than as a file. Where root is available the closed alternative for
+any projected file is `sudo chown 1654 <file>` with the mode left at `0600`; it needs privilege here,
+which is why `0644` is the documented default.
 
 **The certificate set is one command block, and it is not duplicated here.**
 [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) §9.3.1 is the single place it lives: the local
-authority, the shared server certificate **with its subject alternative names**, and the two optional caller
-certificates. Read that section rather than improvising, because one property of it is not obvious and
-breaks everything quietly when missed — one certificate is presented under several names
-(`security-service`, `persistence-service`, `dataservices-service` and `localhost`, plus the loopback
-addresses), current TLS stacks ignore the common name and read `subjectAltName` only, and a certificate
-carrying a common name alone therefore matches **nothing at all**, including the name it appears to carry.
+authority, **one server certificate per service with its own subject alternative names**, and the two
+optional caller certificates. Read that section rather than improvising, because one property of it is not
+obvious and breaks everything quietly when missed — each certificate is presented under several names (its
+own Compose service name and `localhost`, plus the loopback addresses), current TLS stacks ignore the common
+name and read `subjectAltName` only, and a certificate carrying a common name alone therefore matches
+**nothing at all**, including the name it appears to carry.
 
-**Then name the three files in `orchestration/.env`, which is §9.3.1 step 6 and is not optional.** Nothing
-is copied or assembled: the manifest declares three top-level Compose **secrets** whose `file:` sources are
-those three host paths, and projects them **read-only** into all four services at three fixed container
-paths — `/run/secrets/internal-tls/server.crt`, `…/server.key` and `…/ca.crt`, which are the canonical
-defaults every service setting and all four image `HEALTHCHECK`s already read. Point
-the four `<SERVICE>_TLS_CERTIFICATE_PATH` / `_KEY_PATH` pairs and `INTERNAL_TLS_CA_PATH` at the
-generated files as
+**Then name the nine files in `orchestration/.env`, which is §9.3.1 step 6 and is not optional.** Nothing
+is copied or assembled: the manifest declares one top-level Compose **secret** per host path — four
+certificate/key pairs and the shared anchor — and projects each **read-only** into the container that owns
+it, at three fixed container paths per service: `/run/secrets/internal-tls/server.crt`, `…/server.key` and
+`…/ca.crt`, which are the canonical defaults every service setting and all four image `HEALTHCHECK`s
+already read. Point the four `<SERVICE>_TLS_CERTIFICATE_PATH` / `_KEY_PATH` pairs and `INTERNAL_TLS_CA_PATH`
+at the generated files as
 **absolute** paths, because Compose resolves a relative secret source against the manifest's own directory.
 
-> ### ⚠ The private key must be readable by UID 1654, and the projection will not arrange that for you
+> ### ⚠ EVERY PROJECTED FILE must be readable by UID 1654, and the projection will not arrange that for you
 >
 > Compose accepts `mode:`, `uid:` and `gid:` on a secret and **ignores all three outside Swarm**, so the host
 > file's ownership and mode arrive numerically unchanged, and every runtime stage drops to the unprivileged
-> `app` account the base image publishes as UID 1654. A key at mode `0600` owned by your own account is
-> therefore unreadable inside the container, and **Kestrel then fails exactly as if the file were absent** —
-> the container crash-loops with an unresolvable certificate and nothing distinguishes the two causes from
-> the outside. §9.3.1 part 4b makes the key `0644` inside a `0700` directory for exactly this reason, which
-> is safe because the directory is the real host control. Where root is available, the closed alternative is
-> to give the key to that account instead:
+> `app` account the base image publishes as UID 1654. A file at mode `0600` owned by your own account is
+> therefore unreadable inside the container, and **the service then fails exactly as if the file were
+> absent** — nothing distinguishes the two causes from the outside. §9.3.1 part 4b makes the four
+> `*-server.key` files `0644` inside a `0700` directory for exactly this reason, and step 2 above does the
+> same for the three non-TLS files the manifest projects — the signing key, `caller-gateway.secret` and
+> `caller-dataservices.secret`. Both are safe because the directory is the real host control. Where root is
+> available, the closed alternative is to give each projected file to that account instead:
 >
 > ```bash
-> sudo chown 1654 server.key && chmod 600 server.key
+> sudo chown 1654 security-server.key security-signing.key && chmod 600 security-server.key security-signing.key
 > ```
 >
-> **Per-service certificates are the alternative and are equally correct**, and they are the right choice
-> when each service carries its own pair: declare one certificate and one key secret per service, source
-> each from its own variable, and grant each service only its own — the three container-side `target:`
-> paths stay exactly as they are, so no service setting and no `HEALTHCHECK` changes. The manifest records
-> why one shared pair is the default: it is what a single multi-SAN certificate buys, and it keeps the
-> secret roster at three entries rather than nine.
+> **Per-service certificates are the default rather than an alternative**, and this is what that costs and
+> buys: one certificate and one key secret per service, each sourced from its own variable and granted only
+> to its own container, which puts the TLS secret roster at nine entries rather than three. The three
+> container-side `target:` paths are unchanged by it, so no service setting and no `HEALTHCHECK` differs
+> between the two arrangements — which is precisely why the move to per-service material changed nothing but
+> the host half. What it buys is a distinct cryptographic identity per service: a key read out of any one
+> container is no longer the key every other service presents.
 
 ### 3.3 Step 3 — start the stack
 
@@ -379,22 +419,25 @@ docker compose -f orchestration/docker-compose.yml \
 cd orchestration && docker compose up --build -d
 ```
 
-**The three host paths are projected for you, and that is what makes this one command enough.** The manifest
-does not inject them into any container: it consumes them as Compose **secret sources** and decides the
-container-side paths itself, as literals, so the material arrives read-only at
-`/run/secrets/internal-tls/server.crt`, `…/server.key` and `…/ca.crt` in all four services with no override
-file and no `volumes:` entry of your own. What the deployment owns is the host half — which file feeds each
-of the three secrets — and nothing else
+**All twelve host paths are projected for you, and that is what makes this one command enough.** The manifest
+does not inject any of them into any container: it consumes them as Compose **secret sources** and decides
+the container-side paths itself, as literals. The nine TLS paths arrive read-only at
+`/run/secrets/internal-tls/server.crt`, `…/server.key` and `…/ca.crt` in all four services, and the three
+non-TLS paths arrive under `/run/secrets/security/` — the signing key at `…/jwt-signing-key` in Security
+only, and each caller credential at `…/client-secret-gateway` and `…/client-secret-dataservices` in Security
+and in the service that presents it. No override file and no `volumes:` entry of your own is involved. What
+the deployment owns is the host half — which file feeds each secret — and nothing else
 ([§8.3](#83-mutual-tls-is-a-documented-fallback-not-scaffolding) states the one exception, the caller
 material of the mutual-TLS fallback, which is *not* projected and needs a secret source and grant of its
 own).
 
-**Make the files readable by the unprivileged runtime account.** Every service runs as the base image's
-non-root `app` account, so material readable only by your host user makes the process fail to start rather
-than fall back — the log names the unreadable file and the container exits. `chmod 644` on the server key,
-as §9.3.1 part 4b does, or `chown 1654` to match `APP_UID` in the container definitions, both work; a `600`
-file owned by your host user does not, because Compose ignores `mode:`, `uid:` and `gid:` on a secret
-outside Swarm and hands the file over exactly as it found it.
+**Make every projected file readable by the unprivileged runtime account.** Every service runs as the base
+image's non-root `app` account, so material readable only by your host user makes the process fail to start
+rather than fall back — the log names the unreadable file and the container exits. `chmod 644`, as §9.3.1
+part 4b does for the four `*-server.key` files and step 2 above does for the three non-TLS files, or
+`chown 1654` to match `APP_UID` in the container definitions, both work; a `600` file owned by your host
+user does not, because Compose ignores `mode:`, `uid:` and `gid:` on a secret outside Swarm and hands the
+file over exactly as it found it.
 
 Then watch the chain converge. `docker compose ps` reports each service's health, and
 [§4](#4-the-ordered-readiness-gates) is the ordered list of what has to go green and why:
@@ -1040,6 +1083,48 @@ to one clone**, against one unrecreated volume. Where several clones run concurr
 Compose project and its own volume so that one clone's teardown cannot invalidate another clone's
 half-finished pair.
 
+### 6.4 Every service declares a resource ceiling, and what that ceiling is for
+
+Each of the four services carries a `deploy.resources.limits` block declaring a **memory** and a **CPU**
+ceiling. Both are overridable — `SECURITY_MEMORY_LIMIT`, `PERSISTENCE_CPU_LIMIT` and the six others, all
+declared in `.env.example` — and the shipped defaults are `512M` for Security and `1024M` for each of the
+other three, with `2.0` cores each.
+
+**Why they are declared at all, measured rather than assumed.** With no ceiling, a container reports the
+cgroup-v2 `max` sentinel as its memory limit — 3.753 TiB on the machine this was measured on, which is not a
+real quantity — so the garbage collector has effectively no collection pressure and simply retains. Nineteen
+identical full REST projections drove Gateway's resident set from 573 MiB to roughly 1,500 MiB, about
+48 MiB per request, **with no plateau**. The same run under a declared ceiling plateaued at about **85 % of
+it**, returned every response byte-complete, and produced **zero OOM kills, zero restarts and no
+`OutOfMemoryException`**. The growth was therefore **retention and not a leak** — the memory was collectible
+throughout — and declaring the ceiling is what gives the collector a reason to collect.
+
+**A ceiling is not a performance objective, and none is asserted here** ([§1.3](#13-no-performance-objective-is-asserted-anywhere-in-this-document)).
+These values state the most a service *may* consume. They do not state what it needs, how fast it is, or how
+much load it carries.
+
+**Nor is a ceiling a reservation.** Compose turns each into that container's own cgroup limit, so nothing is
+set aside for an idle service and the four may legitimately sum to more than the machine has. Only a
+container exceeding **its own** ceiling is affected.
+
+**The CPU quota is here for a reason that is not throttling.** The .NET runtime derives its thread-pool and
+server-GC heap counts from the processor count it observes, and an unquoted container observes every core on
+the host — so four services on one machine each provision as though they owned all of it. A declared quota
+makes that sizing deterministic, which is why the value appears even on services where CPU has never been the
+constraint.
+
+**If a workload meets a ceiling, that is information rather than a failure.** Raise the relevant variable. The
+one service whose peak is a function of *response size* rather than of chunk size is Gateway, because its REST
+projection materialises a whole result before writing it: a full projection of the sole evidenced table is
+73 MB at fifty thousand rows and 147 MB at a hundred thousand, so a deployment expecting several concurrent
+full projections should raise `GATEWAY_MEMORY_LIMIT` rather than discover the ceiling. Streaming that
+projection instead of materialising it would decouple peak memory from result size altogether and is the
+better long-term answer; it is deliberately not done here, because it changes the shape of a published
+response body rather than an orchestration value.
+
+**Nothing is declared for any deferred service**, for the same reason nothing else is: none is built,
+orchestrated or reachable in this phase.
+
 ---
 
 ## 7. The four documented decisions
@@ -1202,6 +1287,21 @@ and audience validation and clock-skew handling inside framework code rather tha
 There is deliberately **no JWKS variable anywhere in the roster**: adding one would be dead configuration,
 because standard discovery is what locates the key set.
 
+**One consequence of that, and it is the reason `SECURITY_PUBLIC_BASE_URL` exists.** Because every consumer
+locates the key set by following `jwks_uri` out of the discovery document rather than from a variable of its
+own, the address in that member has to resolve *for the consumer that read it* — and this stack has two
+kinds of consumer on two different hosts. The three internal verifiers reach Security as
+`security-service:5104`, which is also `SECURITY_JWT_ISSUER`; an operator, `tests/e2e` and any third-party
+client reach the same service through its published host port. Composing that member from the issuer alone
+therefore served the first group and handed the second a host that resolves only inside this network — a
+document that parsed, looked correct, and failed at DNS during key retrieval. `SECURITY_PUBLIC_BASE_URL`
+declares that second address, and Security publishes whichever declared address the request arrived on,
+falling back to the issuer. **It declares an address; it does not reflect the request** — a caller-chosen
+`Host` header can only select among values you configured, never introduce one, which is what keeps the
+document unforgeable. The `issuer` member and the `iss` claim are always `SECURITY_JWT_ISSUER`, so the
+byte-for-byte comparison all three verifiers perform is untouched. It is a *location*, not a second issuer,
+and it is not a signing key — the paragraph below still holds without qualification.
+
 You will not find a per-service signing key in the roster under any spelling. Any per-service key name, if
 retained at all in an operator's own environment, is **verification-side** and is **not an independent
 signing authority** — the security properties of a sole-issuer topology depend on there being exactly one
@@ -1223,30 +1323,95 @@ five minutes (`Security:TokenLifetime`), which bounds the damage without prevent
 never used to sign, which is why this does not give the estate a second issuer: there is still exactly one
 component that can mint a token, and exactly one key it mints with.
 
+**THE ACTIVE KEY IS ROTATED BY REPOINTING A PATH, NOT BY MOVING A VALUE.** This is the one place the
+procedure is easy to get wrong, because an earlier revision of it said otherwise and the mistake is silent:
+the manifest reads **no** `SECURITY_JWT_SIGNING_KEY` value at all — only `SECURITY_JWT_SIGNING_KEY_PATH`, as
+the `file:` source of the `security-jwt-signing-key` secret, projected at
+`/run/secrets/security/jwt-signing-key`. Writing the incoming key into `SECURITY_JWT_SIGNING_KEY` therefore
+configures nothing, the old key keeps minting under the **new** `kid`, and step 4's check below passed anyway
+because two identifiers over one key are still two published keys. If the rollover was triggered by a
+compromise, that leaves the compromised key as the sole signer under a fresh name.
+
 | Variable | Set to | Cleared when |
 | --- | --- | --- |
-| `SECURITY_JWT_SIGNING_KEY` | The **incoming** key | Never — it is the active key |
+| `SECURITY_JWT_SIGNING_KEY_PATH` | The path of the **incoming** key file | Never — it names the active key |
 | `SECURITY_JWT_SIGNING_KEY_ID` | A **new, different** `kid` for it | Never |
-| `SECURITY_JWT_RETIRING_SIGNING_KEY` | The **outgoing** key, verbatim | Step 5 below |
+| `SECURITY_JWT_RETIRING_SIGNING_KEY_FILE` *(preferred)* | The **projected container path** of the outgoing key — see step 2 | Step 5 below |
+| `SECURITY_JWT_RETIRING_SIGNING_KEY` *(fallback)* | The **outgoing** key material, verbatim | Step 5 below |
 | `SECURITY_JWT_RETIRING_SIGNING_KEY_ID` | The outgoing key's **previous** `kid` | Step 5 below |
 
-1. Generate the incoming key with the `openssl genpkey` / `base64 -w0` pair from step 2 above, into the same
-   `0600` file outside the working tree.
-2. In the environment file: move the current `SECURITY_JWT_SIGNING_KEY` value to
-   `SECURITY_JWT_RETIRING_SIGNING_KEY`, and the current `SECURITY_JWT_SIGNING_KEY_ID` value to
-   `SECURITY_JWT_RETIRING_SIGNING_KEY_ID`. Then put the new key and a new `kid` in the active pair.
-3. `docker compose --env-file .env up -d --no-deps security-service` — Security alone restarts. Nothing else
+1. Generate the incoming key with the `openssl genpkey` pair from [§3.2](#32-step-2--generate-the-local-material),
+   into a **new filename** beside the current one — the outgoing key must stay readable, so nothing is
+   overwritten — and give it the same `0644`-inside-`0700` treatment every projected file gets.
+2. Give Security the **outgoing** key as verification material, by one of two routes. Both keep exactly one
+   signing identity in the estate; they differ only in how the second file reaches the container.
+   - **Preferred — as a second projected file.** The `_FILE` variable is a **pass-through**: the manifest
+     injects it verbatim as a *container* path and projects nothing for it, because the retiring slot is
+     empty in the steady state and a Compose secret's `file:` must name a path that already exists. So
+     declare the projection yourself for the length of the rollover, in an override beside the manifest:
+
+     ```yaml
+     # rollover.override.yml - remove it when step 7 completes. No `mode:` here on purpose: Compose
+     # ignores mode, uid and gid outside Swarm, so the OUTGOING key file's own 0644 is what makes it
+     # readable inside the container, exactly as for every other projected file.
+     services:
+       security-service:
+         secrets:
+           - source: security-jwt-retiring-signing-key
+             target: security/jwt-retiring-signing-key
+     secrets:
+       security-jwt-retiring-signing-key:
+         file: ${SECURITY_JWT_RETIRING_SIGNING_KEY_PATH:?path on THIS HOST holding the OUTGOING key}
+     ```
+
+     then set `SECURITY_JWT_RETIRING_SIGNING_KEY_FILE=/run/secrets/security/jwt-retiring-signing-key` and
+     `SECURITY_JWT_RETIRING_SIGNING_KEY_PATH` to the outgoing key's host path, and pass
+     `-f docker-compose.yml -f rollover.override.yml` on every command below.
+   - **Fallback — as a value.** Set `SECURITY_JWT_RETIRING_SIGNING_KEY` to the outgoing key material. It
+     needs no override, and it puts a signing key into the container environment for the length of the
+     rollover — the exact exposure the active key was moved out of, which is why it is the fallback rather
+     than the default. Setting both forms is **refused** at startup rather than resolved.
+3. In the environment file: set `SECURITY_JWT_RETIRING_SIGNING_KEY_ID` to the `kid` currently in
+   `SECURITY_JWT_SIGNING_KEY_ID`; then repoint `SECURITY_JWT_SIGNING_KEY_PATH` at the file from step 1 and
+   put a new, different `kid` in `SECURITY_JWT_SIGNING_KEY_ID`.
+4. `docker compose --env-file .env up -d --no-deps security-service` — Security alone restarts. Nothing else
    is reconfigured, because the other three learn the second key from the key set they already fetch.
-4. Confirm both keys are published before going further:
-   `curl -sf --cacert "$INTERNAL_TLS_CA_PATH" https://localhost:5104/.well-known/jwks.json | jq '.keys | length'`
-   must report `2`, and `... | jq -r '.keys[].kid'` must list the new `kid` and the previous one.
-5. **Wait out the overlap.** At least `Security:TokenLifetime` (five minutes as shipped) **plus** the 30-second
+5. Confirm the rollover **actually rotated something** before going further. Two checks, and the second is
+   the one that matters:
+
+   ```bash
+   JWKS="https://localhost:${SECURITY_HOST_PORT:-5104}/.well-known/jwks.json"
+
+   # (a) Two keys are published, carrying the new `kid` and the previous one.
+   curl -sf --cacert "$INTERNAL_TLS_CA_PATH" "$JWKS" | jq '.keys | length'    # must be 2
+   curl -sf --cacert "$INTERNAL_TLS_CA_PATH" "$JWKS" | jq -r '.keys[].kid'
+
+   # (b) The two keys are DIFFERENT KEYS. Count the distinct moduli, never just the entries:
+   #     a no-op rotation publishes two identifiers over ONE modulus and satisfies (a) completely.
+   curl -sf --cacert "$INTERNAL_TLS_CA_PATH" "$JWKS" | jq '[.keys[].n] | unique | length'   # must be 2
+   ```
+
+   Both must hold. If (a) reports `2` and (b) reports `1`, nothing rotated: the active key is still the
+   outgoing one under a new name, and the correct response is to fix step 3 rather than to proceed. A
+   third confirmation is available and is worth taking when the rollover answers a compromise — decode the
+   header of a freshly minted token and check its `kid` is the new one:
+   `... /v1/tokens | jq -r .access_token | cut -d. -f1 | base64 -d | jq -r .kid`.
+
+   **A `401` on the first authenticated request after this step is expected and clears itself**, so do not
+   read it as a failed rollover. A verifier holds a cached key set that does not yet carry the new `kid`; the
+   unknown identifier is what makes it request a refresh, and the next request succeeds. Measured on this
+   stack: refused immediately after the restart, `200` fifteen seconds later with no further action. It is
+   the mirror image of the window step 6 exists for — that one protects tokens minted under the OLD key, this
+   one is the short wait for the NEW key to become known.
+6. **Wait out the overlap.** At least `Security:TokenLifetime` (five minutes as shipped) **plus** the 30-second
    clock skew the verifiers allow **plus** however long a verifier's cached key set may remain stale
    (`MetadataAutomaticRefreshInterval`, five minutes as shipped — the library's own floor). Ten to fifteen
    minutes is the practical figure for the shipped settings. **Nothing enforces this wait**, which is exactly
    why it is written down: cutting it short reproduces the outage the rollover exists to prevent.
-6. Clear both retiring variables, restart `security-service` again, and re-run the check in step 4 — it must
-   now report `1`. Destroy the retired material at its source.
+7. Clear the retiring pair — whichever of the two forms step 2 used, plus
+   `SECURITY_JWT_RETIRING_SIGNING_KEY_ID`, and remove the override if one was added — restart
+   `security-service` again, and re-run the checks in step 5: `.keys | length` must now report `1` and the one
+   remaining `kid` must be the **new** one. Destroy the retired material at its source.
 
 **A half-applied rollover refuses the host rather than running quietly.** Material with no identifier cannot
 be published at all; an identifier with no material publishes nothing while reading as a rollover in
@@ -1281,9 +1446,9 @@ The distinction that matters here is between *supported* and *scaffolded*. Mutua
 those paths requires no code change anywhere, each pair is enforced as both-or-neither (half-configured is a
 refusal to start with a names-only message, entirely unset is a legitimate state), and
 [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) §9.3.1 generates the certificates. **The server material
-is projected rather than left to be arranged, and the caller material deliberately is not.** Three top-level
-Compose secrets — sourced from each service’s own `<SERVICE>_TLS_CERTIFICATE_PATH` / `_KEY_PATH` and
-`INTERNAL_TLS_CA_PATH`, each with the `:?` form and therefore no default — land read-only at
+is projected rather than left to be arranged, and the caller material deliberately is not.** Nine top-level
+Compose secrets — sourced from each service’s own `<SERVICE>_TLS_CERTIFICATE_PATH` / `_KEY_PATH` and the
+shared `INTERNAL_TLS_CA_PATH`, each with the `:?` form and therefore no default — land read-only at
 `/run/secrets/internal-tls/server.crt`, `…/server.key` and `…/ca.crt` in all four services, which are the
 canonical paths every service setting and every image `HEALTHCHECK` already reads; an unset or absent source
 aborts bring-up by name rather than inventing one. The four `GATEWAY_MTLS_*` / `DATASERVICES_MTLS_*` paths
@@ -1293,7 +1458,8 @@ path here — [`.env.example`](.env.example) carries the three-line shape under 
 and mounting the authority's **public** half only is part of it. One property of a Compose secret decides
 whether any of this works: `mode:`, `uid:` and `gid:` are accepted and **ignored outside Swarm**, so a `0600`
 private key owned by your host account is unreadable by the non-root runtime user (UID 1654) and Kestrel
-fails exactly as if the file were absent — §3 gives the ownership the generated files must carry.
+fails exactly as if the file were absent — §3 gives the ownership every projected file must carry, and it
+covers the three non-TLS projections as well as the four server keys.
 
 **No signing, verification or mutual-TLS variable is scaffolded for any deferred service.** The attached
 environment's `design-service` and `i18n-service` key names are not provisioned at all, because neither
@@ -1347,8 +1513,10 @@ decomposition created rather than a legacy behaviour, and no performance objecti
 Two consequences for an operator: **`/health` is exempt from the rate limiter on all four**, so a saturated
 service still answers the readiness probes of §4 — that exemption is what keeps the gates meaningful under
 load. And a refusal is a `429` with an optional `Retry-After` on the REST surfaces, or
-`ResourceExhausted` on the gRPC ones; both are the limiter working, not an outage. Every value is a setting,
-so raise the relevant `Ingress:*` key if a legitimate workload meets a ceiling.
+`ResourceExhausted` with the same interval on an optional `retry-after` trailer on the gRPC ones; both are
+the limiter working, not an outage, and both tell a caller when to come back rather than only that it was
+turned away. Every value is a setting, so raise the relevant `Ingress:*` key if a legitimate workload meets
+a ceiling.
 
 ### 8.4 What the environment template may and may not contain
 
@@ -1505,13 +1673,17 @@ to Docker health status `healthy`.** The readiness chain converged in the docume
 | A **brand-new** `persistence-db` volume | Persistence reached `healthy` with **no operator step of any kind**, logging `Applied 1 pending migration(s) to the database before reporting ready. The step is additive and idempotent: nothing was dropped, recreated or seeded.` |
 | Restarting on the same volume, and again after a plain `down` and `up` | `The database schema already carries every migration this build declares, so no schema statement was issued.` The provisioning path is a genuine no-op on a provisioned volume |
 | The TLS projection | `/run/secrets/internal-tls/{ca.crt,server.crt,server.key}` present inside a container, all three readable by the unprivileged `app` account, all three mounted `ro`, and a write attempt refused with `Permission denied` |
+| The NON-TLS projection, which is the other half of the same mechanism | `/run/secrets/security/{jwt-signing-key,client-secret-gateway,client-secret-dataservices}` present inside `security-service`, each arriving with its host mode unchanged (`-rw-r--r-- root root`) and each **readable by `uid=1654(app)`** — which is what the recipe's permission split exists to arrange |
 | The gRPC contracts' port, which is each service's only port | **No separate unpublished listener remains to probe.** C-05..C-08 answer on Persistence's 5101 and C-03/C-04 on DataServices' 5102, and `Protocols: Http1AndHttp2` held on both: the HTTP/1.1 `/health` gate above succeeded on the very port a gRPC caller negotiates HTTP/2 on. In-network TLS reachability was verified against the projected anchor with hostname verification, which is what Gateway's aggregate reporting `Healthy` required of all three upstreams |
 | `ASPNETCORE_ENVIRONMENT=Development`, which this template selects | Gateway logged `Now listening on: https://[::]:5105` and answered `200` from the host both on loopback and via the host's non-loopback address |
 | Security's startup on its **own shipped settings** | Started clean. The only warnings were the documented fail-closed client-certificate-anchor warning and the framework's data-protection key-ring warning |
-| The generation recipe of [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) §9.3.1, extracted and run verbatim | Exit `0`; every `openssl verify` passed; the permission split emitted `server.key` readable and the CA, signing and caller keys `0600` |
+| The generation recipe of [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) §9.3.1, extracted and run verbatim, followed by [§3.2](#32-step-2--generate-the-local-material) | Exit `0`; every `openssl verify` passed; the permission split emitted the seven PROJECTED files readable — the four `*-server.key`, the signing key and the two service caller credentials — and left the CA key, the two mutual-TLS caller keys and the unprojected third caller credential `0600` |
 | **The certificate arm of `POST /v1/tokens`**, with `Security__MutualTls__ClientCaPath` pointed at the projected `/run/secrets/internal-tls/ca.crt` and a caller certificate `CN=pfw-e2e-suite` carrying the `clientAuth` extended key usage | A token was issued to a caller presenting **only** that certificate and **no** shared secret, and Gateway's `/v1/ping` answered `200` with it. The common name is what maps to the issuance roster, so the certificate authenticates and the roster still authorizes |
 | The same anchor path naming a file that is **not** there | Security **exited instead of serving**. Its own message names only the configuration key and states that the path is deliberately withheld; the inner framework `FileNotFoundException` in the same log does print it, so the withholding is a property of this service's message rather than of the log |
-| Teardown with a plain `down` | Containers and network removed, **and the named volume survived** — the property [§7.2](#72-decision-2--the-persistence-db-volume-rename)'s capture rule depends on |
+| The complete `tests/e2e` suite, run with `npm ci && npm test` from [`../tests/e2e`](../tests/e2e) against this stack | **29 of 29 passed**, and the harness selected **`STRICT` mode** of its own accord after probing all four services — which is the mode that runs the stack-dependent assertions rather than skipping them. The six groups it reports are health and readiness, authentication, capability gating, the four reserved deferred routes, the DataWindow retrieve/validate/update workflow, and the optimistic-concurrency conflict. The suite needs **both** halves of an issuance credential: supplying `SECURITY_CLIENT_SECRET` without `SECURITY_CLIENT_ID` is refused before any spec runs, by name and without echoing either value, rather than silently degrading to the no-token subset |
+| The four reserved deferred-capability routes of [§5.1](#51-the-map), each with a valid token | `501` on all four, each body naming its own deferred service — `DesignSystem`, `Documents`, `Integration`, `ScriptBridge`. Nothing is served behind any of them |
+| **C-03, C-05 and C-06 invoked across container boundaries**, not merely probed at the TLS layer | `POST /v1/datawindow/retrieve` answered `200` carrying the DataWindow chunk sequence, and an insert and an update both applied — each one traversing Gateway → DataServices over gRPC and DataServices → Persistence over gRPC, with a JWT validated at every hop. A stale-original update was refused `409` and changed nothing. A `NOT NULL` violation was refused `400 application/problem+json` whose `dbError` member named `COMPANY.AGE` while carrying an empty `sqlsyntax` and none of the caller's own column values |
+| Teardown with a plain `down` | Containers and network removed, **and the named volume survived** — the property [§7.2](#72-decision-2--the-persistence-db-volume-rename)'s capture rule depends on. Re-running `up -d` on that surviving volume returned all four to `healthy` and a re-retrieve answered the **same three rows** the suite had left behind, so the volume carries data across a restart rather than merely existing across one |
 
 **The build and test path has been run, and its FIGURES are not restated here.** `dotnet build
 PowerFramework.slnx -c Release` and `dotnet test PowerFramework.slnx -c Release --no-build` were both
@@ -1539,8 +1711,13 @@ package it loaded and is therefore not the gate and must never be read as one.
   container can run, so the capture rule of
   [§7.2](#72-decision-2--the-persistence-db-volume-rename) is an obligation on the work that produces the
   first pair rather than a description of something already done.
-- **`tests/e2e` has not been run against the stack.** The Playwright suite exists and its readme carries the
-  install-and-run path; no run of it against a live stack is reported here.
+- **`tests/e2e` has now been run against the stack, and what remains unexercised is the browser half rather
+  than the suite.** §10.1 records the measurement: `npm ci && npm test` from [`../tests/e2e`](../tests/e2e)
+  against a stack brought up by the documented path passed **29 of 29** in the harness's own `STRICT` mode.
+  What that run does **not** exercise is any *browser* behaviour — the suite drives HTTP through Playwright's
+  request fixture and opens no page, because there is no presentation surface to open. So the installed
+  browser binaries go unused, and no assertion here depends on rendering, on a DOM or on JavaScript
+  execution. That is a property of this phase having no UI rather than a gap in the suite.
 - **The mutual-TLS arm of `POST /v1/tokens` has now been exercised at the issuance endpoint, and what
   remains unexercised is narrower than an earlier revision of this bullet said.** §10.1 records the
   measurement: with `SECURITY_MTLS_CLIENT_CA_PATH` pointed at the already-projected anchor, a caller
@@ -1550,9 +1727,13 @@ package it loaded and is therefore not the gate and must never be read as one.
   paths empty, so neither Gateway nor DataServices has presented **its own** configured pair to Security.
   A deployment choosing that arm must project its own anchor — [`.env.example`](.env.example) carries the
   shape, and setting a *host* path there refuses startup, which is measured rather than predicted.
-- **No gRPC RPC has been invoked.** Every listener was proven reachable at the TLS layer from its
-  legitimate in-network caller, and because each service binds ONE endpoint that is the same port the
-  contracts answer on; no C-03 to C-08 call has been made across a container boundary.
+- **Three of the six gRPC contracts have now been invoked across container boundaries; the other three have
+  not.** §10.1 records which: retrieve, insert, update, the `409` conflict and the `NOT NULL` refusal all
+  traverse Gateway → DataServices → Persistence, so **C-03**, **C-05** and **C-06** have been called for real
+  rather than probed at the TLS layer. **C-04** (the column-expression service), **C-07** (command execution)
+  and **C-08** (the transaction service) have **not** — no caller in the documented bring-up reaches them, and
+  the end-to-end suite drives none of them. Their listeners are reachable on the same ports the invoked
+  contracts answer on, which is evidence about the transport and not about the methods.
 - **CI has not run on a hosted runner from this working tree.**
   [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) exists and defines the four-service matrix;
   what is reported above was run on a developer host.

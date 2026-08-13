@@ -740,7 +740,7 @@ public sealed class GatewayContractTests
 
         string[] reachable =
         [
-            "200", "400", "401", "403", "404", "409", "429", "500", "502", "503", "504",
+            "200", "400", "401", "403", "404", "409", "413", "429", "500", "502", "503", "504",
         ];
 
         (string Route, HttpMethod Method, OpenApiOperation Operation)[] projected = Operations(document)
@@ -772,13 +772,59 @@ public sealed class GatewayContractTests
         // AND THE DECLARED SURFACE IS IDENTICAL ACROSS ALL THIRTY-NINE, which is the property that makes
         // the two directions checkable at all: the only per-operation variation left is WHICH 400
         // description applies, and a description is not a status.
+        // 🔴 THE UNIFORM-SURFACE RULE NOW HAS EXACTLY ONE EXEMPTION, AND THE EXEMPTION IS ITSELF
+        // ASSERTED RATHER THAN TOLERATED.
+        //
+        // Every projected operation used to declare an IDENTICAL status set, which was true and was worth
+        // pinning: a caller writing one handler for the whole projection could rely on it. 413 cannot join
+        // that set, because it is NOT uniformly reachable - the ingress bound is enforced when the request
+        // body is READ, so an operation that reads none cannot produce it. Measured directly against a
+        // running deployment: a 9 MiB body sent to POST /v1/datawindow/retrieve answered 413, and the same
+        // body sent to DELETE /v1/datawindow/sessions/{sessionId}, which reads no body, answered 200 - the
+        // oversized payload was simply never read.
+        //
+        // So the choice was between declaring 413 on all 39 and publishing it on three operations that can
+        // never answer it, or declaring it on the 36 that can and giving up a uniform surface. Publishing
+        // an unreachable status is the thing the assertion above exists to prevent, so the surface is
+        // compared with 413 EXCLUDED and the presence of 413 is then pinned to the one property that
+        // determines it.
+        const string SizeBoundStatus = "413";
+
         string[][] surfaces = [.. projected
-            .Select(static entry => (string[])[.. entry.Operation.Responses!.Keys.Order(StringComparer.Ordinal)])];
+            .Select(static entry => (string[])[.. entry.Operation.Responses!.Keys
+                .Where(static status => !string.Equals(status, SizeBoundStatus, StringComparison.Ordinal))
+                .Order(StringComparer.Ordinal)])];
 
         foreach (string[] surface in surfaces)
         {
             Assert.Equal(surfaces[0], surface);
         }
+
+        int declaringSizeBound = 0;
+
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in projected)
+        {
+            bool readsABody = operation.RequestBody is not null;
+            bool declaresSizeBound = operation.Responses!.ContainsKey(SizeBoundStatus);
+
+            Assert.Equal(readsABody, declaresSizeBound);
+
+            if (declaresSizeBound)
+            {
+                declaringSizeBound++;
+            }
+            else
+            {
+                Assert.False(
+                    readsABody,
+                    $"{method} {route} reads a request body, so the ingress size bound can refuse it and "
+                        + "it must declare 413.");
+            }
+        }
+
+        // 36 of the 39 projected operations read a body; the census is asserted so this cannot pass by
+        // finding that none of them does.
+        Assert.Equal(36, declaringSizeBound);
     }
 
     [Fact]
@@ -1035,6 +1081,14 @@ public sealed class GatewayContractTests
         [
             // C-09's mapping table (docs/CONTRACTS.md 12.1).
             "200", "400", "401", "403", "404", "409", "429", "500", "501", "504",
+
+            // 🔴 THE INGRESS SIZE BOUND, which this document did not declare at all while the runtime
+            // answered it. A body over the configured limit is refused 413 - measured directly against a
+            // running deployment - so a generated client had no branch for a status it could really
+            // receive, and the response it did receive was titled "Bad Request" on a 413. Sanctioned here
+            // and required per-operation by the requestBody rule in
+            // NoProjectedOperationDeclaresAStatusItCannotProduce.
+            "413",
 
             // The one addition, for a failure the mapping cannot describe: no gRPC response at all.
             "502",
@@ -1776,10 +1830,15 @@ public sealed class GatewayContractTests
         // AND THE CHECK ACTUALLY REACHED SOMETHING. Without this, a change that made every schema
         // non-object - or misspelled the exemption list - would pass an empty loop silently.
         //
-        // 125 OF THE DOCUMENT'S 144 SCHEMAS ARE OBJECTS THAT CLOSE THEMSELVES. The remaining 19 are the
+        // 126 OF THE DOCUMENT'S 145 SCHEMAS ARE OBJECTS THAT CLOSE THEMSELVES. The remaining 19 are the
         // two open problem shapes skipped above, the 15 string enums and the two array projections, none
         // of which has members for the keyword to constrain.
-        Assert.Equal(125, checkedSchemas);
+        //
+        // THE MOST RECENT ADDITION IS RowValidationIdentity, and it is closed like every other object
+        // here despite being an extension member's element type. Its openness would matter more than
+        // most: it is the shape a refused write's identity travels in, so an open one would let a future
+        // relay add a member - a row value, an upstream message - without any gate objecting.
+        Assert.Equal(126, checkedSchemas);
     }
 
     [Fact]

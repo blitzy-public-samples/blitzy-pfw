@@ -188,6 +188,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
+using Polly;
 using PowerFramework.Gateway.Configuration;
 using PowerFramework.Shared.Diagnostics;
 
@@ -249,7 +250,15 @@ public interface IServiceTokenProvider
     /// <exception cref="InvalidOperationException">
     /// No upstream address was configured for the Security service.
     /// </exception>
-    /// <exception cref="HttpRequestException">The request could not be completed in transit.</exception>
+    /// <exception cref="ServiceTokenUnavailableException">
+    /// The call to Security did not complete, so no token was obtained. <b>Raised in place of a bare
+    /// <see cref="HttpRequestException"/>, which is the correction rather than a wrapper</b>: every
+    /// consumer of a token here is on its way to a DIFFERENT upstream, so an untyped transport fault
+    /// was indistinguishable from that upstream's own and was attributed to it in both the caller's
+    /// body and the operator record. A caller that needs the underlying fault reads
+    /// <see cref="Exception.InnerException"/>; a caller that needs to attribute the failure needs only
+    /// the type.
+    /// </exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
     Task<ServiceToken> GetTokenAsync(ServiceTokenRequest request, CancellationToken cancellationToken);
 }
@@ -705,6 +714,81 @@ public sealed class SecurityClientException : Exception
 }
 
 /// <summary>
+/// Raised when a service token could not be obtained because the call to Security did not complete -
+/// the credential edge was unreachable, or the request failed in transit.
+/// </summary>
+/// <remarks>
+/// <para>
+/// 🔴 <b>THIS TYPE EXISTS SO THAT A FAILURE OF THE SECURITY EDGE IS NOT REPORTED AS A FAILURE OF
+/// SOMETHING ELSE, AND ITS ABSENCE WAS A MEASURED DEFECT.</b> Before it, a transport fault on token
+/// issuance escaped as a bare <see cref="HttpRequestException"/>. Every consumer of a service token in
+/// this service obtains it on the way to calling DataServices, and the projection's single
+/// <c>catch (HttpRequestException)</c> arm therefore answered
+/// <c>502 { upstream: "dataservices" }</c> with a DataServices-specific detail for an outage that was
+/// entirely Security's - with Security's own record three lines earlier in the same log. Both the
+/// caller and the operator were sent to investigate the wrong service, and the published contract's
+/// <c>upstream</c> member states that it exists precisely "so an operator can attribute the failure
+/// without correlating logs".
+/// </para>
+/// <para>
+/// <b>IT IS DISTINCT FROM <see cref="SecurityClientException"/> BECAUSE THE TWO ARE DIFFERENT
+/// FACTS.</b> That type means Security ANSWERED and the answer was a refusal or a shape the contract
+/// does not permit, so it carries a status and a problem body. This one means there was no answer at
+/// all, so it carries neither, and no amount of retrying the same request can change it into one. The
+/// distinction is the same one the projection's own status map draws between a translated gRPC status
+/// and the absence of a gRPC response.
+/// </para>
+/// <para>
+/// <b>IT DOES NOT DERIVE FROM <see cref="HttpRequestException"/>,</b> deliberately. Deriving would
+/// leave it caught by the very arm it exists to be caught ahead of, which is a change that reads as
+/// made and is not.
+/// </para>
+/// <para>
+/// NOTHING SENSITIVE REACHES THIS TYPE. The message is fixed prose naming the edge and no address, host
+/// or port; the underlying failure is carried as the inner exception for the operator channel and is
+/// never rendered into a caller's response, and no credential, secret or header value can arrive
+/// through any member.
+/// </para>
+/// </remarks>
+public sealed class ServiceTokenUnavailableException : Exception
+{
+    /// <summary>Creates the exception with the fixed prose that names the edge.</summary>
+    public ServiceTokenUnavailableException()
+        : base(DefaultMessage)
+    {
+    }
+
+    /// <summary>Creates the exception with a message.</summary>
+    /// <param name="message">A description that carries nothing sensitive.</param>
+    public ServiceTokenUnavailableException(string? message)
+        : base(message)
+    {
+    }
+
+    /// <summary>Creates the exception with a message and the transport failure that caused it.</summary>
+    /// <param name="message">A description that carries nothing sensitive.</param>
+    /// <param name="innerException">The underlying transport failure.</param>
+    public ServiceTokenUnavailableException(string? message, Exception? innerException)
+        : base(message, innerException)
+    {
+    }
+
+    /// <summary>
+    /// The prose used when no message is supplied, and the prose every raise site in this file uses.
+    /// </summary>
+    /// <remarks>
+    /// A CONSTANT SO THE MESSAGE IS SINGLE SOURCED. It names the contract and the operation rather than
+    /// the address, because an address is deployment topology and this string reaches an operator log.
+    /// </remarks>
+    internal const string DefaultMessage =
+        "The Security service could not be reached, or contract C-01's token issuance call failed in "
+        + "transit, so no service token could be obtained and the request that needed one could not be "
+        + "authorized downstream. Nothing was retried: issuance is a state-changing operation whose "
+        + "replay is not safe, because a transport failure does not reveal whether the server processed "
+        + "the request.";
+}
+
+/// <summary>
 /// The typed HTTP client for contract C-01's token issuance operation.
 /// </summary>
 /// <remarks>
@@ -1119,9 +1203,55 @@ public sealed class SecurityClient : IServiceTokenProvider
             Headers = { Authorization = BuildIssuanceCredential(request.Subject) },
         };
 
-        using HttpResponseMessage response = await _httpClient
-            .SendAsync(httpRequest, cancellationToken)
-            .ConfigureAwait(false);
+        // ==========================================================================================
+        //  🔴 A TRANSPORT FAILURE ON THIS EDGE IS RAISED AS ITS OWN TYPE, AND THAT IS THE WHOLE OF THE
+        //  ATTRIBUTION FIX.
+        //
+        //  This call used to let HttpRequestException escape verbatim. Every caller of this method is
+        //  on its way to calling DataServices, and the REST projection's single
+        //  `catch (HttpRequestException)` arm therefore answered the caller
+        //  `502 { upstream: "dataservices" }` - with a DataServices-specific detail - for an outage
+        //  that was entirely Security's, and wrote an operator record saying the same. The failure was
+        //  reproducible by stopping security-service alone while both other upstreams stayed healthy.
+        //
+        //  WHAT IS CONVERTED, AND WHY EACH IS THE SAME FACT. The classes below all mean "the issuance
+        //  call did not produce an answer": a transport fault, a socket-level fault, the resilience
+        //  pipeline refusing or timing out the attempt (Polly's ExecutionRejectedException covers both
+        //  its timeout and its circuit-breaker refusals), and a timeout surfacing as a bare
+        //  TimeoutException. A CALLER CANCELLATION IS NOT ONE OF THEM and is rethrown untouched by the
+        //  filter below - the caller went away, which is neither this service's fault nor Security's,
+        //  and the projection answers it without a body because there is no longer a connection to
+        //  answer on.
+        //
+        //  A CANCELLATION THAT IS NOT THE CALLER'S *IS* CONVERTED, because that is the shape the
+        //  outbound per-attempt and total-request timeouts take: the same attribution test the service
+        //  fault handler applies to decide whether a cancellation is a fault at all.
+        // ==========================================================================================
+        HttpResponseMessage response;
+
+        try
+        {
+            response = await _httpClient
+                .SendAsync(httpRequest, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception transport) when (transport
+            is HttpRequestException
+            or IOException
+            or TimeoutException
+            or ExecutionRejectedException
+            or OperationCanceledException)
+        {
+            throw new ServiceTokenUnavailableException(
+                ServiceTokenUnavailableException.DefaultMessage,
+                transport);
+        }
+
+        using HttpResponseMessage held = response;
 
         // Every non-success status is a definitive answer on this operation and is surfaced as a typed
         // failure. Nothing is retried here: transient transport faults are the resilience handler's

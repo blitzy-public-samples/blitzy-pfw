@@ -243,9 +243,13 @@ dotnet_naming_style.pfw_pascal_case_prefixed_with_i.required_prefix = I
 # MSBuild, solution and other XML-shaped build files
 # ----------------------------------------------------------------------------------------------
 # `slnx` is the .NET 10 XML solution format, which is what `dotnet new sln` emits on this SDK.
-# `slnf` is deliberately absent: legacy solution filters are incompatible with .slnx and fail
-# with MSB4014 during restore, build and test, so this refactor uses per-service .slnx files and
-# authors no filter for one to match.
+# `slnf` is deliberately absent, and the reason is MAINTENANCE rather than a tooling failure. An
+# earlier form of this note said a filter over a .slnx fails with MSB4014 in all three verbs; that
+# was measured false on the pinned SDK - a well-formed filter over an existing .slnx restores,
+# builds and tests cleanly. What is true is that a filter's project list must be kept in exact
+# agreement with the solution BY HAND and every drift fails hard, which reproduces a scoping the
+# per-service .slnx files already give for free. See docs/BUILD.md section 2 for the measured
+# diagnostics. This refactor authors no filter for a format to match.
 [*.{csproj,props,targets,slnx}]
 indent_size = 2
 insert_final_newline = true

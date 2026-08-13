@@ -44,6 +44,7 @@ using Grpc.Core;
 using Microsoft.Extensions.Options;
 using PowerFramework.Contracts.DataServices.V1;
 using PowerFramework.DataServices.Clients;
+using PowerFramework.DataServices.Endpoints;
 using PowerFramework.DataServices.Grpc;
 using Xunit;
 using RetCode = PowerFramework.Shared.Kernel.RetCode;
@@ -491,6 +492,94 @@ public sealed class PersistenceWorkHandleReleaseTests
         Assert.Equal(0, fixture.Persistence.UpdateCalls);
         Assert.Single(fixture.Persistence.TransactionStub.EndRequests);
         Assert.Empty(fixture.Persistence.UpdateStub.ReleaseTaskRequests);
+    }
+
+    /// <summary>
+    /// A refused query task names the CREATE step and what that call carried, instead of reporting a
+    /// work-handle acquisition failure with nothing after it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THE DEFECT THIS PINS AGAINST WAS A TRUE SENTENCE ABOUT THE WRONG THING (issue INFO-2). A
+    /// retrieval with <c>chunk_size = 1</c> answered
+    /// <c>InvalidArgument "The retrieval could not acquire a Persistence work handle (outcome -3). "</c> -
+    /// trailing space included, because the upstream text it interpolated was empty. "Could not acquire a
+    /// work handle" reads as plumbing, so a caller looked for a registry at capacity or a session that
+    /// would not open, while the actual cause was C-05's preserved chunk-size guard rejecting the value the
+    /// caller itself had sent [<c>n_cst_thread_task_sqlquery.sru:L410</c>].
+    /// </para>
+    /// <para>
+    /// WHY THE UPSTREAM TEXT IS SCRIPTED EMPTY. That is C-05's documented answer wherever a setting's
+    /// refusal is delegated to the preserved legacy setter: the setting's own code travels and no message is
+    /// composed. Persistence is deliberately NOT asked to grow one - the fix is that this service says what
+    /// it knows for certain, which is WHICH acquisition step was refused and WHAT that step carried.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ARefusedQueryTaskNamesTheCreateStepAndWhatItCarried()
+    {
+        C03Fixture fixture = new();
+        fixture.Persistence.QueryStub.CreateTaskCode = RetCode.E_INVALID_ARGUMENT;
+
+        RpcException failure = await Assert.ThrowsAsync<RpcException>(async () =>
+            await fixture.Service.Retrieve(
+                new RetrieveRequest { DatawindowHandle = "dw-1", ChunkSize = 1 },
+                new RestProjectionEndpoints.CollectingStreamWriter<RetrieveChunk>(16),
+                fixture.Context));
+
+        Assert.Equal(StatusCode.InvalidArgument, failure.StatusCode);
+
+        string detail = failure.Status.Detail;
+
+        // THE STEP IS NAMED, and it is the create call rather than the session.
+        Assert.Contains("creating its Persistence work task", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("opening a Persistence session", detail, StringComparison.Ordinal);
+
+        // WHAT THE STEP CARRIED IS NAMED, including the published bound that makes it actionable.
+        Assert.Contains("chunk size", detail, StringComparison.Ordinal);
+        Assert.Contains("1000", detail, StringComparison.Ordinal);
+        Assert.Contains("published setters", detail, StringComparison.Ordinal);
+
+        // AND THE UPSTREAM'S SILENCE IS REPORTED AS SILENCE rather than left as an empty interpolation.
+        Assert.Contains("sent no diagnostic text", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("(outcome -3). ", detail, StringComparison.Ordinal);
+
+        // The session was still ended and nothing was asked of the query itself.
+        Assert.Single(fixture.Persistence.TransactionStub.EndRequests);
+        Assert.Equal(0, fixture.Persistence.QueryStub.QueryCalls);
+    }
+
+    /// <summary>
+    /// A refused SESSION names the session step and does not send the caller looking at its own settings.
+    /// </summary>
+    /// <remarks>
+    /// THE OTHER HALF OF THE DISTINCTION, AND IT IS WHAT MAKES THE FIRST ONE MEAN ANYTHING. A session is
+    /// opened with this service's own configured descriptor rather than with anything on the request, so
+    /// there is nothing for the caller to correct - and a diagnostic that offered it the chunk-size advice
+    /// anyway would be the same category of misdirection the create-step wording replaced.
+    /// </remarks>
+    [Fact]
+    public async Task ARefusedSessionNamesTheSessionStepAndOffersNoSettingAdvice()
+    {
+        C03Fixture fixture = new();
+        fixture.Persistence.TransactionStub.BeginSessionCode = RetCode.E_DB_ERROR;
+
+        RpcException failure = await Assert.ThrowsAsync<RpcException>(async () =>
+            await fixture.Service.Retrieve(
+                new RetrieveRequest { DatawindowHandle = "dw-1", ChunkSize = 5_000 },
+                new RestProjectionEndpoints.CollectingStreamWriter<RetrieveChunk>(16),
+                fixture.Context));
+
+        string detail = failure.Status.Detail;
+
+        Assert.Contains("opening a Persistence session for it", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("creating its Persistence work task", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("chunk size", detail, StringComparison.Ordinal);
+        Assert.Contains("configured connection descriptor", detail, StringComparison.Ordinal);
+
+        // Nothing was acquired, so nothing is released.
+        Assert.Empty(fixture.Persistence.TransactionStub.EndRequests);
+        Assert.Empty(fixture.Persistence.QueryStub.CreateTaskRequests);
     }
 
     /// <summary>

@@ -1264,6 +1264,20 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
     /// emitted is the one the carrier CAPTURED at its last baseline, which for a <c>blob</c> is a content
     /// snapshot rather than an alias - the carrier hands out defensive copies, so the emitted original must
     /// be read from the baseline store and never from the live array.
+    /// <para>
+    /// <b>⚠ THE ROW STATUS THIS EMITS READS LIKE A DEFECT ON A FRESHLY RETRIEVED ROW, AND IT IS NOT.</b> A
+    /// retrieved, unedited row is projected with <c>DataModified!</c> at the row level while every one of
+    /// its columns reads <c>NotModified!</c>, because the retrieval stamps the row before the changeset is
+    /// extracted - six loops, at
+    /// <c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L122-L124, :L126-L128,
+    /// :L161-L163, :L167-L169, :L196-L198</c> and <c>:L201-L203</c>, reproduced by
+    /// <see cref="StampRowsAsModified"/>. It has been raised as a finding once and closed as legacy-faithful
+    /// (constraint C-B). It is also LOAD BEARING: <see cref="IsPayloadRow"/> admits a non-deleted row only
+    /// when it is modified or new, so a row left <c>NotModified!</c> is dropped from the payload and a
+    /// retrieval over a populated table would answer a well-formed EMPTY result and report success. Pinned
+    /// by <c>ChangesetCodecReceiveTests.ARowStampedNotModifiedIsDroppedFromThePayloadEntirely</c> and
+    /// recorded in <c>docs/PARITY.md</c> §7.5.1.
+    /// </para>
     /// </remarks>
     private static bool TryProjectRow(
         DataWindowBufferStore source,

@@ -392,8 +392,11 @@
         Configuration default here would change what a bare command builds; that property leaves it
         untouched.
 
-      * Any solution filter mechanism. .NET 10 emits the XML .slnx solution format and legacy .slnf
-        filters are incompatible with it, failing with MSB4014 during restore, build and test.
+      * Any solution filter mechanism. .NET 10 emits the XML .slnx solution format, and no .slnf
+        filter is authored here because a filter's project list must be kept in exact agreement
+        with the solution BY HAND and every drift fails hard. An earlier form of this note said
+        such a filter fails with MSB4014 in all three verbs; that was measured false on the pinned
+        SDK - see docs/BUILD.md section 2 for the measurement.
         Build scoping is done by the per service .slnx files together with this property sheet.
 
       * Any project level ItemGroup whatsoever, and in particular any Compile, Content, None,

@@ -319,6 +319,7 @@ using System.Globalization;
 using System.Text;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.WebUtilities;
 using PowerFramework.Shared.Diagnostics;
 using PowerFramework.Shared.Kernel;
 
@@ -727,6 +728,15 @@ public sealed class SystemErrorHandler : IExceptionHandler
     /// "Internal Server Error" on a 400 tells a caller to look for an outage when the answer is in its own
     /// request, and a title that disagrees with the status is a defect a consumer cannot work around.
     /// </remarks>
+    /// <remarks>
+    /// 🔴 A FALLBACK NOW, NOT THE ANSWER FOR EVERY CLIENT STATUS - AND USING IT FOR EVERY ONE WAS THE
+    /// DEFECT. <see cref="ResolveResponseStatus"/> honours whatever 4xx the framework's own bad-request
+    /// exception carried, so a body over the configured size limit answers 413 and an unacceptable media
+    /// type answers 415 - and both were titled "Bad Request", which contradicts the status on the same
+    /// line of the same document. A consumer keying on the title reads one answer and a consumer keying
+    /// on the status reads another. Retained only for a status the framework's own phrase table does not
+    /// name, so the member can never be empty.
+    /// </remarks>
     private const string ClientErrorProblemTitle = "Bad Request";
 
     /// <summary>
@@ -742,6 +752,30 @@ public sealed class SystemErrorHandler : IExceptionHandler
         "The request could not be accepted as this operation declares it. A required parameter is absent, "
         + "or a value supplied cannot be bound to the shape the operation publishes. No part of the "
         + "request is echoed here; the published contract states what the operation accepts.";
+
+    /// <summary>
+    /// The problem detail for a request refused because its body exceeded the configured size bound.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 ITS OWN PROSE, BECAUSE THE SHARED CLIENT-ERROR PROSE ACTIVELY MISDESCRIBED THIS CASE. A 413
+    /// carried "A required parameter is absent, or a value supplied cannot be bound to the shape the
+    /// operation publishes" - which sends a caller to check its field names and types when the body was
+    /// never parsed at all. The refusal happens at the ingress bound, before any binding, so nothing about
+    /// the body's SHAPE was ever assessed and no amount of correcting it will help. What a caller needs
+    /// here is the one action that does help: send less.
+    /// <para>
+    /// THE CONFIGURED LIMIT IS DELIBERATELY NOT STATED. It is a property of this deployment rather than of
+    /// the contract, and publishing it in an error body tells an unauthenticated caller exactly how large
+    /// a request it may send before being refused - which is the one fact that makes the bound easier to
+    /// probe. The contract states that a bound exists; the operator channel records the occurrence.
+    /// </para>
+    /// </remarks>
+    private const string PayloadTooLargeProblemDetail =
+        "The request body exceeded the size this deployment accepts, so it was refused at the ingress "
+        + "bound before it was read or parsed. Nothing about the body's shape was assessed and nothing "
+        + "was forwarded to any upstream service. Send a smaller body - for a bulk operation, divide the "
+        + "work across several requests. The configured bound is not published here; the operator channel "
+        + "records the refusal.";
 
     /// <summary>The media type the published contract uses for every error body.</summary>
     private const string ProblemJsonContentType = "application/problem+json";
@@ -1285,6 +1319,49 @@ public sealed class SystemErrorHandler : IExceptionHandler
             ? malformed.StatusCode
             : StatusCodes.Status500InternalServerError;
     }
+
+    /// <summary>
+    /// Names a client status for the problem document's title, from the framework's own phrase table.
+    /// </summary>
+    /// <param name="responseStatus">The status this response carries.</param>
+    /// <returns>The reason phrase, or the fixed fallback where the table names no phrase.</returns>
+    /// <remarks>
+    /// <para>
+    /// ONE TITLE SOURCE FOR THE WHOLE SERVICE. <see cref="ReasonPhrases"/> is what
+    /// <c>Endpoints/DataServicesProxyEndpoints.BuildProblem</c> already titles its documents from, so
+    /// deriving this one the same way removes the second source rather than adding one - and a second
+    /// source that can disagree with the first is precisely what produced a 413 titled "Bad Request".
+    /// </para>
+    /// <para>
+    /// THE FALLBACK IS RETAINED FOR A STATUS THE TABLE DOES NOT NAME. The table covers every status this
+    /// ingress can honour, but it answers an unassigned code with an empty string, and a problem document
+    /// whose title is empty is worse than one whose title is approximate.
+    /// </para>
+    /// </remarks>
+    internal static string ResolveClientErrorTitle(int responseStatus)
+    {
+        string phrase = ReasonPhrases.GetReasonPhrase(responseStatus);
+
+        return string.IsNullOrEmpty(phrase) ? ClientErrorProblemTitle : phrase;
+    }
+
+    /// <summary>
+    /// Chooses the detail prose for a client status, so a refusal describes the condition it was.
+    /// </summary>
+    /// <param name="responseStatus">The status this response carries.</param>
+    /// <returns>The prose.</returns>
+    /// <remarks>
+    /// SIZE IS THE ONE CONDITION THAT NEEDS ITS OWN PROSE, and it needs it because the shared prose was
+    /// actively misleading for it rather than merely generic: a body refused at the ingress bound was told
+    /// that "a required parameter is absent, or a value supplied cannot be bound", which sends a caller to
+    /// audit field names for a body that was never parsed. Every other honoured client status IS a
+    /// shape-or-parameter problem, so the shared prose describes each of them correctly and adding a
+    /// bespoke sentence per status would be prose for its own sake.
+    /// </remarks>
+    internal static string ResolveClientErrorDetail(int responseStatus) =>
+        responseStatus == StatusCodes.Status413PayloadTooLarge
+            ? PayloadTooLargeProblemDetail
+            : ClientErrorProblemDetail;
 
     /// <summary>
     /// Chooses the return code the caller channel carries (DECISION 3).
@@ -2057,9 +2134,21 @@ public sealed class SystemErrorHandler : IExceptionHandler
             // The client-error prose names no value and echoes nothing - in particular not the framework
             // exception's own message, which names the parameter it could not bind and is therefore
             // shaped by caller content (C-F).
-            Title = serverFault ? ProblemTitle : ClientErrorProblemTitle,
+            // 🔴 THE TITLE IS DERIVED FROM THE STATUS RATHER THAN CHOSEN FROM A BINARY TEST, and the
+            // binary test was the defect. `serverFault ? … : "Bad Request"` gave every honoured 4xx the
+            // same title, so a 413 and a 415 both announced themselves as "Bad Request" - a title
+            // contradicting the status member beside it. ReasonPhrases is the framework's own table and is
+            // ALREADY the title source for this service's other problem-producing path
+            // [Endpoints/DataServicesProxyEndpoints.BuildProblem], so deriving it here means one title
+            // source for the whole service instead of two that can disagree.
+            //
+            // NOTE ON THE 413 SPELLING: the table returns RFC 7231's "Payload Too Large" rather than RFC
+            // 9110's later "Content Too Large". Both name the same status and a consumer keys on the
+            // number; hardcoding the newer spelling would reintroduce exactly the second title source
+            // being removed here.
+            Title = serverFault ? ProblemTitle : ResolveClientErrorTitle(responseStatus),
             Status = responseStatus,
-            Detail = serverFault ? ProblemDetail : ClientErrorProblemDetail,
+            Detail = serverFault ? ProblemDetail : ResolveClientErrorDetail(responseStatus),
 
             // The caller's own request path. It discloses nothing the caller did not send.
             Instance = httpContext.Request.Path.HasValue ? httpContext.Request.Path.Value : null,

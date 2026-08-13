@@ -4478,6 +4478,25 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
     /// <c>SqlTaskProxyBase.IsCommitted</c> reading cannot survive from one dispatch into the
     /// next. A caller therefore raises this immediately BEFORE each execution, never once per lifetime.
     /// </para>
+    /// <para>
+    /// 🔴 <b>THE THREE PLACES THAT RAISE IT, AND WHAT WENT WRONG WHILE NONE OF THEM DID.</b>
+    /// <c>Grpc/CommandService.Exec</c>, <c>SqlUpdateTaskComposition.Execute</c> in <c>Program.cs</c> and
+    /// <see cref="SqlQueryTask.ExecuteAsync"/> are the three components that play the substrate for the
+    /// three task kinds, and each raises this immediately before the body. Until they did, the commit
+    /// signal was armed by the first dispatch that committed and NEVER lowered: a caller reusing a command
+    /// task - which the contract explicitly supports, through repeated <c>SetSql</c> and <c>Exec</c> -
+    /// read <c>ExecResponse.committed</c> as <see langword="true"/> after a statement that FAILED and
+    /// concluded that work no statement had performed was durable. The contract states the rule as "any
+    /// failing statement answers false, on every mode"; claiming durability for work that never happened
+    /// is the worse direction of that error.
+    /// </para>
+    /// <para>
+    /// <b>It pairs with <c>TaskProxies/SqlTaskProxyBase.RunPrepare</c>, which raises the CALLER-side
+    /// event.</b> The oracle raises both on every dispatch, so the two are raised together at each of the
+    /// three sites rather than one standing in for the other - the worker's body resets the commit signal
+    /// and the caller's clears the latched error, the row counters and the identity blocks, and neither
+    /// reaches the other's state.
+    /// </para>
     /// </remarks>
     internal long RunPrepare() => OnPrepare();
 

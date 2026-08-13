@@ -2334,15 +2334,45 @@ public sealed class DataServicesOptionsValidator : IValidateOptions<DataServices
         // [n_cst_thread_trans.sru:L356-L362] - so an unbound value would silently select a dialect rather
         // than refuse to start. Starting and then failing every data operation is precisely the graceful
         // degradation the ported fail-fast posture forbids.
-        if (EnsureGroupBound(
-            options.PersistenceSession,
-            string.Concat(prefix, ":PersistenceSession"),
-            failures))
+        path = string.Concat(prefix, ":PersistenceSession");
+        if (EnsureGroupBound(options.PersistenceSession, path, failures))
         {
-            AppendAnnotationFailures(
-                options.PersistenceSession,
-                string.Concat(prefix, ":PersistenceSession"),
-                failures);
+            AppendAnnotationFailures(options.PersistenceSession, path, failures);
+
+            // AUTOCOMMIT IS THE ONE MEMBER OF THIS GROUP WITH A SINGLE DEPLOYABLE VALUE, AND THAT IS A
+            // PUBLISHED CONTRACT RULE RATHER THAN A PREFERENCE OF THIS SERVICE.
+            //
+            // The member mirrors transactiondata.srs:L11 and travels on the session request, but the
+            // legacy ERASES it before the descriptor reaches either the connection pool or a transaction
+            // object [n_cst_thread_task_sqlbase.sru:L118-L119, n_cst_thread_trans.sru:L343-L354], so
+            // C-08 refuses a descriptor that sets it instead of accepting it and quietly discarding it -
+            // see the TransactionDescriptor header in persistence.v1.proto. Setting it true here would
+            // therefore refuse EVERY session this service opens, which is not a per-request fault: no
+            // retrieval, no update and no expression host can be created until the setting is corrected.
+            //
+            // FAIL-FAST RATHER THAN DERIVED-AND-REMOVED, which is the difference between this member and
+            // the two connection flags that used to sit beside it. Those were removed because a SECOND
+            // authority for the same behaviour could contradict the first, and a leftover key binding to
+            // nothing is harmless. This one has no second authority to defer to and its default already
+            // is the only legal value, so removing the property would make a deployed
+            // "AutoCommit": true bind to nothing and be IGNORED IN SILENCE - strictly worse than a
+            // startup failure that names the key and the three routes that do work.
+            if (options.PersistenceSession.AutoCommit)
+            {
+                failures.Add(string.Concat(
+                    path,
+                    ":AutoCommit must be false. The member mirrors transactiondata.srs:L11 and is ",
+                    "carried on the session request, but the legacy erases it before the descriptor ",
+                    "reaches the connection pool or a transaction object ",
+                    "(ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L118-L119 and ",
+                    "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L343-L354), so ",
+                    "Persistence refuses a descriptor that sets it rather than accept it and discard ",
+                    "it - setting it true here would refuse every session this service opens. Leave it ",
+                    "false and choose where the commit belongs instead: this service already sets the ",
+                    "update task's own autocommit switch so a single-call update commits before its ",
+                    "session ends, and a caller holding a session of its own moves the connection-level ",
+                    "mode with the transaction contract's SetAutoCommit."));
+            }
         }
 
         return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
@@ -3341,9 +3371,28 @@ public sealed class PersistenceSessionOptions
     /// Whether the session commits each statement as it runs. <c>[transactiondata.srs:L11]</c>
     /// </summary>
     /// <remarks>
+    /// <para>
     /// FALSE by default, and that is the preserved legacy posture rather than a preference: an update
     /// applies many rows and the caller owns the carrier's state afterwards, so a session that committed
     /// per statement would make a partially applied update unrecoverable.
+    /// </para>
+    /// <para>
+    /// <b>⚠ FALSE IS ALSO THE ONLY DEPLOYABLE VALUE, AND THE VALIDATOR REFUSES TRUE AT STARTUP.</b> The
+    /// member mirrors <c>[transactiondata.srs:L11]</c> and is carried on the session request, but the
+    /// legacy erases it before the descriptor reaches either the connection pool or a transaction object
+    /// [<c>n_cst_thread_task_sqlbase.sru:L118-L119</c>, <c>n_cst_thread_trans.sru:L343-L354</c>], so C-08
+    /// refuses a descriptor that sets it rather than accept it and discard it. It is still forwarded
+    /// verbatim by <c>BuildTransactionDescriptor</c> - a graph built in code that bypasses the validator
+    /// then meets that refusal at <c>BeginSession</c> instead of having its request silently rewritten.
+    /// </para>
+    /// <para>
+    /// WHERE THE COMMIT ACTUALLY BELONGS. A single-call update commits because this service sets C-06's
+    /// own task-level autocommit switch, which is the oracle's epilogue
+    /// <c>if _bAutoCommit then rtCode = of_Commit(true)</c>
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L386-L387</c>] and is a different switch from this one; a
+    /// caller holding a session of its own moves the connection-level mode with C-08's
+    /// <c>SetAutoCommit</c>.
+    /// </para>
     /// </remarks>
     public bool AutoCommit { get; set; }
 

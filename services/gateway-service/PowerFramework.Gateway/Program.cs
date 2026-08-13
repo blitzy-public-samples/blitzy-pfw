@@ -153,6 +153,28 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 builder.Logging.Configure(static options => options.ActivityTrackingOptions =
     ActivityTrackingOptions.TraceId | ActivityTrackingOptions.SpanId | ActivityTrackingOptions.ParentId);
 
+// 🔴 AND THE SCOPE IS ACTUALLY RENDERED, WITHOUT WHICH THE LINE ABOVE CHANGES NOTHING OBSERVABLE.
+//
+// ActivityTrackingOptions puts the trace context into a log SCOPE. The console formatter's default is
+// `IncludeScopes = false`, so every one of those identifiers was assembled per record and then dropped
+// before it reached an operator - the mechanism was configured and its output was discarded. A measured
+// sweep of a running deployment found the caller's `traceId` in 39 Gateway records, because Gateway
+// alone also names it in its own message templates, and in ZERO records on the other two services: the
+// correlation identifier the ingress hands a caller in a problem body could not be joined to the
+// records on the service that actually failed, which is the entire purpose of publishing it.
+//
+// AddSimpleConsole IS THE MECHANISM, AND IT ADDS NO PACKAGE. Directory.Packages.props deliberately
+// excludes Serilog and the OpenTelemetry family (AAP 0.5.3), so the shared framework's own formatter is
+// what remains. It does NOT add a second console provider: the console registration uses
+// TryAddEnumerable, so this configures the one already present rather than duplicating it - verified by
+// counting ILoggerProvider registrations before and after, which stayed at three, and by confirming one
+// record per event rather than two.
+//
+// SET IN CODE RATHER THAN IN appsettings.json, deliberately. A settings key can be silently dropped by
+// a deployment's own configuration layer, and this estate's settings files are asserted key-for-key by
+// their own coherence tests - so the guarantee belongs where it cannot be overridden by omission.
+builder.Logging.AddSimpleConsole(static options => options.IncludeScopes = true);
+
 // --------------------------------------------------------------------------------------------------
 // 0. FILE-BACKED SECRET MATERIAL, RESOLVED BEFORE ANYTHING READS A SECRET
 //
@@ -450,6 +472,17 @@ builder.Services
         // (AAP 0.6.6.3 fixes exactly one signing secret in the estate).
         bearer.RefreshInterval = configured.MetadataRefreshInterval;
         bearer.AutomaticRefreshInterval = configured.MetadataAutomaticRefreshInterval;
+
+        // 🔴 THE REFUSAL RECORDS, WITHOUT WHICH THIS BOUNDARY ENFORCED CORRECTLY AND SILENTLY.
+        //
+        // Every 401 and every 403 this service answered produced NO operator record in any shipped
+        // logging profile: the framework's own records sit at Information under `Microsoft.AspNetCore.*`
+        // and every profile here caps that category at Warning, so a measured probe - no credential, a
+        // forged signature, and an authenticated caller without the entitlement - produced not one line
+        // for any of the three. Credential stuffing against this ingress would have looked exactly like
+        // no traffic at all. Authorization/AuthenticationRefusalRecord.cs carries what a record may
+        // contain and why the failure event deliberately writes nothing of its own.
+        AuthenticationRefusalRecord.Attach(bearer);
 
         TokenValidationParameters parameters = bearer.TokenValidationParameters;
 
@@ -941,6 +974,69 @@ builder.Services.AddOpenApi(static options => options.AddDocumentTransformer(
         return Task.CompletedTask;
     }));
 
+// ==================================================================================================
+//  CONTENT NEGOTIATION ON THE RESPONSE - THE ONE HTTP MECHANISM THIS INGRESS WAS NOT HONOURING
+// ==================================================================================================
+//
+//  WHY THIS IS NOT THE BEHAVIOUR IMPROVEMENT CONSTRAINT C-B FORBIDS, stated first because the previous
+//  reading of that constraint had it the other way round and this file said so. C-B freezes LEGACY
+//  behaviour. There is no legacy behaviour here to freeze: the legacy is an in-process library that hands
+//  a DataWindow carrier over BY POINTER, opens no listening socket and composes no response at all
+//  [AAP 0.1.5]. The HTTP response representation is surface the decomposition created from nothing, in
+//  exactly the same way the JWT bearer requirement on every internal edge is - and C-B cannot be read to
+//  freeze net-new surface at its first draft, or the resilience handlers the AAP itself justifies would be
+//  forbidden too. What C-B does forbid, and what is not done here, is changing a ported behaviour: not one
+//  byte of any decoded body differs, because a caller that advertises no encoding receives exactly the
+//  bytes it received before.
+//
+//  MEASURED RATHER THAN ASSUMED. A full retrieval projection of 50,008 rows answered 73,239,527 bytes with
+//  `content-encoding` NULL and no `Vary`, for every one of six accept-encoding combinations including
+//  `gzip` and `gzip, br, deflate, zstd`; at 100,009 rows the body was 146,680,012 bytes. The client had
+//  ASKED and was ignored. Transfer is chunked, so this was never a memory exposure on either side - it is
+//  a client's stated capability being discarded.
+//
+//  NO PERFORMANCE OBJECTIVE IS ASSERTED HERE, AND NONE MAY BE (AAP 0.8.5). No target ratio, no latency
+//  budget and no throughput claim appears in this file, in the documentation or in a test. Nothing is
+//  tuned either: both providers keep their framework compression levels, because choosing one would be
+//  making exactly the tuning claim the AAP forbids. What is asserted is only that a stated capability is
+//  honoured.
+//
+//  NO PACKAGE IS ADDED (AAP 0.5.3). Response compression ships in the Microsoft.AspNetCore.App shared
+//  framework, so the deliberately-excluded-package list is untouched.
+//
+//  THE THREE NARROWINGS, EACH LOAD BEARING:
+//
+//  1. THE MIME ALLOWLIST IS REPLACED, NOT EXTENDED. The framework's default set covers text/plain,
+//     text/css, text/html, application/javascript, text/xml and more - none of which this service serves,
+//     and text/html in particular is the shape a compression side-channel is classically demonstrated on.
+//     Only the two media types this ingress actually produces are listed. The generated OpenAPI document
+//     is served as application/json and is therefore included, which is correct: it is a description of a
+//     public contract that already lives in the repository.
+//
+//  2. HTTPS IS OPTED INTO DELIBERATELY, AND THE BREACH QUESTION IS ANSWERED RATHER THAN WAVED AWAY. The
+//     framework defaults this OFF because compressing a TLS body that mixes attacker-influenced input with
+//     a SECRET leaks the secret through response length. Neither half holds here: no response this service
+//     composes carries a session cookie, a bearer token or key material - Gateway sets no Set-Cookie
+//     anywhere and never echoes an Authorization value - and the bodies at issue carry the caller's OWN
+//     rows, which it already has. Security is the service whose bodies DO carry token and key material,
+//     and it is deliberately left uncompressed for precisely this reason; that asymmetry is the point of
+//     answering the question per service instead of once.
+//
+//  3. BROTLI AND GZIP ONLY. Both are in the shared framework. Deflate is not offered separately because
+//     gzip subsumes it for every client that asks for either, and zstd has no framework provider - a
+//     caller advertising it simply negotiates one of the two below, which is what content negotiation is
+//     for.
+builder.Services.AddResponseCompression(static options =>
+{
+    options.EnableForHttps = true;
+
+    options.MimeTypes =
+    [
+        "application/json",
+        "application/problem+json",
+    ];
+});
+
 builder.Services.AddSingleton<IExceptionHandler>(static serviceProvider => new SystemErrorHandler(
     serviceProvider.GetRequiredService<ILogger<SystemErrorHandler>>(),
     serviceProvider.GetRequiredService<IHostApplicationLifetime>(),
@@ -989,6 +1085,16 @@ _ = OutboundCallPolicy.Verify();
 // for the three directives and the reason for each.
 SecurityResponseHeaders.Use(app);
 
+// IMMEDIATELY INSIDE THE HEADER MIDDLEWARE AND OUTSIDE EVERYTHING ELSE, which is the only position that
+// works. Compression must wrap every middleware that can write a body - the exception handler's problem
+// document, the status-code pages' problem document, the bearer challenge and every mapped endpoint - and a
+// middleware placed after any of them cannot compress what they wrote. It stays INSIDE the response-header
+// middleware because that one works by registering a response-starting callback rather than by writing
+// bytes, so the two do not contend, and the protective headers must remain the outermost thing on the
+// response. See the registration above for why this is honoured content negotiation rather than the
+// behaviour improvement C-B forbids.
+app.UseResponseCompression();
+
 app.UseExceptionHandler();
 
 // STATUS-CODE PAGES, AND THE REASON IS CONTRACT FIDELITY RATHER THAN HARDENING. Without it the framework
@@ -1000,7 +1106,10 @@ app.UseExceptionHandler();
 // service configured above, which is why the members that customization fills reach these responses too.
 //
 // It is a narrow exception to the no-unrequested-middleware rule (constraint C-B): the requirement that
-// creates it is the published contract, and no CORS, no compression and no output caching are added here.
+// creates it is the published contract, and no CORS and no output caching are added here. Response
+// compression IS registered, and the long note on its registration above is why: it honours a capability
+// the client states on the request rather than adding one to a ported behaviour, and no legacy behaviour
+// exists on this net-new surface for it to change.
 // It is ordered with UseExceptionHandler and BEFORE authentication for the reason both diagnostics
 // middlewares share: each works by observing what the middlewares beneath it produced, and the response
 // they most need to observe is the challenge the authentication middleware writes.

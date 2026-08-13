@@ -403,6 +403,37 @@ services:
       # INCLUDING THE SCHEME, and change the two together.
       Security__Issuer: ${SECURITY_JWT_ISSUER:-https://security-service:5104}
 
+      # THE PUBLISHED LOCATION, WHICH IS A DIFFERENT FACT FROM THE IDENTITY ABOVE.
+      #
+      # This service is reachable on TWO addresses and the discovery document could only name one. The
+      # three internal verifiers arrive as `security-service:5104` - the Compose service name, which is
+      # also the issuer - while an operator, `tests/e2e` and any third-party consumer arrive through the
+      # published host port as `localhost:${SECURITY_HOST_PORT}`. Composing `jwks_uri` and
+      # `token_endpoint` from the issuer alone therefore answered that second group with a key-set
+      # address naming a host that resolves ONLY inside this network: the document parsed, looked
+      # correct, and pointed at nothing they could fetch - a DNS failure during key retrieval rather
+      # than a rejected document, which is why it went unnoticed.
+      #
+      # WHAT THIS VARIABLE DOES, AND WHAT IT DELIBERATELY DOES NOT DO. It DECLARES a second address this
+      # service may be reached on. Security then chooses between the declared addresses by matching the
+      # origin a request actually arrived on, and falls back to the issuer when it matches none. The
+      # request can only SELECT among values declared here; it can never contribute one, so a
+      # caller-chosen Host header cannot be advertised to consumers - the hazard that removed
+      # request-reflection from this document in the first place. The `issuer` member and the `iss`
+      # claim remain the identity above on every response, so the byte-for-byte comparison all three
+      # verifiers perform is untouched.
+      #
+      # THE DEFAULT MATCHES THE PUBLISHED PORT MAPPING BELOW. Override it when the host port is remapped
+      # or when a proxy fronts this service; set it EMPTY to publish only issuer-composed addresses,
+      # which is the behaviour that preceded this variable.
+      #
+      # A DEPLOYMENT REACHED ON FURTHER ORIGINS declares each as `__1`, `__2` and so on - and the HOST of
+      # every one of them must ALSO appear in Security's `AllowedHosts`, which is the coarser control
+      # deciding whether the request is answered at all. `localhost` is already there. An entry MAY carry a
+      # path prefix, which is how a path-prefixing proxy is declared: the well-known path is concatenated
+      # onto the declared base, so the prefix survives into the published address.
+      Security__PublishedOrigins__0: ${SECURITY_PUBLIC_BASE_URL:-https://localhost:${SECURITY_HOST_PORT:-5104}}
+
       # CLIENT-CERTIFICATE TRUST ON THE ISSUANCE EDGE - PATHS AND A MODE NAME, NEVER MATERIAL.
       #
       # This is the mirror image of the trust anchor the other three services are given: that one
@@ -492,6 +523,64 @@ services:
 
     networks:
       - powerframework
+
+    # ============================================================================================
+    #  THE RESOURCE CEILING - DECLARED ON ALL FOUR, AND IT IS WHAT GIVES THE RUNTIME A BUDGET
+    # ============================================================================================
+    #
+    #  ⚠ WITHOUT THIS BLOCK THE RUNTIME SEES THE WHOLE MACHINE, AND THAT IS NOT A THEORETICAL
+    #  CONCERN - IT WAS MEASURED. With no limit declared, a container on this host reported a memory
+    #  limit of 3.753 TiB (the cgroup-v2 "max" sentinel, not a real quantity), so the garbage
+    #  collector had effectively no collection pressure and simply retained. Nineteen identical full
+    #  REST projections drove Gateway's resident set from 573 MiB to about 1,500 MiB - roughly
+    #  48 MiB per request - WITH NO PLATEAU, while its thread count went from 174 to 279. The same
+    #  run under a declared ceiling plateaued at about 85 per cent of it, returned every response
+    #  byte-complete, and produced zero OOM kills, zero restarts and no OutOfMemoryException. So the
+    #  growth was RETENTION AND NOT A LEAK: the memory was collectible the whole time and the
+    #  collector had been given no reason to collect it. Declaring the ceiling is what supplies the
+    #  reason.
+    #
+    #  A CEILING IS NOT A PERFORMANCE OBJECTIVE, AND NOTHING HERE ASSERTS ONE (AAP 0.8.5). This
+    #  repository publishes no latency budget, no throughput target and no availability commitment,
+    #  and these numbers claim none: they state the most memory and CPU a service MAY consume, not
+    #  how much it needs, how fast it is, or how much load it carries. Read them as the blast radius
+    #  of one misbehaving service, which is the property an operator of a four-service stack on one
+    #  machine actually needs.
+    #
+    #  NOR IS IT A RESERVATION. Compose translates these into the container's own cgroup limits, so
+    #  nothing is set aside for a service that is idle and the four ceilings may legitimately sum to
+    #  more than the machine has. Only a container exceeding ITS OWN ceiling is affected.
+    #
+    #  HOW EACH NUMBER WAS ARRIVED AT, AND WHY EACH IS DELIBERATELY SLACK. Every memory value is
+    #  roughly 1.6 to 2.5 times its service's own measured working-set peak under load, because a
+    #  ceiling set near the observed peak converts a working deployment into OOM kills on the first
+    #  workload larger than the one that was measured - the opposite of the intent. The per-service
+    #  measurement is recorded in that service's own block below.
+    #
+    #  THE CPU QUOTA IS HERE FOR A REASON THAT IS NOT THROTTLING. The .NET runtime sizes its thread
+    #  pool and its server-GC heap count from the processor count it observes, and an unquoted
+    #  container observes every core on the host - so four services on one machine each provision as
+    #  though they owned all of it. Declaring a quota makes that sizing deterministic and is the
+    #  reason the value appears even where CPU has never been the constraint.
+    #
+    #  BOTH VALUES ARE OVERRIDABLE, in this file's usual `${VAR:-default}` form, and
+    #  `orchestration/.env.example` carries the roster. Raise the relevant variable if a legitimate
+    #  workload meets a ceiling; a workload that meets one is information rather than a failure.
+    #
+    #  ⚠ AND `deploy:` HERE CARRIES NOTHING BUT `resources:`. No `replicas:`, no `restart_policy:`,
+    #  no `placement:`. A replica count would silently contradict the published port map - two
+    #  containers cannot both bind one host port - and a restart policy under `deploy:` would
+    #  reintroduce exactly the crash-loop masking that `restart: "no"` below exists to prevent.
+    #
+    #  SECURITY'S OWN MEASUREMENT: 83.6 MiB idle, rising by about 112 MiB while digesting a 3 MiB
+    #  payload, so roughly 200 MiB under its heaviest observed work. It is the smallest ceiling in
+    #  the stack because it is the smallest service: it issues tokens, publishes a key set and
+    #  performs single-payload cryptography, and it materialises no result set at all.
+    deploy:
+      resources:
+        limits:
+          memory: ${SECURITY_MEMORY_LIMIT:-512M}
+          cpus: "${SECURITY_CPU_LIMIT:-2.0}"
 
     # NO RESTART POLICY, DELIBERATELY - THE FAIL-FAST POSTURE MUST SURVIVE AS FAIL-FAST.
     #
@@ -790,6 +879,22 @@ services:
     networks:
       - powerframework
 
+    # THE RESOURCE CEILING. The rationale, the measurement behind it and the reason a CPU quota
+    # appears at all are stated once in the security-service block above; only the sizing is
+    # per-service.
+    #
+    # PERSISTENCE'S OWN MEASUREMENT: a stable 460 to 574 MiB band across every load phase - the
+    # healthy sawtooth of a service that streams result chunks rather than materialising a whole
+    # response - with 658 MiB observed after repeated hundred-thousand-row queries. The ceiling is
+    # therefore about 1.6 times the highest figure seen. It is not the smallest in the stack despite
+    # never composing a large response, because it is the service that reads whole tables out of
+    # storage and holds the DataWindow carriers they are transported in.
+    deploy:
+      resources:
+        limits:
+          memory: ${PERSISTENCE_MEMORY_LIMIT:-1024M}
+          cpus: "${PERSISTENCE_CPU_LIMIT:-2.0}"
+
     restart: "no"
 
     # GATED ON READINESS, NOT ON START. `condition: service_healthy` waits for the inherited image
@@ -916,6 +1021,18 @@ services:
 
     networks:
       - powerframework
+
+    # THE RESOURCE CEILING. Rationale in the security-service block above; sizing here.
+    #
+    # DATASERVICES' OWN MEASUREMENT: a stable 395 to 614 MiB band under the same load, oscillating
+    # rather than climbing. It sits between two boundaries - it receives chunks from Persistence and
+    # re-emits them to Gateway - so its peak tracks the chunk in flight rather than the whole result,
+    # which is why its ceiling matches Persistence's rather than Gateway's.
+    deploy:
+      resources:
+        limits:
+          memory: ${DATASERVICES_MEMORY_LIMIT:-1024M}
+          cpus: "${DATASERVICES_CPU_LIMIT:-2.0}"
 
     restart: "no"
 
@@ -1151,6 +1268,29 @@ services:
 
     networks:
       - powerframework
+
+    # THE RESOURCE CEILING. Rationale in the security-service block above; sizing here.
+    #
+    # ⚠ GATEWAY IS THE SERVICE THE MEASUREMENT WAS TAKEN ON, and the only one whose peak is a
+    # function of RESPONSE SIZE rather than of chunk size: its REST projection materialises the whole
+    # result before writing it, so a full projection of the sole evidenced table is 73 MB of mostly
+    # large-object allocation at fifty thousand rows and 147 MB at a hundred thousand. That is the
+    # allocation profile that climbed to about 1,500 MiB unbounded, and that plateaued at about
+    # 650 MiB - roughly 85 per cent - once a 768 MiB ceiling existed. The declared value is a third
+    # higher than the ceiling that was proven sufficient, which is the headroom a second concurrent
+    # projection needs; a deployment expecting several at once raises it rather than discovering the
+    # limit.
+    #
+    # STREAMING THE PROJECTION INSTEAD OF MATERIALISING IT WOULD DECOUPLE PEAK MEMORY FROM RESULT
+    # SIZE ENTIRELY, and it is the better long-term answer. It is deliberately NOT done here: it
+    # changes the shape of a published response body (C-09) rather than an orchestration value, and
+    # this manifest is not the place to make a contract change. The ceiling bounds the behaviour
+    # today and the contract question is recorded rather than pre-empted.
+    deploy:
+      resources:
+        limits:
+          memory: ${GATEWAY_MEMORY_LIMIT:-1024M}
+          cpus: "${GATEWAY_CPU_LIMIT:-2.0}"
 
     restart: "no"
 

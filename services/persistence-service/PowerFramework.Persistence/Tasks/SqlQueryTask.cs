@@ -2538,6 +2538,25 @@ internal sealed class SqlQueryTask : SqlTaskBase
 
         try
         {
+            // THE WORKER-SIDE PREPARE EVENT, RAISED HERE BECAUSE THIS WRAPPER IS THE SUBSTRATE HALF OF THE
+            // SPLIT. `onprepare` fires once for every run of a task body
+            // [n_cst_thread_task_sqlbase.sru:L725-L729] and its body lowers the commit signal, so a reading
+            // of it cannot survive from one dispatch into the next. This method already owns the
+            // once-per-dispatch responsibilities - it is the single unmissable latch wrapper around
+            // RunRetrievalAsync - so winning the latch above IS the dispatch, and the event belongs
+            // immediately after it and before the body.
+            //
+            // THE CALLER-SIDE PREPARE IS DELIBERATELY NOT RAISED FOR A RETRIEVAL, and that asymmetry is
+            // recorded rather than left to be discovered. The query proxy's own prepare body additionally
+            // RESETS THE CALLER-SIDE CARRIER and clears its data object
+            // [n_cst_threading_task_sqlquery.sru:L505-L506] - state a caller installs deliberately and
+            // reads after the run - and no reachable staleness on this contract is attributable to its
+            // absence: the record, page and row counters it clears are written by each run before anything
+            // publishes them, and every count C-05 returns travels in the response stream rather than
+            // being polled off the proxy afterwards. Raising it would change the read path's observable
+            // behaviour with no defect to justify the change (C-B).
+            _ = RunPrepare();
+
             return await RunRetrievalAsync(sink, cancellationToken).ConfigureAwait(false);
         }
         finally

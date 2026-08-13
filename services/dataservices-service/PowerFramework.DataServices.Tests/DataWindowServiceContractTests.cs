@@ -504,7 +504,16 @@ internal sealed class C03ModelSetProvider : IDataWindowModelSetProvider
             return existing;
         }
 
-        FakeDataWindowHost host = new(new EventBroker());
+        // 🔴 THE GOLDEN-MASTER FIXTURE, NOT A BARE HOST. This was `new FakeDataWindowHost(new EventBroker())`
+        // - a DataWindow declaring NO OBJECTS AT ALL, which is a state production cannot be in: a
+        // `HeadlessDataWindowHost` is always built from a `DataWindowDefinition` off the catalogue and
+        // therefore always has columns. Every column-sort case in this class was consequently sorting by
+        // names the double did not have, and passed only because nothing resolved them. Once
+        // `ApplyColumnSort` began refusing a name that addresses no column - the defect QA reported - the
+        // double's emptiness became visible. The double is made faithful rather than the refusal weakened:
+        // `dw_sqlite.srd` is the fixture these tests already name their columns from (`age`, `salary`,
+        // `name`), so this is the host they were always written against.
+        FakeDataWindowHost host = FakeDataWindowFixtures.CreateCompanyFixture(new EventBroker());
         IOptions<DataServicesOptions> options = Options.Create(_options);
         I18n i18n = new();
 
@@ -525,12 +534,36 @@ internal sealed class C03ModelSetProvider : IDataWindowModelSetProvider
 
         return created;
     }
+
+    /// <summary>Restores the durable host on the four retained models, as the production provider does.</summary>
+    /// <param name="dataWindowHandle">The handle whose conversation has ended.</param>
+    public void RebindToDurableHost(string dataWindowHandle)
+    {
+        if (!_sets.TryGetValue(dataWindowHandle, out DataWindowModelSet? retained)
+            || retained.Host is not FakeDataWindowHost host)
+        {
+            return;
+        }
+
+        retained.ContextMenu.OnInit(host);
+        retained.RowSelect.OnInit(host);
+        retained.DropDownSearch.OnInit(host);
+        retained.ColumnSort.OnInit(host);
+    }
 }
 
 /// <summary>Serves nothing, so every headless operation takes its unknown-handle arm.</summary>
 internal sealed class C03EmptyModelSetProvider : IDataWindowModelSetProvider
 {
     public DataWindowModelSet? GetOrCreate(string dataWindowHandle) => null;
+
+    /// <summary>Retains nothing, so there is nothing to re-host.</summary>
+    /// <param name="dataWindowHandle">Ignored.</param>
+    public void RebindToDurableHost(string dataWindowHandle)
+    {
+        // A provider that retains no set has nothing whose host could have been replaced. Stated as an
+        // explicit no-op rather than left to a default so the double declares its answer.
+    }
 }
 
 /// <summary>Binds a session to the chain double.</summary>
@@ -3242,6 +3275,344 @@ public sealed class DataWindowServiceContractTests
 
         Assert.Equal(WireRetCode.Ok, read.RetCode);
         Assert.Equal(1UL, read.State.Style);
+    }
+
+    /// <summary>
+    /// A row-selection style carrying a bit no member defines is REFUSED, and the stored style is untouched.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE DEFECT THIS PINS. The ported setter screens only ZERO
+    /// [<c>n_cst_dwsvc_rowselect.sru:L168-L169</c>], which is correct for it - <c>RS_SINGLE</c> is 1,
+    /// <c>RS_MULTIPLE</c> is 2, and their sum of 3 is a legal combination the framework's own demo passes
+    /// [<c>:L58</c>] - so it admits any non-zero number. In process that was harmless, because the only
+    /// party able to name a style was code in the same application holding the two constants. Across this
+    /// boundary a remote caller composes the number, and 4 or 999 was accepted, STORED, and read back
+    /// verbatim by <c>GetRowSelectState</c> and by the Gateway projection. Every behavioural test in the
+    /// model compares the style with an inequality, so an undefined value is treated as "neither single nor
+    /// multiple" - a selection mode with no defined behaviour, reported as a success.
+    /// </para>
+    /// <para>
+    /// THE PREVIOUSLY STORED STYLE IS ASSERTED AFTERWARDS, not merely the return code. A refusal that still
+    /// wrote the value would satisfy a code-only assertion while leaving exactly the defect that was
+    /// reported.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(4UL)]
+    [InlineData(8UL)]
+    [InlineData(999UL)]
+    [InlineData(1024UL)]
+    [InlineData(ulong.MaxValue)]
+    public async Task ARowSelectStyleCarryingAnUndefinedBitIsRefusedAndNothingIsStored(ulong style)
+    {
+        C03Fixture fixture = new();
+
+        // A defined style first, so the assertion below distinguishes "refused" from "never set".
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await fixture.Service.ApplyRowSelectStyle(
+                new ApplyRowSelectStyleRequest
+                {
+                    DatawindowHandle = "dw-1",
+                    Style = (ulong)RowSelectService.RS_SINGLE,
+                },
+                fixture.Context)).RetCode);
+
+        ApplyRowSelectStyleResponse refused = await fixture.Service.ApplyRowSelectStyle(
+            new ApplyRowSelectStyleRequest { DatawindowHandle = "dw-1", Style = style },
+            fixture.Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, refused.RetCode);
+
+        // A DIAGNOSTIC ON EVERY REFUSED VALUE, INCLUDING THE LARGEST. A range guard used to precede the
+        // mask test and answered the same code with NO error, so the refusal's shape depended on the
+        // magnitude of the number; the mask subsumes it and the diagnostic is now uniform.
+        Assert.NotNull(refused.Error);
+        Assert.False(refused.Error.Localized);
+        Assert.Equal(0L, refused.Error.Category);
+        Assert.Contains(
+            style.ToString(CultureInfo.InvariantCulture),
+            refused.Error.Text,
+            StringComparison.Ordinal);
+
+        // NOTHING WAS STORED. The refusal reports the model's current state, which is the defined style.
+        Assert.Equal((ulong)RowSelectService.RS_SINGLE, refused.State.Style);
+
+        GetRowSelectStateResponse read = await fixture.Service.GetRowSelectState(
+            new GetRowSelectStateRequest { DatawindowHandle = "dw-1" },
+            fixture.Context);
+
+        Assert.Equal((ulong)RowSelectService.RS_SINGLE, read.State.Style);
+    }
+
+    /// <summary>
+    /// The three DEFINED styles are all admitted - the mask widens nothing and narrows nothing legal.
+    /// </summary>
+    /// <remarks>
+    /// 3 IS THE ROW THAT MATTERS. It is the documented combination rather than an accident
+    /// [<c>n_cst_dwsvc_rowselect.sru:L58</c>], so the screen has to be a MASK test and not a list of the two
+    /// member values - a list would have refused the combination the legacy demo itself passes.
+    /// </remarks>
+    [Theory]
+    [InlineData(1UL)]
+    [InlineData(2UL)]
+    [InlineData(3UL)]
+    public async Task EachDefinedRowSelectStyleIsAdmittedAndStored(ulong style)
+    {
+        C03Fixture fixture = new();
+
+        ApplyRowSelectStyleResponse applied = await fixture.Service.ApplyRowSelectStyle(
+            new ApplyRowSelectStyleRequest { DatawindowHandle = "dw-1", Style = style },
+            fixture.Context);
+
+        Assert.Equal(WireRetCode.Ok, applied.RetCode);
+
+        GetRowSelectStateResponse read = await fixture.Service.GetRowSelectState(
+            new GetRowSelectStateRequest { DatawindowHandle = "dw-1" },
+            fixture.Context);
+
+        Assert.Equal(style, read.State.Style);
+    }
+
+    /// <summary>
+    /// The mask is composed from the model's own constants, so a third member widens it in one place.
+    /// </summary>
+    [Fact]
+    public void TheDefinedStyleMaskIsExactlyTheUnionOfTheTwoMembers()
+    {
+        Assert.Equal(1L, RowSelectService.RS_SINGLE);
+        Assert.Equal(2L, RowSelectService.RS_MULTIPLE);
+        Assert.Equal(3L, RowSelectService.RS_SINGLE | RowSelectService.RS_MULTIPLE);
+    }
+
+    /// <summary>
+    /// A sort naming a column the DataWindow does not have is REFUSED rather than silently producing nothing.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE DEFECT THIS PINS. An unknown name reached <c>GetClause</c>, whose four stages are all Describe
+    /// probes; the host answers its invalid-expression sentinel for every one of them, so no special case
+    /// fired and stage four's bare-name fallback [<c>n_cst_dwsvc_columnsort.sru:L329</c>] published
+    /// <c>"nope A"</c> as the sort expression - an expression no DataWindow can apply - while the response
+    /// reported OK. The cascade cannot tell "no special handling needed" from "no such column", which is
+    /// fine in process (the only names reaching the model come from the control's own object list) and is
+    /// not fine here, where the name is caller-supplied text.
+    /// </para>
+    /// <para>
+    /// THE PORTED MODEL IS UNTOUCHED (C-B). The refusal is at the boundary the caller-supplied name enters
+    /// through, which is the narrow-with-a-defined-error mechanism AAP 0.1.5 prescribes.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ASortOnAColumnTheDataWindowDoesNotHaveIsRefused()
+    {
+        C03Fixture fixture = new();
+
+        ApplyColumnSortRequest request = new() { DatawindowHandle = "dw-1", ExpressionOnly = true };
+        request.Columns.Add(new ColumnSortState.Types.ColumnSort
+        {
+            ColumnName = "nope",
+            Direction = ColumnSortState.Types.Direction.SortAsc,
+        });
+
+        ApplyColumnSortResponse refused = await fixture.Service.ApplyColumnSort(request, fixture.Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, refused.RetCode);
+        Assert.NotNull(refused.Error);
+        Assert.False(refused.Error.Localized);
+        Assert.Contains("nope", refused.Error.Text, StringComparison.Ordinal);
+
+        // AND THE BARE-NAME FALLBACK IS NOT PUBLISHED. This is the observable the defect produced: with
+        // expression_only set, the response carried "nope A" as a sort expression.
+        Assert.Empty(refused.State.SortExpression);
+        Assert.DoesNotContain("nope", refused.State.SortExpression, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A name that addresses a DECLARED OBJECT WHICH IS NOT A COLUMN is refused too.
+    /// </summary>
+    /// <remarks>
+    /// <c>id_t</c> is one of the six header text objects the fixture declares [<c>dw_sqlite.srd:L15-L20</c>].
+    /// It IS a real object, so a membership test against <c>DataWindow.Objects</c> would have admitted it -
+    /// and then produced a sort expression naming a text label. The identifier probe distinguishes the two
+    /// cases: an unknown name answers the invalid-expression sentinel while a non-column object answers
+    /// <c>"0"</c>, and both are non-positive. This is the reason the probe is <c>Describe(name + ".Id")</c>
+    /// and not an object-list lookup.
+    /// </remarks>
+    [Fact]
+    public async Task ASortOnADeclaredObjectThatIsNotAColumnIsRefused()
+    {
+        C03Fixture fixture = new();
+
+        ApplyColumnSortRequest request = new() { DatawindowHandle = "dw-1", ExpressionOnly = true };
+        request.Columns.Add(new ColumnSortState.Types.ColumnSort
+        {
+            ColumnName = "id_t",
+            Direction = ColumnSortState.Types.Direction.SortDesc,
+        });
+
+        ApplyColumnSortResponse refused = await fixture.Service.ApplyColumnSort(request, fixture.Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, refused.RetCode);
+        Assert.NotNull(refused.Error);
+        Assert.Empty(refused.State.SortExpression);
+
+        // The control: the COLUMN of the same stem is admitted, so the refusal is about the object's kind
+        // rather than about the name's spelling.
+        ApplyColumnSortRequest column = new() { DatawindowHandle = "dw-1", ExpressionOnly = true };
+        column.Columns.Add(new ColumnSortState.Types.ColumnSort
+        {
+            ColumnName = "id",
+            Direction = ColumnSortState.Types.Direction.SortDesc,
+        });
+
+        ApplyColumnSortResponse admitted = await fixture.Service.ApplyColumnSort(column, fixture.Context);
+
+        Assert.Equal(WireRetCode.Ok, admitted.RetCode);
+        Assert.Equal("id D", admitted.State.SortExpression);
+    }
+
+    /// <summary>
+    /// An empty column name carrying a direction is refused - it addresses nothing.
+    /// </summary>
+    [Fact]
+    public async Task AnEmptyColumnNameCarryingADirectionIsRefused()
+    {
+        C03Fixture fixture = new();
+
+        ApplyColumnSortRequest request = new() { DatawindowHandle = "dw-1", ExpressionOnly = true };
+        request.Columns.Add(new ColumnSortState.Types.ColumnSort
+        {
+            Direction = ColumnSortState.Types.Direction.SortAsc,
+        });
+
+        ApplyColumnSortResponse refused = await fixture.Service.ApplyColumnSort(request, fixture.Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, refused.RetCode);
+        Assert.NotNull(refused.Error);
+    }
+
+    /// <summary>
+    /// A DIRECTIONLESS entry is not resolved at all, so an unknown name in one is inert rather than refused.
+    /// </summary>
+    /// <remarks>
+    /// THE ORACLE'S OWN PROBE ORDER DECIDES THIS. <c>_of_getclause</c> tests for <c>SORT_NONE</c> as its
+    /// very first statement and returns the empty string [<c>n_cst_dwsvc_columnsort.sru:L292</c>] - BEFORE
+    /// any of the four stages and therefore before any Describe call - so the legacy never asks whether a
+    /// column it is not sorting by exists. Refusing such an entry would be a narrowing with no oracle behind
+    /// it, and it is inert either way: it composes no clause, so there is no malformed expression and no
+    /// false claim of success to prevent.
+    /// </remarks>
+    [Fact]
+    public async Task ADirectionlessEntryIsNotResolvedSoAnUnknownNameInOneIsInert()
+    {
+        C03Fixture fixture = new();
+
+        ApplyColumnSortRequest request = new() { DatawindowHandle = "dw-1", ExpressionOnly = true };
+        request.Columns.Add(new ColumnSortState.Types.ColumnSort
+        {
+            ColumnName = "age",
+            Direction = ColumnSortState.Types.Direction.SortAsc,
+        });
+        request.Columns.Add(new ColumnSortState.Types.ColumnSort
+        {
+            ColumnName = "nope",
+            Direction = ColumnSortState.Types.Direction.SortNone,
+        });
+
+        ApplyColumnSortResponse response = await fixture.Service.ApplyColumnSort(request, fixture.Context);
+
+        Assert.Equal(WireRetCode.Ok, response.RetCode);
+        Assert.Equal("age A", response.State.SortExpression);
+    }
+
+    /// <summary>
+    /// An unknown column anywhere in the list refuses the WHOLE request, before any of it is applied.
+    /// </summary>
+    /// <remarks>
+    /// The resolution is a pre-pass over every entry that carries a direction, so a request whose first
+    /// column is real and whose second is not applies neither. A per-entry check inside the composing loop
+    /// would have published a partial sort for the entries it reached first.
+    /// </remarks>
+    [Fact]
+    public async Task AnUnknownColumnRefusesTheWholeRequestAndAppliesNoneOfIt()
+    {
+        C03Fixture fixture = new();
+
+        // A real sort first, applied for real, so "nothing was applied" is distinguishable from
+        // "nothing was ever set".
+        ApplyColumnSortRequest first = new() { DatawindowHandle = "dw-1" };
+        first.Columns.Add(new ColumnSortState.Types.ColumnSort
+        {
+            ColumnName = "age",
+            Direction = ColumnSortState.Types.Direction.SortAsc,
+        });
+
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await fixture.Service.ApplyColumnSort(first, fixture.Context)).RetCode);
+
+        GetColumnSortStateResponse before = await fixture.Service.GetColumnSortState(
+            new GetColumnSortStateRequest { DatawindowHandle = "dw-1" },
+            fixture.Context);
+
+        ApplyColumnSortRequest mixed = new() { DatawindowHandle = "dw-1" };
+        mixed.Columns.Add(new ColumnSortState.Types.ColumnSort
+        {
+            ColumnName = "salary",
+            Direction = ColumnSortState.Types.Direction.SortDesc,
+        });
+        mixed.Columns.Add(new ColumnSortState.Types.ColumnSort
+        {
+            ColumnName = "nope",
+            Direction = ColumnSortState.Types.Direction.SortAsc,
+        });
+
+        ApplyColumnSortResponse refused = await fixture.Service.ApplyColumnSort(mixed, fixture.Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, refused.RetCode);
+        Assert.NotNull(refused.Error);
+
+        // Neither the real column nor the unknown one reached the model.
+        Assert.DoesNotContain("salary", refused.State.SortExpression, StringComparison.Ordinal);
+
+        GetColumnSortStateResponse after = await fixture.Service.GetColumnSortState(
+            new GetColumnSortStateRequest { DatawindowHandle = "dw-1" },
+            fixture.Context);
+
+        Assert.Equal(before.State.SortExpression, after.State.SortExpression);
+    }
+
+    /// <summary>
+    /// An EMPTY column list states no column at all and is still how a sort is cleared.
+    /// </summary>
+    /// <remarks>
+    /// The resolution pre-pass iterates the stated entries, so a request with none is untouched by it: the
+    /// empty expression is composed and applied, which is the clear operation. A guard that had required at
+    /// least one resolvable column would have taken that away.
+    /// </remarks>
+    [Fact]
+    public async Task AnEmptyColumnListStillClearsTheSort()
+    {
+        C03Fixture fixture = new();
+
+        ApplyColumnSortRequest set = new() { DatawindowHandle = "dw-1" };
+        set.Columns.Add(new ColumnSortState.Types.ColumnSort
+        {
+            ColumnName = "age",
+            Direction = ColumnSortState.Types.Direction.SortAsc,
+        });
+
+        Assert.Equal(WireRetCode.Ok, (await fixture.Service.ApplyColumnSort(set, fixture.Context)).RetCode);
+
+        ApplyColumnSortResponse cleared = await fixture.Service.ApplyColumnSort(
+            new ApplyColumnSortRequest { DatawindowHandle = "dw-1" },
+            fixture.Context);
+
+        Assert.Equal(WireRetCode.Ok, cleared.RetCode);
+        Assert.Empty(cleared.State.SortExpression);
+        Assert.Empty(cleared.State.Columns);
     }
 
     [Fact]

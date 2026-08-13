@@ -172,9 +172,20 @@ public sealed class IngressBoundTests
     /// A gRPC request is exempt here because it is bounded at the interceptor instead.
     /// </summary>
     /// <remarks>
-    /// Gateway publishes no gRPC contract, so this arm is inert on this service and is asserted anyway:
+    /// <para>
+    /// THIS SERVICE PUBLISHES NO gRPC CONTRACT AT ALL, so this arm is inert here and is asserted anyway:
     /// the classifier is written identically in all four services, and a divergence in the one where it
     /// does nothing is exactly the divergence nobody would notice.
+    /// </para>
+    /// <para>
+    /// Inert also means there is nothing on THIS service for the sibling gRPC interceptor to bound - it
+    /// has no such interceptor, no gRPC package reference and no mapped gRPC service, because REST plus
+    /// OpenAPI is this surface's deliberate choice so that a consumer's stock bearer handler fetches the
+    /// key set with zero bespoke code. The retry hint a refused gRPC call carries
+    /// [<c>Grpc/GrpcIngressLimit.cs</c> in Persistence and DataServices, issue INFO-3] therefore has no
+    /// counterpart to keep in step here; what a refused REST call is told is asserted by the rows in this
+    /// file and by the refusal detail beside them.
+    /// </para>
     /// </remarks>
     [Theory]
     [InlineData("application/grpc", true)]

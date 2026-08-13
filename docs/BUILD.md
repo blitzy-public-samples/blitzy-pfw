@@ -493,11 +493,30 @@ rm -rf -- "$probe"
 Every solution file in this repository is consequently `.slnx`: the root `PowerFramework.slnx` of §6 and
 the four per-service solutions of §3.4.
 
-**Legacy solution filters (`.slnf`) are incompatible with the `.slnx` format.** A hand-authored filter
-pointing at a `.slnx`-format solution **fails with `MSB4014` during restore, during build *and* during
-test** — all three verbs, not just one, so a filter that appears to have restored will still fail later.
+**There is no supported filter path in this repository. Do not author one, now or as a follow-up. The
+reason is maintenance, not a tooling failure — and an earlier revision of this paragraph got that wrong in
+a way worth recording rather than quietly deleting.**
 
-**There is no supported filter path in this repository. Do not author one, now or as a follow-up.**
+It said that a hand-authored `.slnf` pointing at a `.slnx`-format solution *fails with `MSB4014` during
+restore, build and test*. **That is not what the pinned SDK does.** Measured on **10.0.303**, the version
+[`global.json`](../global.json) pins, with a well-formed filter naming an existing `Probe.slnx`:
+
+```text
+restore: exit=0   build: exit=0   test: exit=0      no MSB4014, no diagnostic of any kind
+```
+
+A well-formed filter over a `.slnx` solution **works**. `MSB4014` is real, and its actual trigger is a
+filter naming a **legacy-format `.sln` that does not exist** — measured in the same run, and the reason the
+false claim was plausible: the code does appear when a filter is pointed at a missing `.sln`, which is what
+a filter written against this repository's earlier layout would have done. The claim was right about the
+symptom it had seen and wrong about the cause, which is exactly the shape of error a build reference must
+not carry, because a reader who tests it finds something else.
+
+**The prohibition stands on its own merits, and they are stronger than an error code.** A filter's project
+list has to be kept in exact agreement with the solution **by hand**; every disagreement fails hard, in all
+three verbs, in each of the situations tabulated below. That maintenance reproduces a scoping the
+per-service solutions already give for free, by construction. A rule that rests on a tooling defect expires
+when the defect is fixed; this one does not.
 
 This prohibition is recorded in four places that all say the same thing, so that whichever file you are
 reading when the idea occurs to you, it tells you not to:
@@ -509,18 +528,28 @@ reading when the idea occurs to you, it tells you not to:
 | `Directory.Build.props` | Solution-filter mechanisms among the things deliberately not configured |
 | `.editorconfig` | Its MSBuild-file section notes that no filter is authored for the format to match |
 
-**Additional diagnostics you may encounter on the pinned SDK.** Recorded because a build
-reference should tell you what you will actually see, and because these confirm the prohibition rather
-than soften it — a misused filter fails in **all three verbs** in every case:
+**Every diagnostic a misused filter produces on the pinned SDK, measured rather than recalled.** All five
+rows were driven on **10.0.303** in a scratch directory, each against `restore`, `build` *and* `test`, and
+every failing row failed in **all three verbs** — so a filter that appears to have restored will still fail
+later. The first row is the one that matters most, because it is the row the earlier text denied:
 
 | Situation | Diagnostic |
 | --- | --- |
-| The filter lists a project that does not match the solution's project list | **`MSB4025`** — `InvalidProjectFileException` raised from `SolutionFile.ValidateProjectsInSolutionFilter()` |
-| The filter names a solution file that does not exist | **`MSB5026`** |
+| The filter is well formed and names an **existing** `.slnx` | **None.** Exit 0 in all three verbs. This is the row that refutes the withdrawn `MSB4014` claim above |
+| The filter lists a project that does not match the solution's project list | **`MSB4025`** — `InvalidProjectFileException` from `SolutionFile.ValidateProjectsInSolutionFilter()`: *"includes project … that is not in the solution"* |
+| The filter names a `.slnx` solution file that does not exist | **`MSB5026`** — *"specifies there will be a solution file at … but that file does not exist"* |
+| The filter names a **legacy `.sln`** solution file that does not exist | **`MSB4014`** — *"The build stopped unexpectedly because of an internal failure."* This, and not the `.slnx` format, is what actually raises `MSB4014` |
+| The **filter file itself** does not exist | **`MSB1009`** — *"Project file does not exist."* |
 
-The practical point behind every one of these codes is the same: a filter's project list has to be kept
-in exact agreement with the solution **by hand**, and any drift fails hard. That maintenance would be
-spent reproducing a scoping the per-service solutions already give for free, by construction.
+Two of these are worth separating deliberately, because they look interchangeable and are not. A missing
+`.slnx` is reported precisely, naming both files (`MSB5026`); a missing legacy `.sln` is reported as an
+internal failure with no path at all (`MSB4014`). So the *quality* of the diagnostic depends on which
+solution format the filter named — which is a real, if minor, argument for the `.slnx` format, and a much
+weaker one than "filters do not work", which was untrue.
+
+The practical point behind every failing row is the same: a filter's project list has to be kept in exact
+agreement with the solution **by hand**, and any drift fails hard. That maintenance would be spent
+reproducing a scoping the per-service solutions already give for free, by construction.
 
 **The resolution is the per-service `.slnx` design of §3.4.** Each service directory carries exactly one
 solution file listing exactly that service's projects, so scoping is structural rather than curated. Use
@@ -1238,7 +1267,8 @@ kinds is the mistake this table exists to prevent:
 
 | Variable | Kind | What it receives |
 | --- | --- | --- |
-| `SECURITY_JWT_SIGNING_KEY_PATH` | **A host path, not material** | A path to a FILE holding the signing key. It used to be the value itself, which put the RSA private key that signs every token into the container environment — where `docker compose config` renders it in cleartext, and that is the command an operator runs when a bring-up misbehaves. The file’s contents may be base64 of the PKCS#8 DER on one line, or PEM, which is tried first |
+| `SECURITY_JWT_SIGNING_KEY_PATH` | **A host path, not material** | A path to a FILE holding the signing key. It used to be the value itself, which put the RSA private key that signs every token into the container environment — where `docker compose config` renders it in cleartext, and that is the command an operator runs when a bring-up misbehaves. The file’s contents may be base64 of the PKCS#8 DER on one line, or PEM, which is tried first. **The file is projected, so it must be readable by UID 1654** — see the mode note below the recipe |
+| `SECURITY_CLIENT_SECRET_GATEWAY_PATH`, `SECURITY_CLIENT_SECRET_DATASERVICES_PATH` | **Host paths, not material** | A path to a FILE holding one shared issuance credential per caller, a different value each. One file backs both ends of a pair: Security verifies the credential and the calling service presents it, so the same projected file is granted to both containers. **Both are projected and must be readable by UID 1654.** The unsuffixed `SECURITY_CLIENT_SECRET_GATEWAY` / `…_DATASERVICES` names are the superseded value form and are not read by the manifest |
 | `SECURITY_TLS_CERTIFICATE_PATH` / `SECURITY_TLS_CERTIFICATE_KEY_PATH`, `PERSISTENCE_TLS_CERTIFICATE_PATH` / `PERSISTENCE_TLS_CERTIFICATE_KEY_PATH`, `DATASERVICES_TLS_CERTIFICATE_PATH` / `DATASERVICES_TLS_CERTIFICATE_KEY_PATH`, `GATEWAY_TLS_CERTIFICATE_PATH` / `GATEWAY_TLS_CERTIFICATE_KEY_PATH` | **Host** paths | **A server certificate and key PER SERVICE**, on *your machine*. The manifest names each as the source of a Compose secret and projects each read-only into ITS OWN container only, so no two services share a cryptographic identity; the `Kestrel:Certificates:Default:Path` and `:KeyPath` each service binds are the **literal projected container paths**, not these values. All three TLS listeners terminate with the same default material |
 | `INTERNAL_TLS_CA_PATH` | **Host** path | The authority that issued that server certificate, on your machine — the third Compose secret. Each service's own internal-anchor key points at the projected copy, so a locally issued chain verifies without touching platform trust. Left empty, the services fall back to platform trust |
 | `GATEWAY_HOST_PORT`, `DATASERVICES_HOST_PORT`, `PERSISTENCE_HOST_PORT`, `SECURITY_HOST_PORT` | Numbers | The **host** side of each published port, defaulted to 5105, 5102, 5101 and 5104. Overriding them is what lets a second stack run beside the first — `orchestration/README.md` §6.3 carries the recipe; the container-side ports never move |
@@ -1257,8 +1287,8 @@ neither surface may be reconciled by renaming the other's variable, because each
 consumer. The mutual-TLS entries above are
 **optional**, and that is the correction: `POST /v1/tokens` is protected by a caller credential and by no
 bearer token — a caller cannot present a bearer token in order to obtain its first bearer token — and it
-accepts **either** a shared secret as an HTTP `Basic` credential (`SECURITY_CLIENT_SECRET_GATEWAY` and
-`SECURITY_CLIENT_SECRET_DATASERVICES` above, which the documented bring-up supplies) **or** a client
+accepts **either** a shared secret as an HTTP `Basic` credential (`SECURITY_CLIENT_SECRET_GATEWAY_PATH` and
+`SECURITY_CLIENT_SECRET_DATASERVICES_PATH` above, which the documented bring-up supplies) **or** a client
 certificate. So a deployment that supplies the secrets and leaves all four certificate paths empty is a
 supported one, and every service reports ready under it; a deployment presenting **neither** scheme is
 refused at startup. **Persistence has no client pair and no secret**, because it reads Security's anonymous
@@ -1323,20 +1353,25 @@ variable: it produces material the configured algorithm cannot use.** No HMAC ke
 on this variable either, for the same reason.
 
 Two identities are generated, because the signing identity and the transport identity are different keys
-with different lifetimes. The signing key ends up in the environment file **as a value**; every
-certificate and every private key stays on disk and is named **by path**:
+with different lifetimes. **Nothing here ends up in the environment file as a value**: every certificate,
+every private key and both issuance credentials stay on disk and are named **by path**:
 
 ```bash
 set -euo pipefail
 install -d -m 700 "$HOME/.config/powerframework/secrets"
 cd "$HOME/.config/powerframework/secrets"
 
-# 1. The RS256 SIGNING identity. SECURITY_JWT_SIGNING_KEY_PATH names a FILE holding the base64 of this
-#    key's PKCS#8
-#    DER encoding as its VALUE - it is not a path, because the dotenv format cannot hold a PEM block.
+# 1. The RS256 SIGNING identity. SECURITY_JWT_SIGNING_KEY_PATH names this FILE, and the material never
+#    becomes a variable value. PEM is accepted directly - the service tries PEM first and falls back to
+#    base64-of-DER on one line - so no second encoding step is required.
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out security-signing.key
-openssl pkey -in security-signing.key -outform DER 2>/dev/null | base64 -w0 > security-signing.b64
-# Point SECURITY_JWT_SIGNING_KEY_PATH at security-signing.b64, keep it 0600, and never echo it.
+
+# 1b. The two caller ISSUANCE credentials, named by SECURITY_CLIENT_SECRET_GATEWAY_PATH and
+#     SECURITY_CLIENT_SECRET_DATASERVICES_PATH. A different value each: one shared value would make the
+#     two callers indistinguishable to the grant matrix. Persistence has neither and needs neither.
+for caller in gateway dataservices; do
+  openssl rand -base64 32 > "client-secret-${caller}"
+done
 
 # 2. The mutual-TLS trust anchor for POST /v1/tokens -> SECURITY_MTLS_CLIENT_CA_PATH. This one
 #    variable is enough: Security reads it as the listener's anchor and, when
@@ -1350,22 +1385,24 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=powerframework-loc
 #    here: ARCHITECTURE.md section 9.3.1 carries them, including the subjectAltName set the server
 #    certificate must cover and the -copy_extensions copyall that stops openssl dropping it.
 
-# Name the files rather than globbing ./*.key. THE SERVER KEY MUST NOT BE 0600 -- Compose ignores
-# `mode:`, `uid:` and `gid:` on a secret outside Swarm, so a 0600 host key arrives inside the container
-# as `-rw------- root root` while every image runs as the unprivileged `app` account, and Kestrel then
-# refuses to start for want of read permission. ARCHITECTURE.md section 9.3.1 step 4b sets the split:
-# the server key 0644 inside a 0700 directory, every other key 0600.
-chmod 600 security-signing.key security-signing.b64 mtls-ca.key
+# Name the files rather than globbing ./*.key. NO PROJECTED FILE MAY BE 0600 -- Compose ignores `mode:`,
+# `uid:` and `gid:` on a secret outside Swarm, so a 0600 host file arrives inside the container as
+# `-rw------- root root` while every image runs as the unprivileged `app` account, and the service then
+# refuses to start for want of read permission. The split is "is it projected", not "is it a key":
+# ARCHITECTURE.md section 9.3.1 part 4b sets it, and it covers SEVEN files rather than four -- the four
+# server keys, the signing key, and the two caller issuance credentials. Only the CA private key stays
+# 0600 here, because it must never enter a container at all.
+chmod 644 security-signing.key caller-gateway.secret caller-dataservices.secret
+chmod 600 mtls-ca.key
 ```
 
-**One variable carries key material and the rest carry paths.** The Compose dotenv format has no line
-continuation, so the file `SECURITY_JWT_SIGNING_KEY_PATH` names holds the single-line base64-of-DER value the second
-command above produces rather than a PEM block; a secret store that can carry newlines may supply PEM
-instead, and Security tries PEM first. It is a VALUE and not a mounted file path, and there are no
-`SECURITY_MTLS_*` path variables — `.env.example` is the authority, it declares a value for the signing
-key, and its mutual-TLS roster is the one in the table above. **The public half is derived, never configured**: Security computes the public JWK
-from the private key and publishes it under the `kid` in `Security:SigningKeyId`, so there is no
-public-key variable to set and there must not be one.
+**Every variable in the roster carries a path, and none carries key material.** The Compose dotenv format
+has no line continuation, which is why the signing key is named by path rather than pasted in: the file
+`SECURITY_JWT_SIGNING_KEY_PATH` names may hold a PEM block, which the service tries first, or the
+single-line base64 of the PKCS#8 DER. There are no `SECURITY_MTLS_*` path variables — `.env.example` is the
+authority, and its mutual-TLS roster is the one in the table above. **The public half is derived, never
+configured**: Security computes the public JWK from the private key and publishes it under the `kid` in
+`Security:SigningKeyId`, so there is no public-key variable to set and there must not be one.
 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.3.1 and [`SECRETS.md`](SECRETS.md) §4.1 carry the identical
 procedure; a change to one is a change to all three.
 
@@ -2299,7 +2336,9 @@ Five things a reader needs about that table:
   readiness probe. The compose health gate and Gateway's upstream aggregation both depend on that, and it is
   the only exemption.
 - **A REST refusal is `429`** with `application/problem+json` and an optional `Retry-After`; **a gRPC
-  refusal is `ResourceExhausted`**, because a gRPC client cannot read an HTTP status.
+  refusal is `ResourceExhausted`**, because a gRPC client cannot read an HTTP status, **carrying the same
+  interval on a `retry-after` trailer** — same name, same whole seconds, and optional on the same condition,
+  so a caller reads one fact the same way on either transport.
 - **The per-caller partition names the authenticated principal** where there is one and the remote address
   otherwise, so callers do not consume each other's budget.
 

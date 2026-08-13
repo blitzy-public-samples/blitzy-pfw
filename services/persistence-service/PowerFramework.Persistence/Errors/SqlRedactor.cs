@@ -774,9 +774,107 @@ public sealed class SqlRedactor : ISqlRedactor
     /// message wants the envelope preserved. The startup open-failure record deliberately publishes NO
     /// provider prose at all, because a failed open is the record most likely to carry a deployment PATH
     /// inside the provider's own message, and its own comment says so. Narrowing the general method would
-    /// have quietly relaxed that site too. So the strict method keeps every caller it had and this one is
-    /// reached only where the failing column's identity is the point - today exactly one place, the
-    /// <c>sqlerrtext</c> field of the wire payload.
+    /// have quietly relaxed that site too. So the strict method keeps every caller it had, and this one is
+    /// reached wherever the failing condition's identity is the point.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>THE POLICY IS PER FIELD CLASS, AND THIS IS THE CANONICAL STATEMENT OF IT.</b> A review found
+    /// the two policies split ACROSS ONE VALUE: an invalid-table <c>Exec</c> published the same provider
+    /// message at two different depths on ONE response - <c>DbError.sqlerrtext</c> read
+    /// <c>SQLite Error 1: 'no such table: NO_SUCH_TABLE'.</c> through this method, while
+    /// <c>ExecResponse.sql_err_text</c> and the status's <c>error_text</c> read
+    /// <c>SQLite Error &lt;redacted&gt;: '&lt;redacted&gt;'.</c> through the strict one. Same value, same
+    /// response, two disclosure depths, so a consumer could not tell which field to trust and an operator
+    /// reading the shallower one learned nothing. Two field classes are therefore distinguished, and every
+    /// member of a class uses one policy:
+    /// </para>
+    /// <list type="bullet">
+    /// <item>
+    /// <description>
+    /// <b>PROVIDER-DIAGNOSTIC values → this method.</b> Anything whose value originates as the driver's own
+    /// message: <c>common.v1.DbError.sqlerrtext</c> [<see cref="DbErrorDataExtensions.ToDbError"/>], the
+    /// database-error log record [<c>Tasks/SqlTaskBase.cs</c>], <c>ExecResponse.sql_err_text</c> and the
+    /// command path's status <c>error_text</c> [<c>Grpc/CommandService.cs</c>],
+    /// <c>TransactionStatus.sql_err_text</c> [<c>Grpc/TransactionService.cs</c>], the update and query
+    /// paths' status <c>error_text</c> [<c>Grpc/UpdateService.cs</c>, <c>Grpc/QueryService.cs</c>], and
+    /// EVERY EXCEPTION MESSAGE written to a log record [<c>Errors/FaultRecord.cs</c>, and the interceptor
+    /// and worker-host records in <c>Program.cs</c>]. EVERY WIRE FIELD AND EVERY LOG RECORD CARRYING A
+    /// PROVIDER MESSAGE IS IN THIS CLASS, with no exception.
+    /// </description>
+    /// </item>
+    /// <item>
+    /// <description>
+    /// 🔴 <b>THERE IS NO LONGER AN EXCEPTION, AND WHAT REMOVED IT WAS EVIDENCE.</b> An earlier revision
+    /// held the framework-error log record in <c>Program.cs</c> out of the class on the grounds that it
+    /// reaches redaction through the injected <see cref="ISqlRedactor"/> seam - which is deliberately one
+    /// member (constraint C-K) - and argued the strict policy there discloses LESS, never more. A runtime
+    /// log scan disproved that: <see cref="Redact(string)"/> is a SQL literal scanner, and the provider's
+    /// envelope NESTS single quotes when the diagnosis quotes a value -
+    /// <c>SQLite Error 19: 'CHECK constraint failed: NAME &lt;&gt; 'Ada''.</c>. The scanner closes the outer
+    /// literal at the INNER opening quote, so the value between the two pairs is copied through VERBATIM
+    /// and the record read <c>SQLite Error &lt;redacted&gt;: '&lt;redacted&gt;'Ada'&lt;redacted&gt;'.</c> -
+    /// the row value in the clear. On that shape the strict policy is the LEAKY one and this method is
+    /// strictly safer. The seam is still not widened: the affected sites ask
+    /// <see cref="IsProviderDiagnostic(string)"/> and route only the envelope here, leaving statement text
+    /// on the seam that the abstraction's own remarks describe it as being for.
+    /// </description>
+    /// </item>
+    /// <item>
+    /// <description>
+    /// <b>STATEMENT and FREE-TEXT values → <see cref="Redact(string)"/>, unchanged.</b>
+    /// <c>DbError.sqlsyntax</c> and the conflict detail, because they carry interpolated literals by
+    /// construction; the startup open-failure record, because it is the one most likely to carry a
+    /// deployment path; statement text in log records; the DataWindow <c>Modify</c> rejection, because it
+    /// quotes back the whole rejected <c>DataWindow.Table.Select='...'</c> assignment and therefore the
+    /// generated statement; the externally supplied SORT and FILTER expressions the retrieval task
+    /// composes into a rejection; and the task-layer notification payload, which is arbitrary free text
+    /// and not a provider envelope at all.
+    /// </description>
+    /// </item>
+    /// </list>
+    /// <para>
+    /// <b>WIDENING THE FIRST CLASS DISCLOSES NOTHING NEW, AND THE SHAPE TEST IS WHY.</b> A value that is
+    /// not exactly this envelope is masked by the strict method as before, so a statement-bearing string
+    /// routed here by mistake is still fully masked. What the first class now discloses uniformly is the
+    /// provider's result code - already published in the clear on <c>DbError.sqldbcode</c> - and schema
+    /// identifiers such as <c>COMPANY.NAME</c>, which is the material an operator opens the field for.
+    /// </para>
+    /// <para>
+    /// <b>THE ONE RESIDUAL LIMIT, STATED RATHER THAN LEFT TO BE FOUND.</b> The strict scanner is a SQL
+    /// literal scanner, so it cannot mask a value whose surrounding quotes are AMBIGUOUS - quoted text
+    /// containing an odd inner quote. Two shapes produce that, and they are on opposite sides of this
+    /// checkpoint's boundary:
+    /// </para>
+    /// <list type="bullet">
+    /// <item>
+    /// <description>
+    /// <b>FIXED - the provider envelope.</b> Its nesting is systematic rather than accidental: any
+    /// diagnosis that quotes a value produces it, and an unnamed CHECK constraint failure does so on
+    /// ordinary well-formed input. Every value of that class now goes through this method, which peels the
+    /// wrapper before scanning, so the nesting never reaches the scanner.
+    /// </description>
+    /// </item>
+    /// <item>
+    /// <description>
+    /// <b>NOT FIXED, AND DELIBERATELY - a statement that is INVALID SQL.</b> An un-escaped apostrophe
+    /// inside an interpolated value closes the literal early, and the remainder of that value is then read
+    /// as structure and copied through: <c>DbError.sqlsyntax</c> for
+    /// <c>VALUES ('O'Hara-1')</c> retains <c>Hara-1</c>. It is not fixable without treating everything
+    /// between the first and last quote as one literal, and for a VALID statement that span is where the
+    /// column names live - the two shapes are indistinguishable, so the rule that closes this would empty
+    /// the field of the structure it exists to show. The exposure is bounded by who can produce it: the
+    /// statement is the CALLER'S OWN, malformed by that caller, and this field is documented as returning
+    /// that statement to it. The provider's MESSAGE about the same failure is masked normally. Pinned by
+    /// <c>PersistenceRuntimeTests.AStatementFaultRecordsARedactedChainAndAttachesNoException</c>, whose
+    /// last sub-case exercises exactly this shape so the limit cannot be mistaken for an oversight.
+    /// </description>
+    /// </item>
+    /// </list>
+    /// <para>
+    /// Every OTHER live producer of free text on the strict path was checked against the ambiguous shape:
+    /// the <c>Modify</c> rejection and the SORT and FILTER rejections quote a value with well-formed
+    /// quoting, including the doubled-quote escape the scanner already handles, and the notification
+    /// payload quotes an identifier.
     /// </para>
     /// <para>
     /// <b>WHAT SURVIVES, AND WHY EACH PART IS SAFE.</b> Only the envelope: the fixed words, the provider's
@@ -813,6 +911,37 @@ public sealed class SqlRedactor : ISqlRedactor
             Redact(diagnostic.Substring(interiorStart, interiorLength)),
             diagnostic.AsSpan(interiorStart + interiorLength));
     }
+
+    /// <summary>
+    /// Reports whether <paramref name="text"/> is, in its entirety, the storage provider's own
+    /// diagnostic envelope rather than statement text.
+    /// </summary>
+    /// <param name="text">The candidate text. <see langword="null"/> and empty both answer false.</param>
+    /// <returns>
+    /// <see langword="true"/> when <see cref="RedactProviderDiagnostic(string)"/> would preserve the
+    /// wrapper and mask only the interior; <see langword="false"/> when it would fall through to
+    /// <see cref="Redact(string)"/>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY A PREDICATE EXISTS AT ALL, given that the policy already decides for itself.</b> One
+    /// consumer must choose between the INJECTED seam and this concrete policy rather than between two
+    /// methods on this type: <c>PersistenceSqlTaskHost.OnError</c> in <c>Program.cs</c> is handed an
+    /// <see cref="ISqlRedactor"/> so a test can drive it, and that seam is documented as being about
+    /// STATEMENT text. A provider envelope is not statement text, so it must not go through the seam's
+    /// single member - and the site cannot know which it holds without asking. This member is that
+    /// question, and it is deliberately on the CONCRETE type: the seam stays one member, exactly as its
+    /// own remarks require (constraint C-K).
+    /// </para>
+    /// <para>
+    /// <b>It answers the same question the policy asks itself</b>, by calling the same measurement, so
+    /// the two can never disagree about a given string - which is the property that makes a caller's
+    /// two-way branch equivalent to letting the policy decide.
+    /// </para>
+    /// </remarks>
+    internal static bool IsProviderDiagnostic([AllowNull] string text) =>
+        !string.IsNullOrEmpty(text)
+        && TryMeasureProviderDiagnosticEnvelope(text, out _, out _);
 
     /// <summary>
     /// The opening of the framework's row-cap diagnostic

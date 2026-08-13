@@ -1418,6 +1418,62 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         + "valid only on the instance that issued it, and is single-use: EndSession retires it.";
 
     /// <summary>
+    /// The sentence returned beside the oracle's bare <see cref="RetCode.FAILED"/> when a commit or a
+    /// rollback is issued on a session that is auto-committing.
+    /// </summary>
+    /// <remarks>
+    /// The CODE is the oracle's, unchanged - <c>if AutoCommit then return RetCode.FAILED</c> guards both
+    /// verbs and is the first test in each [<c>n_cst_thread_trans.sru:L185</c>, <c>:L240</c>]. Only the
+    /// text is this boundary's, because a PowerScript function returning <c>long</c> has no text channel
+    /// to reproduce and an empty one made a data-integrity refusal unreadable. It names the mode and the
+    /// members that move it, and quotes no handle and no descriptor field (constraint C-F).
+    /// </remarks>
+    private const string AutoCommittingSessionDiagnostic =
+        "This session is auto-committing, so there is no open transaction to commit or roll back and the "
+        + "legacy answers a plain failure rather than a harmless success. Every statement on an "
+        + "auto-committing session has already been applied as it executed. Move the mode with "
+        + "SetAutoCommit, or begin the session without auto-commit if the work is meant to accumulate "
+        + "until you commit it.";
+
+    /// <summary>
+    /// The sentence returned when a begin request sets the descriptor's <c>autocommit</c> member.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>REFUSED FAIL-CLOSED BECAUSE THE ORACLE CANNOT HONOUR IT AND ACCEPTING IT SILENTLY DISCARDED
+    /// WRITES.</b> The oracle erases the member before it can reach anything -
+    /// <c>_transData.AutoCommit = false</c> under 擦除连接目标无关的参数
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L118-L119</c>] - and its
+    /// descriptor-to-transaction transfer is the SEVEN-field copy that touches neither <c>autocommit</c>
+    /// nor <c>userparm</c> [<c>n_cst_thread_trans.sru:L343-L354</c>]. So there is no legacy behaviour to
+    /// reproduce for a set flag, and honouring it would be a behaviour this port invented (constraint
+    /// C-B).
+    /// </para>
+    /// <para>
+    /// <b>AND IGNORING IT WAS WORSE THAN EITHER.</b> The pool keys its entries on WHOLE-descriptor
+    /// equality [<c>n_cst_thread_trans_pool.sru</c>, <c>of_addref</c>], so a session opened with the flag
+    /// set resolved to a DIFFERENT pooled connection from the tasks created on it, which acquire with the
+    /// erased descriptor: the caller's commit met the auto-committing engine and was refused, while its
+    /// write sat in the other engine's explicit transaction and was rolled back when the task's lease
+    /// dropped. An update answered <c>rowsUpdated: 1</c> and storage kept the old row. Refusing here is
+    /// AAP §0.1.5's rule applied literally - narrow the contract with a defined error rather than widen it
+    /// with a guess - and it matches how this service already answers the sibling incoherence on
+    /// <c>keep_alive</c>.
+    /// </para>
+    /// <para>
+    /// It names the field and every supported route to the same effect, and quotes nothing else.
+    /// </para>
+    /// </remarks>
+    private const string DescriptorAutoCommitRefusedDiagnostic =
+        "The transaction descriptor set its autocommit member. That member is part of the mirrored legacy "
+        + "structure and is carried on the wire, but the legacy erases it before it reaches either the "
+        + "connection pool or a transaction object, so this service cannot honour it and will not accept "
+        + "it silently. Leave descriptor.autocommit unset, and choose the commit policy you want: "
+        + "TransactionService.SetAutoCommit moves the session's connection-level mode, UpdateRequest."
+        + "autocommit commits one update, and ExecRequest.autocommit selects the three-valued per-statement "
+        + "mode on a command.";
+
+    /// <summary>
     /// The one sentence returned when a caller-supplied statement is not something a read-scoped caller
     /// may ask this service to prepare.
     /// </summary>
@@ -1527,6 +1583,46 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// </remarks>
     private long GuardLease(PoolLease lease) =>
         !lease.IsValid || !_pool.IsLeaseLive(lease) ? RetCode.E_OUT_OF_BOUND : RetCode.OK;
+
+    /// <summary>
+    /// Refuses a begin request whose descriptor sets the <c>autocommit</c> member.
+    /// </summary>
+    /// <param name="wire">The descriptor exactly as it arrived, before it is folded onto the in-process type.</param>
+    /// <param name="diagnostic">The refusal text, or the empty string when the member is unset.</param>
+    /// <returns>
+    /// <c>RetCode.OK</c> when the member is unset, otherwise <c>RetCode.E_INVALID_ARGUMENT</c>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// The full reasoning is on <see cref="DescriptorAutoCommitRefusedDiagnostic"/>: the oracle erases the
+    /// member before it can reach either the pool key or a transaction object, so there is no legacy
+    /// behaviour for a set flag to reproduce, and accepting it silently split a session away from its own
+    /// tasks' pooled connection and discarded writes that had been reported as applied.
+    /// </para>
+    /// <para>
+    /// <b>THE WIRE MESSAGE IS READ RATHER THAN THE FOLDED DESCRIPTOR, AND THAT IS THE WHOLE POINT OF THE
+    /// SIGNATURE.</b> <c>TransactionDescriptor.autocommit</c> is a plain proto3 <c>bool</c>, so
+    /// <see langword="false"/> and absent are indistinguishable on it - which is exactly the shape a
+    /// refusal wants here, because only <see langword="true"/> asks for behaviour this service cannot
+    /// supply. A caller that never touched the member, and one that set it to <see langword="false"/>, are
+    /// both asking for the default and are both admitted.
+    /// </para>
+    /// </remarks>
+    private static long GuardDescriptorAutoCommit(
+        TransactionDescriptor wire,
+        out string diagnostic)
+    {
+        if (!wire.Autocommit)
+        {
+            diagnostic = string.Empty;
+
+            return RetCode.OK;
+        }
+
+        diagnostic = DescriptorAutoCommitRefusedDiagnostic;
+
+        return RetCode.E_INVALID_ARGUMENT;
+    }
 
     /// <summary>
     /// Refuses a request whose explicit connection flags disagree with what the supplied
@@ -1889,7 +1985,12 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         TransactionData descriptor = ToDescriptor(request.Descriptor_);
 
-        long guard = GuardConnectionFlags(in descriptor, request.Flags, out string diagnostic);
+        long guard = GuardDescriptorAutoCommit(request.Descriptor_, out string diagnostic);
+        if (guard == RetCode.OK)
+        {
+            guard = GuardConnectionFlags(in descriptor, request.Flags, out diagnostic);
+        }
+
         if (guard == RetCode.OK)
         {
             guard = GuardPoolSettings(request.KeepAlive, out diagnostic);
@@ -1913,10 +2014,31 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
             };
         }
 
+        // 🔴 THE POOL KEY IS THE ERASED DESCRIPTOR, WHICH IS WHAT MAKES A SESSION AND ITS OWN TASKS SHARE
+        //    ONE CONNECTION.
+        //
+        //    The oracle reaches its pool from exactly one place, and that place erases the auto-commit
+        //    member first: `_transData.AutoCommit = false` under 擦除连接目标无关的参数 - erase parameters
+        //    irrelevant to the connection target - and only then
+        //    `transPool.of_AddRef(_transData)` [n_cst_thread_task_sqlbase.sru:L118-L119, :L165]. Because
+        //    the pool keys its reference-counted entries on WHOLE-descriptor equality
+        //    [n_cst_thread_trans_pool.sru, of_addref], a key that kept the flag put a session on a
+        //    DIFFERENT pooled connection from the tasks created on it - the tasks acquire through
+        //    SqlTaskBase.SetTransData, which performs exactly this erasure. The caller's commit then
+        //    reached one connection while its write sat in the other's explicit transaction and was rolled
+        //    back when the task's lease dropped.
+        //
+        //    The guard above already refuses a request that SET the flag, so this normalisation is
+        //    ordinarily a no-op. It is performed anyway, and deliberately: the invariant "a session and
+        //    its tasks always key the same pool entry" is then structural rather than a consequence of a
+        //    validation above it, and a future relaxation of that guard cannot silently reintroduce the
+        //    split. Section: this is the same fold SqlTaskBase.SetTransData applies.
+        TransactionData poolKey = descriptor with { AutoCommit = false };
+
         // [n_cst_thread_task_sqlbase.sru:L165] `_nTransRefIdx = transPool.of_AddRef(_transData)`.
         // ONE-BASED: the oracle appends at UpperBound + 1 and returns that
         // [n_cst_thread_trans_pool.sru:L143-L151]. Stored verbatim; never decremented.
-        PoolLease lease = _pool.AddRefLease(in descriptor);
+        PoolLease lease = _pool.AddRefLease(in poolKey);
 
         // Defensive, and it states the one-based invariant at the boundary: the oracle's own guards
         // treat a non-positive index as out of bounds [n_cst_thread_trans_pool.sru:L89, :L120, :L154],
@@ -2134,8 +2256,12 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
             };
         }
 
+        // THE SESSION RECORDS THE SAME DESCRIPTOR THE POOL IS KEYED ON, not the one that arrived on the
+        // wire, so the retained state and the pool entry cannot describe the connection differently. The
+        // two differ only in the erased auto-commit member, and the guard above already refuses a request
+        // that set it - this keeps them identical by construction rather than by that coincidence.
         TransactionSession? session =
-            _sessions.Register(lease, in descriptor, borrowed, out string quotaDiagnostic);
+            _sessions.Register(lease, in poolKey, borrowed, out string quotaDiagnostic);
 
         if (session is null)
         {
@@ -2780,6 +2906,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         long rtCode;
         DbErrorData captured;
         int sharing;
+        bool autoCommitting;
 
         using (session.Gate.Enter())
         {
@@ -2795,6 +2922,10 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
             sharing = _sessions.CountSharingSessions(session);
 
             rtCode = operation(session.Transaction);
+
+            // READ INSIDE THE GATE, WITH THE OPERATION, so the reason reported below is the mode the
+            // operation actually met rather than one a concurrent SetAutoCommit moved afterwards.
+            autoCommitting = session.Transaction.AutoCommit;
 
             captured = rtCode == RetCode.E_DB_ERROR
                 ? session.Transaction.CaptureError()
@@ -2818,9 +2949,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
                 sharing);
         }
 
-        return rtCode == RetCode.E_DB_ERROR
-            ? TransactionWireCodes.Status(rtCode, in captured)
-            : TransactionWireCodes.Status(rtCode);
+        return ProjectOutcome(rtCode, in captured, autoCommitting);
     }
 
     /// <summary>
@@ -2859,6 +2988,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     {
         long rtCode;
         DbErrorData captured;
+        bool autoCommitting;
 
         using (session.Gate.Enter())
         {
@@ -2874,14 +3004,61 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
             rtCode = operation(session.Transaction);
 
+            // READ INSIDE THE GATE, WITH THE OPERATION - see ProjectOutcome.
+            autoCommitting = session.Transaction.AutoCommit;
+
             captured = rtCode == RetCode.E_DB_ERROR
                 ? session.Transaction.CaptureError()
                 : DbErrorData.Empty;
         }
 
-        return rtCode == RetCode.E_DB_ERROR
-            ? TransactionWireCodes.Status(rtCode, in captured)
-            : TransactionWireCodes.Status(rtCode);
+        return ProjectOutcome(rtCode, in captured, autoCommitting);
+    }
+
+    /// <summary>
+    /// Projects one transaction outcome onto the wire status, attaching the driver detail for a database
+    /// error and the auto-commit explanation for the oracle's bare failure.
+    /// </summary>
+    /// <param name="rtCode">The code the transaction member answered.</param>
+    /// <param name="captured">The driver snapshot, empty unless the outcome is a database error.</param>
+    /// <param name="autoCommitting">
+    /// Whether the session was auto-committing when the operation ran, read under the same gate as the
+    /// operation so a concurrent mode change cannot attribute the wrong reason.
+    /// </param>
+    /// <returns>The status.</returns>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE ONE BARE CODE ON THIS CONTRACT THAT NEEDED A SENTENCE BESIDE IT, AND WHY ADDING ONE IS
+    /// NOT AN INVENTED DIAGNOSTIC.</b> <c>if AutoCommit then return RetCode.FAILED</c> guards commit
+    /// [<c>n_cst_thread_trans.sru:L240</c>] and rollback [<c>:L185</c>] alike, and it is the FIRST test in
+    /// each - so a plain <c>FAILED</c> observed while the session is auto-committing is that guard and can
+    /// be nothing else. <b>The return code is left exactly as the oracle answers it</b>; what is added is
+    /// text in a field PowerScript has no channel for at all, because a function returning <c>long</c>
+    /// cannot carry one. Nothing observable to the oracle changes, and the empty text was actively
+    /// harmful: a caller that had asked for auto-commit and then did the responsible thing - commit - read
+    /// <c>-1</c> with no explanation and no way to learn that its session had nothing to commit.
+    /// </para>
+    /// <para>
+    /// The sentence names the mode and the members that move it, and quotes no session handle
+    /// (constraint C-F).
+    /// </para>
+    /// </remarks>
+    private static OperationStatus ProjectOutcome(
+        long rtCode,
+        in DbErrorData captured,
+        bool autoCommitting)
+    {
+        if (rtCode == RetCode.E_DB_ERROR)
+        {
+            return TransactionWireCodes.Status(rtCode, in captured);
+        }
+
+        if (rtCode == RetCode.FAILED && autoCommitting)
+        {
+            return TransactionWireCodes.Status(rtCode, AutoCommittingSessionDiagnostic);
+        }
+
+        return TransactionWireCodes.Status(rtCode);
     }
 
     /// <summary>
@@ -3159,7 +3336,17 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
                 // the same literal-scoped policy the statement field always had covers it too. A message
                 // quoting no value is byte-identical after masking, so a caller reading this for display
                 // loses nothing it was entitled to (constraints C-F, C-B).
-                SqlErrText = SqlRedactor.Instance.Redact(transaction.SqlErrText),
+                //
+                // 🔴 THROUGH THE PROVIDER-DIAGNOSTIC POLICY. The premise above - "a message quoting no
+                // value is byte-identical after masking" - is true of a BARE message and false of the one
+                // this service receives, because Microsoft.Data.Sqlite wraps it: `SQLite Error 5:
+                // 'database is locked'.` presents the result code as a numeric literal and the whole
+                // diagnosis as a quoted string, so the strict policy masked both and a busy or locked
+                // database reached a caller as `SQLite Error <redacted>: '<redacted>'.` while
+                // `DbError.sqlerrtext` elsewhere on the same wire read the condition in full. The interior
+                // is still masked and a non-envelope string still takes the strict path - see
+                // Errors/SqlRedactor.cs, RedactProviderDiagnostic, for the field-class policy.
+                SqlErrText = SqlRedactor.Instance.RedactProviderDiagnostic(transaction.SqlErrText),
 
                 // NOT MASKED, DELIBERATELY. The return data is a stored-procedure OUT value the caller
                 // itself asked for - it is the RESULT of the operation rather than a diagnostic about it,
