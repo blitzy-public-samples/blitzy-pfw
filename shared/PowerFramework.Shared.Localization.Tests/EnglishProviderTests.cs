@@ -40,9 +40,6 @@
 //  correction the constraint forbids, and these two values are the canonical example of it in the
 //  whole refactor. The tests below assert the wrong values on purpose and say so at each one.
 //
-//  RULES POSITION
-//  review_rules returns "No user rules provided.". Constraints cited inline: C-B (replicate defects),
-//  C-C (the legacy tree and pfw.i18n.xml are read-only), C-K (document boundary decisions).
 // ==================================================================================================
 
 using System.Globalization;
@@ -130,7 +127,8 @@ public class EnglishProviderTests
     /// reader-taking constructor rejects null.
     /// </summary>
     /// <remarks>
-    /// The default constructor is what <c>pfw.sra</c>'s open event reaches, so it has to work with no
+    /// The default constructor is what <c>ws_objects/pfw.pbl.src/pfw.sra</c>'s open event reaches -
+    /// the framework application, not the same-named packager object - so it has to work with no
     /// arguments at all; the reader-taking one exists so tests and future hosts can point it at a
     /// different table. A null reader is a programming error rather than a translation miss, which is
     /// why it throws where everything else in this library stays silent.

@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  F-06 - IN-BAND OUTCOME TO HTTP STATUS PROJECTION
+//  IN-BAND OUTCOME TO HTTP STATUS PROJECTION
 // =====================================================================================================
 //
 //  WHY THIS FILE EXISTS. Both REST projections answer a gRPC method whose failures arrive IN BAND: the
@@ -58,8 +58,17 @@ public sealed class RestProjectionInBandStatusTests
     [InlineData(RetCode.E_RETRY, StatusCodes.Status409Conflict)]
     [InlineData(RetCode.E_BUSY, StatusCodes.Status429TooManyRequests)]
     [InlineData(RetCode.E_TIME_OUT, StatusCodes.Status504GatewayTimeout)]
-    [InlineData(RetCode.E_NO_SUPPORT, StatusCodes.Status501NotImplemented)]
-    [InlineData(RetCode.E_NO_IMPLEMENTATION, StatusCodes.Status501NotImplemented)]
+    // 🔴 THE UNAVAILABLE-CAPABILITY PAIR IS 500, AND THESE TWO ROWS ARE THE C-D AUDIT MADE EXECUTABLE.
+    // They answered 501, which no operation of this projection declares and which is reserved system-wide
+    // for Gateway's four deferred-capability routes (AAP 0.4.4, C-D). An implemented operation reporting
+    // that one cell of its surface has no available implementation - the pinyin matcher, the expression
+    // engine's macro and foreign-variable arms, a disagreeing pinyin flag mask - is a different statement
+    // from "this whole capability area is unbuilt", and answering both the same way left a caller unable to
+    // tell them apart from the published contract. 500 carries the distinction on the retCode member, which
+    // is how Security answers its two symmetric-cipher narrowings (docs/CONTRACTS.md 14.4). The ingress twin
+    // states the identical two rows.
+    [InlineData(RetCode.E_NO_SUPPORT, StatusCodes.Status500InternalServerError)]
+    [InlineData(RetCode.E_NO_IMPLEMENTATION, StatusCodes.Status500InternalServerError)]
     [InlineData(RetCode.E_DB_ERROR, StatusCodes.Status502BadGateway)]
     [InlineData(RetCode.E_INVALID_TRANSACTION, StatusCodes.Status502BadGateway)]
     public void AFailingInBandOutcomeProjectsOntoItsPublishedStatus(long retCode, int expected)
@@ -139,16 +148,34 @@ public sealed class RestProjectionInBandStatusTests
     }
 
     /// <summary>
-    /// The upstream's own diagnostic is carried through when it sent one, and a fallback stands in when it
-    /// did not.
+    /// The in-band diagnostic never becomes the problem's <c>detail</c>; the fixed prose for the mapped
+    /// outcome stands there whether the upstream sent text or not.
     /// </summary>
     /// <remarks>
-    /// THE LEGACY TEXT MUST REACH THE CALLER (C-B). The diagnostic is the legacy's own message and is
-    /// relayed verbatim rather than replaced by a generic sentence; the built-in prose exists only for the
-    /// case where the upstream sent none, so the body is never empty.
+    /// <para>
+    /// 🔴 THIS ROW WAS INVERTED, AND THE REMARK IT REPLACED ARGUED C-B PROTECTED THE OLD BEHAVIOUR. It
+    /// asserted the diagnostic was relayed verbatim into <c>detail</c>, on the reasoning that the legacy
+    /// text must reach the caller. The premise is right and the conclusion did not follow from it.
+    /// </para>
+    /// <para>
+    /// THE LEGACY TEXT STILL REACHES THE CALLER - through the <c>response</c> extension, which carries the
+    /// contract's own message complete with its text, localization category, severity and, for an
+    /// expression fault, its caret position. That is the structured-error carrier the AAP actually
+    /// specifies (0.3.4, 0.6.2.5), it is a reviewed member, and StructuredErrorParityTests already screens
+    /// every value in it against reading as a database statement and against credential markers. Nothing
+    /// is withheld from the caller by this change.
+    /// </para>
+    /// <para>
+    /// WHAT CHANGED IS THAT <c>detail</c> STOPPED DUPLICATING IT UNSCREENED. <c>detail</c> is RFC 9457's
+    /// human-readable prose member, it passes through no such screen, and the identical construction one
+    /// hop downstream in Gateway's proxy was the reported disclosure - so leaving it here would have
+    /// reinstated that disclosure from behind, since this body is what that proxy mirrors. C-B is not
+    /// engaged either way: the legacy had no process boundary and no network caller at all, and these
+    /// diagnostics went to a MessageBox on the operator's own screen [AAP 0.6.1].
+    /// </para>
     /// </remarks>
     [Fact]
-    public void TheUpstreamDiagnosticIsCarriedThroughAndAFallbackStandsInWhenAbsent()
+    public void TheInBandDiagnosticIsNeverPromotedIntoTheProblemDetail()
     {
         OperationStatus carried = new()
         {
@@ -158,12 +185,18 @@ public sealed class RestProjectionInBandStatusTests
 
         PowerFramework.DataServices.Endpoints.RestProjectionEndpoints.StatusProjection withText = AssertProjects(new UpdateResponse { Status = carried });
 
-        Assert.Equal("检索失败", withText.Detail);
+        Assert.DoesNotContain("检索失败", withText.Detail, StringComparison.Ordinal);
 
         PowerFramework.DataServices.Endpoints.RestProjectionEndpoints.StatusProjection withoutText = AssertProjects(Failing(RetCode.E_DB_ERROR));
 
-        Assert.NotEqual("检索失败", withoutText.Detail);
-        Assert.False(string.IsNullOrWhiteSpace(withoutText.Detail));
+        // THE TWO DETAILS ARE THE SAME STRING, which is the property that matters: a caller cannot infer
+        // whether the upstream sent a diagnostic, or anything about it, from the detail it receives.
+        Assert.Equal(withoutText.Detail, withText.Detail);
+        Assert.False(string.IsNullOrWhiteSpace(withText.Detail));
+
+        // AND THE OUTCOME IS STILL FULLY DISTINGUISHABLE, because the numeric code is what a caller
+        // branches on and it is untouched.
+        Assert.Equal((long)RetCode.E_DB_ERROR, withText.RetCode);
     }
 
     /// <summary>Builds a response whose nested status carries the given outcome.</summary>

@@ -1182,9 +1182,9 @@ public sealed class DataWindowServiceConversationTests
     /// A sequenced group admits a GAP and refuses a REVERSAL.
     /// </summary>
     /// <remarks>
-    /// THIS ROW USED TO ASSERT THE DEFECT. It was called
-    /// <c>ASequencedGroupToleratesAnArrivalBehindTheHighWaterMark</c> and it required exactly the
-    /// behaviour that made the sequencing token decorative: an arrival behind the mark had to NOT throw,
+    /// THE TEMPTING FORM OF THIS ROW ASSERTS THE DEFECT. It would be called
+    /// <c>ASequencedGroupToleratesAnArrivalBehindTheHighWaterMark</c> and would require exactly the
+    /// behaviour that makes the sequencing token decorative: an arrival behind the mark must NOT throw,
     /// justified as "reorder authority is the consumer's". The consumer on this boundary is this server,
     /// and it was not reordering - it was dispatching in arrival order - so tolerating the reversal meant
     /// delivering the chain out of order and calling it authority. What is admitted is a GAP, because both
@@ -1833,9 +1833,9 @@ public sealed class DataWindowServiceContractTests
     /// </summary>
     /// <param name="requested">The size the caller stated.</param>
     /// <remarks>
-    /// 🔴 <b>THE FILTER USED TO BE <c>&gt; 0</c>, AND THAT DISCARDED THE WORST VALUES SILENTLY.</b> A caller
-    /// sending <c>-5</c> had it dropped here and received a successful retrieval chunked at the server's own
-    /// size, while a caller sending <c>500</c> had it forwarded and was refused
+    /// 🔴 <b>A <c>&gt; 0</c> FILTER HERE WOULD DISCARD THE WORST VALUES SILENTLY.</b> A caller
+    /// sending <c>-5</c> would have it dropped here and receive a successful retrieval chunked at the server's
+    /// own size, while a caller sending <c>500</c> would have it forwarded and be refused
     /// <c>E_INVALID_ARGUMENT</c> by C-05's guard [<c>n_cst_thread_task_sqlquery.sru:L410</c>] - two equally
     /// nonsensical sizes, two different outcomes, and the more obviously wrong of the two accepted.
     /// <para>
@@ -1920,7 +1920,7 @@ public sealed class DataWindowServiceContractTests
     }
 
     // =============================================================================================
-    //  F-02 - THE UPSTREAM LIFECYCLE. C-05 and C-06 are TASK-scoped and a task is SESSION-scoped, so a
+    //  THE UPSTREAM LIFECYCLE. C-05 and C-06 are TASK-scoped and a task is SESSION-scoped, so a
     //  retrieval and an update are each three or four upstream calls rather than one. These tests assert
     //  the ORDER, the handle actually reaching the payload call, and the release running on every exit
     //  path - the last of which is what separates a working orchestration from one that leaks a
@@ -1989,10 +1989,10 @@ public sealed class DataWindowServiceContractTests
     /// log-password field does not travel on every later call.
     /// </para>
     /// <para>
-    /// ⚠ THE ABSENT FLAGS MESSAGE IS THE ASSERTION, AND THIS ROW USED TO ASSERT THE OPPOSITE. It was
-    /// written expecting <c>Flags.DisableBind</c> and <c>Flags.NcharBind</c> to arrive true, from two
-    /// independently settable options beside <c>DbParm</c> - and the very configuration it used demonstrates
-    /// why that shape was a defect. <c>DbParm="DisableBind=1"</c> resolves, by the oracle's own nested
+    /// ⚠ THE ABSENT FLAGS MESSAGE IS THE ASSERTION, AND ASSERTING THE OPPOSITE IS THE TEMPTING READING. That
+    /// row expects <c>Flags.DisableBind</c> and <c>Flags.NcharBind</c> to arrive true, from two
+    /// independently settable options beside <c>DbParm</c> - and the very configuration below demonstrates
+    /// why that shape is a defect. <c>DbParm="DisableBind=1"</c> resolves, by the oracle's own nested
     /// reading [<c>n_cst_thread_task_sqlbase.sru:L127-L132</c>], to <c>disable_bind=true</c> and
     /// <c>nchar_bind=FALSE</c>, because the second key is consulted only inside the first key's branch. The
     /// flags this row asserted therefore DISAGREED with the string sent beside them, and Persistence
@@ -2075,10 +2075,10 @@ public sealed class DataWindowServiceContractTests
     /// <remarks>
     /// <para>
     /// <b>DEAD CONFIGURATION IS WORSE THAN MISSING CONFIGURATION, WHICH IS WHY ITS ABSENCE IS ASSERTED.</b>
-    /// A <c>Transaction</c> group used to be declared here and bound from
-    /// <c>DataServices:Persistence:Transaction</c> while nothing in the service ever read it - and it
-    /// DISAGREED with the group that is read, defaulting the database to a table name and auto-commit to
-    /// true where the live group defaults to empty and false. An operator tuning the settings file would
+    /// Declaring a <c>Transaction</c> group here and binding it from
+    /// <c>DataServices:Persistence:Transaction</c> while nothing in the service reads it is the trap - and
+    /// such a group DISAGREES with the group that is read, defaulting the database to a table name and
+    /// auto-commit to true where the live group defaults to empty and false. An operator tuning the settings file would
     /// have seen two plausible places to configure one session, changed the one with the more specific
     /// defaults, observed no effect, and had nothing in the service to tell them why.
     /// </para>
@@ -2134,8 +2134,8 @@ public sealed class DataWindowServiceContractTests
 
         // THE OUTCOME IS NAMED NUMERICALLY, which identifies the refusal without carrying row data.
         //
-        // This row previously asserted the status message contained the words "deliberately withheld",
-        // which is a phrase rather than a property: it passed only while one particular sentence was
+        // ASSERTING THAT THE STATUS MESSAGE CONTAINS THE WORDS "deliberately withheld" IS THE TEMPTING
+        // ROW, and it pins a phrase rather than a property: it passes only while one particular sentence is
         // present, and it says nothing about what the message actually carries. What matters, and what is
         // asserted instead, is that the DRIVER's own message never reaches a status. It cannot: the driver's
         // text lives in DbError.sqlerrtext and no acquisition failure reads that field - the status carries
@@ -2213,7 +2213,7 @@ public sealed class DataWindowServiceContractTests
 
         // ⚠ CANCELLED MID-STREAM, NOT BEFORE THE CALL, AND THE DIFFERENCE IS THE WHOLE ROW ⚠
         //
-        // This row used to cancel before calling, which cannot reach what it asserts: the very first
+        // Cancelling BEFORE the call cannot reach what this row asserts: the very first
         // upstream request travels under the caller's token, so an already-cancelled token refuses the
         // session before it is opened and there is then no task and no session to release. The row would
         // then be asserting a release on a path where nothing was ever acquired. Cancelling on the first
@@ -2239,7 +2239,7 @@ public sealed class DataWindowServiceContractTests
     /// A failing terminal status that carried no database error is a call failure, not an empty result.
     /// </summary>
     /// <remarks>
-    /// <b>THE DEFECT THIS CLOSES PRODUCED A BYTE-FOR-BYTE CORRECT-LOOKING ANSWER.</b>
+    /// <b>THE DEFECT THIS CLOSES PRODUCES A BYTE-FOR-BYTE CORRECT-LOOKING ANSWER.</b>
     /// <c>RetrieveChunk</c> can express a database error and nothing else, so a refusal that brought none -
     /// a rejected clause, an invalid paging request, a bad chunk size - had no field to occupy and was
     /// delivered as the plain final marker: identical to what a DataWindow with no matching rows produces.
@@ -2323,10 +2323,10 @@ public sealed class DataWindowServiceContractTests
     /// <c>DbError</c> on its way to becoming a status.
     /// </para>
     /// <para>
-    /// ⚠ AND IT IS STILL A CALL FAILURE, WHICH IS A CORRECTION TO WHAT THIS ROW ORIGINALLY ASSERTED ⚠
+    /// ⚠ AND IT IS STILL A CALL FAILURE, NOT A COMPLETED CALL CARRYING AN ERROR CHUNK ⚠
     /// </para>
     /// <para>
-    /// It was first written expecting the call to COMPLETE, on the reasoning that the error chunk is a
+    /// Expecting the call to COMPLETE is the tempting reading, on the reasoning that the error chunk is a
     /// sufficient encoding of the failure. It is not, for three reasons and the third alone decides it.
     /// <c>RetrieveChunk</c> declares no return-code field and no error-text field, so completing normally
     /// discards both - here, <c>E_DB_ERROR</c> and the driver's message. A caller's retry-or-surface policy
@@ -2384,12 +2384,12 @@ public sealed class DataWindowServiceContractTests
     /// <param name="expected">The gRPC status it must become.</param>
     /// <remarks>
     /// <para>
-    /// <b>THE SECOND OF THE TWO STATUS PATHS ON ONE ROUTE, AND THE ONE THE FINDING WAS RAISED ON.</b> A
+    /// <b>THE SECOND OF THE TWO STATUS PATHS ON ONE ROUTE, AND THE ONE MOST EASILY LEFT WRONG.</b> A
     /// failing terminal status with NO database error becomes its status through one helper (the theory
     /// above); one that DOES carry a database error writes the error chunk first and then becomes its status
     /// through a DIFFERENT helper. Persistence attaches a database error to an unresolvable-DataObject
-    /// retrieval, so it was this path that answered <c>Internal</c> and reached the caller as HTTP 500 for a
-    /// mistake that was entirely theirs.
+    /// retrieval, so it is this path that decides whether such a retrieval reaches the caller as HTTP 500
+    /// for a mistake that is entirely theirs.
     /// </para>
     /// <para>
     /// THE ROWS ARE THE SAME OUTCOME CODES THE THEORY ABOVE USES, ON PURPOSE. A caller keys its
@@ -2400,14 +2400,14 @@ public sealed class DataWindowServiceContractTests
     /// spelling is the one its own helper's siblings already use.
     /// </para>
     /// <para>
-    /// 🔴 <b>E_INVALID_HANDLE IS THE ONE ROW THAT MOVED, AND IT MOVED BECAUSE THE TWO HELPERS DID NOT MERELY
-    /// SPELL IT DIFFERENTLY - THEY ANSWERED DIFFERENTLY.</b> This path used to give it
-    /// <c>FailedPrecondition</c> while the theory above gave it <c>NotFound</c>, and the published projection
-    /// declares no <c>FailedPrecondition</c> row: that status falls to the canonical mapping and reaches the
-    /// caller as <c>400</c> carrying <c>E_INVALID_ARGUMENT</c>, replacing the originating code rather than
-    /// re-spelling it. So a caller naming a handle the upstream no longer holds was told on one path that it
-    /// could not be found and on the other that its argument was malformed. Both paths now answer
-    /// <c>NotFound</c>.
+    /// 🔴 <b>E_INVALID_HANDLE IS THE ROW WHERE THE TWO HELPERS MOST EASILY DIVERGE, AND DIVERGING HERE IS
+    /// NOT MERELY A DIFFERENT SPELLING - IT IS A DIFFERENT ANSWER.</b> Giving it
+    /// <c>FailedPrecondition</c> on this path while the theory above gives it <c>NotFound</c> collides with a
+    /// published projection that declares no <c>FailedPrecondition</c> row: that status falls to the
+    /// canonical mapping and reaches the caller as <c>400</c> carrying <c>E_INVALID_ARGUMENT</c>, replacing
+    /// the originating code rather than re-spelling it. A caller naming a handle the upstream does not hold
+    /// would then be told on one path that it could not be found and on the other that its argument was
+    /// malformed. Both paths answer <c>NotFound</c>.
     /// </para>
     /// <para>
     /// AND THE DATABASE ERROR STILL TRAVELS ON EVERY ROW. The chunk is asserted alongside the status,
@@ -2642,16 +2642,16 @@ public sealed class DataWindowServiceContractTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THIS CASE PREVIOUSLY ASSERTED THE DEFECT. It expected TWO segments in first-appearance order, which
-    /// is what the implementation produced and what <c>persistence.v1.CarrierState</c> does not accept:
-    /// the receiving codec tests the segment COUNT against the canonical length and then requires segment
-    /// n to be buffer n [<c>Buffers/ChangesetCodec.cs</c>], so the payload this case was pinning would have
-    /// been rejected outright by the service it was addressed to. The expectation is corrected to the
-    /// contract rather than the implementation preserved to keep the expectation.
+    /// ASSERTING TWO SEGMENTS IN FIRST-APPEARANCE ORDER PINS THE DEFECT, and it is the shape an
+    /// emit-only-what-was-mentioned implementation produces. <c>persistence.v1.CarrierState</c> does not
+    /// accept it: the receiving codec tests the segment COUNT against the canonical length and then requires
+    /// segment n to be buffer n [<c>Buffers/ChangesetCodec.cs</c>], so such a payload would be
+    /// rejected outright by the service it is addressed to. The expectation follows the
+    /// contract rather than the implementation following the expectation.
     /// </para>
     /// <para>
-    /// WHAT IS GENUINELY PRESERVED IS ROW ORDER WITHIN A SEGMENT, and that half of the original assertion
-    /// is kept and strengthened. The Filter buffer's rows arrive inverted relative to the source
+    /// WHAT IS GENUINELY PRESERVED IS ROW ORDER WITHIN A SEGMENT, and that half is asserted and
+    /// strengthened. The Filter buffer's rows arrive inverted relative to the source
     /// [<c>n_cst_thread_task_sqlupdate.sru:L235</c>] and the identity round trip reads that buffer
     /// backwards because of it, so re-sorting here would pair identity values with the wrong rows - a
     /// defect that returns the right COUNT of identities and survives every row-count assertion.
@@ -3525,8 +3525,8 @@ public sealed class DataWindowServiceContractTests
                 // TOKEN 2, NOT 1, AND THAT IS THE ONE-COUNTER RULE RATHER THAN AN ARBITRARY CHOICE. The
                 // refusal above is a real message on the stream and it carries token 1, so the ordering
                 // mark stands at 1 by the time this notification is read and the token expected next is 2.
-                // This row used to send 1 and passed only because the sequenced discipline accepted any
-                // positive token - the same over-permissiveness that let production ignore the token
+                // Sending 1 here passes only against a sequenced discipline that accepts any
+                // positive token - the same over-permissiveness that lets a server ignore the token
                 // altogether. A client computes this value the way it computes it for the synchronous
                 // group: one past the highest token it has seen on the stream, in either direction.
                 Notify(opened.SessionId, 2L)),
@@ -4110,8 +4110,8 @@ public sealed class DataWindowServiceContractTests
     /// </summary>
     /// <remarks>
     /// C-03 states that a session is scoped to one DataWindow, so a session against a handle no DataWindow
-    /// resolves is not a session. Answering it <c>Ok</c> - which this service used to do for any string at
-    /// all - meant a caller learned of its typo only when a later column-dependent call failed, under a code
+    /// resolves is not a session. Answering it <c>Ok</c> - the obvious behaviour for any string at
+    /// all - means a caller learns of its typo only when a later column-dependent call fails, under a code
     /// describing THAT call. A BLANK handle is a different mistake and keeps its own code.
     /// </remarks>
     [Fact]
@@ -4145,7 +4145,7 @@ public sealed class DataWindowServiceContractTests
 
         // A handle the MODEL provider serves and the CHAIN factory refuses, which is the second of
         // BindConversation's two fail-fast arms. The open-time handle check above is the first, so this
-        // handle has to be one that passes it - the two arms are now reachable independently.
+        // handle has to be one that passes it - the two arms are reachable independently.
         OpenValidationSessionResponse opened = await fixture.Service.OpenValidationSession(
             new OpenValidationSessionRequest { DatawindowHandle = C03ChainFactory.UnboundHandle },
             fixture.Context);

@@ -70,13 +70,7 @@
 //  than retyping the literal - so the assertion cannot drift from the contract, and no analyzer
 //  suppression is needed for a constant this file does not own.
 //
-//  ====================================== RULES POSITION ==========================================
-//  `review_rules` returns exactly "No user rules provided." - one line, nothing further to page
-//  through. NO user-specified rule governs this file, none is invented here, and the absence is not
-//  treated as permission to lower the bar: the enterprise-standard baseline (AAP 0.7.2) applies in
-//  their place, and the binding constraints are AAP 0.7.3's non-rule inventory - C-A, C-B, C-E, C-G,
-//  C-I and the concurrency clause of 0.8.1, each discharged at the point of use below.
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  C-A SELF-AUDIT: every outcome is asserted against the GENERATED `dataservices.v1` and `common.v1`
 //      types. Where a domain constant is compared, it is compared TO its wire twin to prove the two
 //      agree - which is the only assertion holding an agreement the compiler cannot see - never used
@@ -922,14 +916,14 @@ public sealed class DataWindowGrpcRetrieveTests(DataServicesTestHostFactory host
     /// <returns>A task that completes once every upstream handle has been given back.</returns>
     /// <remarks>
     /// <para>
-    /// TOKEN-DRIVEN AND UNBOUNDED, AND THE OLD SHAPE WAS WORSE THAN MERELY SLOW. It retried up to fifty
-    /// times at twenty milliseconds and then RETURNED NORMALLY, so an expired bound did not report itself at
-    /// all - it handed a still-leaking edge to the caller's assertion, which then failed as though the
+    /// TOKEN-DRIVEN AND UNBOUNDED, BECAUSE A BOUNDED RETRY IS WORSE THAN MERELY SLOW. Retrying up to fifty
+    /// times at twenty milliseconds and then RETURNING NORMALLY means an expired bound does not report itself
+    /// at all - it hands a still-leaking edge to the caller's assertion, which then fails as though the
     /// release had never been attempted. The truth in that case is "a one-second budget elapsed on a loaded
     /// agent", and the two are indistinguishable in the failure message.
     /// </para>
     /// <para>
-    /// There is now no attempt count and no delay: the loop yields until the edge is clear, and only the
+    /// There is therefore no attempt count and no delay: the loop yields until the edge is clear, and only the
     /// test's own cancellation token can end it early. A release that genuinely never happens - the leak
     /// this case exists to catch - is ended by the runner's timeout, the separate liveness bound that
     /// belongs outside the assertion, and the caller's assertion still names exactly which handles were
@@ -2223,8 +2217,8 @@ public sealed class DataWindowGrpcEventChainTests(WireEventChainHostFixture fixt
             EventId.Ondwnrbuttondown,
             TestContext.Current.CancellationToken);
 
-        // TWO INDEPENDENT VETO CHANNELS, because the oracle has two: a raw event delegates to a SEMANTIC
-        // handler and then to the BROKER, and either can stop the dispatch -
+        // TWO INDEPENDENT VETO CHANNELS, because the oracle has two: a raw event has up to two edges - a
+        // PARTNER call and a BROKER trigger - and either can stop the dispatch. On this event both exist -
         // `if Event RButtonDown(...) = 1 then return 1` followed by
         // `if Eventful.of_Trigger(EVT_RBUTTONDOWN,...) = 1 then return 1` [se_cst_dw.sru:L115-L117].
         // Collapsing them into one field would lose which of the two prevented, and they unwind

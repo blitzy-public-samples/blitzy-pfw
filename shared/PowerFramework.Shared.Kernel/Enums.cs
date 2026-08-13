@@ -1774,7 +1774,7 @@ public static class Enums
     // exists only inside the closed pfw.dll and there is no C++ source for it anywhere in the
     // repository. Knowing the flags does not yield the table. Bit-exact parity for the matcher
     // therefore still requires the behavioural oracle, and if the oracle cannot be exercised the
-    // matcher must be reported BLOCKED rather than approximated. The flag contract is now known; the
+    // matcher must be reported BLOCKED rather than approximated. The flag contract is known; the
     // table is not.
     //
     // TRANSLATION NOTE: the trailing comment on each of the three constants below is Chinese in the

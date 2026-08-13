@@ -113,14 +113,6 @@
 //  are obvious non-secrets that match no provider credential pattern.
 //
 //  ------------------------------------------------------------------------------------------------
-//  RULES POSITION, STATED RATHER THAN LEFT IMPLICIT
-//  No user rules were provided for this project: the rules document contains exactly one line saying
-//  so, and re-reading it returns the same. Nothing is invented or back-filled from convention in
-//  their place. What governs this file is therefore the enterprise-standard baseline of AAP 0.7.2 -
-//  nullable and warnings-as-errors inherited by test code too, no secret in source, no unused
-//  coupling - together with the named non-rule constraints C-A, C-B, C-D, C-E, C-F, C-G, C-H and
-//  C-K, each cited below at the point it applies, as C-K requires. This mirrors the position
-//  GlobalUsings.cs states for the assembly as a whole.
 // ==================================================================================================
 // System.Globalization is imported locally rather than globally, exactly as GlobalUsings.cs prescribes for
 // the minority of files that need it: the ordinal diagnostics below are composed culture-invariantly, so a
@@ -129,8 +121,8 @@
 // System.Reflection is deliberately NOT imported. The one member that reflects
 // - TheServiceDerivesFromTheGeneratedBaseAndOverridesEveryDeclaredRpc - qualifies BindingFlags in full, and
 // an import used by a single expression would make reflection read as this file's norm when it is its
-// exception. The architectural assertion that once used reflection now reads source instead; see
-// ThisTypeIsTheSoleAbortedThrowSiteInTheService for the measurement that drove the change.
+// exception. The one architectural assertion that could use reflection reads SOURCE instead; see
+// ThisTypeIsTheSoleAbortedThrowSiteInTheService for the measurement behind that choice.
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using Google.Protobuf.Reflection;
@@ -1241,6 +1233,142 @@ public sealed class UpdateServiceTests
     }
 
     /// <summary>
+    /// A source field that is present and EMPTY is refused with the run's own code, and never reaches the
+    /// setter that asserts on it.
+    /// </summary>
+    /// <param name="emptyDataObject">Whether the request states an empty data object.</param>
+    /// <param name="emptySqlSyntax">Whether the request states an empty SQL syntax.</param>
+    /// <remarks>
+    /// <para>
+    /// ⚠️ <b>THIS IS THE ROW THE FINDING EXISTS FOR, AND WHAT IT PREVENTS IS A PROCESS EXIT.</b> The
+    /// caller-side proxy's data-object setter carries the oracle's UN-GATED assertion
+    /// [<c>Tasks/TaskProxies/SqlUpdateTaskProxy.cs:1077</c>, oracle <c>:L101</c>], and this host answers an
+    /// <c>AssertionFailure</c> by SHUTTING DOWN - the reproduced fail-fast posture. So before this screen an
+    /// authenticated caller holding the write scope terminated the whole instance, and with it every open
+    /// session, task and transaction, by sending one explicitly-present empty string
+    /// (CWE-20, CWE-617, CWE-248). The sibling syntax setter's assertion is DEBUG-gated [<c>:1134</c>], so
+    /// the same input reached the same fail-fast in a debug build; both fields are covered.
+    /// </para>
+    /// <para>
+    /// <b>THE ASSERTION IS NOT WEAKENED, AND THAT IS ASSERTED ELSEWHERE RATHER THAN HERE.</b>
+    /// <c>SqlUpdateTaskProxyTests.SetDataObject_AssertsOnAnEmptyNameInEveryConfiguration</c> still requires
+    /// the un-gated assertion to fire for an in-process caller, which is what it is for (constraint C-B).
+    /// What this row requires is that REMOTE input never reaches it.
+    /// </para>
+    /// <para>
+    /// <b>THE CODE AND THE MESSAGE ARE THE RUN'S OWN.</b> An empty value installs no source and CLEARS the
+    /// sibling one [<c>:L259-L260</c>, <c>:L270-L271</c>], so the state it leaves is exactly the no-source
+    /// state the case above refuses - same constant, same verbatim diagnostic, consumed from the task type
+    /// that owns it rather than retyped.
+    /// </para>
+    /// <para>
+    /// <b>AND THE REFUSAL IS ATOMIC</b>: the surface records NO call at all, which is the assertion that
+    /// proves the screen sits ahead of both the clear and the setters rather than merely converting an
+    /// exception into a status afterwards.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task APresentButEmptySourceFieldIsRefusedAndNeverReachesTheSetter(
+        bool emptyDataObject,
+        bool emptySqlSyntax)
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        // THE TASK ALREADY HOLDS A USABLE SOURCE, so this row cannot pass by way of the no-source arm above:
+        // the refusal it asserts can only come from the emptiness screen.
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await service.PrepareUpdate(
+                new PrepareUpdateRequest { Task = handle, DataObject = EvidencedDataObject },
+                Context)).Status.RetCode);
+
+        Assert.Equal(EvidencedDataObject, surface.DataObjectSeen);
+
+        int callsBefore = surface.Calls.Count;
+
+        PrepareUpdateRequest request = new() { Task = handle, Tables = { Company() } };
+
+        if (emptyDataObject)
+        {
+            request.DataObject = string.Empty;
+        }
+
+        if (emptySqlSyntax)
+        {
+            request.SqlSyntax = string.Empty;
+        }
+
+        PrepareUpdateResponse refused = await service.PrepareUpdate(request, Context);
+
+        Assert.Equal(WireRetCode.EInvalidDataobject, refused.Status.RetCode);
+        Assert.Equal(SqlUpdateTask.InvalidDataObjectMessage, refused.Status.ErrorText);
+
+        // NOTHING REACHED THE TASK: no clear, no switch, no descriptor, and above all neither setter - so
+        // the empty string never reached the assertion that would have ended the process.
+        Assert.Equal(callsBefore, surface.Calls.Count);
+        Assert.Empty(surface.Adds);
+
+        // The source the task already held is intact, so the refusal did not half-apply.
+        Assert.Equal(EvidencedDataObject, surface.DataObjectSeen);
+        Assert.Null(surface.SqlSyntaxSeen);
+
+        // THE POSITIVE ARM: a NON-EMPTY value on the very same field is still accepted, so the screen tests
+        // emptiness rather than presence.
+        PrepareUpdateRequest accepted = new() { Task = handle };
+
+        if (emptyDataObject)
+        {
+            accepted.DataObject = "d_company";
+        }
+
+        if (emptySqlSyntax)
+        {
+            accepted.SqlSyntax = "release 12.5;";
+        }
+
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await service.PrepareUpdate(accepted, Context)).Status.RetCode);
+    }
+
+    /// <summary>
+    /// The refusal names the offending field in its log record and quotes no request value.
+    /// </summary>
+    /// <remarks>
+    /// A caller that sent both fields has to be told which one to correct, and an operator reading the log
+    /// needs the same. What must NOT appear is any request value: the diagnostic carries the field's ROLE
+    /// and the task identifier only (constraint C-F).
+    /// </remarks>
+    [Fact]
+    public async Task TheEmptySourceRefusalNamesTheFieldWithoutQuotingAValue()
+    {
+        RecordingLogger<UpdateService> logger = new();
+
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) =
+            await CreateTaskAsync(logger);
+
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await service.PrepareUpdate(
+                new PrepareUpdateRequest { Task = handle, DataObject = EvidencedDataObject },
+                Context)).Status.RetCode);
+
+        _ = await service.PrepareUpdate(
+            new PrepareUpdateRequest { Task = handle, DataObject = string.Empty },
+            Context);
+
+        string record = Assert.Single(
+            logger.Messages,
+            message => message.Contains("EMPTY data object", StringComparison.Ordinal));
+
+        Assert.Contains("no update could ever run", record, StringComparison.Ordinal);
+        Assert.DoesNotContain(EvidencedDataObject, record, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A descriptor sent with the multi-table switch off that names a DIFFERENT update table from the one
     /// the data object's definition declares is REFUSED, and nothing is recorded.
     /// </summary>
@@ -1532,6 +1660,196 @@ public sealed class UpdateServiceTests
 
         Assert.True(surface.AutoCommitSeen);
         Assert.Contains("SetAutoCommit", surface.Calls);
+    }
+
+    /// <summary>
+    /// A submitted carrier over either published bound is refused, and the task's own payload survives.
+    /// </summary>
+    /// <param name="overRows">Whether the carrier exceeds the row ceiling.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>WHAT WAS WRONG.</b> The oracle's payload setter takes a blob and a row count and bounds neither
+    /// [<c>n_cst_thread_task_sqlupdate.sru:L44, :L74-L77</c>], and it was right not to: the blob was produced
+    /// by the SAME PROCESS a moment earlier from a DataWindow the application owned, so its size was a
+    /// property of that application's own data. Across a network boundary the carrier is caller-submitted,
+    /// and the only thing bounding it was the transport's message ceiling - which a caller fills with
+    /// millions of one-column rows as easily as with a few wide ones. Every row is then decoded, reconciled
+    /// against its buffer segment and walked twice, current values and original values, before a single
+    /// statement is generated: item COUNT and payload SIZE are different quantities and only one was bounded
+    /// (CWE-400, CWE-770).
+    /// </para>
+    /// <para>
+    /// <b>THE REFUSAL IS ATOMIC, WHICH IS THE HALF A STATUS ASSERTION ALONE WOULD MISS.</b> The setter it
+    /// guards ASSIGNS the payload before anything decodes it, so a carrier refused further in would already
+    /// have replaced the payload the task held. The row therefore installs a usable payload first and
+    /// requires it to survive the refusal untouched.
+    /// </para>
+    /// <para>
+    /// <b>THIS NARROWS THE CONTRACT DELIBERATELY</b> [AAP 0.1.5]: where a legacy behaviour cannot cross a
+    /// network boundary unchanged, the contract is narrowed with a DEFINED error rather than widened with a
+    /// guess. The error is <c>E_OUT_OF_RANGE</c> and it names the bound, because a published ceiling is not
+    /// a fact about this deployment's state or its other callers.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AnOverBudgetCarrierIsRefusedAndTheHeldPayloadSurvives(bool overRows)
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+        surface.Result = new UpdateRunResult
+        {
+            Code = RetCode.OK,
+            Outcome = UpdateOutcome.Succeeded(Resolution(new UpdateRowCounts(1, 0, 0))),
+        };
+
+        // THE TASK ALREADY HOLDS A USABLE PAYLOAD, so the survival assertion below has something to be about.
+        CarrierState held = new() { Processing = 1 };
+
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await service.Update(
+                new UpdateRequest { Task = handle, UpdateData = held, UpdateRows = 1 },
+                Context)).Status.RetCode);
+
+        Assert.Same(held, surface.PayloadSeen);
+
+        CarrierState offending = overRows
+            ? CarrierOfRows(UpdateCarrierBounds.MaximumRows + 1, valuesPerRow: 1)
+            : CarrierOfRows(1, UpdateCarrierBounds.MaximumValuesPerRow + 1);
+
+        UpdateResponse refused = await service.Update(
+            new UpdateRequest { Task = handle, UpdateData = offending, UpdateRows = 1 },
+            Context);
+
+        Assert.Equal(WireRetCode.EOutOfRange, refused.Status.RetCode);
+        Assert.Equal(
+            overRows
+                ? UpdateCarrierBounds.TooManyRowsDiagnostic
+                : UpdateCarrierBounds.TooManyValuesDiagnostic,
+            refused.Status.ErrorText);
+
+        // ATOMIC: the payload the task held is the one it still holds.
+        Assert.Same(held, surface.PayloadSeen);
+    }
+
+    /// <summary>
+    /// A carrier at both ceilings is accepted, and an absent one still means what the oracle means by it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE POSITIVE ARM, without which the rows above are satisfied by an implementation that refuses every
+    /// carrier - the failure mode a newly added bound is most likely to have. It submits a carrier sitting
+    /// exactly ON both ceilings, so the comparison is proved to be inclusive rather than merely present.
+    /// </para>
+    /// <para>
+    /// AND THE ABSENT CARRIER, which is a legal submission whose meaning is decided further in: a rejected
+    /// change set with a ZERO row count is the oracle's SUCCESS arm [<c>:L339-L342</c>]. A screen that
+    /// refused an absent carrier would convert a documented success into a refusal.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ACarrierAtBothCeilingsIsAcceptedAndAnAbsentOneIsUntouched()
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+        surface.Result = new UpdateRunResult
+        {
+            Code = RetCode.OK,
+            Outcome = UpdateOutcome.Succeeded(Resolution(new UpdateRowCounts(1, 0, 0))),
+        };
+
+        CarrierState atCeiling = CarrierOfRows(
+            UpdateCarrierBounds.MaximumRows,
+            UpdateCarrierBounds.MaximumValuesPerRow);
+
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await service.Update(
+                new UpdateRequest { Task = handle, UpdateData = atCeiling, UpdateRows = 1 },
+                Context)).Status.RetCode);
+
+        Assert.Same(atCeiling, surface.PayloadSeen);
+
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await service.Update(
+                new UpdateRequest { Task = handle, UpdateRows = 0 },
+                Context)).Status.RetCode);
+
+        Assert.Null(surface.PayloadSeen);
+    }
+
+    /// <summary>
+    /// The row ceiling counts across buffers rather than within one.
+    /// </summary>
+    /// <remarks>
+    /// A conforming carrier holds three segments, one per buffer, and every one of their rows is decoded and
+    /// walked. A ceiling applied per segment would admit three times the work it claims to - which is the
+    /// specific mistake a reader checking only the primary buffer would not see.
+    /// </remarks>
+    [Fact]
+    public async Task TheRowCeilingCountsAcrossEveryBuffer()
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+        surface.Result = new UpdateRunResult
+        {
+            Code = RetCode.OK,
+            Outcome = UpdateOutcome.Succeeded(Resolution(new UpdateRowCounts(1, 0, 0))),
+        };
+
+        int perBuffer = (UpdateCarrierBounds.MaximumRows / 2) + 1;
+
+        CarrierState split = new() { Processing = 1 };
+
+        foreach (DwBuffer buffer in (DwBuffer[])[DwBuffer.Primary, DwBuffer.Delete])
+        {
+            CarrierBufferSegment segment = new() { Buffer = buffer };
+
+            for (int row = 0; row < perBuffer; row++)
+            {
+                segment.Rows.Add(new DataWindowRow { Buffer = buffer, Row = row + 1 });
+            }
+
+            split.Segments.Add(segment);
+        }
+
+        UpdateResponse refused = await service.Update(
+            new UpdateRequest { Task = handle, UpdateData = split, UpdateRows = 1 },
+            Context);
+
+        Assert.Equal(WireRetCode.EOutOfRange, refused.Status.RetCode);
+        Assert.Equal(UpdateCarrierBounds.TooManyRowsDiagnostic, refused.Status.ErrorText);
+    }
+
+    /// <summary>
+    /// Builds a carrier with the requested shape and nothing else.
+    /// </summary>
+    /// <param name="rows">How many rows to place in the primary segment.</param>
+    /// <param name="valuesPerRow">How many column values each row carries, in each value set.</param>
+    /// <returns>The carrier.</returns>
+    /// <remarks>
+    /// The values carry column identifiers and no data. What the bound counts is ITEMS, so a row's payload
+    /// is irrelevant to it, and leaving the values empty keeps the row's cost proportional to the count
+    /// under test rather than to a fixture's idea of a realistic row.
+    /// </remarks>
+    private static CarrierState CarrierOfRows(int rows, int valuesPerRow)
+    {
+        CarrierBufferSegment segment = new() { Buffer = DwBuffer.Primary };
+
+        for (int row = 0; row < rows; row++)
+        {
+            DataWindowRow carried = new() { Buffer = DwBuffer.Primary, Row = row + 1 };
+
+            for (int column = 0; column < valuesPerRow; column++)
+            {
+                carried.Columns.Add(new ColumnValue { ColumnId = column + 1 });
+                carried.OriginalValues.Add(new ColumnValue { ColumnId = column + 1 });
+            }
+
+            segment.Rows.Add(carried);
+        }
+
+        return new CarrierState { Processing = 1, Segments = { segment } };
     }
 
     [Fact]
@@ -2212,12 +2530,33 @@ public sealed class UpdateServiceTests
         // A GUARD ON THE GUARD: an empty scan would satisfy nothing below by accident.
         Assert.NotEmpty(raising);
 
-        // PRODUCES - the classifier, and only the classifier.
+        // PRODUCES - the classifier, and only the classifier. THIS is the assertion that carries the
+        // guarantee: a status that could be Aborted can be constructed in exactly one file, so no other
+        // file can raise a 409 at all, whatever else it raises.
         Assert.Equal(["Concurrency/ConflictDetector.cs"], [.. naming]);
 
-        // THROWS - this file's subject, and only it. A new entry here is either a second throw site, which
-        // the division of responsibility forbids, or a deliberate change that must be argued for.
-        Assert.Equal(["Grpc/UpdateService.cs"], [.. raising]);
+        // RAISES - exactly two files, and the second is not a second CONFLICT site.
+        //
+        // WHY THE SET GREW, AND WHY THE PROPERTY DID NOT WEAKEN. Grpc/GrpcIngressLimit.cs raises
+        // RESOURCE_EXHAUSTED when an ingress bound is met, which is the canonical gRPC status for a refusal
+        // rather than a fault and is the only status it can raise - it names no other, and the assertion
+        // above proves it cannot name Aborted, because that spelling appears in one file and this is not
+        // that file. So the division this test defends is intact: the classifier still owns producing the
+        // conflict status, Grpc/UpdateService.cs still owns raising it, and no path anywhere can answer a
+        // caller 409 without the conflict trailer to rebase from.
+        //
+        // The bound cannot be enforced from either existing file. It has to refuse BEFORE a handler runs,
+        // which is what an interceptor is, and an interceptor's only way of refusing a call is to raise.
+        Assert.Equal(["Grpc/GrpcIngressLimit.cs", "Grpc/UpdateService.cs"], [.. raising]);
+
+        // AND THE SECOND SITE IS PINNED TO ITS ONE STATUS, so a later edit cannot quietly repurpose the
+        // interceptor into a general-purpose throw site. Read from source for the same reason the scan
+        // above is: it names the file a reviewer would open.
+        string limiter = File.ReadAllText(Path.Combine(sourceRoot, "Grpc", "GrpcIngressLimit.cs"));
+
+        Assert.Contains("StatusCode.ResourceExhausted", limiter, StringComparison.Ordinal);
+        Assert.Single(
+            limiter.Split("new Status(", StringSplitOptions.None).Skip(1).ToArray());
     }
 
     /// <summary>
@@ -2596,7 +2935,7 @@ public sealed class UpdateServiceTests
     [Fact]
     public async Task TheRequestsCancellationTokenReachesTheWorker()
     {
-        // F-11 for this contract: the worker side is synchronous by contract, so what the token buys is
+        // THE CANCELLATION CONTRACT, FOR THIS CONTRACT: the worker side is synchronous by contract, so what the token buys is
         // that a statement is not ISSUED for a caller that has gone, and that a multi-row apply stops
         // between rows. Both live below this seam; what is asserted here is that the request's own token
         // - not None, and not a fresh one - is what arrives.
@@ -2761,9 +3100,9 @@ public sealed class UpdateServiceTests
     [Fact]
     public async Task AnIdleReclaimDoesNotDisposeATaskWithAnOperationInFlight()
     {
-        // THE THIRD LOOP, AND THE ONE THE OLD CODE ARGUED DID NOT NEED THE HANDOFF - on the grounds that
+        // THE THIRD LOOP, AND THE ONE MOST EASILY ARGUED NOT TO NEED THE HANDOFF - on the grounds that
         // every C-06 operation refreshes the stamp on the way in, so a task in use is never near the idle
-        // window. "Never" was too strong: an update against a contended file-backed store can outrun the
+        // window. "Never" is too strong: an update against a contended file-backed store can outrun the
         // window, and the teardown would then land on a task still executing. The handoff costs nothing and
         // removes the argument.
         (UpdateService service, FakeTaskFactory factory, UpdateTaskRegistry registry) = CreateService();
@@ -2928,6 +3267,21 @@ public sealed class UpdateServiceTests
         public string Dbms { get; private set; } = string.Empty;
 
         public bool AutoCommit { get; set; }
+
+        /// <summary>Moves the auto-commit mode and answers success, because this double opens no transaction.</summary>
+        /// <param name="autoCommit">The mode to put in force.</param>
+        /// <returns>Always a succeeded state.</returns>
+        /// <remarks>
+        /// ROUTED THROUGH THE PROPERTY so whatever the property records still records. A double with no
+        /// provider behind it has nothing the transition can fail on, which is the contract's own
+        /// nothing-to-do case.
+        /// </remarks>
+        public SqlState TrySetAutoCommit(bool autoCommit)
+        {
+            AutoCommit = autoCommit;
+
+            return SqlState.Succeeded();
+        }
 
         public void ApplyConnectionFields(in TransactionData descriptor) => Dbms = descriptor.Dbms;
 
@@ -4105,7 +4459,7 @@ public sealed class UpdateServiceTests
 
         Assert.Equal(0L, harness.Worker.GetUpdateRows());
 
-        // With both cleared, the same refusal is now the SUCCESS-WITH-NO-DATA arm [:L339].
+        // With both cleared, the same input reaches the SUCCESS-WITH-NO-DATA arm instead [:L339].
         Assert.Equal(RetCode.OK, harness.Run());
         Assert.Null(harness.Carrier.ChangesSeen);
     }

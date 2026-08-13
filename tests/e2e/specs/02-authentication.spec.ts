@@ -144,11 +144,11 @@ import {
 } from '../fixtures/contract-shape';
 
 /**
- * THE REPOSITORY READERS MOVED, and both callers here now share them.
+ * THE REPOSITORY READERS ARE SHARED, NOT LOCAL.
  *
- * `repositoryRoot()` and `readRepositoryText()` used to be declared in this file
- * and nowhere else. They are now in `fixtures/contract-shape.ts` beside the
- * contract-shape assertions that need them, because the readiness spec's
+ * `repositoryRoot()` and `readRepositoryText()` live in `fixtures/contract-shape.ts`
+ * beside the contract-shape assertions that need them, rather than here, because the
+ * readiness spec's
  * anti-drift guard reads the published Gateway contract for exactly the same
  * reason this spec reads the published Security contract — and two copies of a
  * repository-root walk is one copy too many.
@@ -198,9 +198,11 @@ const NEVER_THROW_ON_STATUS = { failOnStatusCode: false } as const;
 test.describe('Authentication (constraint C-G)', () => {
   // THE TOKEN-ISSUANCE PRECONDITION, and it is the FIRST thing this group does.
   //
-  // `POST /v1/tokens` on Security is authenticated by a client certificate and by
-  // nothing else, on every topology including the local bring-up, so with no
-  // identity provisioned every authenticated assertion below is unrunnable. The
+  // `POST /v1/tokens` on Security is authenticated by a presented caller
+  // credential - an HTTP Basic credential or a trusted client certificate - and
+  // never by a bearer token, on every topology including the local bring-up, so
+  // with no identity provisioned every authenticated assertion below is
+  // unrunnable. The
   // hook fails this group's SETUP in a full acceptance run rather than letting
   // fifteen token calls fail one at a time with transport errors that never say
   // why; a run that has explicitly declared itself partial passes straight
@@ -279,15 +281,15 @@ test.describe('Authentication (constraint C-G)', () => {
         'response here means the guard is not wired at all',
     ).toBe(false);
 
-    // THE BODY IS ASSERTED, AND THE REASON THIS COMMENT ONCE SAID OTHERWISE IS WORTH RECORDING.
-    // It read: no schema is published for this response, the 401 is a cross-cutting outcome of the
-    // bearer scheme answered before the route runs, so inventing a shape would be inventing a
-    // requirement (C-B). The premise was simply wrong. `gateway.v1.yaml` publishes a shared
+    // THE BODY IS ASSERTED, AND THE ARGUMENT FOR LEAVING IT UNASSERTED IS WORTH ANSWERING.
+    // That argument runs: no schema is published for this response, the 401 is a cross-cutting outcome
+    // of the bearer scheme answered before the route runs, so asserting a shape would be inventing a
+    // requirement (C-B). The premise is simply wrong. `gateway.v1.yaml` publishes a shared
     // `Unauthorized` response whose only content is `application/problem+json` carrying
     // `ProblemDetails`, and every authenticated operation in the document references it — so the
-    // shape is not invented here, it is quoted. Worse, the omission MASKED A REAL DEFECT: the
-    // service advertised that body and returned an empty one, because neither diagnostics
-    // middleware was installed, and this was the assertion positioned to catch it.
+    // shape is not invented here, it is quoted. And the omission MASKS A REAL DEFECT SHAPE: a service
+    // advertising that body while returning an empty one, because neither diagnostics middleware was
+    // installed, is exactly what this assertion is positioned to catch.
     // EXACTLY the problem media type, parameters and all. This was
     // `toContain('application/problem+json')`, which a `text/html` page mentioning
     // the string would have satisfied and which said nothing about an unexpected
@@ -378,7 +380,7 @@ test.describe('Authentication (constraint C-G)', () => {
         'valid but the granted scope set was insufficient.',
     ).toBe(200);
 
-    // THE ACCEPTED RESPONSE'S SHAPE, WHICH WAS PREVIOUSLY UNASSERTED ALTOGETHER.
+    // THE ACCEPTED RESPONSE'S SHAPE, WHICH A STATUS ASSERTION ALONE LEAVES OPEN.
     // A 200 alone establishes that the credential was accepted and nothing about
     // what the endpoint answered, so `PingResponse` could have drifted to any
     // shape at all without this suite noticing. Its two constants make the
@@ -529,10 +531,10 @@ test.describe('Authentication (constraint C-G)', () => {
         'separate services.',
     ).toBe('string');
 
-    // THE FULL URI, NOT A SUFFIX. This assertion used to be
-    // `jwksUri.endsWith(JWKS_PATH)`, which accepted the key set on ANY ORIGIN:
-    // a document advertising `https://somewhere-else.example/.well-known/jwks.json`
-    // satisfied it completely. That is precisely the drift that matters here,
+    // THE FULL URI, NOT A SUFFIX. `jwksUri.endsWith(JWKS_PATH)` is the obvious
+    // assertion and it accepts the key set on ANY ORIGIN: a document advertising
+    // `https://somewhere-else.example/.well-known/jwks.json` satisfies it
+    // completely. That is precisely the drift that matters here,
     // because a consumer's stock bearer handler fetches whatever this member
     // says and then trusts the keys it finds — so an advertised origin nobody
     // verified is an unverified trust anchor for three services.

@@ -94,13 +94,7 @@
 //  0. Every assertion below distinguishes the two, and nothing here reads a handled value out of a
 //  trigger result.
 //
-//  RULES POSITION, STATED EXPLICITLY (AAP 0.7.1)
-//  --------------------------------------------
-//  review_rules reports exactly one line: "No user rules provided." No user-specified rule governs this
-//  file, none was invented to fill the gap, and that absence is not licence to lower the bar. In their
-//  place the AAP 0.7.2 enterprise baseline and the AAP 0.7.3 binding non-rule constraints apply. The
-//  five that bear on this file:
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //    C-B  NO BEHAVIOUR IMPROVEMENTS - the capture protocol is asserted AS THE LEGACY HAS IT.
 //         Every test that pins a rule of the protocol carries a PINS LEGACY SEMANTICS marker and its
 //         locator. Two of them exist specifically to stop a "cleaner" rule being asserted in place of

@@ -35,16 +35,14 @@
 //  startup failure for a mysterious one. It is safe for the same reason the eager resolve is - a startup
 //  exception reaches the operator channel and never a caller.
 //
-//  WHY THE SUBJECT OF THIS FILE CHANGED, AND WHAT WAS WRONG BEFORE. These tests used to call a helper
-//  named `LoadMutualTlsClientIdentity`, which had NO production call site: the singleton registration in
-//  `Program.cs` has always used `LoadSecurityClientIdentity`. Two near-identical loaders coexisted, and
-//  the tested one was the dead one - so every assertion here about refusal wording described diagnostics
-//  no deployment could ever emit. The two genuinely differed on that point: the dead helper quoted the
-//  GROUP key plus bare property names, while the live one quotes both FULLY-QUALIFIED configuration keys,
-//  which is why the two constants below are spelled out in full rather than reduced to the group. A test
-//  that passes against an unreachable implementation is worse than no test, because it reports confidence
-//  it has not earned. The duplicate is deleted and every assertion below now runs against the loader the
-//  deployed registration calls.
+//  WHY THE SUBJECT IS NAMED SO PRECISELY. `LoadSecurityClientIdentity` is the loader the singleton
+//  registration in `Program.cs` calls, and it is the ONLY loader this file may assert against. A
+//  second, near-identical loader with no production call site would make every assertion here about
+//  refusal wording describe diagnostics no deployment could emit - and a test that passes against an
+//  unreachable implementation is worse than no test, because it reports confidence it has not earned.
+//  The wording is where such a pair would diverge invisibly: this loader quotes both
+//  FULLY-QUALIFIED configuration keys, not the GROUP key plus bare property names, which is why the two
+//  constants below are spelled out in full rather than reduced to the group.
 // ==================================================================================================
 
 using System.Globalization;
@@ -169,9 +167,9 @@ public sealed class MutualTlsClientIdentityTests
         // BOTH KEYS, FULLY QUALIFIED, AND THAT PRECISION IS THE POINT RATHER THAN PEDANTRY. An operator
         // has to be able to tell which half is missing, and a bare `CertificatePath` does not locate a
         // setting in a file with several sections. It is also the assertion that DISCRIMINATES this loader
-        // from the dead duplicate this file used to exercise: that one quoted the group key plus the bare
-        // property names, so it would satisfy a `Contains(GroupKey)` and a `Contains(nameof(...))` check
-        // while failing these two. Asserting the group alone is what let the tests pass against an
+        // from a duplicate that quotes the group key plus the bare
+        // property names: such a message satisfies a `Contains(GroupKey)` and a `Contains(nameof(...))` check
+        // while failing these two. Asserting the group alone is what lets a suite pass against an
         // implementation no deployment could reach.
         Assert.Contains(CertificatePathKey, refusal.Message, StringComparison.Ordinal);
         Assert.Contains(CertificateKeyPathKey, refusal.Message, StringComparison.Ordinal);

@@ -115,9 +115,9 @@
 //      PINYIN      `pinyinfirstletterlike.srf` is IN SCOPE (AAP 0.4.1), invoked from a DataWindow
 //                  filter expression at `n_cst_dwsvc_dropdownsearch.sru:L323`, and its `PY_LIKE_*`
 //                  flags are declared at `enums.sru:L1146-L1149`. `dataservices.v1.PinyinLike` is
-//                  therefore legitimate, not a Documents leak. An earlier draft exempted it in the
-//                  ledger; the ledger's own necessity check rejected the entry, correctly, because no
-//                  term matches it - the worked example is recorded at that entry's former place.
+//                  therefore legitimate, not a Documents leak. Exempting it in the ledger is the
+//                  tempting response, and the ledger's own necessity check rejects such an entry,
+//                  correctly, because no term matches it - the worked example is recorded at the ledger.
 //                  (Also note that "nyi" would match pi-NYI-n, which is why the placeholder
 //                  vocabulary does not contain it.)
 //      LOCALIZATION The i18n categories are a shared LIBRARY, not a deferred service
@@ -145,12 +145,6 @@
 //    `TheDeferredCapabilityVocabularyIsTheLoadBearingInputAndIsNotEmpty` asserts its size and
 //    coverage. ANY EDIT TO THE VOCABULARY IS A CHANGE TO A COMPLIANCE CONTROL.
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  `review_rules` returns exactly "No user rules provided.", so NO user-specified rule governs this
-//  file, and no file enters scope because of one. That absence is not licence: the enterprise baseline
-//  of AAP 0.7.2 applies in its place - nullable enabled and warnings as errors inherited and never
-//  relaxed (C-H), no `NoWarn`, no `#pragma`, no suppression, and no secret in source.
 // ==================================================================================================
 
 using System.Globalization;
@@ -346,7 +340,7 @@ public sealed class ReservedRouteMetadataTests(OpenApiContractDocuments document
             //  pfw.ui.objects (64), pfw.base::u_logo.sru (1). Capability bits INIT_FLAG_ENABLE_UI (1)
             //  and INIT_FLAG_ENABLE_DPIAWARE (1024) [enums.sru:L41,L47].
             // ---------------------------------------------------------------------------------------
-            new("theme", DesignSystemService, "theming; the legacy disables its own with themename = \"Do Not Use Themes\" [pfw.sra:L25]"),
+            new("theme", DesignSystemService, "theming; the legacy disables its own with themename = \"Do Not Use Themes\" [ws_objects/pfw.pbl.src/pfw.sra:L25]"),
             new("geometry", DesignSystemService, "the geometry structures of pfw.ui"),
             new("colour", DesignSystemService, "colour functions - British spelling, as AAP 0.4.4 writes it"),
             new("color", DesignSystemService, "colour functions - American spelling, as code would spell it"),
@@ -508,12 +502,12 @@ public sealed class ReservedRouteMetadataTests(OpenApiContractDocuments document
         //  though its library `pfw.utility` is otherwise deferred to Documents, and its flag
         //  meanings are declared in the read-only oracle at `enums.sru:L1146-L1149`.
         //
-        //  An earlier draft of this ledger exempted the type. THE NECESSITY CHECK IN
-        //  EveryExemptionInTheLedgerStillResolvesToARealContractSymbol REJECTED IT, correctly:
-        //  "pinyin" is not a vocabulary term, so nothing would ever have reported the type, and an
+        //  EXEMPTING THE TYPE HERE IS THE TEMPTING RESPONSE, AND THE NECESSITY CHECK IN
+        //  EveryExemptionInTheLedgerStillResolvesToARealContractSymbol REJECTS IT, correctly:
+        //  "pinyin" is not a vocabulary term, so nothing would ever report the type, and an
         //  exemption for something no sweep reports is how a ledger starts reading as a general
-        //  allow-list. The right control is the one now in place - the term was never added, and the
-        //  reason it was not is recorded in the file banner. Left here as the worked example of how
+        //  allow-list. The right control is the one in place - the term is not in the vocabulary, and
+        //  the reason is recorded in the file banner. Left here as the worked example of how
         //  to answer "does this need an exemption?": if no term matches it, the answer is no.
         // ---------------------------------------------------------------------------------------
     ];
@@ -602,12 +596,12 @@ public sealed class ReservedRouteMetadataTests(OpenApiContractDocuments document
         // carries the image resource NAME and nothing more, and resolving that name to a picture and
         // drawing it is the deferred half.
         //
-        // IT NEEDED NO ENTRY UNTIL THE PAYLOAD SCHEMAS BECAME CONCRETE, and that is the point rather
-        // than an inconvenience. While every projected body was delegated to one open `ProtoPayload`
-        // schema, this sweep had no property names to inspect on the DataWindow surface at all - it
-        // passed because there was nothing there, which is the silent failure mode the file banner's
-        // guard exists to catch. The Tier 3 schemas put 436 members in front of it, and this is the one
-        // it reports.
+        // THIS ENTRY IS ONLY REACHABLE BECAUSE THE PAYLOAD SCHEMAS ARE CONCRETE, and that is the point
+        // rather than an inconvenience. A document that delegated every projected body to one open
+        // `ProtoPayload` schema would give this sweep no property names to inspect on the DataWindow
+        // surface at all, so it would pass because there was nothing there - the silent failure mode
+        // the file banner's guard exists to catch. The Tier 3 schemas put every projected member in
+        // front of it, and this is the one it reports.
         "image",
     ];
 
@@ -778,8 +772,8 @@ public sealed class ReservedRouteMetadataTests(OpenApiContractDocuments document
             // examines the request before answering, and any 2xx would say part of a deferred service
             // had been built. Neither may appear.
             //
-            // 401 IS THE ONE PERMITTED COMPANION, AND EXCLUDING IT WAS THE DEFECT THIS ASSERTION USED
-            // TO CARRY. An earlier revision asserted the set was EXACTLY {501}, on the reasoning that
+            // 401 IS THE ONE PERMITTED COMPANION, AND EXCLUDING IT IS THE DEFECT THIS ASSERTION EXISTS
+            // TO CATCH. Asserting the set is EXACTLY {501} is the tempting reading, on the reasoning that
             // the 401 comes from the authentication middleware and is therefore not a response the
             // ROUTE produces. That is true about where the refusal originates and wrong about what the
             // contract owes a consumer: these operations DO require a token - Endpoints/
@@ -830,6 +824,55 @@ public sealed class ReservedRouteMetadataTests(OpenApiContractDocuments document
         {
             Assert.Contains(required, serialized, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void TheIngressLimiterStatusIsReconciledAtDocumentLevelRatherThanAddedToAReservedResponseSet()
+    {
+        // THE SECOND CROSS-CUTTING STATUS, AND THE ROW THAT KEEPS ITS OMISSION HONEST.
+        //
+        // Gateway now bounds its ingress - it is this system's first-ever listener, so a caller able to
+        // exhaust it is a failure mode the decomposition itself created rather than a legacy behaviour
+        // (AAP 0.1.4). The limiter is GLOBAL middleware, not a per-path policy, so it runs before every
+        // route handler in the document except the exempt `/health`, and a reserved path can therefore
+        // observably answer 429.
+        //
+        // WHY IT IS NOT DECLARED ON THE EIGHT RESERVED OPERATIONS, WHICH IS THE JUDGEMENT THIS ROW
+        // RECORDS. The two rows above pin their response set closed at exactly {401, 501}, and
+        // gateway.v1.yaml states the rule they enforce: any 4xx there other than that 401 would say the
+        // route inspects the request before answering. A reserved family inspects nothing. The 401 earns
+        // its place because the OPERATION carries `.RequireAuthorization()`, the requirement that
+        // produces it; the limiter carries no per-operation declaration to earn the same standing. C-D
+        // is a hard AAP exclusion and outranks a publication preference, so the status is reconciled
+        // machine-readably at document level - which is exactly what the extension exists for - instead
+        // of growing a set whose closedness IS the deferred-service compliance position.
+        //
+        // Without this row the omission would be indistinguishable from having forgotten to publish the
+        // limiter at all, which is the SEC-05 finding itself.
+        Assert.NotNull(documents.Gateway.Extensions);
+
+        Assert.True(
+            documents.Gateway.Extensions!.TryGetValue("x-cross-cutting-responses", out var declaration),
+            "gateway.v1.yaml declares no document-level 'x-cross-cutting-responses', so the ingress "
+                + "limiter's 429 is reconciled nowhere. The four reserved families deliberately omit it "
+                + "from their closed response sets, and this declaration is the only thing that "
+                + "distinguishes that omission from never having published the limit.");
+
+        JsonNodeExtension node = Assert.IsType<JsonNodeExtension>(declaration);
+        string serialized = node.Node.ToJsonString();
+
+        // THE FOUR THINGS A CONSUMER OF A RESERVED PATH NEEDS: which status, what produces it, that it
+        // is evaluated before the handler, and that it is NOT enumerated on the reserved families.
+        foreach (string required in (string[])
+            ["429", "ingress-rate-limiter", "route-handler", "reserved"])
+        {
+            Assert.Contains(required, serialized, StringComparison.Ordinal);
+        }
+
+        // AND THE EXEMPTION IS NAMED, because `/health` is the one path that genuinely cannot answer
+        // 429 - the limiter skips it so a saturated service still reports its own readiness, which is
+        // what the compose health gate depends on.
+        Assert.Contains("health", serialized, StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]

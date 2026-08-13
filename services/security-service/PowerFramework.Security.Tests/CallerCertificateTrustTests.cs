@@ -26,7 +26,8 @@
 //       to "any CA-looking thing".
 //    4. NO CERTIFICATE IS REFUSED.
 //    5. WITH NO ANCHOR CONFIGURED the platform's own verdict is returned unchanged - neither an
-//       unconditional accept (which would be the bypass this replaces) nor an unconditional refuse
+//       unconditional accept (which would be the bypass an explicit anchor exists to prevent) nor an
+//       unconditional refuse
 //       (which would make a publicly-issued or image-trusted deployment unable to accept any caller).
 //    6. AN UNREADABLE ANCHOR IS FAIL-FAST, and the failure never echoes the configured path.
 //
@@ -110,6 +111,25 @@ public sealed class CallerCertificateTrustTests
     /// </summary>
     /// <param name="commonName">The caller identity it falsely claims.</param>
     /// <returns>The certificate.</returns>
+    /// <summary>
+    /// The revocation posture the shipped settings file declares, passed explicitly by every row.
+    /// </summary>
+    /// <remarks>
+    /// EXPLICIT RATHER THAN DEFAULTED, because the loader takes no default for it and deliberately so: a
+    /// host that omitted the posture would silently run on one nobody chose, which is the class of defect
+    /// an optional parameter on a security decision invites. Spelling it here keeps every row below
+    /// asserting the behaviour of the SHIPPED posture rather than of an implicit one.
+    /// </remarks>
+    private const string ShippedRevocationMode = ClientCertificateRevocationModes.NoCheck;
+
+    /// <summary>The declared-window ceiling the shipped settings file declares, in days.</summary>
+    /// <remarks>
+    /// Every certificate this file builds declares a window of one day or twelve hours, so no row is near
+    /// the ceiling and none of them is asserting the ceiling by accident. The ceiling has its own rows in
+    /// <c>CallerCertificateLifetimeCeilingTests</c>.
+    /// </remarks>
+    private const int ShippedLifetimeDays = 90;
+
     private static X509Certificate2 CreateSelfSignedCaller(string commonName)
     {
         using RSA key = RSA.Create(2048);
@@ -158,7 +178,7 @@ public sealed class CallerCertificateTrustTests
 
         try
         {
-            CallerCertificateTrust trust = CallerCertificateTrust.Load(anchor);
+            CallerCertificateTrust trust = CallerCertificateTrust.Load(anchor, ShippedRevocationMode, ShippedLifetimeDays);
 
             Assert.True(trust.IsPinned);
 
@@ -183,7 +203,7 @@ public sealed class CallerCertificateTrustTests
 
         try
         {
-            CallerCertificateTrust trust = CallerCertificateTrust.Load(anchor);
+            CallerCertificateTrust trust = CallerCertificateTrust.Load(anchor, ShippedRevocationMode, ShippedLifetimeDays);
 
             // THE IMPERSONATION CASE. The common name is byte-identical to a real caller identity, so
             // the endpoint's name reconciliation would have passed. Only the chain check stops it.
@@ -210,7 +230,7 @@ public sealed class CallerCertificateTrustTests
 
         try
         {
-            CallerCertificateTrust trust = CallerCertificateTrust.Load(anchor);
+            CallerCertificateTrust trust = CallerCertificateTrust.Load(anchor, ShippedRevocationMode, ShippedLifetimeDays);
 
             // Pinning is to THIS authority, not to "anything with a CA basic constraint".
             Assert.False(trust.Validate(
@@ -227,7 +247,10 @@ public sealed class CallerCertificateTrustTests
     [Fact]
     public void AnAbsentCertificateIsRefusedWhetherOrNotAnAnchorIsConfigured()
     {
-        CallerCertificateTrust unpinned = CallerCertificateTrust.Load(clientCaPath: null);
+        CallerCertificateTrust unpinned = CallerCertificateTrust.Load(
+            clientCaPath: null,
+            ShippedRevocationMode,
+            ShippedLifetimeDays);
 
         Assert.False(unpinned.IsPinned);
         Assert.False(unpinned.Validate(certificate: null, chain: null, SslPolicyErrors.None));
@@ -237,7 +260,7 @@ public sealed class CallerCertificateTrustTests
 
         try
         {
-            CallerCertificateTrust pinned = CallerCertificateTrust.Load(anchor);
+            CallerCertificateTrust pinned = CallerCertificateTrust.Load(anchor, ShippedRevocationMode, ShippedLifetimeDays);
 
             Assert.False(pinned.Validate(certificate: null, chain: null, SslPolicyErrors.None));
         }
@@ -258,7 +281,10 @@ public sealed class CallerCertificateTrustTests
     {
         using X509Certificate2 caller = CreateSelfSignedCaller("powerframework-gateway");
 
-        CallerCertificateTrust trust = CallerCertificateTrust.Load(clientCaPath: "   ");
+        CallerCertificateTrust trust = CallerCertificateTrust.Load(
+            clientCaPath: "   ",
+            ShippedRevocationMode,
+            ShippedLifetimeDays);
 
         Assert.False(trust.IsPinned);
 
@@ -276,7 +302,7 @@ public sealed class CallerCertificateTrustTests
             $"blitzy_security_clientca_absent_{Guid.NewGuid():n}.pem");
 
         InvalidOperationException failure = Assert.Throws<InvalidOperationException>(
-            () => CallerCertificateTrust.Load(missing));
+            () => CallerCertificateTrust.Load(missing, ShippedRevocationMode, ShippedLifetimeDays));
 
         Assert.Contains(
             nameof(SecurityMutualTlsOptions.ClientCaPath),
@@ -296,7 +322,7 @@ public sealed class CallerCertificateTrustTests
 
         try
         {
-            _ = Assert.Throws<InvalidOperationException>(() => CallerCertificateTrust.Load(path));
+            _ = Assert.Throws<InvalidOperationException>(() => CallerCertificateTrust.Load(path, ShippedRevocationMode, ShippedLifetimeDays));
         }
         finally
         {

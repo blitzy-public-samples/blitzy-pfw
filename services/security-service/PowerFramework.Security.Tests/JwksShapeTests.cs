@@ -60,13 +60,7 @@
 //  CONSTRAINT COMPLIANCE - WHAT EACH GOVERNING CONSTRAINT REQUIRES OF THIS FILE SPECIFICALLY
 //  ==================================================================================================
 //
-//  RULES POSITION. The project's rules document contains exactly one line: NO USER RULES WERE
-//  PROVIDED. Nothing is invented, inferred or back-filled from convention in their place, and their
-//  absence is not read as licence to lower the bar. The enterprise-standard baseline applies instead:
-//  warning-clean under warnings-as-errors, correct nullable annotations with no null-forgiving
-//  suppression anywhere below, no secret in source, no package added, every disposable disposed, and
-//  no performance property asserted because the repository publishes none.
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  C-F  NOTHING HARDCODED, AND THE NAMED SECRET SITES ARE A FLOOR RATHER THAN A CEILING. Two distinct
 //       obligations land on this file.
 //
@@ -480,13 +474,22 @@ public sealed class JwksShapeTests
     ];
 
     /// <summary>
-    /// The members the authored contract REQUIRES in the discovery document
-    /// [<c>OpenApi/security.v1.yaml</c> ProviderMetadata, <c>required: [issuer, jwks_uri]</c>].
+    /// The FOUR members the authored contract REQUIRES in the discovery document
+    /// [<c>OpenApi/security.v1.yaml</c> ProviderMetadata,
+    /// <c>required: [issuer, jwks_uri, token_endpoint, id_token_signing_alg_values_supported]</c>].
     /// </summary>
+    /// <remarks>
+    /// <c>token_endpoint</c> and <c>id_token_signing_alg_values_supported</c> are required of any
+    /// provider that is not implicit-flow-only by the discovery specification itself, and this issuer
+    /// publishes both unconditionally - so asserting only <c>issuer</c> and <c>jwks_uri</c> would admit
+    /// a document a conforming consumer would be entitled to reject.
+    /// </remarks>
     private static readonly ImmutableArray<string> ContractRequiredMetadataMembers =
     [
         IssuerMember,
         KeySetAddressMember,
+        TokenEndpointMember,
+        SigningAlgorithmsMember,
     ];
 
     /// <summary>
@@ -494,8 +497,8 @@ public sealed class JwksShapeTests
     /// </summary>
     /// <remarks>
     /// There is no interactive flow and no user-facing flow anywhere in this system: every caller is a
-    /// service, identity on the issuance operation is established by the transport, and there is no end
-    /// user to redirect, to prompt for consent or to describe. Publishing either member would advertise
+    /// service, the issuance operation authenticates a presented Basic credential or a trusted client
+    /// certificate, and there is no end user to redirect, to prompt for consent or to describe. Publishing either member would advertise
     /// a capability that does not exist and invite a consumer to attempt a redirect that cannot succeed.
     /// </remarks>
     private static readonly ImmutableArray<string> InteractiveFlowMembers =

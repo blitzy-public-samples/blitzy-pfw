@@ -19,14 +19,6 @@
 //  the real MapPersistenceEndpoints call. A hand-assembled host would prove only that this file can
 //  configure ASP.NET Core correctly, which is not the question an auditor asks.
 //
-//  RULES POSITION, STATED BECAUSE ITS ABSENCE IS A FINDING RATHER THAN AN OMISSION
-//  No user rules were provided for this project. The rules document contains exactly one line saying
-//  so, and re-reading it returns the same one line. Nothing is invented, inferred or back-filled from
-//  convention in their place. The bar applied instead is the enterprise-standard baseline - nullable
-//  enabled, warnings as errors, no secret in source or in a fixture, a genuinely testable design, a
-//  hard coverage gate - together with the named non-rule constraints, each cited below at the point it
-//  actually applies rather than listed in a preamble.
-//
 //  ================================================================================================
 //  THE DECISION RECORD
 //  ================================================================================================
@@ -150,10 +142,10 @@
 //      ALPN gives a probe HTTP/1.1 and a gRPC channel HTTP/2 on that one port - measured on a
 //      throwaway host before it was asserted here.
 //
-//      A REVISION BETWEEN THE TWO SPLIT THEM ACROSS TWO TLS ENDPOINTS, 5101 pinned to HTTP/1.1 and a
-//      second port pinned to HTTP/2, so each listener could only answer what it was for. That was
-//      withdrawn: AAP 0.3.2.2 assigns contracts C-05 through C-08 to 5101, so serving them anywhere
-//      else put a published contract on a port the map does not give it.
+//      SPLITTING THEM ACROSS TWO TLS ENDPOINTS is the tempting middle position - 5101 pinned to HTTP/1.1
+//      and a second port pinned to HTTP/2, so each listener could only answer what it was for. It is not
+//      available: AAP 0.3.2.2 assigns contracts C-05 through C-08 to 5101, so serving them anywhere
+//      else puts a published contract on a port the map does not give it.
 //
 //      This file asserts the arrangement that SHIPS, and separately asserts the substance the brief is
 //      protecting - that ONE application, ONE route table and ONE pipeline carry both REST routes AND
@@ -1476,13 +1468,12 @@ public sealed class HealthAndPingEndpointTests
     /// the credential and the data it authorises together.
     /// </para>
     /// <para>
-    /// ONE ENDPOINT, ON THE PORT THE MAP ASSIGNS, AND THE WITHDRAWN SECOND ONE IS ASSERTED ABSENT. A
-    /// revision before this one split the surfaces across two TLS endpoints - 5101 pinned to
-    /// <c>Http1</c> and a second port pinned to <c>Http2</c> - so that each listener could only answer
-    /// what it was for. AAP 0.3.2.2 assigns contracts C-05 through C-08 to 5101, so that arrangement
-    /// served published contracts on a port the map does not give them; it was collapsed onto the assigned
-    /// port. The absence of a second endpoint is asserted rather than assumed, because re-adding one is
-    /// how the surfaces would drift apart again.
+    /// ONE ENDPOINT, ON THE PORT THE MAP ASSIGNS, AND A SECOND ONE IS ASSERTED ABSENT. Splitting the
+    /// surfaces across two TLS endpoints - 5101 pinned to <c>Http1</c> and a second port pinned to
+    /// <c>Http2</c> - so that each listener could only answer what it was for is the tempting shape.
+    /// AAP 0.3.2.2 assigns contracts C-05 through C-08 to 5101, so that arrangement
+    /// serves published contracts on a port the map does not give them. The absence of a second endpoint
+    /// is asserted rather than assumed, because adding one is how the surfaces drift apart.
     /// </para>
     /// <para>
     /// AND THE RESERVED PORT STAYS UNBOUND (constraint C-D). The documented port band assigns 5103 to a
@@ -1507,8 +1498,8 @@ public sealed class HealthAndPingEndpointTests
         // service holding a storage provider - and because HTTP/2 is unavailable without TLS at all.
         Assert.StartsWith("https://", restUrl, StringComparison.Ordinal);
 
-        // EXACTLY ONE ENDPOINT. A second would put a published contract back on a port AAP 0.3.2.2 does
-        // not assign it, which is precisely what was withdrawn.
+        // EXACTLY ONE ENDPOINT. A second would put a published contract on a port AAP 0.3.2.2 does not
+        // assign it.
         Assert.Equal(
             ["Rest"],
             configuration

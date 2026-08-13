@@ -95,7 +95,7 @@
 //
 //     public string Lookup(string language, string category, string text)
 //
-// which assembles the expression itself, from those three parts, at I18nResourceReader.cs:L360.
+// which assembles the expression itself, from those three parts, at I18nResourceReader.cs:L366.
 // It exposes NO member that accepts a pre-built expression, and its header records that as a
 // deliberate design decision at :L130-L134 - "there is no overload taking a pre-built XPath
 // expression: that would put two ways to ask the same question on the surface and would leak the
@@ -116,7 +116,7 @@
 //   (c) THE RENDERED KEY IS PROVED IDENTICAL, so nothing observable rides on which component
 //       assembles it. Kernel's Formatting.Sprintf is a single-pass scanner - it walks the format
 //       string once and appends each rendered argument to a StringBuilder without rescanning it
-//       (Formatting.cs:L692-L748) - and it renders a null argument as the empty string
+//       (Formatting.cs:L739-L832) - and it renders a null argument as the empty string
 //       (Formatting.cs, DECISION 13 CHOICE 3). The reader's interpolation does both of those too.
 //       Measured against the real pfw.i18n.xml, the two paths agree on every input class,
 //       including the one that matters most: a key carrying literal braces, '第{}行' at
@@ -165,7 +165,7 @@
 // (constraint C-B) dressed up as a fix, and a silent one. It is documented at its point of
 // reproduction instead - here, and again at the call inside OnTranslate - and the reader carries the
 // matching note plus the catch that turns a malformed expression into an ordinary miss
-// (I18nResourceReader.cs:L335-L345, :L374-L381). Nothing in this file sanitises, quotes, rejects or
+// (I18nResourceReader.cs:L344-L347, :L430-L445). Nothing in this file sanitises, quotes, rejects or
 // reports a key.
 //
 // WHO CAN REACH IT, stated so the risk can be judged rather than guessed. The key is not free input
@@ -526,7 +526,7 @@ public sealed class EnglishProvider : II18nProvider
             // the deferred Documents XML family (constraint C-D), and the reader is that
             // substitute. Its Lookup takes the expression's three variable parts rather than an
             // assembled string, and it publishes no member that accepts one - a decision recorded
-            // at I18nResourceReader.cs:L130-L134. Building a second expression here with Sprintf
+            // at I18nResourceReader.cs:L152-L157. Building a second expression here with Sprintf
             // would produce a string with no consumer, which is dead code, and a second expression
             // builder for one query. The format string above is carried verbatim instead, so the
             // expression shape stays auditable against :L51 from this file, and the equivalence was

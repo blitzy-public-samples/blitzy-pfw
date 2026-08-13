@@ -145,13 +145,13 @@
 //  callback. Program.cs falls back to the same constants this type defaults to, so an absent key and an
 //  unbound one cannot disagree.
 //
-//  THERE IS NO Jwt:JwksPath LEAF, AND ITS ABSENCE IS THE DECISION. An earlier revision declared,
-//  documented and validated one as though this service composed its own key-set address beneath the
-//  authority. It never did: AddPersistenceAuthentication configures the stock bearer handler, and that
-//  handler resolves the key set by fetching the authority's discovery document and following its
-//  published `jwks_uri`. Nothing read the leaf, so an operator who overrode it changed nothing while
-//  believing a key-set address had moved - which is strictly worse than having no setting at all,
-//  because the documented key inventory was then false. ONE authoritative metadata flow is advertised
+//  THERE IS NO Jwt:JwksPath LEAF, AND ITS ABSENCE IS THE DECISION. Declaring, documenting and
+//  validating one reads as though this service composed its own key-set address beneath the authority.
+//  It does not: AddPersistenceAuthentication configures the stock bearer handler, and that handler
+//  resolves the key set by fetching the authority's discovery document and following its published
+//  `jwks_uri`. No code path would read such a leaf, so an operator who overrode it would change nothing
+//  while believing a key-set address had moved - which is strictly worse than having no setting at all,
+//  because the documented key inventory would then be false. ONE authoritative metadata flow is advertised
 //  and it is the live one: standard discovery beneath Jwt:Authority, with Jwt:MetadataAddress as the
 //  single override for a deployment that republishes the discovery document elsewhere. DO NOT
 //  REINSTATE THE LEAF unless a code path is added that genuinely reads it.
@@ -194,6 +194,7 @@
 // ==================================================================================================
 
 using System.ComponentModel.DataAnnotations;
+using System.Security.Cryptography.X509Certificates;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using Microsoft.Extensions.Options;
@@ -1234,9 +1235,9 @@ public sealed class QueryOptions
 /// </para>
 /// <para>
 /// THE FOUR TOKEN-VALIDATION SWITCHES ARE MODELLED, AND THEY ARE MODELLED SO THEY CAN BE REFUSED. They
-/// used to be read directly with a safe default, which meant a deployment could turn one OFF and the
-/// host would start healthy with a weakened boundary. Each of the four removes an entire class of
-/// forgery, so none is a deployment choice; Program.cs now assigns all four unconditionally and the
+/// could be read directly with a safe default, which would let a deployment turn one OFF and the
+/// host start healthy with a weakened boundary. Each of the four removes an entire class of
+/// forgery, so none is a deployment choice; Program.cs assigns all four unconditionally and the
 /// validator refuses a configured <see langword="false"/>. They remain visible here rather than being
 /// deleted so that a deployment can still be audited for them by reading its settings file.
 /// </para>
@@ -1419,8 +1420,8 @@ public sealed class JwtOptions
     /// <remarks>
     /// <para>
     /// AUTHENTICATION IS NOT AUTHORIZATION, AND THIS IS THE SUBJECT HALF OF THE DIFFERENCE. Every contract
-    /// used to be protected by "an authenticated user" and nothing more, so any holder of any token minted
-    /// for this audience could call all four - including a caller with no business here at all. The AAP
+    /// protected by "an authenticated user" and nothing more would let any holder of any token minted
+    /// for this audience call all four - including a caller with no business here at all. The AAP
     /// fixes the call graph as layered and acyclic: nothing but DataServices calls Persistence. This roster
     /// is that statement made enforceable, and the scope half is enforced alongside it, because either
     /// alone leaves a hole (CWE-862, CWE-863).
@@ -1491,6 +1492,117 @@ public sealed class InternalTlsTrustOptions
     /// Whether this deployment narrows internal trust to a mounted anchor.
     /// </summary>
     public bool IsConfigured => !string.IsNullOrWhiteSpace(TrustedCaPath);
+    /// <summary>
+    /// How the revocation status of an internal peer's certificate is checked. One of
+    /// <see cref="RevocationModes.NoCheck"/>, <see cref="RevocationModes.Offline"/> or
+    /// <see cref="RevocationModes.Online"/>, compared case-insensitively.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>CONFIGURABLE, AND THE SHIPPED DEFAULT IS THE ONLY VALUE THE DOCUMENTED TOPOLOGY CAN ANSWER.</b>
+    /// This was a hardcoded <c>NoCheck</c>, which meant a deployment whose authority DOES publish revocation
+    /// information had no way to ask for it and a stolen peer certificate stayed acceptable until it expired
+    /// (CWE-295). It is a setting now. What it is NOT is a setting whose default can be the strict value:
+    /// the local authority the documented recipe generates publishes no distribution point and runs no
+    /// responder, and that was MEASURED rather than assumed - building a chain for a leaf it issued under
+    /// <c>CustomRootTrust</c> succeeds under <c>NoCheck</c> and FAILS under both <c>Offline</c> and
+    /// <c>Online</c> with <c>RevocationStatusUnknown | OfflineRevocation</c>. Shipping a strict default
+    /// would therefore refuse every internal peer on a clean bring-up and hold every dependent behind an
+    /// unsatisfiable health gate.
+    /// </para>
+    /// <para>
+    /// AN INDETERMINATE STATUS IS A REFUSAL UNDER THE STRICTER MODES, NEVER A PASS. The chain policy sets no
+    /// verification flag that ignores a revocation failure, so a deployment that selects <c>Offline</c> or
+    /// <c>Online</c> gets a genuine check whose unknown answer refuses the peer - which is the only reading
+    /// under which selecting the mode means anything at all.
+    /// </para>
+    /// <para>
+    /// WHAT SUBSTITUTES FOR REVOCATION WHILE THIS IS <c>NoCheck</c> IS CERTIFICATE LIFETIME, and the
+    /// documented issuance recipe is <c>-days 30</c> for both the authority and every leaf. The operational
+    /// surfaces state the production recommendation - issue from an authority that publishes a distribution
+    /// point or a responder and set this to <c>Online</c> - and the emergency procedure for a compromise
+    /// under <c>NoCheck</c>, which is to replace the anchor and restart rather than to revoke.
+    /// </para>
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string RevocationMode { get; set; } = RevocationModes.NoCheck;
+
+    /// <summary>
+    /// Resolves <see cref="RevocationMode"/> to the platform value the chain policy is built with.
+    /// </summary>
+    /// <param name="configurationKeyPrefix">
+    /// The configuration path of this group, quoted into the failure so an operator can find the offending
+    /// key without reading source.
+    /// </param>
+    /// <returns>The resolved mode.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// The configured value names no recognised mode. Structural, and therefore fatal: guessing a mode
+    /// would either silently weaken the check a deployment asked for or silently refuse every peer, and
+    /// both are worse than not starting. The value IS quoted, because a mode name is not a secret and an
+    /// operator fixing a typo needs to see what was read.
+    /// </exception>
+    internal X509RevocationMode ResolveRevocationMode(string configurationKeyPrefix)
+    {
+        string configured = RevocationMode?.Trim() ?? string.Empty;
+
+        if (RevocationModes.Matches(configured, RevocationModes.NoCheck))
+        {
+            return X509RevocationMode.NoCheck;
+        }
+
+        if (RevocationModes.Matches(configured, RevocationModes.Offline))
+        {
+            return X509RevocationMode.Offline;
+        }
+
+        if (RevocationModes.Matches(configured, RevocationModes.Online))
+        {
+            return X509RevocationMode.Online;
+        }
+
+        throw new InvalidOperationException(
+            $"'{configurationKeyPrefix}:{nameof(RevocationMode)}' is set to '{RevocationMode}', which "
+                + "names no recognised revocation posture, so this service will not start. Set one of "
+                + $"{string.Join(", ", RevocationModes.Recognised)}, or remove the key to accept the "
+                + "default. Note that the stricter two require an authority that publishes a certificate "
+                + "revocation list or runs a responder: against one that does not, every peer is refused "
+                + "with an indeterminate revocation status, which is a refusal by design.");
+    }
+
+    /// <summary>The revocation postures this group accepts.</summary>
+    /// <remarks>
+    /// Declared here rather than as loose strings so that the settings file, the validator, the resolver
+    /// and the failure message cannot spell them three different ways.
+    /// </remarks>
+    public static class RevocationModes
+    {
+        /// <summary>No revocation check is performed. The shipped default.</summary>
+        public const string NoCheck = "NoCheck";
+
+        /// <summary>Only cached revocation information is consulted.</summary>
+        public const string Offline = "Offline";
+
+        /// <summary>Revocation information is fetched from the authority.</summary>
+        public const string Online = "Online";
+
+        /// <summary>Every accepted spelling, in the order a failure message lists them.</summary>
+        public static IReadOnlyList<string> Recognised { get; } = [NoCheck, Offline, Online];
+
+        /// <summary>Reports whether a configured value is recognised.</summary>
+        /// <param name="candidate">The configured value, which may be <see langword="null"/>.</param>
+        /// <returns><see langword="true"/> when it names a mode.</returns>
+        public static bool IsRecognised(string? candidate) =>
+            candidate is not null
+                && Recognised.Any(mode => Matches(candidate.Trim(), mode));
+
+        /// <summary>Compares a configured value against one mode, case-insensitively.</summary>
+        /// <param name="candidate">The configured value.</param>
+        /// <param name="mode">The mode to compare against.</param>
+        /// <returns><see langword="true"/> when they name the same mode.</returns>
+        internal static bool Matches(string candidate, string mode) =>
+            string.Equals(candidate, mode, StringComparison.OrdinalIgnoreCase);
+    }
+
 }
 
 /// <summary>
@@ -1507,7 +1619,7 @@ public sealed class InternalTlsTrustOptions
 /// </para>
 /// <para>
 /// THE CEILINGS ARE REFUSALS, NOT EVICTIONS. Reaching one refuses the CREATION of a new handle with
-/// <see cref="RetCode.E_BUSY"/>; it never takes a handle away from the caller that already holds one.
+/// <c>RetCode.E_BUSY</c>; it never takes a handle away from the caller that already holds one.
 /// Evicting a live handle to admit a new one would let one caller destroy another's in-flight work, which
 /// is a worse failure than refusing the newcomer - and <c>E_BUSY</c> is a code the legacy already uses for
 /// "not now", so no new value enters a consumer's branch set.

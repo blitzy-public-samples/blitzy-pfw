@@ -112,8 +112,9 @@
 //
 //  NO WIRE SHAPE IS DEFINED HERE (C-A). shared/PowerFramework.Contracts owns all `.proto`
 //  compilation through one `<Protobuf GrpcServices="Both">` item; this folder contains NO `.proto`
-//  and the project declares NO `<Protobuf>` item, because re-declaring double-generates every type
-//  (verified: 244 CS0436 diagnostics). `Grpc.AspNetCore.Server.Reflection` is deliberately absent
+//  and the project declares NO `<Protobuf>` item, because re-declaring double-generates every type and
+//  raises CS0436 on each - see the project file for why that is fatal here rather than a warning.
+//  `Grpc.AspNetCore.Server.Reflection` is deliberately absent
 //  (AAP 0.5.3). Nothing here references a type from `PowerFramework.Gateway.*`,
 //  `PowerFramework.Persistence.*` or `PowerFramework.Security.*`; the published contract is the
 //  sole cross-service coupling. No storage provider, connection or DbContext (C-E). No key, token
@@ -773,7 +774,7 @@ public sealed class MacroChannelRegistration : IDisposable
 /// <para>
 /// EVERY CONVERSION IN ONE PLACE, DELIBERATELY. The mapping is where a refactor of this shape loses
 /// fidelity - a dropped array, a collapsed null, an index whose basis changed silently - so it is
-/// concentrated here rather than spread across twenty-seven RPC bodies, and each narrowing is stated
+/// concentrated here rather than spread across twenty-six RPC bodies, and each narrowing is stated
 /// at the member that performs it rather than in a summary somewhere else.
 /// </para>
 /// <para>

@@ -44,7 +44,9 @@
 #
 #  WHAT IT PRODUCES, AND THE TWO PROPERTIES THAT MAKE IT WORK
 #  ---------------------------------------------------------
-#    1. A throwaway certificate authority - `client-ca.crt` / `client-ca.key`. Security must trust it,
+#    1. A throwaway certificate authority. Its certificate `client-ca.crt` is retained; ITS PRIVATE KEY
+#       IS DESTROYED as soon as it has signed the leaf, because that key can mint further certificates
+#       this stack trusts and nothing after the signature needs it. Security must trust it,
 #       which is what `SECURITY_MTLS_CLIENT_CA_PATH` in `orchestration/.env.example` is for. A private
 #       authority is used rather than a self-signed leaf because Security validates the presented chain
 #       at the transport, and a leaf that is its own issuer has no chain to validate.
@@ -361,11 +363,28 @@ openssl req -newkey rsa:2048 -sha256 -nodes \
   echo "subjectAltName=DNS:${client_identity}"
 } > "${client_ext}"
 
+# A RANDOM SERIAL, NOT THE CONSTANT 1.
+#
+# This read `-set_serial 1`, so every leaf this script has ever issued - across every run, every
+# machine and every operator - carries serial 1 under a CN that is also fixed. Two consequences, and
+# neither needs an attacker to be interesting. A serial is the only handle a CA has on an individual
+# certificate, so revocation cannot name one leaf without naming all of them; and (issuer, serial) is
+# the pair an audit trail, a TLS cache or a trust store treats as a certificate's identity, so two
+# different leaves collide and the wrong one can be matched, logged or pinned.
+#
+# 16 random bytes is the conventional size. The first nibble is forced into 1..7 so the leading bit is
+# clear, which keeps the DER INTEGER positive, and so the value is never zero - both of which a raw
+# `openssl rand -hex` can violate. That leaves 127 bits of entropy, well above the 64-bit floor the
+# public CA rules require, and collision across runs is not a practical concern.
+serial_hex="$(openssl rand -hex 16)"
+serial_high="$(( ( $(printf '%d' "0x${serial_hex:0:1}") % 7 ) + 1 ))"
+serial_hex="${serial_high}${serial_hex:1}"
+
 openssl x509 -req -sha256 \
   -in "${client_csr}" \
   -CA "${ca_cert}" \
   -CAkey "${ca_key}" \
-  -set_serial 1 \
+  -set_serial "0x${serial_hex}" \
   -days "${validity_days}" \
   -extfile "${client_ext}" \
   -out "${client_cert}" \
@@ -373,7 +392,38 @@ openssl x509 -req -sha256 \
 
 rm -f -- "${client_csr}" "${client_ext}"
 
-chmod 600 -- "${ca_key}" "${client_key}"
+# ------------------------------------------------------------------------------------------------------
+#  THE AUTHORITY'S PRIVATE KEY IS DESTROYED HERE, IMMEDIATELY AFTER THE ONLY SIGNATURE IT EXISTS FOR.
+#
+#  It used to be kept - `chmod 600` and nothing else - which left, on disk for the life of the
+#  directory, the one key that can mint ADDITIONAL client certificates this stack trusts. Step 2 of the
+#  report below deliberately makes Security trust this authority, so retaining its key means anything
+#  able to read the file can issue itself a leaf bearing ANY common name and obtain a token as that
+#  identity. The leaf's own key is scoped to one identity; the CA key is scoped to all of them, which
+#  is why the two are not equally safe to keep and why file permissions are not the answer.
+#
+#  NOTHING DOWNSTREAM NEEDS IT. The signature is already made; verification uses the CA CERTIFICATE,
+#  which is public and is retained. The dotenv file and the report both publish `ca_cert` and neither
+#  mentions the key. `SECURITY_MTLS_CLIENT_CA_PATH` points at the certificate too.
+#
+#  IT STAYS IN generated_names ABOVE. That list is the by-name clean the next run performs, so removing
+#  the entry would let a key left by an older revision of this script survive a clean and then trip the
+#  unexpected-content refusal. Deleting the file here and still declaring the name there is consistent:
+#  the script owns the name whether or not the file outlives the run.
+#
+#  A single-pass overwrite precedes the unlink as a courtesy on rotating media. It is NOT claimed as
+#  secure erasure - on a copy-on-write or wear-levelling filesystem it cannot be - and the real control
+#  is that the key existed for the few milliseconds between issuance and this line.
+if [ -f "${ca_key}" ]; then
+  dd if=/dev/zero of="${ca_key}" bs=1 count="$(wc -c < "${ca_key}")" conv=notrunc > /dev/null 2>&1 || true
+  rm -f -- "${ca_key}"
+fi
+
+if [ -e "${ca_key}" ]; then
+  refuse "The ephemeral certificate authority's private key could not be removed from ${identity_dir}. It can mint further client certificates this stack trusts, so the run is refused rather than leaving it in place."
+fi
+
+chmod 600 -- "${client_key}"
 chmod 644 -- "${ca_cert}" "${client_cert}"
 
 # ------------------------------------------------------------------------------------------------------

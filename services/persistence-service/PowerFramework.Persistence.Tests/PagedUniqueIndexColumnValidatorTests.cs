@@ -196,11 +196,11 @@ public sealed class PagedUniqueIndexColumnValidatorTests
     [Fact]
     public void AnOutputAliasResolvesToItsSourceTermRatherThanBeingSplicedAsItself()
     {
-        // THE DEFECT THIS TEST EXISTS FOR, stated on its own rather than folded into the case above. The
-        // validator used to add every whitespace-delimited token of `c.id AS ident` to one flat set, so
-        // `ident` was admitted as though it named a source column - and the arm then emitted
+        // THE DEFECT THIS TEST EXISTS FOR, stated on its own rather than folded into the case above. A
+        // validator that adds every whitespace-delimited token of `c.id AS ident` to one flat set admits
+        // `ident` as though it named a source column - and the arm then emits
         // `SELECT ident FROM COMPANY c`, projecting a column the table does not have, plus a join
-        // predicate on the same non-existent name. Admitted by the guard whose job was to prevent it.
+        // predicate on the same non-existent name. Admitted by the guard whose job is to prevent it.
         SelectStatementModel statement = Parsed("SELECT c.id AS ident, c.NAME nm FROM COMPANY c");
 
         Assert.True(
@@ -237,10 +237,10 @@ public sealed class PagedUniqueIndexColumnValidatorTests
     [Fact]
     public void AQualifiedSpellingOfAnUnqualifiedColumnIsSplicedAsTheCallerWroteIt()
     {
-        // A caller who writes `c.ID` against a statement that selects a bare `ID` previously had `c.ID`
-        // spliced, and that statement was valid - the qualifier names a table the sub-query's FROM clause
+        // A caller who writes `c.ID` against a statement that selects a bare `ID` has `c.ID`
+        // spliced, and that statement is valid - the qualifier names a table the sub-query's FROM clause
         // still carries. Resolution must confirm membership by trailing segment WITHOUT replacing the
-        // caller's spelling, or it would change output that was already correct.
+        // caller's spelling, or it would change output that is already correct.
         SelectStatementModel statement = Parsed(EnumeratedSelect);
 
         Assert.True(

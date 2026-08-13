@@ -260,7 +260,8 @@ public sealed class PredicatesTests
         rows.Add(2L, true, false, false, false, false);
 
         //  The largest catalogued positive: an extended SQLite code, SQLITE_OK + (1 * 256)
-        //  [retcode.sru:L1103 in the port]. It is a success, and - the point of including it - it
+        //  [retcode.sru:L206; RetCode.cs:1103 in the port]. It is a success, and - the point of
+        //  including it - it
         //  does NOT reach IsAllowed's undocumented 1000 threshold, so no catalogued code does.
         rows.Add(RetCode.SQLITE_OK_LOAD_PERMANENTLY, true, false, false, false, false);
 

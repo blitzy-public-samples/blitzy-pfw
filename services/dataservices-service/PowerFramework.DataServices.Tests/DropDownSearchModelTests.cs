@@ -719,11 +719,11 @@ public sealed class DropDownSearchModelTests
     /// DEFECT 2 preserved - while the expression that EXECUTES is structurally untouched by it.
     /// </summary>
     /// <remarks>
-    /// THIS IS THE FINDING ITSELF, PINNED. The term below closes the oracle's own quote and appends a
+    /// THIS IS DEFECT 2 ITSELF, PINNED. The term below closes the oracle's own quote and appends a
     /// disjunction, which in the rendered text changes the predicate's meaning - and the rendered text is
     /// asserted to still contain it, because AAP 0.6.4 requires the defect documented rather than corrected
-    /// and constraint C-B forbids changing the observable expression. What changed is only WHICH string
-    /// runs.
+    /// and constraint C-B forbids changing the observable expression. Parameterising the EXECUTED statement
+    /// alters only WHICH string runs, never the rendered one.
     /// </remarks>
     [Theory]
     [InlineData("a' OR 'x'='x")]

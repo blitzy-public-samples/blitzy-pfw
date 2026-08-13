@@ -3,17 +3,17 @@
 //  ------------------------------------------------------------------------------------------------
 //  WHAT THIS FILE GUARDS, AND WHY A GUARD IS NEEDED AT ALL
 //
-//  This service used to read the four inbound token-validation checks - issuer, audience, lifetime and
-//  signature - out of configuration and hand whatever it found to the bearer handler. A settings file
-//  could therefore turn any of them off while the host reported healthy, and each one removes a whole
-//  class of forgery: without issuer validation a credential from any issuer is accepted, so Security
+//  READING the four inbound token-validation checks - issuer, audience, lifetime and
+//  signature - out of configuration and handing whatever is found to the bearer handler is the obvious
+//  shape, and it lets a settings file turn any of them off while the host reports healthy. Each one
+//  removes a whole class of forgery: without issuer validation a credential from any issuer is accepted, so Security
 //  stops being the sole authority; without audience validation a credential minted for Gateway or
 //  DataServices is replayable here; without lifetime validation the short lifetimes Security mints bound
 //  nothing; without signature validation any well-formed token is accepted.
 //
-//  The remedy has two halves, and BOTH need a test or the pair is only half true:
+//  The discipline has two halves, and BOTH need a test or the pair is only half true:
 //
-//    1. The composition root now assigns all four LITERALLY, so a configured value cannot reach the
+//    1. The composition root assigns all four LITERALLY, so a configured value cannot reach the
 //       handler. Asserted here by resolving the handler's own options from a running host.
 //    2. Because the assignment is literal, a configured `false` would be SILENTLY IGNORED - which is
 //       the more dangerous failure of the two, since an operator would believe it applied. So the
@@ -321,10 +321,10 @@ public sealed class InvariantTokenValidationTests
     /// AN ALLOW-LIST RATHER THAN A RELAXED HEURISTIC, so the scan below keeps its teeth. Both entries
     /// govern KEY-SET RETRIEVAL - how soon a refresh a rejected token asked for may happen, and how often
     /// the cached set is refreshed anyway - and neither reaches
-    /// <see cref="TokenValidationParameters.ClockSkew"/>. They were added because leaving them unset was a
-    /// rotation decision taken by omission: the token library's defaults are five minutes and TWELVE
-    /// HOURS, so a signing-key rotation at Security left this boundary accepting the retired credential
-    /// and refusing the current one.
+    /// <see cref="TokenValidationParameters.ClockSkew"/>. They are configured because leaving them unset
+    /// is a rotation decision taken by omission: the token library's defaults are five minutes and TWELVE
+    /// HOURS, so a signing-key rotation at Security would leave this boundary accepting the retired
+    /// credential and refusing the current one.
     /// </para>
     /// <para>
     /// The sibling row below is what makes the allow-list safe rather than a hole: it boots the deployed

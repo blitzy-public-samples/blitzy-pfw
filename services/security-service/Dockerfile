@@ -99,10 +99,15 @@
 #      no stage, layer, label, environment variable or build input here, and none of the placeholder
 #      service names from the attached environment's five-directory roster is provisioned either.
 #    * No second port. Exactly one is exposed - no debug port, no diagnostics listener and no
-#      development-only surface. This service is REST-only, so the protocol-version split that forces
-#      Persistence and DataServices each to bind a SECOND TLS endpoint - one `Http1`, one `Http2`,
-#      because a single endpoint cannot carry both versions - does not arise here. Neither of their
-#      extra endpoints is cleartext; the split is about HTTP version, not about scheme.
+#      development-only surface. Nor is a second one needed anywhere in this system: each of the four
+#      services binds exactly ONE TLS listener, and the two that carry gRPC alongside REST - Persistence
+#      on 5101 and DataServices on 5102 - do it with Protocols `Http1AndHttp2` on that single endpoint,
+#      because ALPN over TLS negotiates the version per connection. That is measured rather than
+#      assumed, and it is also why no protocol-version split arises: an earlier revision of those two
+#      services did bind a second, HTTP/2-only endpoint so that a misaddressed client failed at
+#      negotiation instead of getting a 404 from the wrong surface, and it was removed because it
+#      published two contracts at an address AAP 0.3.2.2 does not assign. This service is REST-only, so
+#      its one endpoint is `Http1` and the question never arose here at all.
 #    * No extra tooling AT ALL. Not one package is installed into either stage: no probe binary, no
 #      shell utility set, no debugging agent, no telemetry sidecar and no interactive tooling.
 #    * No performance, latency, throughput or availability claim. The repository publishes no such
@@ -190,7 +195,21 @@
 # pins SDK 10.0.303 with rollForward: latestFeature, and 10.0.400 satisfies that pin by rolling
 # forward one feature band within 10.0 - both are the same 10.0.11 platform release.
 # --------------------------------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/sdk:10.0.400 AS build
+#
+# ⚠ PINNED BY DIGEST, NOT BY TAG, AND THE `pinned-tag:` LINE ABOVE THE `FROM` IS LOAD BEARING. A
+# tag is a NAME a registry may republish over: `mcr.microsoft.com/dotnet/sdk:10.0.400` resolved to different content the
+# day MCR rebuilt the OS layer, so a build that reported success could silently be building on content
+# nobody reviewed (CWE-1104, CWE-494). The digest below is the content itself.
+#
+# THE COMMENT IS NOT DECORATION - THE CI IMAGE LEG PARSES IT. Dockerfile has no inline comment syntax,
+# so the tag the digest was taken from is recorded on its own line immediately above. Before every
+# build, .github/workflows/ci.yml reads that pair out of this file, asks the registry what the tag
+# resolves to NOW, and fails the leg when it has moved - naming the new digest to adopt. Drift is
+# therefore the signal that a patched base image exists, which is the OS-image freshness control.
+# Both halves must stay together and stay adjacent: the digest alone cannot be re-checked, and the tag
+# alone is not a pin.
+# pinned-tag: mcr.microsoft.com/dotnet/sdk:10.0.400
+FROM mcr.microsoft.com/dotnet/sdk@sha256:e1fc6e423f543119c406d24e2e687d67c569f18f04a37a8b0005d80ad0dcee80 AS build
 
 WORKDIR /src
 
@@ -268,7 +287,21 @@ RUN dotnet publish services/security-service/PowerFramework.Security/PowerFramew
 # signing key. NOT the non-ASP.NET `runtime` image either: this is an ASP.NET Core service and would
 # fail to start without the shared framework this image provides.
 # --------------------------------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/aspnet:10.0.11 AS final
+#
+# ⚠ PINNED BY DIGEST, NOT BY TAG, AND THE `pinned-tag:` LINE ABOVE THE `FROM` IS LOAD BEARING. A
+# tag is a NAME a registry may republish over: `mcr.microsoft.com/dotnet/aspnet:10.0.11` resolved to different content the
+# day MCR rebuilt the OS layer, so a build that reported success could silently be building on content
+# nobody reviewed (CWE-1104, CWE-494). The digest below is the content itself.
+#
+# THE COMMENT IS NOT DECORATION - THE CI IMAGE LEG PARSES IT. Dockerfile has no inline comment syntax,
+# so the tag the digest was taken from is recorded on its own line immediately above. Before every
+# build, .github/workflows/ci.yml reads that pair out of this file, asks the registry what the tag
+# resolves to NOW, and fails the leg when it has moved - naming the new digest to adopt. Drift is
+# therefore the signal that a patched base image exists, which is the OS-image freshness control.
+# Both halves must stay together and stay adjacent: the digest alone cannot be re-checked, and the tag
+# alone is not a pin.
+# pinned-tag: mcr.microsoft.com/dotnet/aspnet:10.0.11
+FROM mcr.microsoft.com/dotnet/aspnet@sha256:207cc51496778557731c81ff670333d8ade4a4fec22768fd1be8e78474a84ecf AS final
 
 # --------------------------------------------------------------------------------------------------
 # NO PACKAGE IS INSTALLED INTO THIS IMAGE, AND THE READINESS PROBE STILL SPEAKS TLS
@@ -406,53 +439,63 @@ USER $APP_UID
 # line. An earlier revision installed curl for exactly this reason; it was removed because its apt
 # version could not be pinned against a family-tagged base (AAP 0.7.2 admits no floating version), not
 # because the listener stopped being TLS. This is the same probe shape all four images use, which is
-# correct rather than a copy: all eight listeners across the four services are `https`.
+# correct rather than a copy: all four listeners across the four services are `https` - one per service.
 #
-# NOT VERIFYING THE SERVER CERTIFICATE IS CORRECT HERE AND IS NOT A RELAXATION OF THIS SERVICE'S TLS
-# POSTURE. `openssl s_client` reports a verification failure and continues, which is the behaviour this
-# probe wants and is why no verify option is passed; `-verify_quiet` suppresses the report rather than
-# changing the outcome. Two independent reasons, either one sufficient:
-#   1. This request never leaves the container's own network namespace - it is a process asking
-#      itself whether it is ready. There is no on-path party to authenticate, so validating a
-#      certificate would establish nothing the loopback address has not established already.
-#   2. The server certificate is supplied by the deployment at run time and its subject alternative
-#      names are a deployment fact this file cannot know. A deployment whose certificate is issued for
-#      the in-network service name - which is what the documented configuration uses - would fail
-#      hostname verification against a loopback address, so a verifying probe would report a healthy
-#      service as permanently unhealthy. That is the /v1/ping failure mode reached from a different
-#      direction.
-# Nothing about the listener changes as a result: every real caller still gets TLS, no consumer
-# relaxes its own verification anywhere, and no trust anchor, certificate or key path is baked into
-# this image. An operator probing from OUTSIDE the container, where there is a party to authenticate,
-# uses the verifying form that docs/ARCHITECTURE.md records.
+# THE PROBE VERIFIES THE SERVER CERTIFICATE, AND THAT IS THE DECIDED POSITION RATHER THAN A DEFAULT.
+# It is worth setting out both sides, because the opposite conclusion is the intuitive one and an earlier
+# revision of this file reached it:
+#
+#   THE ARGUMENT FOR NOT VERIFYING, which is sound about the THREAT. This request never leaves the
+#   container's own network namespace - it is a process asking itself whether it is ready - so there is
+#   no on-path party to authenticate and validating a certificate establishes nothing the loopback
+#   address has not established already. `openssl s_client` obliges by default: it REPORTS a
+#   verification failure and carries on, so a probe that passes no verify option is a non-verifying one.
+#
+#   WHY IT LOSES ANYWAY, on DIAGNOSIS rather than on threat. Not verifying also suppresses the one
+#   signal this probe is uniquely placed to give: that the listener is presenting material no consumer
+#   can verify. A Security instance serving a certificate the rest of the stack rejects is NOT ready -
+#   every verifier in the system is about to fail to fetch its key set from it - and a probe that
+#   reported it healthy would open the Compose dependency gate on a service nothing can talk to. That is
+#   a worse outcome than the one the threat argument protects against, so the probe verifies.
+#
+# THE HOSTNAME OBJECTION IS REAL AND IS ANSWERED BY THE CERTIFICATE RECIPE, not waved away. A
+# certificate issued only for the in-network service name would fail hostname verification against a
+# loopback connection, which would report a healthy service as permanently unhealthy - the /v1/ping
+# failure mode reached from another direction. So the generation recipe in docs/ARCHITECTURE.md 9.3.1
+# carries `DNS:localhost` in the subject alternative names for exactly this reason, and the probe
+# addresses the listener as `localhost` while connecting to the loopback address. A deployment that
+# issues its own certificates has to carry that name too, and this is where it is written down.
+#
+# Nothing about the listener changes either way: every real caller gets TLS, no consumer relaxes its own
+# verification anywhere, and no trust anchor, certificate or key path is baked into this image.
 #
 # 5104 is written literally rather than read from a variable. The port is fixed by the published
 # contract - the OpenAPI document, docs/ARCHITECTURE.md and orchestration/.env.example all state it -
 # and introducing a variable that only this probe would read means adding configuration surface nothing
-# else consumes. A deployment that ever moves the listener through Kestrel's own configuration has to
-# move this probe with it, and a deployment that terminates TLS has to replace it with a TLS-capable
-# form - there is no tool in this image that could perform one.
+# else consumes. A deployment that ever moves the listener through Kestrel's own configuration - the
+# `Kestrel__Endpoints__Default__Url` key is the channel that works - has to move this probe with it, and
+# nothing else in this image reads the port at all.
 #
 # The window is deliberately unhurried: this host validates its configuration and imports its signing
 # material before it answers anything, and failures inside the start period do not count against the
 # retry budget.
 #
-# ONE CORRECTION TO THE REASONING ABOVE, AND IT CHANGES THE COMMAND. An earlier revision of this probe
-# passed `--insecure`, on the argument that a loopback probe has no party to authenticate. That argument
-# holds for the THREAT and fails for the DIAGNOSIS: `--insecure` also suppresses the one signal this
-# probe is uniquely placed to give, which is that the listener is presenting material no consumer can
-# verify. A Security instance serving a certificate the rest of the stack rejects is not ready - every
-# verifier in the system is about to fail to fetch its key set - and a probe that reports it healthy
-# opens the Compose dependency gate on a service nothing can talk to. So the probe VERIFIES, against the
-# same anchor every other consumer uses, and addresses the listener by a name the certificate has to
-# cover.
-#
-# The anchor is read from INTERNAL_TLS_TRUSTED_CA_PATH with the documented mount point as its default,
-# so no path is baked into this image and a deployment that mounts elsewhere sets one variable. `localhost`
-# is used rather than the raw address because name validation is part of what is being checked, and the
-# generation recipe in docs/ARCHITECTURE.md 9.3.1 carries `DNS:localhost` in the certificate's subject
-# alternative names for exactly this reason. `--resolve` keeps the connection on the loopback interface
-# so the name is never resolved through DNS.
+# WHAT EACH OPTION IN THE COMMAND IS FOR, since three of the five carry the decision above rather than
+# being noise:
+#   * `-CAfile` reads the anchor from INTERNAL_TLS_TRUSTED_CA_PATH with the documented mount point as its
+#     default, so no path is baked into this image and a deployment that mounts elsewhere sets one
+#     variable. It is the SAME anchor every other consumer in the stack uses, which is what makes a pass
+#     here predictive of their success rather than merely local.
+#   * `-verify_return_error` is what turns verification into a VERDICT. Without it `s_client` reports a
+#     failure and still exits successfully, so the handshake would be validated and the result discarded
+#     - the non-verifying probe wearing verifying options.
+#   * `-verify_hostname localhost` checks the name, because a certificate that is trusted but issued for
+#     something else is exactly the half-configured state this probe exists to catch. `-servername` sends
+#     the same name in SNI so a multi-name deployment presents the right certificate, while `-connect
+#     127.0.0.1:5104` keeps the connection on the loopback interface - openssl's equivalent of pinning
+#     the resolution, so the name is never looked up through DNS.
+#   * `-quiet` and `-verify_quiet` suppress OUTPUT only. Neither changes an outcome; the status line the
+#     shell reads is what decides the exit code.
 #
 # A MISSING ANCHOR FAILS THE PROBE, and that is the truthful answer rather than an inconvenience: this
 # service cannot start without a server certificate at all, so a running instance with no anchor mounted

@@ -1790,15 +1790,14 @@ public sealed class SqlTaskProxyTests
     /// <c>return RetCode.OK</c> with no matched-count test anywhere above it
     /// [<c>n_cst_eventful.sru:L1089</c>], and its only non-OK exit is the malformed-filter screen for a
     /// <c>^</c>-prefixed empty name [<c>:L1020-L1022</c>]. Answering a failure for "nothing matched"
-    /// would be an invented result, and it is the result this service used to give: the local broker
-    /// re-implementation returned FAILED there, which is one of the four measured drifts that adopting
-    /// the shared broker removes.
+    /// would be an invented result, and it is the result a local broker re-implementation gives: FAILED
+    /// there, which is one of the four measured drifts that adopting the shared broker avoids.
     /// </para>
     /// <para>
     /// The two arities still differ in EFFECT, which is why both exist and why both are exercised: the
     /// two-argument form drops a single handler and leaves the channel present but empty, and the
-    /// one-argument form drops the channel. They no longer differ in return code, because the oracle
-    /// never did.
+    /// one-argument form drops the channel. They do NOT differ in return code, because the oracle
+    /// does not.
     /// </para>
     /// </remarks>
     [Fact]
@@ -1929,7 +1928,7 @@ public sealed class SqlTaskProxyTests
     /// leaves the dispatch loop [<c>n_cst_eventful.sru:L840-L842</c>] without any subscriber having
     /// run. Its sibling <c>onprepare</c> fires per subscriber and screens a cancellation that arrives
     /// MID-dispatch [<c>:L48-L53</c>] - a different case, asserted by
-    /// <see cref="ACancellationArrivingMidDispatchStopsTheLaterSubscribers"/>.
+    /// <c>ACancellationArrivingMidDispatchStopsTheLaterSubscribers</c>.
     /// </para>
     /// <para>
     /// Reachable only by dispatching DIRECTLY on the delegate surface, because the proxy's own

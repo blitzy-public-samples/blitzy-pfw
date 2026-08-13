@@ -437,8 +437,8 @@ capturePhase:
     - >-
       ORDERING DISCIPLINE - DROP-DOWN SEARCH, the filter request followed by the filtered notification:
       ORDERING_DISCIPLINE_SYNCHRONOUS. REASON: the first event produces its result through a REFERENCE
-      STRING OUT-PARAMETER [`:L13`], which has no asynchronous representation at all; the caller blocks
-      on the filter the handler writes into it.
+      STRING OUT-PARAMETER [`:L13`] and declares no return type, so the caller blocks on the filter the
+      handler writes into it and the answer has no fire-and-forget form.
     - >-
       ORDERING DISCIPLINE - MACRO INVOCATION, the column-expression method call:
       ORDERING_DISCIPLINE_SYNCHRONOUS. REASON: the calculation cannot proceed without the returned
@@ -535,8 +535,8 @@ capturePhase:
       description: >-
         SEMANTIC 3 of 9. `onddsgetfilter(long row, dwobject dwo, string data, ref string filter)` - it
         returns NOTHING and produces its result by writing into a REFERENCE STRING OUT-PARAMETER. That
-        is why its area is synchronous: there is no asynchronous representation of an out-parameter, and
-        the caller blocks on the filter text the handler writes.
+        is why its area is synchronous: the caller blocks on the filter text the handler writes, so the
+        answer has no fire-and-forget form.
       format: >-
         The out-parameter's value is recorded as the filter expression text the handler wrote, exactly as
         written and unnormalized, alongside the value it held on entry - so a handler that leaves it

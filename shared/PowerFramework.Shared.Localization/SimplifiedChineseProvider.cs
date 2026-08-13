@@ -126,11 +126,11 @@
 //     n_cst_i18n        ws_objects/pfw.ui.pbl.src/n_cst_i18n.sru
 //                       Declares the event and nothing else [:L8-L10]. Its `type variables` block
 //                       holds only the licence header and not one variable [:L13-L37]. That event
-//                       is now II18nProvider.
+//                       maps onto II18nProvider.
 //     ne_cst_i18n       ws_objects/pfw.ui.controls.ext.pbl.src/ne_cst_i18n.sru
 //                       Declares only CAT_MSGBOX and CAT_DWSVC as offsets from
 //                       Enums.I18N_CAT_CUSTOM [:L16-L17], and overrides no event. Those two
-//                       constants are now this project's category-constant catalogue, so the
+//                       constants are this project's category-constant catalogue, so the
 //                       intermediate has no counterpart.
 //     n_cst_i18n_chs    this file.
 //

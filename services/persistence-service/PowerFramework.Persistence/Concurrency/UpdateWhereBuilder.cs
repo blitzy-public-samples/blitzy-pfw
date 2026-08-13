@@ -275,12 +275,7 @@
 //  PowerFramework.Shared.Kernel.RetCode rather than restated. The shouty spellings that appear in
 //  this file appear only inside comments, quoting the oracle for traceability.
 //
-//  RULES POSITION. review_rules returns exactly one line, "No user rules provided.", so NO
-//  user-specified rule governs this file and none is invented here. The enterprise-standard baseline
-//  applies in their place, and the binding constraints are the refactor plan's own non-rule
-//  inventory; those bearing on this file are cited inline where each is discharged: C-A, C-B, C-C,
-//  C-D, C-E, C-F, C-H, C-K, and risk R9.
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  C-F SELF-AUDIT: no key, credential, token, password, connection string, logpass or secret-shaped
 //  placeholder appears anywhere in this file - in any member, default, message, literal or comment.
 // ==============================================================================================
@@ -1200,7 +1195,7 @@ internal static class UpdateWhereBuilder
     /// that would concatenate with whatever followed it.
     /// </para>
     /// <para>
-    /// A NAME OF A SINGLE SPACE IS NOW REFUSED, AND THAT IS THE ONE OBSERVABLE NARROWING IN THIS FILE.
+    /// A NAME OF A SINGLE SPACE IS REFUSED, AND THAT IS THE ONE OBSERVABLE NARROWING IN THIS FILE.
     /// <see cref="UpdatableTableDescriptor.IsAcceptable"/> still admits it - that predicate is the
     /// oracle's <c>name = ""</c> test and stays exactly that - so the oracle's own reachability is
     /// unchanged and the narrowing is visible in one place: the boundary refuses what
@@ -1335,8 +1330,8 @@ internal static class UpdateWhereBuilder
     /// <see cref="UpdatableTableDescriptor.Create"/> or a <c>with</c> expression, neither of which passes
     /// through the admission boundary. Four positions are guarded - the updatable columns at step 2, the
     /// key columns at step 3 before the describe, the identity column at step 4 when present, and the
-    /// table name at step 7 - so a descriptor with an empty or whitespace name is now REFUSED where it
-    /// would previously have emitted <c>UpdateTable = ''</c>. That is the single observable narrowing in
+    /// table name at step 7 - so a descriptor with an empty or whitespace name is REFUSED where the
+    /// oracle would emit <c>UpdateTable = ''</c>. That is the single observable narrowing in
     /// this file and it is stated on <see cref="UpdateWhereBuilder.IsScriptSafeTableName"/>.
     /// </para>
     /// <para>

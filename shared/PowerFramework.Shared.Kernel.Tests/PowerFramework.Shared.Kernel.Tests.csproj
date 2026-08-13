@@ -37,7 +37,7 @@
           executable (set project property '<OutputType>Exe</OutputType>').
 
       Do not change this to Library. The project is hand authored for a related reason:
-      `dotnet new xunit3` does not exist in SDK 10.0.302, and `dotnet new xunit` scaffolds the
+      `dotnet new xunit3` does not exist in the pinned SDK, and `dotnet new xunit` scaffolds the
       xunit v2 line with an older test SDK and an older coverage collector.
     -->
     <OutputType>Exe</OutputType>

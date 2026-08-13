@@ -115,6 +115,10 @@
 //  that reference exists for the return-code predicates that the assertion overloads in Assert.cs
 //  guard on. Nothing in THIS file needs a symbol from it, and the inheritance ruling on the type
 //  below is the reason it must stay that way.
+//
+//  LOCATOR CONVENTION: every bare `pfw.sra:L...` in this file means ws_objects/pfw.pbl.src/pfw.sra,
+//  the framework application - never the same-named packager object at
+//  ws_objects/pfw.pack.pbl.src/pfw.sra (AAP 0.8.6 R7).
 // ==============================================================================================
 
 namespace PowerFramework.Shared.Diagnostics;

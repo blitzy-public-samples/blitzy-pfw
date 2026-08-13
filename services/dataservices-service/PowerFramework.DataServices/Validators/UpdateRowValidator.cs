@@ -67,10 +67,6 @@
 //  written against the abstract host (AAP 0.2.1.3 Correction 3) and means a deployment that registers a
 //  further definition is validated by the same code with no change here.
 //
-//  RULES POSITION
-//  No user rules were provided for this project. The binding constraints applied here are C-B (no
-//  behaviour improvement beyond what the transition requires - hence the three deliberate non-checks
-//  above), C-K (every boundary decision documented at the point it is made) and AAP 0.1.5.
 // ==================================================================================================
 
 using System.Collections.Immutable;
@@ -586,12 +582,14 @@ internal sealed class UpdateRowValidator
             // reading under which an int64 is a date.
             //
             // 🔴 AND FITTING THE FAMILY IS NOT ENOUGH - THE SUBTYPE DECIDES. Three refusals live in
-            // IsRepresentableNumber and each one was reachable and silent before it existed: a non-finite
-            // double, which SQLite stores as NULL so a NaN written to a NOT NULL column either fails at
-            // the driver or reads back as an absent value; a fractional value for a `long` column, where
-            // the legacy's own coercion is Long(), which TRUNCATES, so the stored value is not the value
-            // sent; and a negative value for `ulong`, whose domain begins at zero. Each is a value the
-            // DECLARED type cannot hold, which is exactly the question this validator exists to answer.
+            // IsRepresentableNumber and each one was reachable and silent before it existed: a NaN, which
+            // the provider refuses as a FAULT rather than as a database error, so it escapes as an
+            // undiagnosed Internal unless it is refused here first; a fractional value for a `long` column,
+            // where the legacy's own coercion is Long(), which TRUNCATES, so the stored value is not the
+            // value sent; and a negative value for `ulong`, whose domain begins at zero. Each is a value
+            // the DECLARED type cannot hold, which is exactly the question this validator exists to answer.
+            // The two infinities are NOT refused as a family - the published contract accepts them and the
+            // provider stores them - and are refused only where the declared subtype cannot hold one.
             AnyValue.KindOneofCase.Int64Value
                 or AnyValue.KindOneofCase.Uint64Value
                 or AnyValue.KindOneofCase.DoubleValue
@@ -647,11 +645,19 @@ internal sealed class UpdateRowValidator
     /// <list type="bullet">
     ///   <item>
     ///     <description>
-    ///     <b>NON-FINITE.</b> <c>NaN</c>, <c>+∞</c> and <c>-∞</c> are legal <c>double</c> values and no
-    ///     legal DataWindow numeric value: PowerBuilder has no literal for any of them, and the storage
-    ///     engine behind this contract records a non-finite REAL as <c>NULL</c>, so accepting one turns a
-    ///     write into a null - or into a NOT NULL violation from the driver - with nothing in the
-    ///     response saying so.
+    ///     <b>NOT A NUMBER - AND THE TWO INFINITIES ARE NOT REFUSED, BECAUSE THE PUBLISHED CONTRACT DOES
+    ///     NOT REFUSE THEM.</b> <c>common.v1.AnyValue.double_value</c> states the rule and Persistence
+    ///     implements exactly it: <c>NaN</c> is answered with a defined refusal before any statement is
+    ///     generated, while both infinities bind and store. The distinction is the storage provider's and
+    ///     was measured rather than assumed - binding <c>NaN</c> raises a provider FAULT, so refusing it
+    ///     at a decode or validation seam converts an unhandled <c>Internal</c> into each caller's own
+    ///     defined error and stops a multi-row payload from half-applying, whereas an infinity is a value
+    ///     the provider accepts. A stricter rule here would make acceptance depend on which HOP a value
+    ///     arrived through: the same <c>double_value</c> would be admitted on a direct C-06 update and
+    ///     rejected through this service, which is the one thing a shared published contract exists to
+    ///     prevent. An infinity is still refused by an INTEGRAL column below, on the out-of-domain arm,
+    ///     because no infinity is representable as a <c>long</c> - that refusal is the declared subtype's
+    ///     and not this arm's.
     ///     </description>
     ///   </item>
     ///   <item>
@@ -694,7 +700,11 @@ internal sealed class UpdateRowValidator
             case AnyValue.KindOneofCase.DoubleValue:
                 double number = value.DoubleValue;
 
-                if (!double.IsFinite(number))
+                // NaN ONLY, WHICH IS THE PUBLISHED RULE VERBATIM [common.v1.AnyValue.double_value] and the
+                // rule Persistence's own decoder applies [Buffers/DataWindowBuffers.CarrierValue.TryFromWire].
+                // The infinities pass here and are refused below for an integral column, where they are
+                // genuinely unrepresentable - see the remarks.
+                if (double.IsNaN(number))
                 {
                     return false;
                 }

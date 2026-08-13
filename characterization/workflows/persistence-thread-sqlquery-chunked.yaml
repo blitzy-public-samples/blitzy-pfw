@@ -992,18 +992,23 @@ capturePhase:
     # statement straight into the error event - and the legacy logger performs no
     # redaction whatever. Where the connection's bind-disabling parameter suppresses
     # bind variables the runtime interpolates values directly, so every value the
-    # failing statement touched is present in that text as a literal. Splitting keeps
-    # the statement TEXT comparable, which is the point of recording it at all, while
-    # the values it carried are held apart from the text and withheld from the
-    # recording rather than travelling inside it.
+    # failing statement touched is present in that text as a literal.
+    #
+    # REDACTED, NOT SPLIT. This entry read split-statement-and-parameters and claimed
+    # the values were "held apart from the text and withheld from the recording". They
+    # were not withheld - split records them, in a tracked file. A parameter collection
+    # IS the sensitive data (docs/SECRETS.md section 6.3), so splitting produced two
+    # fields to redact instead of one. Redaction keeps the statement SHAPE byte-
+    # comparable, which is the whole property this recording proves, and writes no
+    # value anywhere.
     - field: dbError.sqlsyntax
-      treatment: split-statement-and-parameters
+      treatment: redacted
 
     # REASON: same exposure, same treatment. The counting statement's byte-exact text
     # is exactly what this pair needs to prove; its parameter values are not part of
-    # the statement's shape and are not recorded inside it.
+    # that shape, so a placeholder loses nothing the comparison reads.
     - field: paging.countWrapperStatement
-      treatment: split-statement-and-parameters
+      treatment: redacted
 
     # REASON: the transaction descriptor's password field is WRITE-ONLY - accepted
     # inbound, never populated outbound, never echoed in a response, never logged and
@@ -1013,6 +1018,21 @@ capturePhase:
     # what makes the omission auditable instead of indistinguishable from an
     # oversight.
     - field: transactionDescriptor.logpass
+      treatment: omitted
+
+    # REASON: the SAME descriptor's user-name field, and it was the one exclusion this
+    # store asserted without declaring. Both recordings READMEs already rule it
+    # "equally sensitive and equally excluded from every recording", yet no workflow
+    # named it - so the exclusion rested on prose while the schema exists precisely so
+    # that a withheld field is declared rather than assumed. Declared here to close
+    # that gap.
+    #
+    # WHY OMITTED RATHER THAN REDACTED, which is not the same answer as for a statement:
+    # a user name is a credential half in its entirety, not a shape with values inside
+    # it, so there is nothing to preserve by masking. A placeholder would still assert
+    # that an account was configured and how long its name was, which is why the
+    # password field beside it takes the same treatment for the same reason.
+    - field: transactionDescriptor.logid
       treatment: omitted
 
     # REASON: where a password parameter is supplied in its position the assembled

@@ -97,6 +97,7 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Xml.Linq;
+using Grpc.AspNetCore.Server;
 using Grpc.Net.Client;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
@@ -134,6 +135,21 @@ using PersistenceUpdateClient =
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 // --------------------------------------------------------------------------------------------------
+// 0. FILE-BACKED SECRET MATERIAL, RESOLVED BEFORE ANYTHING READS A SECRET
+//
+// DataServices holds no signing key and mints nothing, but it does hold one secret: the client credential it presents to Security
+// in exchange for a token. It is read through a flat configuration key whose NAME is declared on the
+// options type and whose VALUE the deployment supplies. Supplied as an environment variable, that
+// credential is exposed to `docker compose config`, `docker inspect`, `/proc/<pid>/environ` and every
+// child process; supplied as a projected file, to none of those.
+//
+// SO THE KEY ACCEPTS A `<KEY>_FILE` COMPANION, resolved here. It runs FIRST because the options graph
+// and the outbound client both read that key, and a later registration would leave one reader on the
+// environment value and the other on the file. The environment-variable form still works, so the
+// documented bring-up is unchanged. Configuration/FileBackedSecrets.cs carries the refusal rules.
+_ = builder.AddFileBackedSecrets();
+
+// --------------------------------------------------------------------------------------------------
 // THE COMPOSITION, IN SEVEN NAMED GROUPS
 //
 // Each group is an INTERNAL EXTENSION METHOD on IServiceCollection rather than a run of inline calls.
@@ -151,6 +167,14 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 // initialisation sequence of the five attached DataWindow services - is NOT owned here at all, and
 // section 7 records exactly where it is owned.
 // --------------------------------------------------------------------------------------------------
+// THE INGRESS BOUNDS COME FIRST, because their transport half configures the LISTENER and a listener must
+// be bounded before the host is built rather than after the first unbounded request has been accepted.
+// Decomposition creates this system's first-ever listening socket [Agent Action Plan 0.1.4], so there is no
+// legacy limit to port: the bound answers a failure mode the transition itself introduced, exactly as
+// outbound resilience does (0.5.3), rather than being a behaviour improvement (constraint C-B). No package
+// is added - the limiter is shared-framework code. Configuration/IngressOptions.cs argues every value.
+builder.AddIngressHardening();
+
 builder.Services.AddDataServicesOptions(builder.Configuration);
 builder.Services.AddDataServicesDeterminismSeam();
 builder.Services.AddDataServicesLocalization();
@@ -228,9 +252,9 @@ X509Certificate2Collection securityClientIdentity =
 
 // WHICH CREDENTIAL IS ACTUALLY IN FORCE, STATED SO THAT THIS LOG AND `/health` CANNOT DISAGREE.
 //
-// THE DEFECT THIS REPLACES. The condition here used to be `securityClientIdentity.Count == 0`, and the
-// message it emitted announced that the host "cannot obtain a credential" and that readiness reports the
-// bootstrap unavailable. Both halves were wrong for the documented bring-up: `orchestration/.env.example`
+// THE DEFECT THIS AVOIDS. Writing the condition as `securityClientIdentity.Count == 0`, with a message
+// announcing that the host "cannot obtain a credential" and that readiness reports the
+// bootstrap unavailable, is wrong in both halves for the documented bring-up: `orchestration/.env.example`
 // section 6.3 supplies SECURITY_CLIENT_SECRET_DATASERVICES and leaves BOTH certificate paths deliberately
 // empty, which is a fully supported state - so a correctly configured deployment was warned at startup
 // that it had no credential while `/health` simultaneously reported the credentials check HEALTHY, and
@@ -346,6 +370,16 @@ app.UseExceptionHandler();
 app.UseStatusCodePages();
 
 app.UseAuthentication();
+
+// THE REQUEST-LAYER INGRESS BOUND FOR THE REST HALF OF THIS PORT, positioned after authentication because
+// its per-caller partition IS the authenticated principal - and inside a container network every request
+// from one peer shares one source address, so an address partition would put a whole upstream service in
+// one bucket. gRPC requests are exempt here and bounded at the server interceptor instead, where a refusal
+// travels as RESOURCE_EXHAUSTED rather than as a 429 carrying no gRPC status trailer. /health is exempt in
+// both places: it is the readiness gate Gateway is held behind, so rate-limiting it would turn a busy
+// service into a permanently unready one.
+app.UseIngressHardening();
+
 app.UseAuthorization();
 
 app.MapDataServicesEndpoints();
@@ -1159,14 +1193,14 @@ internal static class DataServicesComposition
         // classified reads and NOTHING else, and the configured attempt count stays meaningful on the
         // Security edge below.
         //
-        // 🔴 "AND IDEMPOTENT TEARDOWNS" USED TO BE PART OF THAT SENTENCE AND WAS WITHDRAWN. The three task
-        // releases were classified replay-safe on the reasoning that releasing an already-released handle
-        // is harmless. The reasoning is sound; the contract does not implement it. A release REMOVES the
-        // handle, so a replay answers E_INVALID_HANDLE - deliberately, so that two concurrent releases have
-        // exactly one winner - and a replay whose first attempt actually succeeded therefore reported a
-        // teardown failure for work that had completed. Making release idempotent would have made the
-        // classification true and would have been a CONTRACT change adopted to accommodate a retry policy,
-        // so the policy yielded instead.
+        // 🔴 "AND IDEMPOTENT TEARDOWNS" IS THE TEMPTING ADDITION TO THAT SENTENCE AND IS EXCLUDED. The
+        // three task releases invite a replay-safe classification on the reasoning that releasing an
+        // already-released handle is harmless. The reasoning is sound; the contract does not implement it.
+        // A release REMOVES the handle, so a replay answers E_INVALID_HANDLE - deliberately, so that two
+        // concurrent releases have exactly one winner - and a replay whose first attempt actually
+        // succeeded therefore reports a teardown failure for work that completed. Making release
+        // idempotent would make the classification true and would be a CONTRACT change adopted to
+        // accommodate a retry policy, so the policy yields instead.
         //
         // A CONFIGURED ZERO IS A SEPARATE MECHANISM FROM THIS ONE, and both are live. This predicate
         // restricts by operation whatever the count; a zero count additionally installs no gRPC service
@@ -1592,11 +1626,11 @@ internal static class DataServicesComposition
     /// contract by omission - it has to say so.
     /// </para>
     /// <para>
-    /// THE ATTEMPT TIMEOUT IS SET, AND IT IS DERIVED RATHER THAN INVENTED. It used to be left at the
-    /// library's ten-second default while only the total was configured, so for any operation that is
+    /// THE ATTEMPT TIMEOUT IS SET, AND IT IS DERIVED RATHER THAN INVENTED. Leaving it at the
+    /// library's ten-second default while configuring only the total is the trap: for any operation that is
     /// never retried - which, after the retry layering below, is every state-advancing call on all four
-    /// contracts - ten seconds was the bound that actually applied while the configured thirty was the
-    /// bound that was documented. The handler also validates that the circuit-breaker sampling duration
+    /// contracts - ten seconds is then the bound that actually applies while the configured thirty is the
+    /// bound that is documented. The handler also validates that the circuit-breaker sampling duration
     /// is at least DOUBLE the attempt timeout, so the value cannot simply be copied from the total;
     /// <see cref="ClientResilienceOptions.ResolveAttemptTimeout(TimeSpan)"/> derives it from both and
     /// names which constraint binds.
@@ -1605,26 +1639,26 @@ internal static class DataServicesComposition
     // ==============================================================================================
     //  THERE IS EXACTLY ONE SECURITY-CHANNEL HANDLER AND ONE CERTIFICATE LOADER IN THIS FILE.
     //
-    //  A SECOND, UNREACHABLE PAIR used to sit here - ConfigureSecurityTransport plus its own
-    //  LoadClientCertificate - reading the same DataServices:Security:MutualTls group and building
-    //  the same client identity a different way. Nothing referenced either: the typed client is wired
-    //  to CreateSecurityChannelHandler above, which resolves the identity from the container that
-    //  LoadSecurityClientIdentity registers.
+    //  A SECOND PAIR IS THE TEMPTING SHAPE - a ConfigureSecurityTransport with its own
+    //  LoadClientCertificate, reading the same DataServices:Security:MutualTls group and building
+    //  the same client identity a different way - AND IT WOULD BE UNREACHABLE. The typed client is
+    //  wired to CreateSecurityChannelHandler below, which resolves the identity from the container
+    //  that LoadSecurityClientIdentity registers, so nothing would reference the second pair.
     //
-    //  THE DUPLICATE WAS NOT MERELY REDUNDANT, IT DISAGREED WITH THE LIVE PAIR ON THREE THINGS, and
-    //  each disagreement is the kind a reader would resolve in the dead code's favour because it was
-    //  the more elaborate of the two:
-    //    * it loaded per handler ROTATION rather than once, so the private key would have been read
-    //      from disk on the factory's recycle schedule;
-    //    * it did a PKCS#12 export-and-reimport round trip the live loader does not, and justified it
-    //      by a Windows client-authentication requirement - on a service whose only runtime is a Linux
+    //  UNREACHABLE IS NOT THE WHOLE HAZARD: A DUPLICATE DISAGREES WITH THE LIVE PAIR, and because
+    //  the duplicate is invariably the more elaborate of the two, a reader resolves each disagreement
+    //  in the dead code's favour. Three that a second loader attracts:
+    //    * loading per handler ROTATION rather than once, so the private key is read from disk on
+    //      the factory's recycle schedule;
+    //    * a PKCS#12 export-and-reimport round trip the live loader does not do, justified by a
+    //      Windows client-authentication requirement - on a service whose only runtime is a Linux
     //      container;
-    //    * it never applied InternalTlsTrust, so a channel built by it would have carried the client
-    //      identity WITHOUT the trust anchor and failed the handshake it was meant to complete.
+    //    * omitting InternalTlsTrust, so a channel built by it carries the client identity WITHOUT
+    //      the trust anchor and fails the handshake it was meant to complete.
     //
-    //  Deleting it also returns the doc comment below to the member it documents: XML documentation
-    //  attaches to the next member, so the dead pair sitting between ApplyResilience's summary and
-    //  ApplyResilience itself meant the summary described a method it was not on.
+    //  Keeping the count at one also keeps the doc comment above attached to the member it documents:
+    //  XML documentation attaches to the NEXT member, so a pair sitting between ApplyResilience's
+    //  summary and ApplyResilience itself would make the summary describe a method it is not on.
     // ==============================================================================================
 
     private static void ApplyResilience(
@@ -1644,16 +1678,16 @@ internal static class DataServicesComposition
 
         resilience.Retry.Delay = configured.RetryBaseDelay;
 
-        // THE SAFETY DECISION LIVES IN THE PREDICATE BELOW AND NOWHERE ELSE, WHICH IS A CORRECTION.
+        // THE SAFETY DECISION LIVES IN THE PREDICATE BELOW AND NOWHERE ELSE.
         //
         // A transport failure does not reveal whether the server processed the request, so replaying a
         // non-idempotent operation can apply it twice, and there is no end-to-end idempotency key or
-        // request deduplication anywhere in this system. That reasoning is unchanged; what changed is
-        // where it is enforced. This method used to call `Retry.DisableForUnsafeHttpMethods()` here and
-        // then assign `Retry.ShouldHandle` a few lines below - and that assignment REPLACES whatever the
-        // verb gate installed, so the gate decided nothing at all while reading as though it were the
-        // safety mechanism. Two ways of expressing one decision, with the visible one inert, is worse
-        // than either alone.
+        // request deduplication anywhere in this system. What that reasoning does NOT settle is where it
+        // is enforced. Calling `Retry.DisableForUnsafeHttpMethods()` here and
+        // then assigning `Retry.ShouldHandle` a few lines below is the arrangement to refuse: the second
+        // assignment REPLACES whatever the verb gate installed, so the gate decides nothing at all while
+        // reading as though it were the safety mechanism. Two ways of expressing one decision, with the
+        // visible one inert, is worse than either alone.
         //
         // IT IS ALSO THE WEAKER OF THE TWO ON THREE OF THE FOUR EDGES. gRPC transports every call as an
         // HTTP POST, so on the four Persistence contracts a verb gate is an all-or-nothing disable that
@@ -1789,10 +1823,16 @@ internal static class DataServicesComposition
         // registration would fail at first resolve with "a suitable constructor could not be found".
         // The localization facade is passed because the validation-error path builds a localized
         // message [:L355, :L357], and the clock because idle expiry is a determinism seam.
+        // The principal resolver is named EXPLICITLY rather than defaulted away, and that is the whole
+        // difference between an owner-bound session store and one that merely mints unguessable
+        // identifiers: the registry's parameter is optional so a unit test can construct one without a
+        // host, so a factory that omitted it here would compile, start, serve, and attribute every
+        // session in the deployment to the same unattributed owner (SEC-03).
         services.TryAddSingleton(static serviceProvider => new ValidationSessionRegistry(
             serviceProvider.GetRequiredService<IOptions<DataServicesOptions>>(),
             serviceProvider.GetRequiredService<I18n>(),
-            serviceProvider.GetRequiredService<TimeProvider>()));
+            serviceProvider.GetRequiredService<TimeProvider>(),
+            serviceProvider.GetRequiredService<SessionPrincipalResolver>()));
 
         // The trace broker is registered ONCE and reached under two names, so C-04's TraceChannel and
         // the expression sessions that EMIT into it share one instance. Registering the interface with
@@ -1812,7 +1852,8 @@ internal static class DataServicesComposition
             serviceProvider.GetRequiredService<IOptions<DataServicesOptions>>(),
             serviceProvider.GetRequiredService<TimeProvider>(),
             serviceProvider.GetRequiredService<IExpressionTraceSink>(),
-            serviceProvider.GetRequiredService<ILogger<ExpressionSessionRegistry>>()));
+            serviceProvider.GetRequiredService<ILogger<ExpressionSessionRegistry>>(),
+            serviceProvider.GetRequiredService<SessionPrincipalResolver>()));
 
         // C-04's INVERTED macro channel. The legacy expects the APPLICATION to implement the macro
         // switch [se_cst_dw.sru:L14, docs/n_cst_dwsvc_columnexp.md], so across a boundary DataServices
@@ -1869,8 +1910,8 @@ internal static class DataServicesComposition
         // all three are REQUIRED dependencies of the published gRPC services, so a service composed
         // without them is structurally faulty and the startup gate keeps that fail-fast.
         //
-        // WHAT THESE REPLACED, AND WHY THE REPLACEMENT WAS REQUIRED. An earlier revision registered three
-        // `Unbound*` implementations that bound no handle and returned null, defended on the ground that
+        // WHY THESE ARE REAL IMPLEMENTATIONS RATHER THAN REFUSALS. Registering three `Unbound*`
+        // implementations that bind no handle and return null is defensible on the ground that
         // materialising a DataWindow needs the DesignSystem ancestry `se_cst_dw` inherits from
         // `se_cst_datawindow` [se_cst_dw.sru:L4, :L10] and that constraint C-D forbids implementing a
         // deferred service even partially. The inheritance fact is true of the LEGACY graph; the
@@ -1879,14 +1920,15 @@ internal static class DataServicesComposition
         //   * AAP 0.2.1.3 Correction 3 resolves that exact edge by instructing DataServices to "define
         //     its own abstract host contract carrying only the members se_cst_dw actually consumes from
         //     its parent, IMPLEMENT AGAINST THAT, and record se_cst_datawindow as REFERENCE-only". The
-        //     contract is Domain/DataWindowServiceHost.cs; the implementation half was what was missing.
+        //     contract is Domain/DataWindowServiceHost.cs, and the registrations below are the
+        //     implementation half it requires.
         //   * AAP 0.3.5 splits every UI capability into "a headless half that SHIPS IN DATASERVICES and a
         //     rendering half" that is deferred. A row and column model with buffers, item statuses,
         //     selection and sort is the headless half by definition.
         //
-        // The cost of the previous shape was not narrow: EIGHT of C-03's headless-model operations and
-        // the WHOLE of C-04 - session open, both inverted streams - were permanently unreachable, and
-        // the published surface answered a valid handle as though it named nothing.
+        // The cost of NOT provisioning the catalogue is not narrow: EIGHT of C-03's headless-model
+        // operations and the WHOLE of C-04 - session open, both inverted streams - become permanently
+        // unreachable, and the published surface answers a valid handle as though it named nothing.
         //
         // THE DEFERRED BOUNDARY IS STILL RESPECTED, AND OBSERVABLY SO. Nothing under Domain/ computes,
         // stores or answers a coordinate, a size, a colour, a font, a DPI conversion or a redraw; see
@@ -1896,7 +1938,7 @@ internal static class DataServicesComposition
         // THE NEGATIVE IS STILL REACHABLE. A handle no definition in Domain/DataWindowCatalogue.cs
         // carries still resolves to null, and the services still turn that into
         // `RetCode.E_INVALID_HANDLE` for a model or chain request and a failed open for an expression
-        // session. That is published contract, and it is now reached by the inputs that earn it - an
+        // session. That is published contract, and it is reached by the inputs that earn it - an
         // unknown name - rather than by every input.
         //
         // REGISTERED WITH TryAdd SO SUBSTITUTION STILL NEEDS NO EDIT HERE. A deployment that materialises
@@ -1988,6 +2030,16 @@ internal static class DataServicesComposition
     {
         ArgumentNullException.ThrowIfNull(services);
 
+        // WHO A SESSION BELONGS TO, which is what makes a session identifier insufficient on its own. The
+        // accessor is the stock ASP.NET Core one - registration ships in the shared framework, so no package
+        // reference is added (AAP 0.5.3) - and it is the only way a component below the endpoint layer can
+        // read the principal of the request it is serving. WITHOUT IT BOTH REGISTRIES DEGRADE SILENTLY:
+        // every session would be attributed to the unattributed sentinel, so every authenticated caller
+        // would own every session and the ownership comparison would admit all of them. See
+        // Authorization/SessionPrincipal.cs.
+        services.AddHttpContextAccessor();
+        services.TryAddSingleton<SessionPrincipalResolver>();
+
         // ⚠ LOAD BEARING, AND IT IS ABOUT THE SHARED PORT. Left at its default, the gRPC hosting layer maps
         // a CATCH-ALL route of the shape /{service}/{method} so that a call naming a service this server
         // does not host answers the gRPC UNIMPLEMENTED status instead of falling through. That route is two
@@ -2007,7 +2059,35 @@ internal static class DataServicesComposition
         // it does to one that did. Unknown METHODS on a service that IS hosted are unaffected and keep
         // answering a proper UNIMPLEMENTED status, because their route begins with a literal service name
         // that cannot collide with a REST path.
-        _ = services.AddGrpc(static options => options.IgnoreUnknownServices = true);
+        // The process-wide gRPC ingress bound. A SINGLETON, because the gRPC hosting layer activates an
+        // interceptor registered by type once per CALL - so an interceptor owning its own limiter would
+        // build a fresh empty one per call and bound nothing. See Grpc/GrpcIngressLimit.cs.
+        services.TryAddSingleton<GrpcIngressLimiter>();
+
+        _ = services.AddGrpc(static options =>
+        {
+            options.IgnoreUnknownServices = true;
+
+            // OUTERMOST AND THE ONLY INTERCEPTOR ON THIS SERVER, because a bound exists to shed work before
+            // it is done. Its refusal is an RpcException carrying RESOURCE_EXHAUSTED, which is the canonical
+            // gRPC status for a bound met rather than a fault and is distinct from the ABORTED this service
+            // forwards when Persistence reports an update conflict.
+            options.Interceptors.Add<GrpcIngressLimitInterceptor>();
+        });
+
+        // THE TWO MESSAGE CEILINGS, APPLIED THROUGH A DEPENDENT CONFIGURE because AddGrpc's delegate takes
+        // no service provider and both values come from a bound options group. A Configure registered after
+        // AddGrpc runs after AddGrpc's own delegate, so these are the last writes to the two properties.
+        // The receive ceiling restates the framework's own 4 MiB default so the value is visible beside the
+        // other bounds; the SEND ceiling is the one the framework leaves unbounded, and a carrier assembled
+        // from a caller-influenced request is exactly the payload that needs one.
+        _ = services
+            .AddOptions<GrpcServiceOptions>()
+            .Configure<IOptions<IngressOptions>>(static (grpc, ingress) =>
+            {
+                grpc.MaxReceiveMessageSize = ingress.Value.MaxReceiveMessageBytes;
+                grpc.MaxSendMessageSize = ingress.Value.MaxSendMessageBytes;
+            });
 
         _ = services.AddDataServicesHealthChecks();
 
@@ -2191,10 +2271,10 @@ internal static class ProblemContractMembers
 /// </summary>
 /// <remarks>
 /// <para>
-/// ONE NAME PER CAPABILITY, AND IT IS THE PUBLISHED SCOPE NAME ITSELF. These aliases previously carried a
-/// second spelling of the same two decisions - <c>dataservices:datawindow</c> beside the published
-/// <c>dataservices.datawindow</c> - and each was registered separately, so the service ran with FOUR
-/// policies for TWO capabilities: the pair the endpoints named and a parallel pair nothing reached. Two
+/// ONE NAME PER CAPABILITY, AND IT IS THE PUBLISHED SCOPE NAME ITSELF. A second spelling of the same two
+/// decisions - <c>dataservices:datawindow</c> beside the published
+/// <c>dataservices.datawindow</c> - registered separately, leaves the service running with FOUR
+/// policies for TWO capabilities: the pair the endpoints name and a parallel pair nothing reaches. Two
 /// spellings for one authorization decision is the shape in which a route ends up naming a policy that
 /// exists but enforces less than the one an author was editing, and the framework answers an unregistered
 /// name with an unexplained internal error rather than a refusal.
@@ -2213,10 +2293,10 @@ internal static class ProblemContractMembers
 /// what follows is why they exist and why they take the shape they do.
 /// </para>
 /// <para>
-/// WHY THIS EXISTS. Both gRPC contracts and all thirty-nine projected REST routes used to be protected by
-/// "an authenticated user" and nothing more, so any holder of any token this issuer minted for this
-/// audience could call every operation on both - and a credential minted for a caller that has no business
-/// here at all could do the same (CWE-862, CWE-863). Both halves of the fix are here because either alone
+/// WHY THIS EXISTS. Protecting both gRPC contracts and all thirty-nine projected REST routes with
+/// "an authenticated user" and nothing more is the default that has to be refused: any holder of any
+/// token this issuer minted for this audience could then call every operation on both - and a credential
+/// minted for a caller that has no business here at all could do the same (CWE-862, CWE-863). Both halves are here because either alone
 /// leaves a hole: scope without subject admits any caller the issuer serves as long as it holds the scope,
 /// and subject without scope lets the one permitted caller reach both contracts once it is in.
 /// </para>
@@ -2278,12 +2358,16 @@ internal static class CallerAuthorization
 /// service (constraint C-G).
 /// </para>
 /// <para>
-/// REVOCATION IS NOT CHECKED, AS A CONSEQUENCE OF THE TOPOLOGY RATHER THAN AS A RELAXATION. A local
-/// authority generated by two <c>openssl</c> invocations publishes no revocation list and runs no
-/// responder, so an online check has nothing to ask; the recipe's own <c>-days 30</c> lifetime is the
-/// control that substitutes for revocation. A deployment whose authority does publish revocation
-/// information leaves this path unset and uses platform trust, where the platform's default revocation
-/// behaviour applies.
+/// REVOCATION IS A SETTING, AND ITS DEFAULT IS A CONSEQUENCE OF THE TOPOLOGY RATHER THAN A RELAXATION.
+/// <c>DataServices:InternalTls:RevocationMode</c> selects the posture, so a deployment whose authority
+/// DOES publish revocation information can ask for a real check - which a hardcoded value denied it,
+/// leaving a stolen peer certificate acceptable until it expired. The shipped default is the only value
+/// the DOCUMENTED topology can answer, and that was measured rather than assumed: a local authority
+/// generated by two <c>openssl</c> invocations publishes no distribution point and runs no responder, so
+/// chain building for a leaf it issued succeeds with no check and fails under both stricter modes with an
+/// indeterminate revocation status - which those modes treat as a refusal, never as a pass. While the
+/// default stands, the substituting control is the recipe's own <c>-days 30</c> lifetime, and the
+/// operational surfaces carry the production recommendation and the emergency procedure.
 /// </para>
 /// <para>
 /// LOADED ONCE AND SHARED, because the handler factories recycle their primary handlers on a schedule
@@ -2294,7 +2378,23 @@ internal static class CallerAuthorization
 /// </remarks>
 internal sealed class InternalTlsTrust
 {
+    /// <summary>The configuration path of the group this type is built from.</summary>
+    /// <remarks>
+    /// Composed once so the resolver's failure message and the loader's failure message name the group
+    /// the same way, and so neither can drift from the property names it quotes.
+    /// </remarks>
+    private static readonly string ConfigurationKeyPrefix = $"{DataServicesOptions.SectionName}:{nameof(DataServicesOptions.InternalTls)}";
+
     private readonly X509Certificate2Collection _anchors;
+
+    /// <summary>
+    /// The revocation posture the configured group selected, resolved once at construction.
+    /// </summary>
+    /// <remarks>
+    /// RESOLVED HERE RATHER THAN PER HANDLER, so an unrecognised value fails the host's start instead of
+    /// failing the first outbound handshake - the fail-fast posture the rest of this file keeps.
+    /// </remarks>
+    private readonly X509RevocationMode _revocationMode;
 
     /// <summary>
     /// Loads the anchor bundle, or records that this deployment uses platform default trust.
@@ -2316,6 +2416,11 @@ internal sealed class InternalTlsTrust
     public InternalTlsTrust(InternalTlsTrustOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
+
+        // RESOLVED BEFORE THE EARLY RETURN, DELIBERATELY. An unrecognised mode is a misconfiguration
+        // whether or not this deployment pins an anchor, and a deployment that later sets a path would
+        // otherwise discover the typo only once it had.
+        _revocationMode = options.ResolveRevocationMode(ConfigurationKeyPrefix);
 
         if (!options.IsConfigured)
         {
@@ -2382,8 +2487,18 @@ internal sealed class InternalTlsTrust
         X509ChainPolicy policy = new()
         {
             TrustMode = X509ChainTrustMode.CustomRootTrust,
-            RevocationMode = X509RevocationMode.NoCheck,
+
+            // THE CONFIGURED POSTURE, not a constant. See the option's own remarks for why the shipped
+            // default cannot be the strict value on the documented topology, and why an indeterminate
+            // status under the stricter two is a refusal rather than a pass.
+            RevocationMode = _revocationMode,
         };
+
+        // ONLY MEANINGFUL WHEN A CHECK IS ACTUALLY PERFORMED, and it excludes the root because a locally
+        // generated authority does not revoke itself - asking about it would turn every check into an
+        // indeterminate answer and therefore into a refusal, which is the failure the mode's own remarks
+        // describe. It matches the flag Security's issuance-credential check already uses.
+        policy.RevocationFlag = X509RevocationFlag.ExcludeRoot;
 
         policy.CustomTrustStore.AddRange(_anchors);
 

@@ -298,7 +298,7 @@ public sealed class SelectStatementModelCompoundSelectTests
     /// <summary>
     /// Arithmetic subtraction uses the hyphen, never the word, so recognising the word costs
     /// arithmetic nothing. Stated explicitly because "MINUS is subtraction" is the intuition that
-    /// would make a reader nervous about this change.
+    /// would make a reader nervous about the rule above.
     /// </summary>
     [Fact]
     public void ArithmeticSubtraction_IsUnaffected()

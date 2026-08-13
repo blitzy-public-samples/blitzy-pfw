@@ -49,27 +49,27 @@
 //  with NO reordering permitted - for the blunt reason that "the calculation cannot proceed without
 //  the returned value". This file therefore models the call as an awaited round trip with zero
 //  reordering tolerance: a response that does not correlate to the invocation still outstanding is a
-//  HARD ERROR (<see cref="MacroProtocolViolationException"/>), never an invitation to buffer and
+//  HARD ERROR (MacroProtocolViolationException), never an invitation to buffer and
 //  reorder. Cancellation and timeout, by contrast, are DEFINED OUTCOMES rather than exceptions,
 //  because a network call can fail in transit where the legacy in-process call could not, and
 //  handling that failure is required BY the transition (AAP 0.5.3).
 //
 //  ============ WHAT THIS FILE OWNS, AND WHAT IT DELIBERATELY DOES NOT ===========================
 //  IT OWNS THE PROTOCOL, NOT THE TRANSPORT. Every type here is transport-agnostic and the outbound
-//  edge is the injectable <see cref="IMacroInvocationChannel"/>, so the engine and the tests can
+//  edge is the injectable IMacroInvocationChannel, so the engine and the tests can
 //  supply an in-process implementation and reach every path with no gRPC host at all (C-H, the 80%
 //  per-service line-coverage gate). `Grpc/ColumnExpressionService.cs` - a sibling, not this file -
 //  binds the abstraction to the generated `dataservices.v1` stream.
 //
 //  IT DOES NOT EVALUATE. `_of_Evaluate` [:L2230] belongs to Expressions/DataWindowExpressionEvaluator.cs,
 //  and the arguments that reach this file are ALREADY EVALUATED strings, exactly as `sArgs` is at
-//  :L2235. What this file does provide is <see cref="MacroInvoker.IsEvaluationFailure"/>, the
+//  :L2235. What this file does provide is MacroInvoker.IsEvaluationFailure, the
 //  `sVal = "!" or sVal = "?"` inspection the dispatch loop performs on each evaluated argument
 //  [:L2231], because that inspection is part of the macro loop rather than part of evaluation.
 //
 //  IT DOES NOT RESOLVE VARIABLES. The FUNC_VAR arm [:L2239-L2257] is a variable lookup through
 //  `_of_FindVarIndex`, and its two failure sites are the engine's. This file RECOGNISES the form and
-//  routes it - see <see cref="MacroDispatchKind.VariableLookup"/> - so that `$$('name')` never
+//  routes it - see MacroDispatchKind.VariableLookup - so that `$$('name')` never
 //  reaches the client macro channel.
 //
 //  IT DOES NOT SCAN. `nMacPos`, `nPos` and the caret arithmetic `nMacPos + (nPos - nMacPos) / 2`
@@ -1630,9 +1630,9 @@ public sealed class MacroInvoker
     /// </para>
     /// <para>
     /// CONCRETELY, THAT IS WHOLE SECONDS. Those formatters emit <c>yyyy-MM-dd HH:mm:ss</c>,
-    /// <c>yyyy-MM-dd</c> and <c>HH:mm:ss</c>. This method previously emitted six fractional digits for
-    /// <c>datetime</c> and <c>time</c>, which rendered <c>.000000</c> onto every whole-second value and
-    /// disagreed with the validator path on a value both can carry. Fractional precision is an
+    /// <c>yyyy-MM-dd</c> and <c>HH:mm:ss</c>. Emitting six fractional digits here for
+    /// <c>datetime</c> and <c>time</c> renders <c>.000000</c> onto every whole-second value and
+    /// disagrees with the validator path on a value both can carry. Fractional precision is an
     /// UNVERIFIED-FROM-REPOSITORY characterization item, recorded once on
     /// <see cref="DateTimeValidator.ExpressionValueFormat"/> and
     /// <see cref="TimeValidator.CanonicalFormat"/> rather than duplicated here: nothing in the tree

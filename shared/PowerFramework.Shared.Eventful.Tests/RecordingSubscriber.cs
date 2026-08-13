@@ -38,11 +38,11 @@
 //          and the oracle's own handler reads the broker straight back out of it
 //          (ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L47). .NET has no `Message` object, so the
 //          port substitutes the ambient `EventBroker.Current` (its DECISION 5) and this double ALSO
-//          accepts an explicit broker reference at construction. <see cref="RecordingSubscriber.Broker"/>
+//          accepts an explicit broker reference at construction. RecordingSubscriber.Broker
 //          documents which of the two wins and why both exist.
 //      SUBSTITUTION 3 - THE DIALOG-FREE OBSERVER.
 //          The oracle's handlers report through `MessageBox` (w_test_eventful.srw:L49, :L77, :L87), which
-//          no headless test can read. The observation channel becomes <see cref="DispatchLog"/>: the same
+//          no headless test can read. The observation channel becomes DispatchLog: the same
 //          facts - which subscriber ran, in what order, with which arguments - recorded as data.
 //
 //  C-B - THIS DOUBLE IS AN OBSERVER, NOT A PARTICIPANT. IT NORMALISES NOTHING.
@@ -98,7 +98,7 @@
 //  DETERMINISM - THERE IS NO CLOCK, NO TIMER AND NO RANDOMNESS IN THIS FILE
 //      No DateTime read, no Guid.NewGuid, no Random, no Task.Delay, no Thread.Sleep and no thread
 //      hand-off. Ordering is expressed solely by the monotonic sequence number
-//      <see cref="DispatchRecord.Sequence"/> assigns on append. The broker's only asynchrony is its post
+//      DispatchRecord.Sequence assigns on append. The broker's only asynchrony is its post
 //      queue, and that is drained explicitly by `EventBroker.DrainPostedContinuations`, so every suite in
 //      this folder is deterministic by construction rather than by tolerance.
 //

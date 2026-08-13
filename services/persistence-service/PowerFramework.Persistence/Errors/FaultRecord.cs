@@ -15,12 +15,12 @@
 //  whose connection-string faults can quote a database PATH or a PASSWORD. Constraint C-F says
 //  none of that may reach a log.
 //
-//  THE DEFECT THIS CLOSES WAS PRESENT AT FIFTEEN SITES AND WAS INVISIBLE AT EVERY ONE. Each of
-//  them wrote a carefully bounded message - numeric codes, fixed prose, an operation name - and
-//  then passed the exception OBJECT as the logging abstraction's exception argument. Every provider
-//  renders that argument by calling ToString(), which prints the unredacted message, every inner
-//  exception's unredacted message and the stack. The bounded message was correct and irrelevant:
-//  the argument beside it published everything the message had withheld.
+//  THE DEFECT THIS CLOSES REACHES FIFTEEN SITES AND IS INVISIBLE AT EVERY ONE. Each of
+//  them writes a carefully bounded message - numeric codes, fixed prose, an operation name - and
+//  each would, left to itself, pass the exception OBJECT as the logging abstraction's exception
+//  argument. Every provider renders that argument by calling ToString(), which prints the unredacted
+//  message, every inner exception's unredacted message and the stack. The bounded message is then
+//  correct and irrelevant: the argument beside it publishes everything the message withheld.
 //
 //  ONE PLACE NAMES THE REDACTOR, WHICH IS THE POINT
 //  --------------------------------------------------------------------------------------------

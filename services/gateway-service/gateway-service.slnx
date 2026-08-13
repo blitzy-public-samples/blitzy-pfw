@@ -23,7 +23,7 @@
   FORMAT IS .slnx, NOT .sln
     .NET 10 emits the XML solution format: dotnet new sln produces a .slnx whose root element is
     Solution and whose members are Project elements carrying a relative Path attribute. That was
-    verified against SDK 10.0.302 on the machine that authored this file rather than assumed from
+    verified against the pinned SDK on the machine that authored this file rather than assumed from
     documentation. The legacy .sln text format is not used anywhere in this repository, and the
     required path for this file carries the .slnx extension.
 
@@ -34,7 +34,7 @@
     ever the one you would want to filter out. A second solution file is worse than pointless. With
     more than one solution in the directory the bare commands above stop working entirely and fail
     with MSB1011, "specify which project or solution file to use because this folder contains more
-    than one project or solution file", which was reproduced deliberately on SDK 10.0.302 to confirm
+    than one project or solution file", which was reproduced deliberately on the pinned SDK to confirm
     the constraint is real rather than folklore. Exactly one solution file belongs in this
     directory, and it is this one.
 

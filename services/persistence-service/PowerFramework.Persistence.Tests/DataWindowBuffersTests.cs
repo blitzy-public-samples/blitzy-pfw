@@ -56,10 +56,7 @@
 //
 //  CONSTRAINTS DISCHARGED BY THIS FILE, EACH CITED AGAIN AT THE POINT IT IS DISCHARGED
 //  --------------------------------------------------------------------------------------------
-//  RULES POSITION FIRST. `review_rules` returns exactly one line - "No user rules provided." - so NO
-//  user rule governs this file and none is invented. Enterprise-standard best practice applies in
-//  their place per AAP 0.7.2, and the binding constraints come from AAP 0.7.3 instead:
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //      C-B  Replicate defects and quirks verbatim. All six above are asserted as EXPECTED.
 //      C-E  No fabricated database. Every case below runs against in-memory buffers. There is no
 //           SQLite file, no connection, no dialect client and no schema anywhere in this file.

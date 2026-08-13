@@ -385,8 +385,7 @@ public sealed class SecurityCredentialCompositionTests
     /// <para>
     /// ALL THREE SETTINGS ARE NAMED, not just the certificate pair. Contract C-01 accepts two caller
     /// credentials as alternatives, so a diagnostic naming only one of them would send an operator to
-    /// adopt a scheme their deployment had deliberately not chosen - which is exactly what this guard
-    /// used to do.
+    /// adopt a scheme their deployment had deliberately not chosen.
     /// </para>
     /// </remarks>
     [Fact]
@@ -570,11 +569,11 @@ public sealed class SecurityCredentialCompositionTests
     /// temporary-directory condition is "not a failure of the subject". One of the two files is a 2048-bit
     /// RSA PRIVATE KEY, so the outcome that reasoning permits is a private key left on disk with nothing
     /// said about it - and a silent leak is strictly worse than a failing test, because only the test can
-    /// tell anyone. The removal is now unconditional and its failure is the caller's to see.
+    /// tell anyone. The removal is unconditional and its failure is the caller's to see.
     /// </para>
     /// <para>
-    /// <b>A DIRECTORY OF ITS OWN RATHER THAN TWO LOOSE FILES.</b> The pair used to be written straight into
-    /// the shared system temporary directory, where a leak is indistinguishable from any other run's and can
+    /// <b>A DIRECTORY OF ITS OWN RATHER THAN TWO LOOSE FILES.</b> Writing the pair straight into
+    /// the shared system temporary directory leaves a leak indistinguishable from any other run's, so it can
     /// neither be attributed nor swept. A GUID-scoped directory named for this suite is both, and it makes
     /// removal ONE recursive delete whose success covers everything written rather than a delete per file
     /// that can half-succeed.

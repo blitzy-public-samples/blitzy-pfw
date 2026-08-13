@@ -433,10 +433,10 @@ an asymmetry between them would itself be the evidence that capability modelling
 | A valid token | **`501 Not Implemented`** with the machine-readable body above | The handler — and it is the **only** result any handler computes, unconditionally, for every method and every path remainder, with nothing evaluated first |
 
 That unconditionality is the property this whole section rests on, and **declaring the pre-handler `401`
-beside the `501` leaves it untouched.** An earlier revision of this section said each operation declares
-exactly one response; that omission told a generated client the `401` could not occur on paths that
+beside the `501` leaves it untouched.** Saying each operation declares exactly one response is the
+tempting simplification; that omission tells a generated client the `401` cannot occur on paths that
 demonstrably return it. The authored contract, the runtime-generated description, the contract tests and
-the end-to-end specs now all agree on `{401, 501}`.
+the end-to-end specs all agree on `{401, 501}`.
 
 **What would still be a violation, so the line stays auditable:** any `2xx`, which would say part of a
 deferred service had been built; and any `4xx` **other** than that `401` — a `400`, a `404` or a `409`

@@ -25,7 +25,7 @@
 //
 //  SO THE GUARD BECOMES A LEASE, AND THE OBSERVABLE ANSWER DOES NOT CHANGE. A refused acquisition
 //  still answers E_BUSY, a released task still answers E_INVALID_HANDLE, and a task that is neither
-//  still proceeds. What changes is only that the answer and the action are now indivisible.
+//  still proceeds. The one thing a lease adds is that the answer and the action are indivisible.
 //
 //  THREE STATES, AND WHY THE THIRD IS NOT REDUNDANT.
 //    RUNNING   an operation owns the task right now. Anything else is refused with E_BUSY, which is a
@@ -58,9 +58,6 @@
 //  lock. It never calls a collaborator, so it can never be the outer half of a lock-ordering cycle,
 //  and it deliberately exposes no member that runs caller-supplied code while the lock is held.
 //
-//  RULES POSITION. review_rules returns exactly one line, "No user rules provided.", so the
-//  enterprise-standard baseline applies; C-B (the observable codes are the oracle's and do not change)
-//  and C-H (no database, no thread, no container) bite here.
 // ==================================================================================================
 
 namespace PowerFramework.Persistence.Grpc;

@@ -2,7 +2,7 @@
 //  ScopeAuthorization.cs - THE INGRESS CHECKS THE SCOPE IT PUBLISHES A 403 FOR
 //  ------------------------------------------------------------------------------------------------
 //  WHAT THIS FILE IS FOR
-//  gateway.v1.yaml declares a `403` on forty of this service's operations, and its shared
+//  gateway.v1.yaml declares a `403` on forty-one of this service's fifty operations, and its shared
 //  `Forbidden` component says what that status means: the token is valid but does not carry the scope the
 //  operation requires, "deliberately distinguished from `401` so a caller can tell a missing credential
 //  from an insufficient one". Until this file existed nothing here read the scope claim. Every

@@ -8,7 +8,7 @@
     and by Persistence, so a defect here reaches two services; this project is the gate that stops it.
 
     HAND AUTHORED ON PURPOSE, NOT TEMPLATED. AAP section 0.5.2 records the measured finding that
-    `dotnet new xunit3` does not exist in SDK 10.0.302 and that `dotnet new xunit` scaffolds the
+    `dotnet new xunit3` does not exist in the pinned SDK and that `dotnet new xunit` scaffolds the
     xunit v2 line with an older test SDK and an older coverage collector. Regenerating this file from
     a template would silently downgrade the whole test stack, so it is written and maintained by hand.
 

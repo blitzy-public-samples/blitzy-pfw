@@ -62,10 +62,6 @@
 //  C-F SELF-AUDIT: no key, credential, token, password, connection string or secret-shaped placeholder
 //  appears anywhere in this file - in any descriptor, sample row, message, literal or comment.
 //
-//  RULES POSITION: review_rules returns exactly one line, "No user rules provided.", so no
-//  user-specified rule governs this file and none is invented here. The enterprise-standard baseline
-//  applies in their place; the binding non-rule constraints bearing on this file are cited inline where
-//  each is discharged - C-B, C-C, C-E, C-F, C-H, C-K, AAP 0.8.5 and risk R9.
 // ==============================================================================================
 
 using System.Globalization;
@@ -354,9 +350,9 @@ public sealed class UpdateWhereBuilderTests
     [Fact]
     public void BuildModificationString_RefusesAnEmptyUpdateTableRatherThanEmittingAnEmptyQuotedName()
     {
-        // THE NARROWED ARM, AND WHY THE NARROWING IS THE POINT. This case previously succeeded and
-        // emitted `DataWindow.Table.UpdateTable = ''`, which the legacy would also have emitted - the
-        // builder trusted add-time validation to have rejected an empty name first. Across a network
+        // THE NARROWED ARM, AND WHY THE NARROWING IS THE POINT. Succeeding here and
+        // emitting `DataWindow.Table.UpdateTable = ''` is what the legacy does, and it rests on the
+        // builder trusting add-time validation to have rejected an empty name first. Across a network
         // boundary that trust is misplaced: persistence.v1.TableUpdateContract carries the name from a
         // remote caller, and a descriptor can also be built through Create or a `with` expression
         // without passing the admission boundary at all. So the builder is fail-closed and refuses.

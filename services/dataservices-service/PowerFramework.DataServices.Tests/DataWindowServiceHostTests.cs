@@ -895,7 +895,7 @@ public sealed class DataWindowServiceHostTests
     //  [se_cst_dw.sru:L11-L32]. That 22-event chain belongs to Domain/DataWindowEventChain.cs and is
     //  characterized by DataWindowEventChainTests. What belongs HERE is different and complementary:
     //  the ELEVEN SEMANTIC EVENTS `se_cst_dw` RAISES ON ITS OWN ANCESTRY, each of which the .NET
-    //  contract has to declare because the ancestry that used to declare them was dropped.
+    //  contract has to declare, because the legacy ancestry that declares them is REFERENCE-only here.
     //
     //  The eleven are exactly the events reached through `Event <Name>(...)` in se_cst_dw.sru:
     //      RButtonDown        :L115      ItemChanged        :L292

@@ -91,10 +91,9 @@
 //  declared here and none may be: a second definition would drift from the wire contract, and the
 //  versioned contracts project is the only sanctioned cross-boundary vocabulary in this system.
 //
-//  The generated enum was READ rather than assumed, from
-//  shared/PowerFramework.Contracts/obj/**/CommonV1.cs after compiling that project. It has exactly
-//  THREE members, matching the legacy domain member for member - protobuf's C# generator strips the
-//  DW_BUFFER_ prefix and PascalCases what is left [common.v1.proto Section 6]:
+//  The enum has exactly THREE members, matching the legacy domain member for member. Its authority is
+//  shared/PowerFramework.Contracts/Proto/common.v1.proto Section 6; protobuf's C# generator strips the
+//  DW_BUFFER_ prefix and PascalCases what is left:
 //
 //      DW_BUFFER_PRIMARY = 0   ->   DwBuffer.Primary = 0
 //      DW_BUFFER_DELETE  = 1   ->   DwBuffer.Delete  = 1
@@ -105,14 +104,13 @@
 //  then observes as Primary, which is exactly the cleared state the legacy produces. No backing
 //  field, no accessor bridging and no fold are needed, so none is written.
 //
-//  THIS IS THE POINT THE CONTRACT AND THIS FILE AGREE ON, and it is worth stating because an earlier
-//  reading of it produced the opposite implementation. PowerBuilder initialises an unassigned
-//  `dwbuffer` to Primary!, so in the legacy "no buffer was supplied" and "the default buffer" are the
-//  SAME state - the framework's own synthesized error passes Primary! together with row 0 to mean
-//  "not attributable to any one row" [n_cst_thread_task_sqlupdate.sru:L190]. A synthetic zero
-//  sentinel would have split that single legacy state into two, shifted all three real members up by
-//  one, and broken every numeric bridge and stored characterization comparison that reads them
-//  (AAP 0.4.5.3). The contract therefore carries no sentinel, and this record needs no fold: one
+//  THIS IS THE POINT THE CONTRACT AND THIS FILE AGREE ON, and it is worth stating because the opposite
+//  reading is easy to reach. PowerBuilder initialises an unassigned `dwbuffer` to Primary!, so in the
+//  legacy "no buffer was supplied" and "the default buffer" are the SAME state - the framework's own
+//  synthesized error passes Primary! together with row 0 to mean "not attributable to any one row"
+//  [n_cst_thread_task_sqlupdate.sru:L190]. A synthetic zero sentinel would split that single legacy
+//  state into two, shift all three real members up by one, and break every numeric bridge and stored
+//  characterization comparison that reads them (AAP 0.4.5.3). The contract therefore carries no sentinel, and this record needs no fold: one
 //  legacy state, one wire value, one in-process value.
 //
 //  Where a FIELD genuinely has to say "no buffer", the contract declares that field proto3
@@ -154,18 +152,6 @@
 //  secret-shaped placeholder appears anywhere in this file, in any comment, default or literal.
 //  No statement text captured from a log appears here either, for the DisableBind reason above.
 //
-//  RULES POSITION
-//  --------------------------------------------------------------------------------------------
-//  review_rules returns exactly one line, "No user rules provided.", so NO user-specified rule
-//  governs this file. That is a finding, not latitude, and nothing is invented or back-filled from
-//  convention in its place. The enterprise-standard baseline applies instead - nullable reference
-//  types on, warnings as errors, no secret in source, deterministic and trivially testable - and
-//  the binding constraints are the refactor plan's own non-rule inventory, of which C-A, C-B, C-C,
-//  C-F, C-H and C-K bite on this file and are each discharged at the point they are cited above.
-//
-//  No performance property is asserted anywhere in this file and no decision here is justified by
-//  one: the repository publishes no latency budget, no throughput target and no availability
-//  commitment, so there is no baseline against which such a claim could be made.
 // ==============================================================================================
 
 using System.Diagnostics.CodeAnalysis;
@@ -287,7 +273,7 @@ namespace PowerFramework.Persistence.Errors;
 //      csproj's InternalsVisibleTo keeps the parity suite able to construct one, which is what lets
 //      the containment itself be tested rather than merely asserted.
 //    * A HAND-WRITTEN ToString() renders the statement's PRESENCE AND LENGTH and never its text, so
-//      the natural log line above is now safe by default rather than dangerous by default.
+//      the natural log line above is safe by default rather than dangerous by default.
 //    * [JsonIgnore] ON SqlSyntax means that even inside this assembly, a serializer cannot emit it.
 //
 //  WHAT IS NOT DONE, AND WHY. The member is not removed, not renamed and not made private: Tasks/

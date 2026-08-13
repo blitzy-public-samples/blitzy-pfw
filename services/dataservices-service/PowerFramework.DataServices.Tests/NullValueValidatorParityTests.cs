@@ -142,8 +142,8 @@
 //
 //  The five ported validators do not present a uniform surface, and the differences are asserted
 //  here as they stand. Anyone tempted to unify them should read this list first: three of the four
-//  differences are REQUIRED by the oracle, and the fourth is a naming choice that is now observable
-//  through this file.
+//  differences are REQUIRED by the oracle, and the fourth is a naming choice this file makes
+//  observable.
 //
 //    A. `NumberValidator.NullNumber()` returns `short?`, not `int?`, `decimal?` or `long?`. PowerScript
 //       `integer` is a 16-BIT SIGNED type, so `short` is the faithful carrier for the type

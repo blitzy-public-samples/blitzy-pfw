@@ -8,12 +8,12 @@
 //  the four verbs that move it, so the pool's ported behaviour is untouched by what is bound here.
 //
 //  WHY THIS EXISTS, STATED AGAINST THE CONSTRAINT IT COULD BE MISREAD AS BREAKING (C-E)
-//  An earlier revision shipped an engine that refused to connect, on the argument that the legacy
+//  REFUSING TO CONNECT AT ALL IS THE TEMPTING READING OF C-E, on the argument that the legacy
 //  transaction object enumerates exactly two database types - SQL Server as 0 and Oracle as 1
 //  [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L60-L61] - and that neither has a schema,
 //  a connection string or one line of DDL anywhere in the repository, so connecting would require
-//  inventing a target. The first half of that is true and is still respected below. The conclusion did
-//  not follow: it silently equated "the DIALECT enumeration omits SQLite" with "there is no evidenced
+//  inventing a target. The first half of that is true and is respected below. The conclusion does not
+//  follow: it silently equates "the DIALECT enumeration omits SQLite" with "there is no evidenced
 //  target at all", and the repository plainly contradicts the second clause. The evidenced target is
 //  SQLite - `ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L456` opens a database through a URI whose
 //  grammar `Data/SqliteConnectionFactory.cs` reproduces in full, and `:L463-L469` is the ONLY DDL in
@@ -248,7 +248,6 @@ namespace PowerFramework.Persistence.Data
             "The transaction object is not connected, so this operation has nothing to act on. Connect "
             + "the transaction before committing, rolling back or executing a statement.";
 
-        /// <summary>The message a rollback or commit reports when no transaction is open.</summary>
         /// <summary>The diagnostic a cancelled call reports.</summary>
         /// <remarks>
         /// NAMES THE CANCELLATION AND NOTHING ELSE. It carries no statement text, no connection string and
@@ -282,6 +281,11 @@ namespace PowerFramework.Persistence.Data
             + "for this phase and this connection was refused rather than opened without the protection "
             + "the caller asked for. Remove the password from the descriptor to connect.";
 
+        /// <summary>The message a rollback or commit reports when no transaction is open.</summary>
+        /// <remarks>
+        /// Its <c>summary</c> used to sit on <see cref="CancelledText"/> above, which left that member
+        /// carrying two and this one carrying none.
+        /// </remarks>
         internal const string NoOpenTransactionText =
             "No explicit transaction is open on this connection, so there is nothing to commit or roll "
             + "back. A connection opened with auto-commit on applies each statement as it executes.";
@@ -406,42 +410,99 @@ namespace PowerFramework.Persistence.Data
         /// transaction, and switching it OFF opens one. A setter that only took effect on the next
         /// connect would leave a caller's <c>Commit</c> silently applying to nothing.
         /// </para>
+        /// <para>
+        /// <b>THE SETTER CANNOT REPORT, SO IT IS NOT THE CHANNEL THAT CARRIES THE OUTCOME.</b> A property
+        /// assignment has no return value, and the transition it performs runs a statement that CAN fail -
+        /// a commit on the way in to auto-commit, a begin on the way out of it. The reporting channel is
+        /// <see cref="TrySetAutoCommit(bool)"/>, which this setter delegates to; the setter itself remains
+        /// for the call shape the legacy has - <c>transObject.AutoCommit = false</c>, which the command
+        /// task's native arm performs around a statement
+        /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlcommand.sru:L89</c>, <c>:L96</c>,
+        /// <c>:L106</c>] - and DISCARDS the outcome for exactly the reason the oracle can: PowerScript's
+        /// assignment has nowhere to put one either. Discarding it is safe here and was not before,
+        /// because the two execution doors now refuse rather than run a statement outside the transaction
+        /// this mode promises - see <see cref="RequiresExplicitTransaction"/>.
+        /// </para>
         /// </remarks>
         public bool AutoCommit
         {
             get => _autoCommit;
 
-            set
+            set => _ = TrySetAutoCommit(value);
+        }
+
+        /// <summary>
+        /// Moves the auto-commit mode and REPORTS what the move cost, which the property setter cannot.
+        /// </summary>
+        /// <param name="autoCommit">
+        /// <see langword="true"/> to apply every subsequent statement as it executes;
+        /// <see langword="false"/> to accumulate them under an explicit transaction.
+        /// </param>
+        /// <returns>
+        /// A succeeded state when the mode is in force and, for the non-auto-commit mode, an explicit
+        /// transaction is open; otherwise the provider's own failure from the commit or the begin that
+        /// could not be issued.
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// <b>A SUCCESSFUL BEGIN IS PART OF THE TRANSITION, NOT A HOPEFUL SIDE EFFECT.</b> Switching OUT
+        /// of auto-commit is a promise that the statements which follow accumulate until the caller
+        /// commits, and that promise is only true once a transaction is open. The failure was previously
+        /// logged and dropped, so a caller was told its mode had changed while the session held no
+        /// transaction - and the next write then applied itself immediately, which is the one outcome a
+        /// transactional caller cannot recover from. The mode the caller asked for is still RECORDED, so
+        /// nothing lies about what was requested; what changed is that the shortfall is reported here and
+        /// that no statement may execute until a transaction exists.
+        /// </para>
+        /// <para>
+        /// <b>THE OTHER DIRECTION REPORTS TOO.</b> Switching INTO auto-commit commits the accumulated
+        /// work - the faithful choice, because the legacy's own auto-commit checkpoint commits rather than
+        /// discards, and throwing away a caller's writes because it changed a mode is the more damaging of
+        /// the two failures. A commit that the provider refuses therefore means the work was NOT applied,
+        /// and that is a fact the caller has to be able to learn.
+        /// </para>
+        /// <para>
+        /// <b>NO LEGACY ARM EXISTS FOR EITHER FAILURE, WHICH IS WHY THIS IS A PORT-CREATED CHANNEL
+        /// (AAP 0.1.4).</b> PowerBuilder's transaction is implicit after <c>CONNECT</c> and its
+        /// <c>AutoCommit</c> is an inherited property of the transaction object, so the oracle has no
+        /// separate begin to fail and no code to reproduce. The obligation the plan does impose is that a
+        /// structural fault surfaces as a fault rather than as degraded service, so the outcome is
+        /// published rather than absorbed.
+        /// </para>
+        /// <para>
+        /// An unchanged mode and an unconnected engine are both successes and neither touches the
+        /// provider: there is nothing to move in the first case, and in the second the mode is honoured by
+        /// <see cref="Connect"/>, which already fails the connect when its own begin cannot be issued.
+        /// </para>
+        /// </remarks>
+        public SqlState TrySetAutoCommit(bool autoCommit)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
+            if (_autoCommit == autoCommit)
             {
-                if (_autoCommit == value)
-                {
-                    return;
-                }
-
-                _autoCommit = value;
-
-                if (_connection is null)
-                {
-                    return;
-                }
-
-                if (value)
-                {
-                    // Switching auto-commit on retires the explicit transaction. Committing rather than
-                    // rolling back is the faithful choice: the legacy's own auto-commit checkpoint
-                    // commits accumulated work rather than discarding it, and discarding a caller's
-                    // writes because it changed a mode would be the more damaging of the two failures.
-                    CommitAndRelease();
-                }
-                else
-                {
-                    // The outcome is deliberately DISCARDED on this re-begin: the caller's own mode
-                    // change has already taken effect, so its answer must stand. An absent transaction
-                    // stays visible to the next commit or rollback, which refuses rather than claiming
-                    // success - see TryBeginTransaction.
-                    _ = TryBeginTransaction(out _);
-                }
+                return SqlState.Succeeded();
             }
+
+            _autoCommit = autoCommit;
+
+            if (_connection is null)
+            {
+                // Recorded and nothing else. The connect path applies it, and its begin failure is fatal
+                // to the connect rather than silent - see Connect.
+                return SqlState.Succeeded();
+            }
+
+            if (autoCommit)
+            {
+                // Switching auto-commit on retires the explicit transaction, committing rather than
+                // rolling back for the reason stated above.
+                return CommitAndRelease();
+            }
+
+            return TryBeginTransaction(out SqlState beginFailure)
+                ? SqlState.Succeeded()
+                : beginFailure;
         }
 
         /// <inheritdoc/>
@@ -558,8 +619,8 @@ namespace PowerFramework.Persistence.Data
             {
                 connection.Dispose();
 
-                // 🔴 THE EXCEPTION OBJECT USED TO BE HERE, AND THIS IS THE WORST SITE IN THE SERVICE FOR
-                // IT. A rejected connection string is the one fault whose message QUOTES THE CONNECTION
+                // 🔴 THE EXCEPTION OBJECT IS DELIBERATELY NOT ATTACHED HERE, AND THIS IS THE WORST SITE IN
+                // THE SERVICE FOR IT. A rejected connection string is the one fault whose message QUOTES THE CONNECTION
                 // STRING - which on this service's own URI grammar carries the database path and, when
                 // configured, the password [Data/SqliteConnectionFactory.cs]. Attaching the exception made
                 // every provider render that message, its whole inner chain and the stack, so constraint
@@ -662,8 +723,13 @@ namespace PowerFramework.Persistence.Data
             // A committed transaction object stays usable, so the next statement needs a fresh
             // transaction rather than an implicit one. Without this the object would silently drift into
             // auto-commit behaviour after its first commit.
-            // The outcome is deliberately DISCARDED here: the COMMIT succeeded, and that is what this
-            // method answers. See TryBeginTransaction for why the connect path treats it differently.
+            //
+            // The outcome is deliberately DISCARDED here, and that is safe for a reason the state itself
+            // now carries: the COMMIT succeeded, so this method's answer must be the commit's, and a
+            // re-begin the provider refused can no longer let a later statement run unprotected - the
+            // execution doors reopen the owed transaction or refuse (see RequiresExplicitTransaction), and
+            // the next commit or rollback answers NoOpenTransactionText rather than claiming success. See
+            // TryBeginTransaction for why the connect path fails outright instead.
             _ = TryBeginTransaction(out _);
 
             return SqlState.Succeeded();
@@ -710,7 +776,8 @@ namespace PowerFramework.Persistence.Data
                 _transaction = null;
             }
 
-            // Discarded for the same reason as the commit path's - the ROLLBACK succeeded.
+            // Discarded for the same reason as the commit path's, and made safe by the same guard - the
+            // ROLLBACK succeeded, and no statement can run outside the owed transaction afterwards.
             _ = TryBeginTransaction(out _);
 
             return SqlState.Succeeded();
@@ -790,6 +857,19 @@ namespace PowerFramework.Persistence.Data
                 // [n_cst_thread_task_sqlbase.sru:L177]. Answering a provider code would additionally be a
                 // fabrication: no provider was reached, so no provider said anything.
                 return SqlState.Failed(RetCode.E_INVALID_TRANSACTION, NotConnectedText);
+            }
+
+            // 🔴 THE STATEMENT DOES NOT RUN OUTSIDE THE TRANSACTION THE MODE PROMISED. With auto-commit OFF
+            // this engine owes the caller an explicit transaction, and the two commands below enlist
+            // whatever `_transaction` happens to hold - so a null one used to mean the provider applied the
+            // write IMMEDIATELY, a later rollback undid nothing, and the response said success. The check
+            // opens the owed transaction if it is missing and REFUSES with the provider's own fault when it
+            // cannot, which is the only honest answer: the caller asked for transactional execution and
+            // transactional execution is unavailable. Under auto-commit nothing is owed and this costs a
+            // field test - see RequiresExplicitTransaction.
+            if (!TryEnsureExplicitTransaction(out SqlState transactionUnavailable))
+            {
+                return transactionUnavailable;
             }
 
             return command.CacheStatement
@@ -1055,14 +1135,35 @@ namespace PowerFramework.Persistence.Data
         /// </remarks>
         /// <inheritdoc/>
         /// <remarks>
+        /// <para>
         /// EXACTLY THE PRECONDITION <see cref="CreateCommand"/> ENFORCES, restated as a question rather
         /// than duplicated as a rule: a disposed engine and an engine that never connected both answer
-        /// <see langword="false"/>, and nothing else here can make <see cref="CreateCommand"/> refuse. No
-        /// statement is sent and no hook is raised, so a consumer may ask on every call.
+        /// <see langword="false"/>. No statement is sent and no hook is raised, so a consumer may ask on
+        /// every call.
+        /// </para>
+        /// <para>
+        /// <b>AND THE TRANSACTION STATE IS PART OF THAT PRECONDITION, NOT A DETAIL BELOW IT.</b> The
+        /// command this capability hands out is enlisted in the engine's explicit transaction, so a
+        /// connection that owes one and holds none would hand back a command whose writes apply
+        /// immediately - the carrier's retrieval and update statements would escape the caller's
+        /// transaction with nothing in the result saying so. That combination therefore answers
+        /// <see langword="false"/> and the consumer reports its own datastore failure, exactly as it does
+        /// for an unconnected transaction. Deliberately a PURE state test even so: issuing a begin from a
+        /// property a consumer is invited to ask on every call would make the question a side effect. The
+        /// opening happens in <see cref="CreateCommand"/>, which is the call that needs one.
+        /// </para>
         /// </remarks>
-        public bool CanCreateCommand => !_disposed && _connection is not null;
+        public bool CanCreateCommand =>
+            !_disposed
+            && _connection is not null
+            && !RequiresExplicitTransaction(_autoCommit, connected: true, _transaction is not null);
 
         /// <inheritdoc/>
+        /// <exception cref="InvalidOperationException">
+        /// The engine is not connected, or it owes an explicit transaction that the provider refused to
+        /// open. <see cref="CanCreateCommand"/> answers <see langword="false"/> for both, which is how
+        /// every consumer of this seam avoids the throw.
+        /// </exception>
         public SqliteCommand CreateCommand()
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -1070,6 +1171,17 @@ namespace PowerFramework.Persistence.Data
             if (_connection is null)
             {
                 throw new InvalidOperationException(NotConnectedText);
+            }
+
+            // The owed transaction is opened here rather than merely asserted, so a carrier reaching a
+            // session whose earlier re-begin failed recovers at its first statement instead of finding the
+            // session permanently unusable - see TryEnsureExplicitTransaction. A begin the provider still
+            // refuses is a precondition violation rather than a result, because this member's signature
+            // carries a command and has no state value to answer with; the sibling question exists so no
+            // consumer has to meet it as an exception.
+            if (!TryEnsureExplicitTransaction(out SqlState transactionUnavailable))
+            {
+                throw new InvalidOperationException(transactionUnavailable.SqlErrText);
             }
 
             SqliteCommand command = _connection.CreateCommand();
@@ -1205,6 +1317,96 @@ namespace PowerFramework.Persistence.Data
             return command.ExecuteScalar()?.ToString() ?? string.Empty;
         }
 
+        /// <summary>
+        /// Whether a connection in this state owes the caller an explicit transaction it does not have.
+        /// </summary>
+        /// <param name="autoCommit">The auto-commit mode in force.</param>
+        /// <param name="connected">Whether a connection is open.</param>
+        /// <param name="transactionOpen">Whether an explicit transaction is open on it.</param>
+        /// <returns>
+        /// <see langword="true"/> only for the one combination that must never execute a statement: open,
+        /// NOT in auto-commit, and holding no explicit transaction.
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// <b>THE INVARIANT THIS ENGINE IS HELD TO, WRITTEN ONCE AS A PREDICATE RATHER THAN THREE TIMES AS
+        /// A CONDITION.</b> Auto-commit OFF is a promise that statements accumulate until the caller
+        /// commits. A connection in that mode with no transaction open breaks the promise SILENTLY: the
+        /// provider applies each statement as it executes, a later rollback has nothing to undo, and every
+        /// response says success. It is therefore not a state to tolerate and report around - it is a state
+        /// in which no statement may run, which is what the three consultation sites enforce
+        /// (<see cref="Execute(in SqlCommandText, CancellationToken)"/>,
+        /// <see cref="CanCreateCommand"/> and <see cref="CreateCommand"/>).
+        /// </para>
+        /// <para>
+        /// Auto-commit ON with no transaction is CORRECT and must stay executable - it is the mode's whole
+        /// meaning - and an unconnected engine owes nothing, because its verbs already refuse with
+        /// <see cref="NotConnectedText"/>. Those two are the reason this is a three-input predicate rather
+        /// than a null test on the transaction.
+        /// </para>
+        /// <para>
+        /// Internal and static so the suite can assert the whole truth table directly, including the arm
+        /// the engine can no longer be driven into on purpose: with the begin deferred there is no
+        /// reachable provider fault left to fail one (see <see cref="TryBeginTransaction"/>), so the
+        /// refusal logic would otherwise be reasoned about rather than tested.
+        /// </para>
+        /// </remarks>
+        internal static bool RequiresExplicitTransaction(bool autoCommit, bool connected, bool transactionOpen) =>
+            connected && !autoCommit && !transactionOpen;
+
+        /// <summary>
+        /// Whether an explicit transaction is open on this engine's connection.
+        /// </summary>
+        /// <remarks>
+        /// Internal for the same reason as <see cref="RequiresExplicitTransaction"/>: the invariant that a
+        /// connected non-auto-commit engine ALWAYS holds one is the property the fix turns on, and
+        /// asserting it needs the state rather than an inference from a commit's return code.
+        /// </remarks>
+        internal bool HasExplicitTransaction => _transaction is not null;
+
+        /// <summary>
+        /// Ensures an explicit transaction is open when the mode owes one, opening it if it is missing.
+        /// </summary>
+        /// <param name="failure">
+        /// Receives the provider's own fault when the transaction is owed and could not be opened.
+        /// </param>
+        /// <returns>
+        /// <see langword="true"/> when a statement may execute - either nothing was owed, or a transaction
+        /// is open on return.
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// <b>THE RECOVERY ATTEMPT IS THE LEGACY'S OWN SHAPE, NOT A RETRY BOLTED ON.</b> PowerBuilder's
+        /// transaction is implicit after <c>CONNECT</c> and materialises at the first statement, which is
+        /// exactly why <see cref="TryBeginTransaction"/> issues a DEFERRED begin. Opening the transaction
+        /// here, at the moment a statement needs one, therefore reproduces the oracle's timing rather than
+        /// inventing a policy - and it means a mode switch or a re-begin that failed earlier heals at the
+        /// next statement instead of poisoning the session for its whole life.
+        /// </para>
+        /// <para>
+        /// When the begin still cannot be issued, the caller REFUSES with the provider's own code and text.
+        /// Executing anyway is the defect this method exists to prevent.
+        /// </para>
+        /// </remarks>
+        private bool TryEnsureExplicitTransaction(out SqlState failure)
+        {
+            failure = SqlState.Succeeded();
+
+            if (!RequiresExplicitTransaction(_autoCommit, _connection is not null, _transaction is not null))
+            {
+                return true;
+            }
+
+            if (TryBeginTransaction(out SqlState beginFailure))
+            {
+                return true;
+            }
+
+            failure = beginFailure;
+
+            return false;
+        }
+
         /// <summary>Opens an explicit transaction on the connection, if one is not already open.</summary>
         /// <param name="failure">Receives the provider's own fault when the begin could not be issued.</param>
         /// <returns><see langword="true"/> when a transaction is open on return.</returns>
@@ -1249,14 +1451,15 @@ namespace PowerFramework.Persistence.Data
                 // outcome is already being reported as a SqlState and an exception here would escape
                 // that channel.
                 //
-                // ⚠ THE OUTCOME IS NOW REPORTED AS WELL AS LOGGED, AND THE TWO CALLERS TREAT IT
-                // DIFFERENTLY ON PURPOSE. On the CONNECT path a caller is asking for a usable
-                // transaction, so a failure there must fail the connect: reporting success for a session
-                // that holds no transaction told the caller it had something it did not have, and the
-                // fault only surfaced later at a commit that refused for a reason the caller could not
-                // relate to its own request. On the RE-BEGIN paths - after a commit, after a rollback -
-                // the caller's own operation has already SUCCEEDED, so its answer must stand; there the
-                // absent transaction stays visible to the NEXT commit or rollback, which refuses with
+                // ⚠ THE OUTCOME IS REPORTED AS WELL AS LOGGED, AND THE CALLERS TREAT IT DIFFERENTLY ON
+                // PURPOSE. On the CONNECT path and on the MODE-SWITCH path a caller is asking for a usable
+                // transaction, so a failure there is the operation's answer: reporting success for a
+                // session that holds no transaction told the caller it had something it did not have, and
+                // the fault only surfaced later at a commit that refused for a reason the caller could not
+                // relate to its own request. On the RE-BEGIN paths - after a commit, after a rollback - the
+                // caller's own operation has already SUCCEEDED, so its answer must stand; there the absent
+                // transaction is caught instead by the execution doors, which reopen it or refuse
+                // (TryEnsureExplicitTransaction), and by the next commit or rollback, which answers
                 // NoOpenTransactionText rather than claiming success.
                 // Described rather than attached - see Errors/FaultRecord.cs. A BEGIN that the provider
                 // refuses reports its own statement text, and the redactor is the only route by which any
@@ -1274,12 +1477,26 @@ namespace PowerFramework.Persistence.Data
         }
 
         /// <summary>Commits and releases the explicit transaction, ignoring the absence of one.</summary>
-        private void CommitAndRelease()
+        /// <returns>
+        /// A succeeded state when there was nothing to commit or the commit was applied; otherwise the
+        /// provider's own failure.
+        /// </returns>
+        /// <remarks>
+        /// <b>THE OUTCOME IS RETURNED AS WELL AS LOGGED, BECAUSE A REFUSED COMMIT MEANS LOST WORK.</b> The
+        /// transaction is released either way - a transaction whose commit the provider refused cannot be
+        /// left open, and disposing it is what unwinds it - so the caller's accumulated statements are gone
+        /// on the failure path. That is precisely the fact a caller has to be able to learn, and a log line
+        /// alone reaches only an operator reading logs after the fact. The single caller,
+        /// <see cref="TrySetAutoCommit(bool)"/>, publishes it.
+        /// </remarks>
+        private SqlState CommitAndRelease()
         {
             if (_transaction is null)
             {
-                return;
+                return SqlState.Succeeded();
             }
+
+            SqlState outcome = SqlState.Succeeded();
 
             try
             {
@@ -1287,18 +1504,20 @@ namespace PowerFramework.Persistence.Data
             }
             catch (SqliteException failure)
             {
-                _logger.LogError(
-                    "The transaction object could not commit its explicit SQLite transaction while "
-                        + "switching to auto-commit, so the accumulated work was not applied. "
-                        + "FaultTypes={FaultTypes} RedactedMessage={RedactedMessage}",
-                    FaultRecord.Types(failure),
-                    FaultRecord.RedactedMessages(failure));
+                // ONE RECORD RATHER THAN TWO. The shared fault funnel already logs the operation, the
+                // mapped provider code and the redacted message; naming the operation as the mode switch
+                // is what gives an operator the context a second bespoke line used to carry, and the
+                // consequence - the accumulated work was not applied - now reaches the CALLER through the
+                // returned state instead of only a log reader.
+                outcome = Failed(failure, "commit while switching to auto-commit");
             }
             finally
             {
                 _transaction.Dispose();
                 _transaction = null;
             }
+
+            return outcome;
         }
 
         /// <summary>Rolls back and releases the explicit transaction, ignoring the absence of one.</summary>
@@ -1345,10 +1564,10 @@ namespace PowerFramework.Persistence.Data
         /// Publishing <c>-1</c> would put a provider artefact on a legacy observable.
         /// </para>
         /// <para>
-        /// <b>WHY THIS WAS PREVIOUSLY INVISIBLE, WHICH IS THE INTERESTING PART.</b> A commit used to
-        /// replace the whole state and zero the count, so on the <c>AC_ON</c> arm the <c>-1</c> was erased
+        /// <b>WHY THE SENTINEL IS EASY TO MISS, WHICH IS THE INTERESTING PART.</b> A commit that
+        /// replaces the whole state and zeroes the count erases the <c>-1</c> on the <c>AC_ON</c> arm
         /// along with every legitimate count. Preserving the count across a commit - which is the correct
-        /// behaviour and is asserted separately - exposed the sentinel that erasure had been hiding. Both
+        /// behaviour and is asserted separately - is what exposes the sentinel that erasure hides. Both
         /// halves are needed: the count must survive the commit, and it must be a count.
         /// </para>
         /// <para>
@@ -1406,8 +1625,8 @@ namespace PowerFramework.Persistence.Data
         /// <b>WHY A SECOND PROJECTION EXISTS.</b> <c>Microsoft.Data.Sqlite</c> raises
         /// <see cref="InvalidOperationException"/> - NOT <see cref="SqliteException"/> - when a statement
         /// carries a parameter marker for which no value was supplied, because the refusal happens in the
-        /// provider before SQLite is asked to step anything. That exception type was previously uncaught
-        /// on both execution paths, so it escaped the whole task layer and surfaced as an UNHANDLED gRPC
+        /// provider before SQLite is asked to step anything. Left uncaught on either execution path that
+        /// exception type escapes the whole task layer and surfaces as an UNHANDLED gRPC
         /// fault carrying no defined code - the one outcome AAP §0.1.5 forbids, since a contract must be
         /// "narrowed with a defined error, never widened with a guess".
         /// </para>

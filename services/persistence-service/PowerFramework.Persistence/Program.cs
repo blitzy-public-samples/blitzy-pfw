@@ -119,6 +119,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Xml.Linq;
+using Grpc.AspNetCore.Server;
 using Grpc.Core;
 using Grpc.Core.Interceptors;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -161,6 +162,15 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 //  reader wants: what the service is configured with, what clock it reads, who it trusts, where it
 //  stores, what it computes, and what it publishes.
 // --------------------------------------------------------------------------------------------------
+// THE INGRESS BOUNDS COME FIRST, AND THAT PLACEMENT IS NOT PRESENTATIONAL LIKE THE SIX BELOW IT. Its
+// transport half configures the LISTENER, which must be bounded before the host is built rather than
+// after the first unbounded request has already been accepted. Decomposition creates this system's
+// first-ever listening socket [Agent Action Plan 0.1.4], so there is no legacy limit to port and the
+// bound answers a failure mode the transition itself introduced - the same standing outbound resilience
+// has (0.5.3), not a behaviour improvement layered on top (constraint C-B). No package is added: the
+// limiter is shared-framework code. Configuration/IngressOptions.cs states every value and argues each.
+builder.AddIngressHardening();
+
 builder.Services.AddPersistenceDeterminismSeam();
 builder.Services.AddPersistenceOptions();
 builder.Services.AddPersistenceAuthentication(builder.Configuration);
@@ -245,6 +255,16 @@ app.UseExceptionHandler();
 app.UseStatusCodePages();
 
 app.UseAuthentication();
+
+// THE REQUEST-LAYER INGRESS BOUND FOR THE REST HALF OF THIS PORT, positioned after authentication because
+// its per-caller partition IS the authenticated principal - and inside a container network every request
+// from one peer shares one source address, so an address partition would put a whole upstream service in
+// one bucket. gRPC requests are exempt here and bounded at the server interceptor instead, where a refusal
+// travels as RESOURCE_EXHAUSTED rather than as a 429 carrying no gRPC status trailer. /health is exempt in
+// both places: it is the readiness gate DataServices and Gateway are held behind, so rate-limiting it would
+// turn a busy service into a permanently unready one and take the stack down with it.
+app.UseIngressHardening();
+
 app.UseAuthorization();
 
 app.MapPersistenceEndpoints();
@@ -577,7 +597,7 @@ internal static class PersistenceServiceCollectionExtensions
                 // without signing-key validation the signature is not verified at all. Reading them with
                 // a safe default still left a configuration path that could turn one OFF while this host
                 // reported healthy - an unauthenticated boundary wearing the shape of an authenticated
-                // one, which constraint C-G forbids. The four are now MODELLED on JwtOptions so a
+                // one, which constraint C-G forbids. The four are MODELLED on JwtOptions so a
                 // deployment can still be audited by reading its settings file, and
                 // PersistenceOptionsValidator refuses a configured false rather than ignoring it in
                 // silence.
@@ -748,7 +768,7 @@ internal static class PersistenceServiceCollectionExtensions
     /// </para>
     /// <para>
     /// THE CONNECTION IS COMPOSED BY THE FACTORY, NEVER BY A LITERAL HERE. <c>UseSqlite</c> is handed
-    /// <see cref="SqliteConnectionFactory.ConnectionString"/> rather than a string built in this file,
+    /// <c>SqliteConnectionFactory.ConnectionString</c> rather than a string built in this file,
     /// which keeps the legacy URI grammar - the open mode, the three-state integrity <c>check</c>
     /// option and the <c>journal</c> mode defaulting to <c>DELETE</c>
     /// [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L452-L456</c>] - together with the optional
@@ -772,13 +792,13 @@ internal static class PersistenceServiceCollectionExtensions
     /// </para>
     /// <para>
     /// MIGRATIONS ARE APPLIED AT STARTUP ONLY WHEN A DEPLOYMENT ASKS FOR IT, AND THE SWITCH IS OFF BY
-    /// DEFAULT (constraint C-K). An earlier revision applied them never, on four stated reasons, and
-    /// three of the four still hold and are the reason the DEFAULT is off rather than on: the
+    /// DEFAULT (constraint C-K). NEVER APPLYING THEM AT STARTUP IS THE OTHER DEFENSIBLE POSITION, and
+    /// three of the four arguments for it hold, which is exactly why the DEFAULT is off rather than on: the
     /// paired-capture rule above means a parity run must be able to rely on the volume being untouched;
     /// this service is required to be independently SCALABLE (constraint C-J), so replicas racing to
     /// apply one migration is a real hazard; and a missing schema SHOULD be visible through the
-    /// readiness probe rather than silently repaired by whichever replica started first. What did not
-    /// survive is the fourth - that applying migrations is purely an operator action with a first-class
+    /// readiness probe rather than silently repaired by whichever replica started first. The fourth
+    /// argument does not hold - that applying migrations is purely an operator action with a first-class
     /// tool. It is, but the runtime image carries neither the SDK nor <c>dotnet-ef</c>, and the
     /// documented bring-up is a SINGLE command (constraints C-J and C-L), so on a fresh volume that
     /// command produced a stack in which three of four services never became healthy and nothing in the
@@ -786,7 +806,7 @@ internal static class PersistenceServiceCollectionExtensions
     /// is not a provisioning strategy.
     /// </para>
     /// <para>
-    /// SO THE SEAM THIS PARAGRAPH USED TO PRESCRIBE NOW EXISTS, ON EXACTLY THE TERMS IT PRESCRIBED:
+    /// SO THE SEAM THIS PARAGRAPH PRESCRIBES EXISTS, ON EXACTLY THOSE TERMS:
     /// ADDITIVE ONLY, never a drop-and-recreate, and gated by configuration so a parity run can switch
     /// it off. <see cref="SchemaProvisioner"/> holds it, <c>Schema:ApplyMigrationsOnStartup</c> enables
     /// it and defaults to <see langword="false"/>, and the orchestration manifest turns it on in one
@@ -930,9 +950,9 @@ internal static class PersistenceServiceCollectionExtensions
 
         // ------------------------------------------------------------------------------------------
         //  THE RUNTIME SEAMS. Each is bound to a real SQLite-backed implementation under Runtime/. See
-        //  the extended commentary at the bottom of this file for what used to be here, why it refused,
-        //  and which of that refusal's premises did not hold. Every one is still TryAdd-registered, so
-        //  every one is still substitutable by a characterization harness or a test host.
+        //  the extended commentary at the bottom of this file for why a refusing seam is the tempting
+        //  reading here and which of its premises do not hold. Every one is TryAdd-registered, so
+        //  every one is substitutable by a characterization harness or a test host.
         // ------------------------------------------------------------------------------------------
         services.TryAddSingleton<IQueryTransactionSurface, SqliteQueryTransactionSurface>();
         services.TryAddSingleton<IQueryDataWindowRuntime, SqliteQueryDataWindowRuntime>();
@@ -1047,7 +1067,7 @@ internal static class PersistenceServiceCollectionExtensions
         services.TryAddSingleton<HandlePrincipalResolver>();
 
         // The server-side handle tables. See the remarks above for why every one of them is a
-        // singleton and what breaks if one is not. Each now carries a CEILING and an IDLE WINDOW: a
+        // singleton and what breaks if one is not. Each carries a CEILING and an IDLE WINDOW: a
         // handle is server-held state that an in-process caller never had, so an abandoned one would
         // otherwise pin a connection - and, for a command or update task, a worker task - for the life of
         // the process. See Runtime/HandleLifecycle.cs.
@@ -1099,9 +1119,21 @@ internal static class PersistenceServiceCollectionExtensions
         // gRPC IS THIS SERVICE'S PRIMARY TRANSPORT. The interceptor is added HERE, once, at the server
         // level, which is exactly what makes the status mapping central rather than duplicated across
         // four implementations - see PersistenceStatusInterceptor for the mapping itself.
+        // The process-wide gRPC ingress bound. A SINGLETON, because the gRPC hosting layer activates an
+        // interceptor registered by type once per CALL - so an interceptor owning its own limiter would
+        // build a fresh empty one per call and bound nothing. See Grpc/GrpcIngressLimit.cs.
+        services.TryAddSingleton<GrpcIngressLimiter>();
+
         services.AddGrpc(static options =>
         {
+            // OUTERMOST, AHEAD OF THE STATUS INTERCEPTOR, because a bound exists to shed work before it is
+            // done: an inner registration would admit the call, let the handler run, and bound nothing that
+            // mattered. Its refusal is already an RpcException carrying RESOURCE_EXHAUSTED, so it needs no
+            // mapping from the status interceptor beneath it.
+            options.Interceptors.Add<GrpcIngressLimitInterceptor>();
+
             options.Interceptors.Add<PersistenceStatusInterceptor>();
+
 
             // ⚠ LOAD BEARING, AND IT IS ABOUT THE SHARED PORT (constraint C-K). Left at its default,
             // the gRPC hosting layer maps a CATCH-ALL route of the shape /{service}/{method} so that a
@@ -1127,6 +1159,25 @@ internal static class PersistenceServiceCollectionExtensions
             // path.
             options.IgnoreUnknownServices = true;
         });
+
+        // THE TWO MESSAGE CEILINGS, APPLIED THROUGH A DEPENDENT CONFIGURE RATHER THAN INSIDE THE CALL
+        // ABOVE, because AddGrpc's configure delegate takes no service provider and these two values come
+        // from a bound options group. A Configure registered after AddGrpc runs after AddGrpc's own
+        // delegate, so these are the last writes to the two properties and cannot be overwritten by it.
+        //
+        // The RECEIVE ceiling restates the framework's own 4 MiB default so the value is visible beside the
+        // other bounds instead of being inherited invisibly. The SEND ceiling is the one that was genuinely
+        // unbounded: a result carrier assembled from a caller-influenced request is exactly the payload
+        // that needs one, because without it this process serialises the whole of it into memory before the
+        // transport can ever push back. Both come from the one Ingress section, so this transport and the
+        // REST half of the same port cannot be bounded differently by accident.
+        _ = services
+            .AddOptions<GrpcServiceOptions>()
+            .Configure<IOptions<IngressOptions>>(static (grpc, ingress) =>
+            {
+                grpc.MaxReceiveMessageSize = ingress.Value.MaxReceiveMessageBytes;
+                grpc.MaxSendMessageSize = ingress.Value.MaxSendMessageBytes;
+            });
 
         // REGISTERED THROUGH AN EXPLICIT FACTORY RATHER THAN BY TYPE, so that the process-termination
         // seam its constructor exposes keeps its host-backed default here and is supplied deliberately
@@ -1424,8 +1475,8 @@ internal static class PersistenceEndpointRouteExtensions
     /// ALL FOUR gRPC SERVICES REQUIRE AUTHORIZATION EXPLICITLY, AND EACH NAMES THE POLICY ITS CONTRACT
     /// CALLS FOR (constraint C-G) - BUT THE DECLARATION IS AN ATTRIBUTE ON THE IMPLEMENTATION, NOT A
     /// SECOND ONE HERE. The fallback policy closes the door on a route that declares nothing; the
-    /// attributes decide WHO may open it and for WHAT. The parameterless form used to be at this mapping
-    /// site, and it meant any holder of any token minted for this audience could call all four contracts -
+    /// attributes decide WHO may open it and for WHAT. The parameterless form at this mapping
+    /// site would let any holder of any token minted for this audience call all four contracts -
     /// a credential obtained for reading could update, delete or run an arbitrary command. Retrieval takes
     /// the reading scope; update and command take the writing scope, which is exactly the split
     /// DataServices already requests its credential under; and each policy additionally requires the
@@ -1616,11 +1667,11 @@ internal static class PersistenceStartupGate
     /// <para>
     /// WHY THIS GATE EXISTS AT ALL. This service is the only one that generates or executes SQL and the
     /// only one holding a storage provider, so a seam that failed to register is not a degraded feature -
-    /// it is a service that can answer nothing. Six of these seams previously shipped as deliberate
-    /// refusals, and the failure mode that made unacceptable was precisely that the shortfall was
-    /// invisible until a caller's first request: the process reported healthy, accepted traffic, and then
-    /// answered every retrieval and every update with a not-implemented code. Resolving them here means
-    /// the same shortfall is a startup failure with a named cause.
+    /// it is a service that can answer nothing. Six of these seams are the ones a deliberate-refusal
+    /// reading of the deferral would leave unbound, and what makes that unacceptable is precisely that the
+    /// shortfall is invisible until a caller's first request: the process reports healthy, accepts traffic,
+    /// and then answers every retrieval and every update with a not-implemented code. Resolving them here
+    /// means the same shortfall is a startup failure with a named cause.
     /// </para>
     /// <para>
     /// THE ENGINE IS RESOLVED AND IMMEDIATELY DISPOSED, AND THAT IS DELIBERATE. It is transient because
@@ -1720,13 +1771,14 @@ internal static class PersistenceStartupGate
         //  🔴 THE READ-ONLY LEGACY TREE IS REFUSED BEFORE ANY FILESYSTEM MUTATION, AND THE ORDER IS
         //  THE WHOLE POINT OF THIS BLOCK.
         //
-        //  SqliteConnectionFactory refuses this path in its constructor too, but that constructor runs
-        //  in ValidateRuntimeGraph BELOW - after the writability probe here has already called
-        //  Directory.CreateDirectory. The service therefore used to CREATE a directory inside
-        //  ws_objects/** and only then refuse to start, which writes into the behavioural oracle that
-        //  constraint C-C states is never an edit target: the very next characterization capture would
-        //  read whatever landed there as legacy source. Startup was correctly refused; the mutation
-        //  that preceded it was the defect.
+        //  SqliteConnectionFactory refuses this path in its constructor too, so relying on that alone
+        //  is the tempting position. It is not sufficient: that constructor runs in ValidateRuntimeGraph
+        //  BELOW - after the writability probe here has already called Directory.CreateDirectory. Without
+        //  the refusal AT THIS POINT the service would CREATE a directory inside ws_objects/** and only
+        //  then refuse to start, writing into the behavioural oracle that constraint C-C states is never
+        //  an edit target: the very next characterization capture would read whatever landed there as
+        //  legacy source. Refusing startup is not enough on its own; the mutation that would precede it
+        //  is the defect this ordering prevents.
         //
         //  The path is resolved to an absolute one first, exactly as the factory resolves it, because
         //  the segment test is defined on an absolute path - a relative setting would otherwise slip
@@ -1862,7 +1914,7 @@ internal static class PersistenceStartupGate
     /// remarks carved out "except a directory path, which is not a credential", and the one caller that
     /// relied on the carve-out produced exactly that contradiction: a record quoting a configured path
     /// and then declaring that configured values are not quoted. The carve-out is gone; the storage
-    /// directory's description is built by <see cref="Data.DataDirectoryFault"/>, which names the
+    /// directory's description is built by <c>Data.DataDirectoryFault</c>, which names the
     /// configuration key instead. A message echoing a token authority, a connection string, a mounted
     /// path or a password would put in the log exactly what constraint C-F exists to keep out of it.
     /// </para>
@@ -2140,7 +2192,7 @@ internal sealed class PersistenceStatusInterceptor : Interceptor
         // that throws - a full disk, a saturated sink, a misconfigured formatter - propagated out of this
         // method and took the termination request with it, leaving the process serving requests in a
         // state its own invariants say is impossible. That is strictly worse than a lost log record, and
-        // the legacy has no equivalent opportunity to skip its halt, so the ordering is now fixed:
+        // the legacy has no equivalent opportunity to skip its halt, so the ordering is fixed:
         // report, then terminate, and terminate whatever the report did.
         if (error is AssertionFailure assertion)
         {
@@ -2176,18 +2228,18 @@ internal sealed class PersistenceStatusInterceptor : Interceptor
 
         // EVERYTHING ELSE, AND THE EXCEPTION OBJECT IS DELIBERATELY NOT PASSED TO THE LOGGER.
         //
-        // THE DEFECT THIS CLOSES WAS SUBTLE AND COMPLETE. The message was redacted, which was correct and
-        // which is why the record looked safe - and then the exception itself was attached as the logging
-        // abstraction's exception argument, at which point every provider renders it by calling ToString().
+        // THE DEFECT THIS CLOSES IS SUBTLE AND COMPLETE. Redacting the message is correct, and it is what
+        // makes such a record LOOK safe - but attach the exception itself as the logging
+        // abstraction's exception argument and every provider renders it by calling ToString().
         // That renders the UNREDACTED message, every inner exception's unredacted message and the stack, so
-        // the redaction applied to one placeholder was undone by the argument beside it. An exception raised
+        // the redaction applied to one placeholder is undone by the argument beside it. An exception raised
         // anywhere near statement generation carries the complete generated statement with its literal values
         // interpolated - exactly the field the legacy logged verbatim and the one this service exists to stop
         // logging.
         //
         // THE WHOLE CHAIN IS REDACTED, NOT ONLY THE OUTERMOST MESSAGE. A provider fault is habitually wrapped,
-        // so the statement text is usually on an INNER exception; redacting only the outer message would have
-        // left the common case fully exposed.
+        // so the statement text is usually on an INNER exception; redacting only the outer message would
+        // leave the common case fully exposed.
         //
         // WHAT IS LOST AND WHY THAT IS THE RIGHT TRADE. The managed stack trace no longer reaches this record.
         // It is upstream content in the sense that matters here - its frames carry parameter values in no
@@ -2400,7 +2452,7 @@ internal sealed class PersistenceSqlTaskHost : ISqlTaskHost
     /// <inheritdoc/>
     /// <remarks>
     /// <para>
-    /// SETTABLE, AND FOR THE SAME REASON <see cref="Worker"/> IS. The legacy substrate's
+    /// SETTABLE, AND FOR THE SAME REASON <c>Worker</c> IS. The legacy substrate's
     /// <c>#ParentTasking</c> is the caller-side tasking object, and the worker forwards its
     /// <c>ondberror</c> event to it [<c>n_cst_thread_task_sqlbase.sru:L94-L95</c>]. Composing the pair in
     /// C# closes a cycle the constructors cannot: the worker takes the host, and the proxy is built before
@@ -2788,20 +2840,20 @@ internal sealed class QueryTaskFactory : IQueryTaskFactory
 }
 
 // ==================================================================================================
-//  THE RUNTIME SEAMS ARE BOUND - WHAT USED TO BE HERE, AND WHY IT IS NOT ANY MORE
+//  THE RUNTIME SEAMS ARE BOUND - AND WHY A REFUSING SEAM IS NOT AN OPTION HERE
 //
 //  READ THIS ONCE HERE RATHER THAN CHASING SIX REGISTRATIONS.
 //
-//  This file previously declared six types - UnboundDataObjectRuntime, UnboundQueryDataWindowRuntime,
+//  Six refusing types - UnboundDataObjectRuntime, UnboundQueryDataWindowRuntime,
 //  UnboundQueryTransactionSurface, UnprovisionedTransactionEngine, UnboundUpdateTaskFactory and
-//  UnboundCommandTaskFactory - each answering its contract's own defined negative, and it argued at length
-//  that the result was a documented gap rather than a stub. The argument was internally consistent and its
-//  conclusion was wrong: with all six bound that way, contracts C-05 through C-08 could not perform a
-//  single retrieval, update, command or commit, so the whole of this service's published surface answered a
-//  refusal no matter what a caller sent. A gap that spans every capability a service exists to provide is
+//  UnboundCommandTaskFactory - each answering its contract's own defined negative, are what a
+//  documented-gap reading of the deferral produces here. That argument is internally consistent and its
+//  conclusion is wrong: with all six bound that way, contracts C-05 through C-08 cannot perform a
+//  single retrieval, update, command or commit, so the whole of this service's published surface answers a
+//  refusal no matter what a caller sends. A gap that spans every capability a service exists to provide is
 //  not a gap in it; it is the absence of it.
 //
-//  The three premises the refusal rested on, and what each was actually true of:
+//  The three premises such a refusal rests on, and what each is actually true of:
 //
 //    1. "A DataWindow runtime would implement the deferred DesignSystem." It would not. AAP 0.2.2.2 scopes
 //       DesignSystem to the `pfw.ui*` libraries - visual controls, geometry, DPI, canvas, painter, font and
@@ -2820,7 +2872,7 @@ internal sealed class QueryTaskFactory : IQueryTaskFactory
 //       insertion - and none of those needs a second thread. `Runtime/SqliteCommandTaskFactory.cs` holds
 //       that state and says which of its members are deliberately not ported and why.
 //
-//  What is bound now, and where the behaviour lives:
+//  What is bound, and where the behaviour lives:
 //
 //      IDataObjectRuntime        ->  Runtime/SqliteDataObjectRuntime.cs
 //      IQueryDataWindowRuntime   ->  Runtime/SqliteQueryRuntime.cs
@@ -2830,8 +2882,9 @@ internal sealed class QueryTaskFactory : IQueryTaskFactory
 //      IUpdateTaskFactory        ->  Runtime/SqliteUpdateTaskFactory.cs
 //      ICommandTaskFactory       ->  Runtime/SqliteCommandTaskFactory.cs
 //
-//  Every one is still TryAdd-registered, so every one is still substitutable - which was the good half of
-//  the previous design and is kept. And the definitions those runtimes resolve are configuration, because
+//  Every one is TryAdd-registered, so every one remains substitutable - which is the property a refusing
+//  seam also has and the only one worth keeping from it. And the definitions those runtimes resolve are
+//  configuration, because
 //  the `.srd` objects live in the read-only legacy tree and no managed runtime can load one; the
 //  `DataObjects` section is that material, and `ValidatePersistenceStructuralPreconditions` refuses to
 //  start a host whose seams are not all resolvable.
@@ -2860,16 +2913,37 @@ internal sealed class QueryTaskFactory : IQueryTaskFactory
 /// no environment-conditional bypass anywhere in this service (constraint C-G).
 /// </para>
 /// <para>
-/// REVOCATION IS NOT CHECKED, AS A CONSEQUENCE OF THE TOPOLOGY. A local authority generated by two
-/// <c>openssl</c> invocations publishes no revocation list and runs no responder, so an online check has
-/// nothing to ask; the recipe's own 30-day certificate lifetime is the control that substitutes for it.
-/// A deployment whose authority does publish revocation information leaves this path unset and uses
-/// platform trust, where the platform's default revocation behaviour applies.
+/// REVOCATION IS A SETTING, AND ITS DEFAULT IS A CONSEQUENCE OF THE TOPOLOGY. <c>InternalTls:RevocationMode</c>
+/// selects the posture, so a deployment whose authority DOES publish revocation information can ask for a
+/// real check - which a hardcoded value denied it, leaving a stolen peer certificate acceptable until it
+/// expired. The shipped default is the only value the DOCUMENTED topology can answer, and that was
+/// measured rather than assumed: a local authority generated by two <c>openssl</c> invocations publishes
+/// no distribution point and runs no responder, so chain building for a leaf it issued succeeds with no
+/// check and fails under both stricter modes with an indeterminate revocation status - which those modes
+/// treat as a refusal, never as a pass. While the default stands, the substituting control is the recipe's
+/// own 30-day lifetime, and the operational surfaces carry the production recommendation and the
+/// emergency procedure.
 /// </para>
 /// </remarks>
 internal sealed class InternalTlsTrust
 {
+    /// <summary>The configuration path of the group this type is built from.</summary>
+    /// <remarks>
+    /// Composed once so the resolver's failure message and the loader's failure message name the group
+    /// the same way, and so neither can drift from the property names it quotes.
+    /// </remarks>
+    private static readonly string ConfigurationKeyPrefix = "InternalTls";
+
     private readonly X509Certificate2Collection _anchors;
+
+    /// <summary>
+    /// The revocation posture the configured group selected, resolved once at construction.
+    /// </summary>
+    /// <remarks>
+    /// RESOLVED HERE RATHER THAN PER HANDLER, so an unrecognised value fails the host's start instead of
+    /// failing the first outbound handshake - the fail-fast posture the rest of this file keeps.
+    /// </remarks>
+    private readonly X509RevocationMode _revocationMode;
 
     /// <summary>
     /// Loads the anchor bundle, or records that this deployment uses platform default trust.
@@ -2889,6 +2963,11 @@ internal sealed class InternalTlsTrust
     public InternalTlsTrust(InternalTlsTrustOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
+
+        // RESOLVED BEFORE THE EARLY RETURN, DELIBERATELY. An unrecognised mode is a misconfiguration
+        // whether or not this deployment pins an anchor, and a deployment that later sets a path would
+        // otherwise discover the typo only once it had.
+        _revocationMode = options.ResolveRevocationMode(ConfigurationKeyPrefix);
 
         if (!options.IsConfigured)
         {
@@ -2955,8 +3034,18 @@ internal sealed class InternalTlsTrust
         X509ChainPolicy policy = new()
         {
             TrustMode = X509ChainTrustMode.CustomRootTrust,
-            RevocationMode = X509RevocationMode.NoCheck,
+
+            // THE CONFIGURED POSTURE, not a constant. See the option's own remarks for why the shipped
+            // default cannot be the strict value on the documented topology, and why an indeterminate
+            // status under the stricter two is a refusal rather than a pass.
+            RevocationMode = _revocationMode,
         };
+
+        // ONLY MEANINGFUL WHEN A CHECK IS ACTUALLY PERFORMED, and it excludes the root because a locally
+        // generated authority does not revoke itself - asking about it would turn every check into an
+        // indeterminate answer and therefore into a refusal, which is the failure the mode's own remarks
+        // describe. It matches the flag Security's issuance-credential check already uses.
+        policy.RevocationFlag = X509RevocationFlag.ExcludeRoot;
 
         policy.CustomTrustStore.AddRange(_anchors);
 
@@ -2969,13 +3058,13 @@ internal sealed class InternalTlsTrust
 //
 //  READ THIS ONCE HERE RATHER THAN TWICE BELOW.
 //
-//  WHAT THESE FACTORIES REPLACED, AND WHY THE REPLACEMENT WAS NECESSARY
-//  An earlier revision of this file shipped six types that refused: a data-object runtime that resolved
-//  nothing, a carrier runtime that materialised nothing, a transaction surface that ran nothing, a
-//  transaction engine that connected to nothing, and two task factories that answered
-//  RetCode.E_NO_IMPLEMENTATION. They were defended as a documented gap rather than a stub, and the
-//  distinction they drew was real - none threw, each answered its own contract's defined negative. The
-//  defence still did not hold, for a reason that has nothing to do with how the refusals were spelled:
+//  WHY THESE FACTORIES BIND REAL IMPLEMENTATIONS RATHER THAN REFUSALS
+//  Binding six refusing types here is the tempting reading of the deferral rules: a data-object runtime
+//  that resolves nothing, a carrier runtime that materialises nothing, a transaction surface that runs
+//  nothing, a transaction engine that connects to nothing, and two task factories that answer
+//  RetCode.E_NO_IMPLEMENTATION. Such a set is defensible as a documented gap rather than a stub, and the
+//  distinction is real - none throws, each answers its own contract's defined negative. The defence
+//  still does not hold, for a reason that has nothing to do with how the refusals are spelled:
 //  the four capabilities behind them are the ones this service EXISTS to own. Persistence is the only
 //  service that generates or executes SQL and the only one holding a storage provider, and its four
 //  published contracts are Query, Update, Command and Transaction. A composition root that binds
@@ -2984,7 +3073,7 @@ internal sealed class InternalTlsTrust
 //  populated ConflictDetail, and a database error whose statement text is proven redacted - are not
 //  reachable at all without a real graph.
 //
-//  WHERE EACH CAPABILITY WENT, so a reader looking for the old types finds the new ones:
+//  WHERE EACH CAPABILITY LIVES, so a reader looking for one of them finds it:
 //    ITransactionEngine        -> Data/SqliteTransactionEngine.cs        (transient, one per pooled
 //                                                                        transaction, and the lifetime
 //                                                                        is load bearing)
@@ -3287,8 +3376,8 @@ internal sealed class UpdateTaskFactory : IUpdateTaskFactory
 /// The provisioned <see cref="ICommandTaskFactory"/>: it builds a command proxy pair.
 /// </summary>
 /// <remarks>
-/// A command task is a PAIR, and the caller-side half's substrate is what a headless service was
-/// previously argued not to have. It does have one - <c>Tasks/TaskProxies/PersistenceSqlTaskProxyHost.cs</c>
+/// A command task is a PAIR, and the caller-side half's substrate is what a headless service is easily
+/// argued not to have. It does have one - <c>Tasks/TaskProxies/PersistenceSqlTaskProxyHost.cs</c>
 /// is that substrate, ported as flags and a cancellation token rather than as Win32 handles, which is the
 /// substitution the migration records for the deliberately non-ported handle surface. So the pair is built
 /// in full and neither half is flattened into the other.

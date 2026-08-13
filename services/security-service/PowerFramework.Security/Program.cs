@@ -112,6 +112,24 @@ using PowerFramework.Shared.Kernel;
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 // --------------------------------------------------------------------------------------------------
+// 0. FILE-BACKED SECRET MATERIAL, RESOLVED BEFORE ANYTHING READS A SECRET
+//
+// This service reads its signing keys and every client secret through a flat configuration key whose
+// NAME is declared and whose VALUE is supplied by the deployment. Supplying that value as an
+// environment variable exposes it to `docker compose config`, `docker inspect`, `/proc/<pid>/environ`
+// and every child process; supplying it as a projected file exposes it to none of those.
+//
+// SO EACH OF THOSE KEYS ACCEPTS A `<KEY>_FILE` COMPANION, and this call resolves them. It runs FIRST
+// because the options graph below, the signing-key provider and the issuance path all read those keys -
+// a later registration would leave some readers on the environment value and others on the file, which
+// is precisely the split-brain the resolver refuses when it sees both forms set at once.
+//
+// The environment-variable form still works, so nothing about the documented bring-up changes by this
+// being here. Configuration/FileBackedSecrets.cs carries the three refusal rules and why each refuses
+// instead of falling back.
+_ = builder.AddFileBackedSecrets();
+
+// --------------------------------------------------------------------------------------------------
 // 1. THE CONFIGURATION CONTRACT, AND THE STARTUP GATE THAT MAKES IT FAIL FAST
 //
 // THE HOST REFUSES TO START ON A MISCONFIGURATION. That is the legacy posture, not a preference: the
@@ -172,7 +190,7 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 // posture of the SERVER side all stay as configured, and no server-certificate validation anywhere is
 // relaxed.
 //
-// THIS ACCEPT-AND-DEFER CALLBACK IS SUPERSEDED FURTHER DOWN THIS FILE, AND THAT IS THE INTENDED READING
+// THIS ACCEPT-AND-DEFER CALLBACK IS OVERRIDDEN FURTHER DOWN THIS FILE, AND THAT IS THE INTENDED READING
 // ORDER RATHER THAN A LEFTOVER. `CallerCertificateTrust.Load` below reads
 // `Security:MutualTls:ClientCaPath` and reassigns `ClientCertificateValidation` to a callback that
 // chains a presented certificate under X509ChainTrustMode.CustomRootTrust against that anchor alone, so
@@ -181,13 +199,34 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 // this block either way is the argument AGAINST the platform default that would otherwise apply, which is
 // the argument the later registration acts on: the trust decision is redirected to a named anchor instead
 // of the container's OS store, and it is redirected at a place a test can drive and a reader can audit.
-// This assignment is the unconditional baseline that argument leaves behind, and the later one replaces it
-// in both configurations - with an anchor, a fresh chain is built against that anchor alone under
-// NoFlag; with none, the platform's own verdict stands, which is what Kestrel would have reached unaided.
+// This assignment is the unconditional baseline that argument rests on, and the later one overrides it in
+// both configurations - with an anchor, a fresh chain is built against that anchor alone under NoFlag;
+// with none, the platform's own verdict stands, which is what Kestrel would reach unaided.
 // --------------------------------------------------------------------------------------------------
 builder.WebHost.ConfigureKestrel(static kestrel =>
     kestrel.ConfigureHttpsDefaults(static https =>
         https.ClientCertificateValidation = static (_, _, _) => true));
+
+// --------------------------------------------------------------------------------------------------
+// 0b. THE BOUNDS THIS SERVICE PLACES ON ITS OWN INGRESS.
+//
+// Registered here, beside the other listener configuration, because its transport half configures the
+// LISTENER and a listener must be bounded before the host is built rather than after the first unbounded
+// request has already been accepted. It sets no TLS property at all, so it neither participates in nor
+// disturbs the accept-and-defer decision above or the anchor-backed callback that supersedes it further
+// down - the three assign disjoint properties.
+//
+// Decomposition creates this system's first-ever listening socket [Agent Action Plan 0.1.4]: the legacy
+// was a library that received no unsolicited request, so there is no legacy limit to port and nothing
+// here preserves or alters a legacy behaviour. The bound answers a failure mode the TRANSITION
+// introduced, which is the standing outbound resilience has (0.5.3) rather than a behaviour improvement
+// layered on top of it (constraint C-B). No package is added - the limiter is shared-framework code.
+//
+// THIS SERVICE'S BOUNDS ARE THE TIGHTEST OF THE FOUR, and that is proportionate rather than arbitrary: a
+// token mint computes a signature and an RSA operation generates or uses a key, so one request here costs
+// far more than a proxied read does anywhere else. Configuration/IngressOptions.cs argues every value.
+// --------------------------------------------------------------------------------------------------
+builder.AddIngressHardening();
 
 builder.Services
     .AddOptions<SecurityOptions>()
@@ -227,6 +266,20 @@ builder.Services
         if (!string.IsNullOrWhiteSpace(configured))
         {
             options.SigningKey = configured;
+        }
+
+        // 🔴 THE RETIRING KEY ARRIVES THE SAME WAY, AND FOR THE SAME REASON.
+        // SECURITY_JWT_RETIRING_SIGNING_KEY carries no double underscore either, so section binding cannot
+        // reach it. It is OPTIONAL - absent in the steady state - and its presence is what puts a rollover
+        // in progress: the key set then publishes it beside the active key under
+        // Security:RetiringSigningKeyId, so both generations of token verify while the three verifiers'
+        // cached key sets converge. Minting never uses it. The same presence guard applies, so an absent
+        // value overwrites nothing, and the same rule about aliases: one spelling, no Security__ variant.
+        string? retiring = configuration[SecurityOptions.RetiringSigningKeyEnvironmentVariableName];
+
+        if (!string.IsNullOrWhiteSpace(retiring))
+        {
+            options.RetiringSigningKey = retiring;
         }
     })
 
@@ -290,14 +343,31 @@ builder.Services.AddSingleton<IValidateOptions<SecurityOptions>, SecurityOptions
 // than a handshake failure discovered by the first caller.
 //
 // TRUST IS NARROWED, NEVER RELAXED. There is no AllowAnyClientCertificate call anywhere in this file:
-// that method REPLACES the callback below and would accept every certificate presented, which is the
-// exact defect this replaces rather than a shortcut to it. With no anchor configured the callback defers
-// to the platform's own verdict, which is what Kestrel would have done unaided.
+// that method REPLACES the callback below and would accept every certificate presented, which is exactly
+// the bypass the anchor exists to prevent rather than a shortcut to it. With no anchor configured the
+// callback defers to the platform's own verdict, which is what Kestrel would do unaided.
 // --------------------------------------------------------------------------------------------------
+//
+// THE REVOCATION POSTURE AND THE LIFETIME CEILING ARE READ FROM THE SAME PLACE THE ISSUANCE-CREDENTIAL
+// CHECK READS THEM, AND THAT IS THE CORRECTION. The listener's chain build used to hardcode "no revocation
+// check", so a deployment whose authority DOES publish revocation information had no way to ask the
+// handshake for one even after asking the issuance path for it - one caller certificate, two different
+// postures, one of them unreachable. Both are now the one configured setting, so `Security:...RevocationMode`
+// means the same thing wherever a caller certificate is judged, and the lifetime ceiling that substitutes
+// for revocation while that setting is NoCheck applies in both places too.
+//
+// Read off Configuration rather than through IOptions for the reason the anchor is: the HTTPS defaults are
+// configured on the host builder, before any options instance can be resolved. Both fall back to the same
+// defaults the options type declares, so a settings file that says nothing gets the shipped posture rather
+// than a third one invented here.
 CallerCertificateTrust callerCertificateTrust = CallerCertificateTrust.Load(
     builder.Configuration[
         $"{SecurityOptions.SectionName}:{nameof(SecurityOptions.MutualTls)}:"
-            + $"{nameof(SecurityMutualTlsOptions.ClientCaPath)}"]);
+            + $"{nameof(SecurityMutualTlsOptions.ClientCaPath)}"],
+    builder.Configuration[
+        $"{SecurityOptions.SectionName}:{nameof(SecurityOptions.ClientCertificateRevocationMode)}"],
+    builder.Configuration.GetValue<int?>(
+        $"{SecurityOptions.SectionName}:{nameof(SecurityOptions.MaxCallerCertificateLifetimeDays)}"));
 
 builder.Services.AddSingleton(callerCertificateTrust);
 
@@ -449,17 +519,20 @@ builder.Services.AddSingleton<ClientCertificateTrust>();
 // THE ACCEPTED AUDIENCE IS THIS SERVICE'S OWN IDENTITY, NOT THE WHOLE ISSUANCE ROSTER. Both come from
 // the one bound options contract - see the resolver at the foot of this file - and the distinction is
 // the point of audience validation: a token minted for Gateway must not be replayable at Security. The
-// roster is used as the MEMBERSHIP AUTHORITY for that identity and as the fallback when a deployment
-// declares no inbound identity at all, and section 8 refuses to start a host whose declared inbound
-// identity is absent from the roster, because /v1/ping could then never be reached by any token this
-// issuer is able to mint.
+// roster is used as the MEMBERSHIP AUTHORITY for that identity and NOT as a fallback: a deployment that
+// declares no inbound identity at all is refused rather than widened to the whole roster, because
+// widening would make a token minted for any service on the roster accept at Security - see the resolver
+// at the foot of this file. Section 8 likewise refuses to start a host whose declared inbound identity is
+// absent from the roster, because /v1/ping could then never be reached by any token this issuer is able
+// to mint.
 // --------------------------------------------------------------------------------------------------
 const string inboundAuthenticationSection = "Authentication:Jwt";
 
-// The category the one non-fatal issuance-configuration report is written under. Named after the type that
-// produces it so a log filter and a source file are found from each other, and declared here rather than
-// inline so the string appears exactly once.
+// The categories the non-fatal startup configuration reports are written under. Each is named after the
+// type that produces it so a log filter and a source file are found from each other, and both are declared
+// here rather than inline so each string appears exactly once.
 const string issuanceRosterAuthorityCategory = "PowerFramework.Security.IssuanceRosterAuthority";
+const string keyStoreReadinessCategory = "PowerFramework.Security.KeyStoreReadiness";
 
 // =================================================================================================
 //  DATA PROTECTION IS EPHEMERAL BY DELIBERATE CHOICE, AND THE CHOICE IS ABOUT KEY MATERIAL AT REST.
@@ -546,12 +619,13 @@ builder.Services
             // performs no metadata retrieval of any kind and there is no fetch for the setting to
             // govern.
             //
-            // An earlier revision read it from configuration here. That was worse than harmless: an
-            // operator reading this block, or the settings file that carried the key, would reasonably
-            // conclude Security's metadata retrieval was being held to HTTPS - when Security has no
-            // metadata retrieval at all. A setting that appears to be enforced and governs nothing is a
-            // false assurance, so the read and its now-dead settings key were both removed rather than
-            // left in place for symmetry with the other three services.
+            // AND IT IS NOT READ FROM CONFIGURATION HERE, WHICH IS WORTH SAYING BECAUSE THE OTHER THREE
+            // SERVICES DO READ IT. Reading it here would be worse than harmless: an operator reading this
+            // block, or a settings file carrying the key, would reasonably conclude Security's metadata
+            // retrieval was being held to HTTPS - when Security has no metadata retrieval at all. A
+            // setting that appears to be enforced and governs nothing is a false assurance, so neither the
+            // read nor a settings key for it exists, and symmetry with the siblings is deliberately not
+            // preserved.
             //
             // THE SETTING REMAINS LIVE AND MEANINGFUL ON GATEWAY, DATASERVICES AND PERSISTENCE, which
             // DO fetch this service's key set and discovery document over HTTP and where the property
@@ -565,7 +639,7 @@ builder.Services
             // - and the literal assignment further down overwrote it unconditionally, so the read decided
             // nothing at all. Worse than harmless for the same reason the removed RequireHttpsMetadata read
             // was: it left a configuration path an operator could reasonably believe applied. The read is
-            // gone, the literal assignment below is the only one, and section 8 now REFUSES a host that
+            // absent, the literal assignment below is the only one, and section 8 REFUSES a host that
             // configures the key rather than ignoring the value in silence.
 
             // ALL FOUR ARE ASSIGNED LITERALLY, NOT READ. Each removes an entire class of forgery, so
@@ -601,12 +675,20 @@ builder.Services
             // the set this service accepts would have two sources able to disagree.
             bearer.TokenValidationParameters.ValidAudiences = ResolveInboundAudiences(
                 configured,
-                ReadInboundAudience(configuration, inboundAuthenticationSection));
+                ReadInboundAudience(configuration, inboundAuthenticationSection),
+                inboundAuthenticationSection);
 
-            // The PUBLIC half of the signing key, taken from the layer that owns the private half. The
-            // provider builds it from parameters exported with the private components EXCLUDED, so
-            // there is nothing private in the object handed here rather than merely nothing exposed.
-            bearer.TokenValidationParameters.IssuerSigningKey = signingKeys.PublicVerificationKey;
+            // The PUBLIC halves of the signing ring, taken from the layer that owns the private halves.
+            // The provider builds each from parameters exported with the private components EXCLUDED, so
+            // there is nothing private in the objects handed here rather than merely nothing exposed.
+            //
+            // 🔴 THE WHOLE RING, NOT THE ACTIVE KEY. An earlier revision assigned the singular
+            // IssuerSigningKey, which was correct while one key existed and becomes a defect the moment a
+            // rollover begins: the other three services fetch the published set and get both entries,
+            // while THIS service - the issuer - would refuse every token minted under the retiring key
+            // during exactly the window the rollover exists to keep working. The plural member is
+            // populated and the singular one deliberately is not, so the accepted set has one source.
+            bearer.TokenValidationParameters.IssuerSigningKeys = signingKeys.PublicVerificationKeys;
 
             // ZERO, UNCONDITIONALLY, DEPARTING FROM THE HANDLER'S OWN FIVE MINUTES.
             //
@@ -655,11 +737,13 @@ builder.Services.AddAuthorization(static options =>
 });
 
 // AUTHENTICATION IS NOT AUTHORIZATION, AND THE FALLBACK ABOVE ONLY DELIVERS THE FIRST. Every token this
-// service mints carries a `scope` claim, and security.v1.yaml publishes a 403 on thirteen operations
-// whose description says the token is valid but does not carry the scope the operation requires. Without
-// the policies registered here nothing read that claim: any token addressed to this service reached
-// every authenticated route, whatever it was scoped to, so the claim was decorative and a caller granted
-// the cryptographic surface for one purpose held all of it.
+// service mints carries a `scope` claim, and security.v1.yaml publishes a 403 on every operation that
+// reaches authentication - only `/health` and the two `/.well-known/` publications are exempt, because
+// they are anonymous - whose description says the token is valid but does not carry the scope the
+// operation requires. Nothing reads that claim unless the policies registered here are present: without
+// them any token addressed to this service reaches every authenticated route whatever it is scoped to,
+// the claim is decorative, and a caller granted the cryptographic surface for one purpose holds all of
+// it.
 //
 // The mechanism, the reason the framework's own claim requirement cannot express it (the claim is ONE
 // value carrying a SPACE-DELIMITED set), and the reason it is duplicated per service rather than shared
@@ -796,7 +880,7 @@ builder.Services.Configure<RouteHandlerOptions>(static options => options.ThrowO
 //     would accept a body that the document it publishes forbids, and a client validating against that
 //     document would refuse a request this service had already honoured. Refusing here is what makes
 //     the two agree. It also closes the shape of smuggling the closed schemas exist to prevent: an
-//     undeclared member named for key material is now a refusal rather than a member that binds
+//     undeclared member named for key material is a refusal rather than a member that binds
 //     nowhere and is quietly dropped - see the raw-key-material rule on contract C-02.
 //   * MEMBER NAMES ARE MATCHED EXACTLY. The web defaults match case-insensitively, so "Subject" would
 //     bind to the member the document spells "subject". A document-validating client refuses that
@@ -908,10 +992,27 @@ _ = app.Services.GetRequiredService<ClientCertificateTrust>();
 
 // Read from the BUILT host's configuration for the same reason section 5 reads from the injected one:
 // this is the only vantage point from which the final, fully-composed configuration is visible.
-RequireIssuableInboundAudience(
-    issuance,
-    ReadInboundAudience(app.Configuration, inboundAuthenticationSection),
-    inboundAuthenticationSection);
+string declaredInboundAudience = ReadInboundAudience(app.Configuration, inboundAuthenticationSection);
+
+// 🔴 AN UNDECLARED INBOUND AUDIENCE IS REFUSED HERE, AT STARTUP, AND THE PLACEMENT IS THE WHOLE POINT.
+//
+// The resolver below is the one that refuses an absent declaration, and section 5 calls it from inside the
+// bearer-options configure action - which the framework runs LAZILY, when those options are first resolved.
+// That is on the first request that authenticates, so a host with no declared audience STARTED, reported
+// healthy on its anonymous /health, satisfied the orchestration readiness gate, and only then failed. A
+// structural fault discovered by a caller is an outage; discovered here it is a failure to launch, which is
+// the legacy posture [ws_objects/pfw.pbl.src/pfw.sra:L111-L144, terminating at :L143].
+//
+// CALLED FOR ITS REFUSAL RATHER THAN FOR ITS RESULT. The returned set is rebuilt in section 5 from the same
+// two inputs; the function is pure, so calling it twice is free and the two calls cannot disagree.
+//
+// IT RUNS BEFORE THE MEMBERSHIP CHECK BECAUSE ABSENCE AND NON-MEMBERSHIP ARE DIFFERENT FAULTS with
+// different remedies - declare an identity, versus put the declared one on the roster - and each has to
+// reach the operator through its own message. The membership check therefore still returns early on an
+// empty value, and this line is what guarantees an empty value never gets that far.
+_ = ResolveInboundAudiences(issuance, declaredInboundAudience, inboundAuthenticationSection);
+
+RequireIssuableInboundAudience(issuance, declaredInboundAudience, inboundAuthenticationSection);
 
 // AND THE FIVE INVARIANT TOKEN-VALIDATION SETTINGS ARE ENFORCED HERE. Section 5 assigns all five
 // literally, so a configured value takes no effect - and a setting that is silently ignored is worse than
@@ -924,19 +1025,18 @@ RequireInvariantTokenValidation(app.Configuration, inboundAuthenticationSection)
 // AND THE PERMISSION MODEL MUST BE SINGULAR, WHICH IS A FOURTH REFUSAL RATHER THAN A WARNING.
 //
 // THERE IS EXACTLY ONE AUTHORITATIVE PERMISSION MODEL: the deployment-wide audience roster and the grant
-// matrix folded from `Security:Callers` and `Security:CallerAuthorizations`. The per-client
-// `Security:Clients[n]:Audiences` and `:Scopes` lists that used to sit beside it were bound, frozen onto the
-// resolved roster entry and CONSULTED BY NOTHING - two surfaces describing one decision, which is how the
-// shipped settings came to advertise audiences and scopes the matrix withholds and how an operator could
-// edit an authorization list and change nothing at all (CWE-16, CWE-863). They are REMOVED, not enforced:
-// enforcing them would create a second gate able to refuse what the matrix grants, which is the divided
-// authority Tokens/TokenIssuer.cs rejects in terms.
+// matrix folded from `Security:Callers` and `Security:CallerAuthorizations`. Per-client
+// `Security:Clients[n]:Audiences` and `:Scopes` lists are NOT part of it and are not bound anywhere - two
+// surfaces describing one decision is how a settings file comes to advertise audiences and scopes the
+// matrix withholds, and how an operator edits an authorization list and changes nothing at all (CWE-16,
+// CWE-863). Nor are they enforced as a second gate: that would let them refuse what the matrix grants,
+// which is the divided authority Tokens/TokenIssuer.cs rejects in terms.
 //
-// THIS LINE MAKES THEIR RETURN FATAL, which is the half that has to be a refusal. A binder silently drops a
-// key no property matches, so a settings file carrying either member forward from an older revision would
-// read as working authorization configuration and do nothing - the removed defect in a new dress, and
-// invisible from the bound instance because the value never reaches it. The check reads the configuration
-// ROOT by key path, names every offending key in one message, and echoes no value.
+// THIS LINE MAKES THEIR PRESENCE FATAL, which is the half that has to be a refusal. A binder silently drops
+// a key no property matches, so a settings file carrying either member would read as working authorization
+// configuration and do nothing - invisible from the bound instance, because the value never reaches it. The
+// check reads the configuration ROOT by key path, names every offending key in one message, and echoes no
+// value.
 IssuanceRosterAuthority.Require(issuance, app.Configuration);
 
 // AND THE ROSTER/MATRIX CROSS-REFERENCE IS REPORTED AT ITS EARNED SEVERITY, WHICH IS NOT A REFUSAL - AND
@@ -953,6 +1053,38 @@ foreach (string divergence in IssuanceRosterAuthority.Describe(issuance))
         .GetRequiredService<ILoggerFactory>()
         .CreateLogger(issuanceRosterAuthorityCategory)
         .LogWarning("{Divergence}", divergence);
+}
+
+// AND THE KEYED-CRYPTO KEY STORE STATES ITS READINESS ONCE, WHICH IS A RECORD AND NOT A GATE.
+//
+// `Security:KeyStore:PermittedKeyRefs` ships EMPTY, and that default is correct: an unconfigured store must
+// resolve nothing rather than read whatever configuration key a caller names. It is, however, SILENT - a
+// deployment that meant to publish references and did not learns nothing until a caller is refused, and the
+// refusal is deliberately indistinguishable from an unknown reference, so it cannot say the store is merely
+// empty. One line at startup closes that gap without changing what resolves. Nothing here reads resolved
+// material, and the prefix is reported as present or absent rather than echoed.
+//
+// THE LEVELS FOLLOW ClientCertificateTrust, WHICH IS THIS EXACT PROBLEM ONE EDGE OVER. That type records an
+// unset trust anchor at Warning, qualified to the credential it affects and closed with the observation that
+// the state is fail-closed rather than a fault - so an unavailable key store is recorded the same way, and an
+// available one at Information. Exactly one record is emitted either way, because the two states are
+// alternatives and a start that printed both would restate itself.
+//
+// NEITHER ARM REFUSES THE HOST. The validator already refuses the one shape that CANNOT work - a permitted
+// reference with no prefix to resolve it against - and refusing the shipped default would break the
+// documented independent bring-up (constraints C-A and C-I).
+ILogger keyStoreReadinessLog = app.Services
+    .GetRequiredService<ILoggerFactory>()
+    .CreateLogger(keyStoreReadinessCategory);
+
+foreach (string available in KeyStoreReadiness.DescribeAvailable(issuance))
+{
+    keyStoreReadinessLog.LogInformation("{Readiness}", available);
+}
+
+foreach (string unavailable in KeyStoreReadiness.DescribeUnavailable(issuance))
+{
+    keyStoreReadinessLog.LogWarning("{Readiness}", unavailable);
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -1020,6 +1152,21 @@ app.UseStatusCodePages();
 MalformedRequestBody.Use(app);
 
 app.UseAuthentication();
+
+// THE REQUEST-LAYER INGRESS BOUND, positioned after authentication because its per-caller partition IS the
+// authenticated principal - and inside a container network every request from one peer shares one source
+// address, so an address partition would put a whole upstream service in one bucket and make one caller's
+// excess indistinguishable from its neighbour's. What that ordering leaves uncounted is the work done
+// before a caller is known, and the transport bounds registered in section 0b answer it: a connection
+// ceiling, a header ceiling and a header-completion deadline all apply beneath every middleware.
+//
+// /health is exempt, and so is nothing else - not the key set, not the discovery document. Those two are
+// anonymous by contract (C-01) and are therefore partitioned by source address rather than by principal,
+// which is the correct accounting for an unauthenticated caller. /health alone is exempt because it is the
+// readiness gate three dependents are held behind, so rate-limiting it would turn a busy service into a
+// permanently unready one and take the whole stack down with it.
+app.UseIngressHardening();
+
 app.UseAuthorization();
 
 // --------------------------------------------------------------------------------------------------
@@ -1054,10 +1201,12 @@ app.MapPingEndpoints();
 app.MapJwksEndpoints();
 
 // Contract C-01's issuance half, and the only route in the system that reaches a signing key. It is
-// authenticated by a CLIENT CERTIFICATE rather than by a token, applied explicitly inside that file as
-// a route-level authorization policy, because a caller cannot present a bearer token in order to obtain
-// its first bearer token - which is why the published document applies its mutual-TLS scheme to that
-// one operation as an override of the document-level bearer requirement. The requirement is enforced
+// authenticated by a PRESENTED CALLER CREDENTIAL rather than by a token - an HTTP Basic credential the
+// roster holds, or a trusted client certificate where a deployment terminates TLS at this listener -
+// applied explicitly inside that file as a route-level authorization policy, because a caller cannot
+// present a bearer token in order to obtain its first bearer token. That is why the published document
+// applies its clientCredential and mutualTLS schemes to that one operation, as ALTERNATIVES and as an
+// override of the document-level bearer requirement; a request presenting neither is refused 401. The requirement is enforced
 // per operation rather than at the listener so that the anonymous routes above and the
 // bearer-authenticated ones below stay reachable on this service's single listener; that registration
 // also validates the configured issuance address and fails the host when it is blank, unrooted, or
@@ -1080,44 +1229,32 @@ app.Run();
 //  produce on a booted host.
 // ==================================================================================================
 
-/// <summary>
-/// Chooses the legacy return code that classifies a framework-produced failure response.
-/// </summary>
-/// <param name="statusCode">The HTTP status the framework is about to write.</param>
-/// <returns>
-/// A return code that is a genuine failure under the legacy algebra, never one that reads as a success
-/// and never one the algebra treats as neither.
-/// </returns>
-/// <remarks>
-/// <para>
-/// EVERY ARM IS WRITTEN OUT DELIBERATELY RATHER THAN DERIVED FROM A TRUTHINESS TEST, which is the whole
-/// requirement here. The codes and the statuses are taken from the published contract's own response
-/// catalogue - a malformed request is <c>E_INVALID_ARGUMENT</c>, a refused caller is
-/// <c>E_ACCESS_DENIED</c> whether the refusal was authentication or authorization, an absent resource is
-/// <c>E_OBJECT_NOT_FOUND</c>, and an internal fault is <c>E_INTERNAL_ERROR</c> with <c>UNKNOWN</c> for a
-/// condition that cannot be classified at all.
-/// </para>
-/// <para>
-/// THE REFUSAL AND THE FORBIDDEN CASE SHARE ONE CODE, AND THAT ASYMMETRY IS PRESERVED RATHER THAN
-/// PAPERED OVER. The legacy algebra declares exactly one access code and draws no distinction between
-/// "no credential" and "credential without permission"; the published contract records the same
-/// correspondence. The HTTP statuses stay distinct, so a caller can still tell the two apart - the code
-/// simply does not gain a member the oracle never declared.
-/// </para>
-/// <para>
-/// THE GUARD IS THE POINT OF THE FINAL CHECK. The return-code algebra is tri-state and has a documented
-/// hole: <c>PREVENT</c> is 1 and <c>IsSucceeded</c> tests greater-than-or-equal-to zero, so a prevention
-/// reads as a SUCCESS [<c>ws_objects/pfw.shared.pbl.src/issucceeded.srf:L11-L13</c>,
-/// <c>retcode.sru:L42</c>]; <c>CANCELLED</c> is -2 and is explicitly excluded from <c>IsFailed</c>, so a
-/// cancellation is NEITHER succeeded nor failed [<c>isfailed.srf:L11-L13</c>,
-/// <c>retcode.sru:L44-L45</c>]; and both predicates answer false on null. An error body must therefore
-/// never carry a code from either of those two classes, and the kernel predicate is CONSUMED to enforce
-/// that rather than the comparison being re-derived here. Every arm below already satisfies it; the
-/// check exists so that a future edit which introduced one that did not would degrade to
-/// <c>UNKNOWN</c> instead of publishing a failure that a consumer's own predicate would read as a
-/// success.
-/// </para>
-/// </remarks>
+// Chooses the legacy return code that classifies a framework-produced failure response.
+// statusCode: The HTTP status the framework is about to write.
+// A return code that is a genuine failure under the legacy algebra, never one that reads as a success
+// and never one the algebra treats as neither.
+// EVERY ARM IS WRITTEN OUT DELIBERATELY RATHER THAN DERIVED FROM A TRUTHINESS TEST, which is the whole
+// requirement here. The codes and the statuses are taken from the published contract's own response
+// catalogue - a malformed request is E_INVALID_ARGUMENT, a refused caller is
+// E_ACCESS_DENIED whether the refusal was authentication or authorization, an absent resource is
+// E_OBJECT_NOT_FOUND, and an internal fault is E_INTERNAL_ERROR with UNKNOWN for a
+// condition that cannot be classified at all.
+// THE REFUSAL AND THE FORBIDDEN CASE SHARE ONE CODE, AND THAT ASYMMETRY IS PRESERVED RATHER THAN
+// PAPERED OVER. The legacy algebra declares exactly one access code and draws no distinction between
+// "no credential" and "credential without permission"; the published contract records the same
+// correspondence. The HTTP statuses stay distinct, so a caller can still tell the two apart - the code
+// simply does not gain a member the oracle never declared.
+// THE GUARD IS THE POINT OF THE FINAL CHECK. The return-code algebra is tri-state and has a documented
+// hole: PREVENT is 1 and IsSucceeded tests greater-than-or-equal-to zero, so a prevention
+// reads as a SUCCESS [ws_objects/pfw.shared.pbl.src/issucceeded.srf:L11-L13,
+// retcode.sru:L42]; CANCELLED is -2 and is explicitly excluded from IsFailed, so a
+// cancellation is NEITHER succeeded nor failed [isfailed.srf:L11-L13,
+// retcode.sru:L44-L45]; and both predicates answer false on null. An error body must therefore
+// never carry a code from either of those two classes, and the kernel predicate is CONSUMED to enforce
+// that rather than the comparison being re-derived here. Every arm below already satisfies it; the
+// check exists so that a future edit which introduced one that did not would degrade to
+// UNKNOWN instead of publishing a failure that a consumer's own predicate would read as a
+// success.
 static long ClassifyFailure(int statusCode)
 {
     long classified = statusCode switch
@@ -1137,19 +1274,15 @@ static long ClassifyFailure(int statusCode)
     return Predicates.IsFailed(classified) ? classified : RetCode.UNKNOWN;
 }
 
-/// <summary>
-/// Reads this service's own declared inbound audience identity from a configuration root.
-/// </summary>
-/// <param name="configuration">The configuration to read, which must be a fully-composed one.</param>
-/// <param name="sectionName">The inbound-validation section's name.</param>
-/// <returns>The declared identity, trimmed, or an empty string when none is declared.</returns>
-/// <remarks>
-/// ONE READER SO THERE IS ONE SPELLING OF THE KEY. Section 5 configures the handler from it and section
-/// 8 gates startup on it; two independent reads of the same key would be two places for a rename to go
-/// half-applied. Trimming is applied because a settings value that acquired surrounding whitespace would
-/// otherwise become an audience no token could ever carry, and an empty result is a legitimate answer
-/// meaning "not declared" rather than a failure - the companion resolver treats it as such.
-/// </remarks>
+// Reads this service's own declared inbound audience identity from a configuration root.
+// configuration: The configuration to read, which must be a fully-composed one.
+// sectionName: The inbound-validation section's name.
+// Returns: The declared identity, trimmed, or an empty string when none is declared.
+// ONE READER SO THERE IS ONE SPELLING OF THE KEY. Section 5 configures the handler from it and section
+// 8 gates startup on it; two independent reads of the same key would be two places for a rename to go
+// half-applied. Trimming is applied because a settings value that acquired surrounding whitespace would
+// otherwise become an audience no token could ever carry, and an empty result is a legitimate answer
+// meaning "not declared" rather than a failure - the companion resolver treats it as such.
 static string ReadInboundAudience(IConfiguration configuration, string sectionName)
 {
     ArgumentNullException.ThrowIfNull(configuration);
@@ -1163,39 +1296,65 @@ static string ReadInboundAudience(IConfiguration configuration, string sectionNa
 /// <param name="configured">The validated issuance settings.</param>
 /// <param name="declaredAudience">
 /// This service's own identity as declared for inbound validation, already trimmed, or an empty string
-/// when a deployment declares none.
+/// when a deployment declares none - which is now fatal.
 /// </param>
-/// <returns>The accepted audience set, never empty.</returns>
+/// <param name="sectionName">
+/// The inbound-validation section the identity was read from, so the refusal names the exact key an
+/// operator has to set. Passed rather than closed over, because this is a static local function and the
+/// section name is a local of the composition root.
+/// </param>
+/// <returns>The accepted audience set: exactly one identity.</returns>
+/// <exception cref="InvalidOperationException">No inbound audience is declared.</exception>
 /// <remarks>
 /// <para>
-/// THE NARROW ANSWER IS THE PREFERRED ONE. When a deployment declares this service's own identity, that
-/// single identity is the accepted set, because the entire purpose of audience validation is that a
-/// token addressed to one service is not replayable at another - and every identity in the issuance
-/// roster belongs to a DIFFERENT service in the same trust domain. Accepting the whole roster would
-/// defeat the check while appearing to perform it.
+/// EXACTLY ONE IDENTITY IS ACCEPTED, AND THERE IS NO WIDER FALLBACK. The entire purpose of audience
+/// validation is that a token addressed to one service is not replayable at another, and every other
+/// identity in the issuance roster belongs to a DIFFERENT service in the same trust domain.
 /// </para>
 /// <para>
-/// THE ROSTER IS THE FALLBACK, NOT THE DEFAULT. A deployment that declares no inbound identity gets the
-/// roster, which keeps the authenticated ping route reachable rather than silently unreachable; the
-/// roster is validated non-empty before this is called, so the returned set can never be empty and
-/// audience validation can never degenerate into accepting everything. A deployment that declares an
-/// identity the roster does not contain is refused at startup instead - see the companion check - since
-/// no token this issuer can mint would ever carry it.
+/// 🔴 <b>THE ROSTER FALLBACK WAS FAIL-OPEN AND IS WITHDRAWN.</b> An earlier revision answered an
+/// UNDECLARED inbound identity with the whole issuance roster, reasoning that it keeps the authenticated
+/// ping route reachable rather than silently unreachable and that a closed four-element set is not
+/// "accepting everything". A security review found the real consequence, and it is worse than the
+/// reasoning allowed for: the roster is every audience this issuer mints for, so a deployment that simply
+/// omitted one settings leaf accepted, at THIS service, every token minted for Gateway, DataServices and
+/// Persistence as well. That is exactly the replay the check exists to stop, arriving through the absence
+/// of a value rather than through a wrong one - and it was invisible, because everything worked.
 /// </para>
 /// <para>
-/// Ordinal comparison, because an audience is an opaque protocol identifier: two spellings differing
-/// only by case are two different audiences, and folding them together would accept one the deployment
-/// never declared. The materialized array is a snapshot, so a later mutation of the roster cannot widen
-/// the set the handler is already validating against.
+/// SO AN ABSENT IDENTITY IS NOW A REFUSAL TO START, not a widening. That is the same posture the legacy
+/// takes on a decoded structural fault, which ends the process rather than continuing past it
+/// [<c>ws_objects/pfw.pbl.src/pfw.sra:L111-L144</c>, ending in <c>HALT CLOSE</c> at <c>:L143</c>], and it
+/// costs a deployment nothing: <c>appsettings.json</c> ships the identity, so only a deployment that
+/// removed it is affected, and it is told which key to restore.
+/// </para>
+/// <para>
+/// Ordinal comparison downstream, because an audience is an opaque protocol identifier: two spellings
+/// differing only by case are two different audiences. The single-element array is a snapshot, so a later
+/// mutation of the roster cannot widen the set the handler is already validating against.
 /// </para>
 /// </remarks>
-static string[] ResolveInboundAudiences(SecurityOptions configured, string declaredAudience)
+static string[] ResolveInboundAudiences(
+    SecurityOptions configured,
+    string declaredAudience,
+    string sectionName)
 {
     ArgumentNullException.ThrowIfNull(configured);
 
-    return string.IsNullOrEmpty(declaredAudience)
-        ? [.. configured.Audiences]
-        : [declaredAudience];
+    if (string.IsNullOrEmpty(declaredAudience))
+    {
+        throw new InvalidOperationException(
+            $"Configuration key '{sectionName}:Audience' declares no inbound "
+            + "audience. This service must validate an inbound token against its OWN identity and "
+            + "nothing else. An earlier revision fell back to the whole issuance roster here, which "
+            + "accepted every token minted for any service in the trust domain - the precise replay "
+            + "audience validation exists to prevent - so the fallback is withdrawn and the absence is "
+            + "fatal. Declare this service's own audience identity, which must also appear on "
+            + $"'{SecurityOptions.SectionName}:{nameof(SecurityOptions.Audiences)}', and restart. This "
+            + "message never echoes a configured value.");
+    }
+
+    return [declaredAudience];
 }
 
 /// <summary>
@@ -1229,8 +1388,11 @@ static string[] ResolveInboundAudiences(SecurityOptions configured, string decla
 /// this diagnostic consistent with every other startup failure in this service (constraint C-F).
 /// </para>
 /// <para>
-/// An undeclared identity is not a fault: the companion resolver answers it with the roster, which is a
-/// wider but still closed set. Only a declared identity that the roster cannot produce is unrecoverable.
+/// 🔴 AN UNDECLARED IDENTITY IS ALSO A FAULT NOW, AND THE COMPANION RESOLVER IS WHERE IT IS REPORTED.
+/// This check therefore still returns early on an empty value - not because absence is acceptable, but
+/// because <c>ResolveInboundAudiences</c> is called immediately BEFORE it at startup and has already
+/// refused it. Reporting it twice would give one fault two different messages depending on which line the
+/// host reached first, and the absence message is the one that names the right remedy.
 /// </para>
 /// </remarks>
 static void RequireIssuableInboundAudience(
@@ -1263,45 +1425,33 @@ static void RequireIssuableInboundAudience(
         + "value.");
 }
 
-/// <summary>
-/// Refuses to start a host that has turned off any of the four inbound token-validation checks.
-/// </summary>
-/// <param name="configuration">The built host's configuration.</param>
-/// <param name="sectionName">The inbound-authentication section the switches are read from.</param>
-/// <exception cref="ArgumentNullException">
-/// <paramref name="configuration"/> is <see langword="null"/>.
-/// </exception>
-/// <exception cref="InvalidOperationException">Any of the four switches is configured false.</exception>
-/// <remarks>
-/// <para>
-/// EACH OF THE FOUR REMOVES A WHOLE CLASS OF FORGERY, AND THIS SERVICE HAS THE MOST TO LOSE FROM IT.
-/// Without issuer validation a credential from any issuer is accepted, and this service IS the issuer,
-/// so it would honour forgeries of its own authority. Without audience validation a credential minted for
-/// Gateway, DataServices or Persistence is replayable at the cryptographic surface, which is precisely
-/// what the one-audience-per-token rule of contract C-01 exists to prevent. Without lifetime validation
-/// the short lifetimes this service itself mints bound nothing. Without signing-key validation the
-/// signature is not verified at all and any well-formed token is accepted. None of the four is a
-/// deployment choice, so section 5 assigns all four literally.
-/// </para>
-/// <para>
-/// AND A CONFIGURED FALSE IS REFUSED RATHER THAN IGNORED. Because the assignment is literal, a false
-/// value would take no effect - which is the more dangerous of the two failures, since an operator would
-/// believe the switch applied. Refusing to start is how the host says the value is neither honoured nor
-/// honourable. Every message names the exact key and states what the check protects; no configured value
-/// other than the offending boolean is echoed. ALL FOUR are reported together rather than one at a time,
-/// so a deployment with several disabled is fixed in one pass rather than in four restarts.
-/// </para>
-/// <para>
-/// 🔴 <b>A FIFTH SETTING IS CHECKED HERE, AND ITS POLARITY IS THE OPPOSITE ONE.</b>
-/// <c>MapInboundClaims</c> is also assigned literally in section 5 - to <see langword="false"/> - and for
-/// this service it is load bearing rather than tidy: the legacy handler rewrites <c>scope</c> and
-/// <c>sub</c> into WS-Federation URIs, so with mapping on, every scope check would look for a claim that
-/// is no longer there and silently pass nothing. The required value is therefore <c>false</c> and a
-/// configured <c>true</c> is what must be refused, which is why it cannot join the loop above. It was
-/// previously READ from configuration in section 5 and then overwritten by the literal, so a configured
-/// value decided nothing while appearing to; the read is gone and this check is what replaces it.
-/// </para>
-/// </remarks>
+// Refuses to start a host that has turned off any of the four inbound token-validation checks.
+// configuration: The built host's configuration.
+// sectionName: The inbound-authentication section the switches are read from.
+// configuration is null.
+// Throws InvalidOperationException: Any of the four switches is configured false.
+// EACH OF THE FOUR REMOVES A WHOLE CLASS OF FORGERY, AND THIS SERVICE HAS THE MOST TO LOSE FROM IT.
+// Without issuer validation a credential from any issuer is accepted, and this service IS the issuer,
+// so it would honour forgeries of its own authority. Without audience validation a credential minted for
+// Gateway, DataServices or Persistence is replayable at the cryptographic surface, which is precisely
+// what the one-audience-per-token rule of contract C-01 exists to prevent. Without lifetime validation
+// the short lifetimes this service itself mints bound nothing. Without signing-key validation the
+// signature is not verified at all and any well-formed token is accepted. None of the four is a
+// deployment choice, so section 5 assigns all four literally.
+// AND A CONFIGURED FALSE IS REFUSED RATHER THAN IGNORED. Because the assignment is literal, a false
+// value would take no effect - which is the more dangerous of the two failures, since an operator would
+// believe the switch applied. Refusing to start is how the host says the value is neither honoured nor
+// honourable. Every message names the exact key and states what the check protects; no configured value
+// other than the offending boolean is echoed. ALL FOUR are reported together rather than one at a time,
+// so a deployment with several disabled is fixed in one pass rather than in four restarts.
+// 🔴 <b>A FIFTH SETTING IS CHECKED HERE, AND ITS POLARITY IS THE OPPOSITE ONE.</b>
+// MapInboundClaims is also assigned literally in section 5 - to false - and for
+// this service it is load bearing rather than tidy: the legacy handler rewrites scope and
+// sub into WS-Federation URIs, so with mapping on, every scope check would look for a claim that
+// is no longer there and silently pass nothing. The required value is therefore false and a
+// configured true is what must be refused, which is why it cannot join the loop above. Section 5 assigns
+// the literal and does NOT read the key, deliberately: a read followed by that assignment would let a
+// configured value decide nothing while appearing to, and this check is what enforces the value instead.
 static void RequireInvariantTokenValidation(IConfiguration configuration, string sectionName)
 {
     ArgumentNullException.ThrowIfNull(configuration);
@@ -1398,14 +1548,41 @@ internal sealed class CallerCertificateTrust
 {
     private readonly X509Certificate2Collection _anchors;
 
+    /// <summary>The revocation posture the deployment selected.</summary>
+    private readonly X509RevocationMode _revocationMode;
+
     /// <summary>
-    /// Creates a validator over an already-loaded anchor set.
+    /// The longest declared validity window a caller certificate may carry, or <see langword="null"/> when
+    /// revocation is being checked and the ceiling therefore does not apply.
+    /// </summary>
+    /// <remarks>
+    /// NULL MEANS "NOT APPLICABLE" RATHER THAN "UNLIMITED". A deployment that selected a real revocation
+    /// posture can withdraw a certificate, so the ceiling has nothing left to compensate for; enforcing it
+    /// there would be a lifetime policy invented at the listener. The same reading, in the same words, as
+    /// the issuance-credential check in Tokens/ClientCertificateTrust.cs.
+    /// </remarks>
+    private readonly TimeSpan? _maximumLifetime;
+
+    /// <summary>
+    /// Creates a validator over an already-loaded anchor set and the deployment's certificate posture.
     /// </summary>
     /// <param name="anchors">
     /// The acceptable roots. An EMPTY collection means platform default trust, which is a legitimate
     /// posture rather than a missing one.
     /// </param>
-    private CallerCertificateTrust(X509Certificate2Collection anchors) => _anchors = anchors;
+    /// <param name="revocationMode">The revocation posture to build chains with.</param>
+    /// <param name="maximumLifetime">
+    /// The declared-window ceiling, or <see langword="null"/> when revocation is checked.
+    /// </param>
+    private CallerCertificateTrust(
+        X509Certificate2Collection anchors,
+        X509RevocationMode revocationMode,
+        TimeSpan? maximumLifetime)
+    {
+        _anchors = anchors;
+        _revocationMode = revocationMode;
+        _maximumLifetime = maximumLifetime;
+    }
 
     /// <summary>
     /// Whether caller-certificate trust is pinned to a mounted anchor rather than left to the platform.
@@ -1429,11 +1606,26 @@ internal sealed class CallerCertificateTrust
     /// container's secret mount layout is not something a startup record should publish, so the message
     /// names the configuration key exactly as <see cref="SecurityOptionsValidator"/> does.
     /// </remarks>
-    public static CallerCertificateTrust Load(string? clientCaPath)
+    public static CallerCertificateTrust Load(
+        string? clientCaPath,
+        string? revocationMode,
+        int? maximumLifetimeDays)
     {
+        X509RevocationMode resolved = ResolveRevocationMode(revocationMode);
+
+        // ARMED ONLY WHEN IT COMPENSATES FOR SOMETHING - see the field's own remarks. An absent or
+        // out-of-range configured value falls back to the options type's own declared default rather than
+        // to no ceiling, because a ceiling that disappears when the key is missing is not a control.
+        TimeSpan? ceiling = resolved == X509RevocationMode.NoCheck
+            ? TimeSpan.FromDays(
+                maximumLifetimeDays is > 0 and <= MaximumConfigurableLifetimeDays
+                    ? maximumLifetimeDays.Value
+                    : DefaultMaximumLifetimeDays)
+            : null;
+
         if (string.IsNullOrWhiteSpace(clientCaPath))
         {
-            return new CallerCertificateTrust([]);
+            return new CallerCertificateTrust([], resolved, ceiling);
         }
 
         try
@@ -1447,7 +1639,7 @@ internal sealed class CallerCertificateTrust
                 throw new CryptographicException("The file carried no PEM-encoded certificate.");
             }
 
-            return new CallerCertificateTrust(loaded);
+            return new CallerCertificateTrust(loaded, resolved, ceiling);
         }
         catch (Exception failure) when (failure
             is CryptographicException
@@ -1507,14 +1699,95 @@ internal sealed class CallerCertificateTrust
             return errors == SslPolicyErrors.None;
         }
 
+        // THE LIFETIME CEILING, CHECKED BEFORE THE CHAIN IS BUILT. A certificate this deployment will not
+        // accept on its own terms is refused before any work is spent verifying who issued it, and before
+        // any lookup a stricter revocation mode would perform. It measures the DECLARED window, which is a
+        // fixed property of the certificate, so a caller cannot wait the check out; expiry is a separate
+        // question and chain building already answers it.
+        TimeSpan declaredLifetime =
+            certificate.NotAfter.ToUniversalTime() - certificate.NotBefore.ToUniversalTime();
+
+        if (_maximumLifetime is { } ceiling && declaredLifetime > ceiling)
+        {
+            return false;
+        }
+
         using X509Chain verification = new();
 
         verification.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
-        verification.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+
+        // THE CONFIGURED POSTURE, not a constant - the correction this type carries. An indeterminate
+        // status under either stricter mode is a REFUSAL and never a pass, because the verification flags
+        // below ignore nothing.
+        verification.ChainPolicy.RevocationMode = _revocationMode;
+
+        // Only meaningful when a check is performed, and it excludes the root because a locally generated
+        // authority does not revoke itself: asking about it would turn every check into an indeterminate
+        // answer and therefore into a refusal. The same flag the issuance-credential check uses.
+        verification.ChainPolicy.RevocationFlag = X509RevocationFlag.ExcludeRoot;
+
         verification.ChainPolicy.VerificationFlags = X509VerificationFlags.NoFlag;
         verification.ChainPolicy.CustomTrustStore.AddRange(_anchors);
 
         return verification.Build(certificate);
+    }
+
+    /// <summary>The ceiling used when the configured value is absent or out of range.</summary>
+    /// <remarks>
+    /// Kept numerically identical to <c>SecurityOptions.MaxCallerCertificateLifetimeDays</c>'s own default.
+    /// It is restated rather than read from that type because this decision is taken before the options
+    /// graph exists; the coherence between the two is asserted by this service's suite.
+    /// </remarks>
+    private const int DefaultMaximumLifetimeDays = 90;
+
+    /// <summary>The largest value the options type's range attribute admits.</summary>
+    /// <remarks>
+    /// Screened here as well so that a value the validator will refuse cannot first be USED by the
+    /// listener - the listener is configured before validation runs, so without this an out-of-range
+    /// value would widen the ceiling for the handshakes that happen before the host finishes starting.
+    /// </remarks>
+    private const int MaximumConfigurableLifetimeDays = 3_650;
+
+    /// <summary>
+    /// Translates the configured revocation mode name onto the platform's own enumeration.
+    /// </summary>
+    /// <param name="configured">The configured name, which may be absent.</param>
+    /// <returns>The platform mode, or the shipped default when nothing is configured.</returns>
+    /// <remarks>
+    /// AN ABSENT VALUE TAKES THE SHIPPED DEFAULT AND AN UNRECOGNISED ONE TAKES THE STRICTEST, which is the
+    /// opposite pairing to a plain fallback and is deliberate. Absent means "this deployment said nothing",
+    /// which the options type answers with NoCheck; unrecognised means "this deployment tried to say
+    /// something and it did not parse", and quietly selecting the weakest posture for a typo is exactly how
+    /// a security setting degrades invisibly. The options validator refuses the same value a moment later
+    /// with a message naming the key, so the strict reading here is what the host does for the handshakes
+    /// that could otherwise land in between.
+    /// </remarks>
+    private static X509RevocationMode ResolveRevocationMode(string? configured)
+    {
+        if (string.IsNullOrWhiteSpace(configured))
+        {
+            return X509RevocationMode.NoCheck;
+        }
+
+        string trimmed = configured.Trim();
+
+        if (string.Equals(
+            trimmed,
+            ClientCertificateRevocationModes.NoCheck,
+            StringComparison.OrdinalIgnoreCase))
+        {
+            return X509RevocationMode.NoCheck;
+        }
+
+        if (string.Equals(
+            trimmed,
+            ClientCertificateRevocationModes.Offline,
+            StringComparison.OrdinalIgnoreCase))
+        {
+            return X509RevocationMode.Offline;
+        }
+
+        return X509RevocationMode.Online;
     }
 }
 

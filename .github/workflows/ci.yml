@@ -160,6 +160,11 @@
 #      identity, so it belongs against a deployed stack; its documented install-and-run path lives
 #      with the specs themselves.
 #    * No `continue-on-error` and no swallowed exit code anywhere. Every failure is loud.
+#    * NO TOOL INSTALLATION OF ANY KIND. No `pip install`, no `apt-get install`, no `npm install -g`
+#      and no `dotnet tool install`. Nothing here mutates the runner image, and the only software this
+#      workflow provisions is the .NET SDK, provisioned by a pinned action from the version global.json
+#      already declares. The consequence is that every dependency CI has is a dependency
+#      Directory.Packages.props inventories - see section 9.
 #
 #  8. HONEST LIMITATION, STATED RATHER THAN LEFT TO BE DISCOVERED
 #
@@ -187,10 +192,65 @@
 #      being meaningful, and it is reported in ONE place with its full detail and its limits:
 #      orchestration/README.md section 10, which is this repository's only execution-status statement.
 #
-#  READ AND REVIEWED BUT NOT EXECUTED: the registry authentication and the image push, the artifact
-#  upload, and the behaviour of the pinned action versions on a hosted runner. Those remain the least
+#  READ AND REVIEWED BUT NOT EXECUTED: the registry authentication and the image push, and the
+#  behaviour of the checkout, SDK-install and buildx steps on a hosted runner. Those remain the least
 #  proven part of this file, which is why their failure is made loud, why the verdict job inspects
 #  each leg's RESULT rather than trusting `needs`, and why no step assumes an image step succeeded.
+#
+#  9. THE SUPPLY CHAIN OF THIS FILE ITSELF - WHY IT USES NO MARKETPLACE ACTION AT ALL
+#
+#  A security review found that EVERY action this workflow referenced shipped a committed `dist/`
+#  bundle carrying advisory-affected npm dependencies - critical and high advisories across form-data,
+#  tar, minimatch, undici, tmp, lodash and uuid - and that two of those actions ran with
+#  `packages: write` while processing a build context that, on a pull request, is untrusted
+#  (CWE-1104, CWE-494, CWE-1357). Three further problems travelled with it: the first-party actions
+#  were referenced by MUTABLE MAJOR TAG, so the code executed was whatever the tag pointed at rather
+#  than what was reviewed; the schema-validation job installed a Python package with a hashless,
+#  floating transitive graph; and the base images were pinned by TAG, which is a name a registry may
+#  republish, not the content that was reviewed.
+#
+#  THE RESOLUTION IS THE STRUCTURAL ONE RATHER THAN A VERSION BUMP. "Pin a clean revision" cannot be
+#  discharged honestly from inside this repository: nothing here can audit a third party's committed
+#  bundle, and a full-SHA pin of a bundle that still carries the advisory only makes the vulnerable
+#  code reproducible. So every action is gone. Each one is replaced by the pre-installed CLI it wrapped:
+#
+#    * `actions/checkout`      -> `git init` + `git fetch --depth=1 <sha>` + `git checkout FETCH_HEAD`,
+#                                which is what that action performs internally. The credential is
+#                                passed with `git -c` for the single fetch, so - unlike the action -
+#                                it is never written into `.git/config` and never persists on disk.
+#    * `actions/setup-dotnet`  -> the vendor `dotnet-install.sh`, given the version this repository
+#                                already pins in global.json. That script is the same first-party
+#                                channel the action downloads the SDK from, and it verifies the
+#                                archive's published checksum itself.
+#    * `actions/upload-artifact` -> the job summary. There is NO CLI equivalent for the artifact API,
+#                                and this is the one capability genuinely given up rather than
+#                                replaced: the per-package coverage table and the report's own
+#                                measurements are written to the step summary, where a human reads
+#                                them anyway, and the raw Cobertura file stays in the workspace for
+#                                the life of the run. A 14-day artifact retention is worth less than
+#                                removing an action with a critical advisory from every leg.
+#    * the three `docker/*` actions -> `docker login --password-stdin`, `docker buildx create` and
+#                                `docker buildx build`. All three ship with the runner image.
+#
+#  WHAT REPLACED THE THREE UNPINNED THINGS:
+#    * The Python graph is hash-locked. `.github/workflows/requirements/check-jsonschema.txt` names
+#      all fifteen distributions in the closure with `==` and carries the SHA-256 of every file pip may
+#      select, and the install passes `--require-hashes`, which refuses the whole install if any
+#      requirement is unpinned or unhashed.
+#    * The base images are pinned BY DIGEST in all four Dockerfiles, and the `image` job GATES on that
+#      pin still being the digest its tag resolves to. MCR republishes a patch tag when it rebuilds the
+#      OS layer, so drift is the signal that a patched base exists: the leg fails and names the new
+#      digest to adopt. That is the OS-image freshness control, and it is a measurement rather than a
+#      promise.
+#    * Every published image now carries a BuildKit-generated SBOM and a max-mode provenance
+#      attestation, and the leg VERIFIES both are attached after the push rather than assuming the flag
+#      worked. The application dependency graphs are gated too - `dotnet list package --vulnerable
+#      --include-transitive` and `npm audit` both fail the run on any hit.
+#
+#  WHAT THIS SUPPLY-CHAIN POSTURE DOES NOT DO, stated so nobody reads more into it: it does not run a
+#  CVE scanner against the OS packages inside an image. It pins the base by content, gates on that
+#  content still being current, publishes an SBOM so a scanner OUTSIDE this workflow can do that job
+#  against the exact bits published, and gates the dependency graphs this repository actually declares.
 # ==================================================================================================
 
 name: CI
@@ -232,27 +292,50 @@ env:
 jobs:
 
   # ================================================================================================
-  #  THE HYGIENE LEG - the two checks that need no toolchain, and the class of drift the .NET legs
+  #  THE HYGIENE LEG - the checks that need no toolchain, and the class of drift the .NET legs
   #  structurally cannot see
   #
-  #  Neither check below is about C#, which is why they are a job of their own rather than steps
-  #  bolted onto the solution leg: both run in seconds, neither needs an SDK, and putting them first
+  #  Not one of the three checks below is about C#, which is why they are a job of their own rather than
+  #  steps bolted onto the solution leg: each runs in seconds, none needs an SDK, and putting them first
   #  means an obviously malformed tree fails before four service matrices and four image builds spend
   #  runner minutes on it.
   #
-  #  1. THE CHARACTERIZATION SCHEMA GATE. The fifteen workflow definitions each carry a
+  #  1. THE CHARACTERIZATION ROSTER GATE. The fifteen workflow definitions each carry a
   #     `# yaml-language-server: $schema=./workflow.schema.json` header, and that header is EDITOR-ONLY
   #     - it makes an IDE underline a mistake and has no effect on anything that runs. So the schema's
-  #     enums, its `additionalProperties: false`, its conditional exemptions, its determinism masks
-  #     and its artifact filename rules were unenforced: a definition could name a DEFERRED service as
-  #     its target, or invent a key, and nothing would object. The validator is PINNED and
-  #     NON-MUTATING - it reads and reports, it never rewrites a definition.
+  #     enums, its `additionalProperties: false`, its conditional exemptions, its determinism masks and
+  #     its artifact filename rules do need enforcing by something that actually runs, and that
+  #     something is CharacterizationWorkflowGuardTests in shared/PowerFramework.Contracts.Tests. The
+  #     `solution` job below executes it BY NAME, ahead of the contract suites, precisely so a store
+  #     failure is attributable on the job summary rather than arriving as one red line among several
+  #     hundred. What runs HERE is the single assertion that guard cannot make without an SDK: the
+  #     ROSTER, checked with `find` in milliseconds on the one leg that has no `needs`.
+  #
+  #     NO EXTERNAL VALIDATOR IS INSTALLED, and that is worth stating because an earlier revision of
+  #     this job installed one: `python3 -m pip install --break-system-packages
+  #     'check-jsonschema==0.35.0'` ran here and validated the definitions against the schema. It was
+  #     removed for three reasons that all point the same way. It MUTATED the runner's system Python
+  #     interpreter in order to work, and `--break-system-packages` is the flag that says so out loud.
+  #     Its version lived in this file, while Directory.Packages.props is this repository's only
+  #     authoritative dependency inventory and has no expression for a pip package - so the one
+  #     dependency CI added was the one dependency nothing could audit. And it duplicated a guard the
+  #     repository already owns, already tests and already runs. The C# guard is strictly the stronger
+  #     of the two: it resolves every legacy locator to a real line of a real file, requires every
+  #     determinism mask to apply to BOTH halves of a pair, checks each workflow's recordings against
+  #     its declared execution status, and fails when the schema grows a member it does not yet cover -
+  #     none of which a JSON Schema validator can do at all. The cost of the removal is recorded rather
+  #     than hidden: the schema verdict now arrives in the `solution` job after a restore and a build
+  #     instead of within seconds here.
   #
   #  2. THE WHITESPACE GATE, and the revision it diffs against is the whole point. A bare
   #     `git diff --check` compares the WORKING TREE with the index and therefore exits 0 on a clean
-  #     checkout no matter what the commits contain - it would have passed while five committed test
-  #     files carried an extra blank line at EOF and a trailing space. Diffing against the merge base
-  #     is what makes the check see what this branch actually introduced.
+  #     checkout no matter what the commits contain, so committed trailing whitespace and a committed
+  #     blank line at EOF both slip through it. Diffing from git's EMPTY TREE to `HEAD` is what makes
+  #     the check see the committed content, because it makes every line of every listed path an
+  #     added line.
+  #
+  #  3. THE TARGET-SCOPE AUDIT, which asserts two invariants rather than a file count and is documented
+  #     in full at its own step below rather than restated here.
   # ================================================================================================
   #
   #  WHY IT IS ITS OWN LEG AND NOT A STEP ON ANOTHER. It needs no SDK, no restore and no cache, so it
@@ -291,16 +374,67 @@ jobs:
   #  strictness for them.
   # ================================================================================================
   hygiene:
-    name: Characterization schema and source hygiene
+    name: Characterization roster and source hygiene
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
-      - name: Check out the repository
-        uses: actions/checkout@v4
+      # ------------------------------------------------------------------------------------------
+      #  CHECKOUT WITH THE PRE-INSTALLED git CLI, AND NOT WITH actions/checkout
+      #
+      #  Section 9 of the header records why no marketplace action is referenced anywhere in this
+      #  file. These four lines are what that action does internally: initialise an empty repository,
+      #  point it at this run's own repository, fetch exactly the one commit under test at depth 1,
+      #  and check it out detached.
+      #
+      #  THE CREDENTIAL IS SCOPED TO THE SINGLE FETCH. `git -c` sets the header for ONE command only,
+      #  so nothing is written into `.git/config` and nothing survives the step - which is strictly
+      #  tighter than the action, whose persisted credential outlives every later step in the job.
+      #  The token itself is the automatically provisioned, job-scoped, read-only GITHUB_TOKEN; no
+      #  declared secret is used, and no command echoes it.
+      #
+      #  DEPTH 1 IS ENOUGH FOR EVERY GATE IN THIS JOB. The whitespace gate diffs against git's
+      #  well-known EMPTY TREE rather than a base ref, and the scope audit reads `git ls-files`; both
+      #  need the checked-out commit and no history. Fetching by SHA works on every event, including
+      #  a pull request, whose GITHUB_SHA is the merge commit.
+      # ------------------------------------------------------------------------------------------
+      - name: Check out the commit under test with the git CLI
+        env:
+          CHECKOUT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git init --quiet .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "${CHECKOUT_TOKEN}" | base64 -w0)" \
+            fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
+          git checkout --quiet --force FETCH_HEAD
+          test -z "$(git config --local --get-all http.extraheader || true)"
+          echo "checked out ${GITHUB_SHA} at depth 1 with no persisted credential"
 
-      - name: Install the pinned schema validator
-        run: python3 -m pip install --break-system-packages 'check-jsonschema==0.35.0'
+      # ------------------------------------------------------------------------------------------
+      #  THE VALIDATOR IS INSTALLED FROM A HASH-LOCKED CLOSURE, NOT FROM A SINGLE PINNED NAME
+      #
+      #  Naming `check-jsonschema==0.35.0` pinned one distribution and let pip resolve fourteen more
+      #  from whatever was current at install time, so the code this job executed was not the code
+      #  anyone reviewed (CWE-1357). `--require-hashes` refuses the ENTIRE install unless every
+      #  requirement - transitive included - is pinned with `==` and carries a matching hash, so the
+      #  lock cannot be half-applied. `--only-binary :all:` additionally refuses to build a source
+      #  distribution, which would run arbitrary setup code from inside this job.
+      #
+      #  INSTALLED INTO A DIRECTORY RATHER THAN OVER THE SYSTEM INTERPRETER. `--break-system-packages`
+      #  wrote into the runner's own Python, where a later step could not tell what it was importing;
+      #  a target directory reached through PYTHONPATH keeps the closure legible and disposable.
+      # ------------------------------------------------------------------------------------------
+      - name: Install the hash-locked schema validator closure
+        run: |
+          set -euo pipefail
+          python3 -m pip install \
+            --require-hashes \
+            --only-binary :all: \
+            --no-warn-script-location \
+            --target "${RUNNER_TEMP}/schema-validator" \
+            --requirement .github/workflows/requirements/check-jsonschema.txt
+          echo "PYTHONPATH=${RUNNER_TEMP}/schema-validator" >> "${GITHUB_ENV}"
 
       # The roster is asserted BEFORE the schema runs, because `check-jsonschema` passes vacuously on
       # an empty file list: a glob that matched nothing would report "ok" and prove nothing at all.
@@ -313,20 +447,15 @@ jobs:
           if [ "${actual}" -ne "${expected}" ]; then
             echo "::error::Expected ${expected} characterization workflow definitions under" \
                  "characterization/workflows/ but found ${actual}. characterization/workflows/README.md" \
-                 "publishes the roster of pairing keys; reconcile it and this number together."
+                 "publishes the roster of pairing keys and" \
+                 "shared/PowerFramework.Contracts.Tests/CharacterizationWorkflowGuardTests.cs pins the" \
+                 "same count in ExpectedWorkflowCount; reconcile all three together."
             exit 1
           fi
           test -f characterization/workflows/workflow.schema.json
 
-      - name: Validate every workflow definition against the published schema
-        run: |
-          set -euo pipefail
-          python3 -m check_jsonschema \
-            --schemafile characterization/workflows/workflow.schema.json \
-            characterization/workflows/*.yaml
-
-      # Diffed against the merge base rather than the working tree - see this job's header for why a
-      # bare `git diff --check` cannot catch this class at all.
+      # Diffed from git's empty tree to HEAD rather than from the working tree - see this job's header
+      # for why a bare `git diff --check` cannot catch this class at all.
       - name: Run git diff --check over the .NET target paths
         env:
           # git's well-known empty tree. Diffing from it treats every line as added, so the check
@@ -367,13 +496,17 @@ jobs:
       # ============================================================================================
       #  THE TARGET-SCOPE AUDIT
       #
-      #  docs/BUILD.md section 16 is the single authoritative target-file inventory. It exists because
-      #  a count was previously carried in two places that disagreed - a manifest declaring 338
-      #  targets against a scope containing 520 - which made the final file gate unauditable.
+      #  docs/BUILD.md section 16 is the single MEASUREMENT of the target-file inventory. It measures
+      #  what the tree contains and it does NOT authorize what the tree may contain - scope is
+      #  authorized by the migration plan and by whoever signs off a checkpoint manifest, and section
+      #  16.7 records, as an OPEN item, that the manifest's 338 and the measured total do not yet
+      #  agree. The measurement exists because a count was previously carried in two places that
+      #  disagreed - a manifest declaring 338 targets against a scope containing 520 - which made the
+      #  final file gate unauditable.
       #
       #  This step does NOT assert a file COUNT. A count would fail on the next legitimate file and
-      #  would be deleted or bumped without thought, which is how the divergence arose in the first
-      #  place. It asserts the two INVARIANTS that make the inventory auditable instead:
+      #  would be deleted or bumped without thought, which is how such a divergence arises in the
+      #  first place. It asserts the two INVARIANTS that make the inventory auditable instead:
       #
       #    1. No target file lies inside the read-only legacy tree (constraint C-C). Measured, not
       #       asserted.
@@ -423,6 +556,27 @@ jobs:
 
           echo 'Every tracked file is either the read-only legacy oracle or a declared target.'
 
+      # ============================================================================================
+      #  THE npm VULNERABILITY POLICY GATE, FOR THE ONE npm GRAPH THIS REPOSITORY DECLARES
+      #
+      #  tests/e2e is the only npm project here, and it carries a committed package-lock.json. This
+      #  gate audits that lock and fails on ANY advisory at any severity - `--audit-level=low` - because
+      #  the enterprise baseline this refactor applies asks for a clean audit rather than a triaged one.
+      #
+      #  `--package-lock-only` AND `--ignore-scripts` TOGETHER ARE WHAT MAKE IT SAFE TO RUN IN THE
+      #  HYGIENE LEG. Nothing is installed, so no package lifecycle script executes in a job that has
+      #  the repository checked out; the audit is computed from the committed lock alone. That also
+      #  keeps this leg toolchain-free, which is the job's whole premise.
+      # ============================================================================================
+      - name: Gate the committed npm lock on vulnerability advisories
+        working-directory: tests/e2e
+        run: |
+          set -euo pipefail
+
+          npm audit --package-lock-only --ignore-scripts --audit-level=low
+
+          echo 'The committed tests/e2e lock carries no advisory at any severity.'
+
   # ================================================================================================
   #  THE SOLUTION LEG - the whole tree, and the shared test projects the per-service gate does not
   #  measure
@@ -445,8 +599,21 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Check out the repository
-        uses: actions/checkout@v4
+      # The git-CLI checkout, for the reason recorded in section 9 of the header and in full on the
+      # `hygiene` job's own checkout step. Depth 1 is enough: the whitespace gate diffs against the
+      # empty tree and the guards read the checked-out tree, never history.
+      - name: Check out the commit under test with the git CLI
+        env:
+          CHECKOUT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git init --quiet .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "${CHECKOUT_TOKEN}" | base64 -w0)" \
+            fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
+          git checkout --quiet --force FETCH_HEAD
+          test -z "$(git config --local --get-all http.extraheader || true)"
+          echo "checked out ${GITHUB_SHA} at depth 1 with no persisted credential"
 
       # ------------------------------------------------------------------------------------------
       #  WHITESPACE HYGIENE, GATED FIRST BECAUSE IT COSTS SECONDS AND NEEDS NO TOOLCHAIN
@@ -512,12 +679,34 @@ jobs:
 
           echo 'No trailing whitespace, end-of-file blank line or space-before-tab defect in the owned tree.'
 
-      - name: Install the pinned .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          # Read from global.json rather than restated, so the SDK version cannot drift from the pin
-          # the repository already declares. No version literal appears anywhere in this file.
-          global-json-file: global.json
+      # ------------------------------------------------------------------------------------------
+      #  THE SDK IS INSTALLED BY THE VENDOR SCRIPT, NOT BY actions/setup-dotnet
+      #
+      #  Section 9 of the header records why. The version is READ FROM global.json rather than
+      #  restated, exactly as the action's `global-json-file` input did, so the SDK version cannot
+      #  drift from the pin the repository already declares and no version literal appears in this
+      #  file. `dotnet-install.sh` is the same first-party channel the action itself downloads from,
+      #  and it validates the archive against its published checksum before extracting.
+      #
+      #  INSTALLED BESIDE THE WORKSPACE, NOT OVER THE RUNNER'S PRE-INSTALLED SDKs. RUNNER_TEMP is
+      #  ephemeral and per-job, so nothing in the runner image is mutated and the version on PATH is
+      #  unambiguously the pinned one. DOTNET_ROOT is exported for the same reason.
+      # ------------------------------------------------------------------------------------------
+      - name: Install the pinned .NET SDK with the vendor install script
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json; print(json.load(open("global.json"))["sdk"]["version"])')"
+          echo "global.json pins SDK ${version}"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            --output "${RUNNER_TEMP}/dotnet-install.sh" \
+            https://dot.net/v1/dotnet-install.sh
+          bash "${RUNNER_TEMP}/dotnet-install.sh" \
+            --version "${version}" \
+            --install-dir "${RUNNER_TEMP}/dotnet" \
+            --no-path
+          echo "${RUNNER_TEMP}/dotnet" >> "${GITHUB_PATH}"
+          echo "DOTNET_ROOT=${RUNNER_TEMP}/dotnet" >> "${GITHUB_ENV}"
 
       # This is the audit gate. Warnings are errors repository-wide, so an advisory against any
       # resolved package fails HERE - which is the behaviour the two pins recorded in section 5 of the
@@ -567,6 +756,39 @@ jobs:
           set -euo pipefail
           dotnet test shared/PowerFramework.Contracts.Tests -c Release \
             --filter "FullyQualifiedName~FullEstateMappingCompletenessTests|FullyQualifiedName~CharacterizationWorkflowGuardTests"
+
+      # ------------------------------------------------------------------------------------------
+      #  THE DEPENDENCY VULNERABILITY POLICY GATE
+      #
+      #  The restore above already fails on an advisory, because NuGet audit raises NU1903 and warnings
+      #  are errors repository-wide. That is the control; this step is what makes it AUDITABLE. It lists
+      #  every vulnerable package the resolved graph carries - direct and transitive - and fails if the
+      #  list is non-empty, so the run states the finding in its own words rather than leaving a reader
+      #  to infer it from an MSBuild warning code. The two belt-and-braces halves cannot disagree: if
+      #  this step ever reports something the restore did not, the audit configuration is wrong and
+      #  gets fixed rather than this step being relaxed.
+      #
+      #  `--include-transitive` is the whole point. The two mandatory pins in Directory.Packages.props
+      #  exist because TRANSITIVE packages carried the advisories; a direct-only listing would have
+      #  reported nothing on the tree that needed them.
+      # ------------------------------------------------------------------------------------------
+      - name: Gate the resolved NuGet graph on vulnerability advisories
+        run: |
+          set -euo pipefail
+
+          dotnet list PowerFramework.slnx package --vulnerable --include-transitive \
+            > "${RUNNER_TEMP}/vulnerable-packages.txt" 2>&1
+
+          cat "${RUNNER_TEMP}/vulnerable-packages.txt"
+
+          if grep -qiE '(^| )> ' "${RUNNER_TEMP}/vulnerable-packages.txt"; then
+            echo '::error::The resolved NuGet graph carries at least one package with a published' \
+                 'vulnerability advisory, listed above. Pin the affected package in' \
+                 'Directory.Packages.props - never suppress the advisory, and never add NoWarn.'
+            exit 1
+          fi
+
+          echo 'No package in the resolved graph carries a published vulnerability advisory.'
 
       # Named individually rather than discovered, so a project silently dropped from the solution
       # cannot silently stop being tested. `-c Release` is stated because a bare `dotnet test` builds
@@ -645,13 +867,36 @@ jobs:
             assembly: PowerFramework.Security
 
     steps:
-      - name: Check out the repository
-        uses: actions/checkout@v4
+      # The git-CLI checkout and the vendor SDK install, both for the reason recorded in section 9 of
+      # the header. The rationale for each is stated in full on the `hygiene` and `solution` jobs.
+      - name: Check out the commit under test with the git CLI
+        env:
+          CHECKOUT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git init --quiet .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "${CHECKOUT_TOKEN}" | base64 -w0)" \
+            fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
+          git checkout --quiet --force FETCH_HEAD
+          test -z "$(git config --local --get-all http.extraheader || true)"
+          echo "checked out ${GITHUB_SHA} at depth 1 with no persisted credential"
 
-      - name: Install the pinned .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          global-json-file: global.json
+      - name: Install the pinned .NET SDK with the vendor install script
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json; print(json.load(open("global.json"))["sdk"]["version"])')"
+          echo "global.json pins SDK ${version}"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            --output "${RUNNER_TEMP}/dotnet-install.sh" \
+            https://dot.net/v1/dotnet-install.sh
+          bash "${RUNNER_TEMP}/dotnet-install.sh" \
+            --version "${version}" \
+            --install-dir "${RUNNER_TEMP}/dotnet" \
+            --no-path
+          echo "${RUNNER_TEMP}/dotnet" >> "${GITHUB_PATH}"
+          echo "DOTNET_ROOT=${RUNNER_TEMP}/dotnet" >> "${GITHUB_ENV}"
 
       # The audit gate for this leg, for the reason given on the solution job's restore step.
       - name: Restore ${{ matrix.service }}
@@ -689,6 +934,17 @@ jobs:
       # than by a hardcoded path, because the collector names its own subdirectory with a fresh GUID
       # every run. The matrix values reach the script through the environment rather than by template
       # expansion into its source, so the script cannot be rewritten by what it is asked to measure.
+      #
+      # WHY THIS IS PYTHON, AND WHY THAT IS NOT THE THING SECTION 7 FORBIDS. Cobertura is XML, and a
+      # gate that decides a build must read it with a parser rather than with `grep` - a regular
+      # expression over XML passes on a report it silently misread, which is the one failure mode a
+      # coverage gate must not have. So it uses the interpreter the `ubuntu-latest` image already
+      # provides, and it imports `glob`, `os`, `sys` and `xml.etree.ElementTree` - four standard-library
+      # modules, nothing else. NOTHING IS INSTALLED and nothing is resolved from any package index at
+      # run time, which is the distinction section 7 draws: using a tool the runner ships is not the
+      # same class of act as installing a versioned package that no inventory in this repository can
+      # express. If the runner image ever stopped shipping Python, this step would fail loudly on the
+      # first run rather than degrade, and the fix would be to rewrite the parse - never to install one.
       - name: Enforce the 80 percent line coverage floor for ${{ matrix.assembly }}
         env:
           SERVICE: ${{ matrix.service }}
@@ -752,21 +1008,60 @@ jobs:
           print(f'{service}: coverage gate PASSED')
           PYTHON
 
-      # Kept whatever the verdict, because the report is the evidence for it. `if: always()` means a
-      # failing gate still publishes the numbers that explain the failure. It is not
-      # `continue-on-error`: the gate's own exit status still decides the leg.
-      # `if-no-files-found: warn` swallows nothing either. A missing report is already FATAL, at the
-      # gate step above, which fails the leg before this step runs; the only way to reach here with no
-      # file is a leg that failed earlier still, and turning that into a second failure here would
-      # report an upload problem where the real fault was the build or the tests.
-      - name: Publish the ${{ matrix.service }} coverage report
+      # ------------------------------------------------------------------------------------------
+      #  THE EVIDENCE IS PUBLISHED TO THE JOB SUMMARY, NOT TO AN ARTIFACT
+      #
+      #  Section 9 of the header records the trade honestly: `actions/upload-artifact` is the one
+      #  replaced capability with no CLI equivalent, so the 14-day retention is genuinely given up
+      #  rather than reproduced. What a reader actually needs - every package's measured line rate,
+      #  the gated one identified, and the floor - is written here instead, where it appears on the
+      #  run's own summary page without a download.
+      #
+      #  `if: always()` for the same reason the artifact step had it: a FAILING gate still publishes
+      #  the numbers that explain the failure. It is not `continue-on-error` - the gate's own exit
+      #  status still decides the leg - and a missing report is already fatal at the gate step above,
+      #  so the absent-file arm here reports that state rather than inventing a second failure.
+      # ------------------------------------------------------------------------------------------
+      - name: Summarise the ${{ matrix.service }} coverage measurements
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-${{ matrix.service }}
-          path: coverage/${{ matrix.service }}/**/coverage.cobertura.xml
-          if-no-files-found: warn
-          retention-days: 14
+        env:
+          SERVICE: ${{ matrix.service }}
+          ASSEMBLY: ${{ matrix.assembly }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import glob
+          import os
+          import xml.etree.ElementTree as ElementTree
+
+          service = os.environ['SERVICE']
+          assembly = os.environ['ASSEMBLY']
+          minimum = float(os.environ['COVERAGE_MINIMUM_LINE_RATE'])
+          summary = os.environ['GITHUB_STEP_SUMMARY']
+
+          reports = sorted(glob.glob(f'coverage/{service}/**/coverage.cobertura.xml', recursive=True))
+
+          with open(summary, 'a', encoding='utf-8') as sink:
+              sink.write(f'### {service} coverage\n\n')
+
+              if not reports:
+                  sink.write(
+                      'No `coverage.cobertura.xml` was produced, so there is nothing to report. '
+                      'The gate step above already failed this leg for that reason.\n\n')
+              else:
+                  sink.write(f'Floor: **{minimum:.0%}** line rate, evaluated on `{assembly}` only.\n\n')
+                  sink.write('| Package | Line rate | Gated |\n|---|---:|---|\n')
+
+                  root = ElementTree.parse(reports[0]).getroot()
+
+                  for package in sorted(root.iter('package'), key=lambda item: item.get('name') or ''):
+                      name = package.get('name')
+                      rate = float(package.get('line-rate'))
+                      gated = 'yes' if name == assembly else 'no'
+                      sink.write(f'| `{name}` | {rate:.2%} | {gated} |\n')
+
+                  sink.write(f'\nReport read from `{reports[0]}`, retained in the workspace for this run.\n\n')
+          PYTHON
 
   # ================================================================================================
   #  THE IMAGE LEG - exactly one container image per in-scope service per build
@@ -789,10 +1084,23 @@ jobs:
   #  for a push event: on a pull request from a fork that token cannot write, so those runs BUILD every
   #  image, which is the assertion that matters for a change under review, and push none.
   #
-  #  THE THIRD-PARTY ACTIONS BELOW ARE PINNED TO A COMMIT, not to a tag, because a tag can be moved to
-  #  point at different code after review. The first-party `actions/*` steps elsewhere in this file are
-  #  referenced at a fixed major version, which is their supported contract. Each pin carries the
-  #  release it resolves to in a trailing comment so the intent stays readable.
+  #  NO ACTION IS REFERENCED HERE, AND THAT MATTERS MOST IN THIS JOB. Section 9 of the header records
+  #  the whole reasoning; this is the leg it was written for. Two of the actions this job used ran with
+  #  `packages: write` while handling a build context that a pull request makes untrusted, and both
+  #  shipped committed npm bundles carrying critical and high advisories. `docker login`,
+  #  `docker buildx create` and `docker buildx build` all ship with the runner image and do the same
+  #  work with nothing vendored, so the registry credential and the untrusted context are now handled
+  #  only by the Docker CLI itself.
+  #
+  #  THE BASE IMAGES ARE PINNED BY DIGEST IN THE DOCKERFILES AND GATED HERE. A tag is a name a registry
+  #  may republish; a digest is the content that was reviewed. The gate below asks the registry what
+  #  each pinned tag resolves to NOW and fails when it has moved - which is precisely the signal that a
+  #  patched base image exists and should be adopted (CWE-1104). It is a measurement, so it stays true
+  #  as the images are rebuilt upstream.
+  #
+  #  EVERY PUBLISHED IMAGE CARRIES AN SBOM AND A MAX-MODE PROVENANCE ATTESTATION, and the push is
+  #  followed by a step that VERIFIES both arrived. A flag that silently did nothing would be worse
+  #  than no flag, because it would be cited as evidence.
   #
   #  It depends on `service`, so an image is only produced for a service whose tests and coverage gate
   #  have already passed. Publishing an image that failed its own gate would be worse than publishing
@@ -821,19 +1129,123 @@ jobs:
           - security-service
 
     steps:
-      - name: Check out the repository
-        uses: actions/checkout@v4
+      # The git-CLI checkout, for the reason recorded in section 9 of the header. Stated in full on
+      # the `hygiene` job's own checkout step.
+      - name: Check out the commit under test with the git CLI
+        env:
+          CHECKOUT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git init --quiet .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "${CHECKOUT_TOKEN}" | base64 -w0)" \
+            fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
+          git checkout --quiet --force FETCH_HEAD
+          test -z "$(git config --local --get-all http.extraheader || true)"
+          echo "checked out ${GITHUB_SHA} at depth 1 with no persisted credential"
 
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      # ------------------------------------------------------------------------------------------
+      #  THE BUILDER IS CREATED WITH THE CLI, AND THE CONTAINER DRIVER IS WHAT MAKES ATTESTATION
+      #  POSSIBLE AT ALL. The runner's default builder uses the `docker` driver, which supports
+      #  neither multi-platform output nor attestations; `docker-container` does. `--bootstrap` starts
+      #  it here so a failure to start is attributed to this step rather than to the build.
+      # ------------------------------------------------------------------------------------------
+      - name: Create the buildx builder with the container driver
+        run: |
+          set -euo pipefail
+          docker buildx version
+          docker buildx create \
+            --name powerframework-ci \
+            --driver docker-container \
+            --bootstrap \
+            --use
+          docker buildx inspect powerframework-ci
 
+      # ------------------------------------------------------------------------------------------
+      #  THE BASE-IMAGE DIGEST GATE - THE OS-IMAGE FRESHNESS CONTROL, MEASURED
+      #
+      #  Each Dockerfile pins `FROM …@sha256:…` and records the tag the digest was taken from in an
+      #  adjacent comment. This step reads BOTH out of the Dockerfile - so the assertion cannot drift
+      #  from the file it is about - asks the registry what that tag resolves to now, and fails when
+      #  the two disagree, naming the digest to adopt. MCR republishes a patch tag when it rebuilds the
+      #  OS layer, so a mismatch means a patched base exists and this repository is still building on
+      #  the previous one.
+      #
+      #  IT RUNS BEFORE THE BUILD, so a stale base is refused rather than published and then reported.
+      # ------------------------------------------------------------------------------------------
+      - name: Gate the pinned base-image digests against the registry
+        env:
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+
+          dockerfile="services/${SERVICE}/Dockerfile"
+          test -f "${dockerfile}"
+
+          stale=0
+
+          # One record per pinned base: the tagged reference the digest came from, and the digest the
+          # FROM line actually builds. Both are read out of the Dockerfile itself, so this assertion
+          # cannot drift from the file it is about.
+          while read -r tagged pinned; do
+            current="$(docker buildx imagetools inspect "${tagged}" --format '{{.Manifest.Digest}}')"
+
+            if [ "${pinned}" = "${current}" ]; then
+              echo "${tagged} still resolves to the pinned ${pinned}"
+            else
+              echo "::error::${dockerfile} builds ${tagged} at ${pinned}, but that tag now resolves" \
+                   "to ${current}. The registry has republished it, which for the .NET images means" \
+                   "the OS layer was rebuilt - almost always a security refresh. Review the new image" \
+                   "and re-pin the FROM line to ${current}."
+              stale=1
+            fi
+          done < <(python3 - "${dockerfile}" <<'PYTHON'
+          import re
+          import sys
+
+          text = open(sys.argv[1], encoding='utf-8').read()
+
+          # Dockerfile has no inline comment syntax, so the pair is two adjacent lines:
+          #     # pinned-tag: <repository>:<tag>
+          #     FROM <repository>@sha256:<digest> AS <stage>
+          pattern = re.compile(
+              r'^#[ \t]*pinned-tag:[ \t]*(?P<repository>[^\s:]+):(?P<tag>\S+)[ \t]*\n'
+              r'FROM[ \t]+(?P=repository)@(?P<digest>sha256:[0-9a-f]{64})[ \t]+AS[ \t]+\S+[ \t]*$',
+              re.MULTILINE)
+
+          matches = pattern.findall(text)
+
+          if not matches:
+              sys.exit(
+                  f'::error::{sys.argv[1]} declares no "# pinned-tag: <repository>:<tag>" comment '
+                  f'immediately above a digest-pinned FROM line for the same repository. Both halves '
+                  f'are required and they must be adjacent: the digest is what gets built, and the '
+                  f'tag is what this gate re-resolves.')
+
+          for repository, tag, digest in matches:
+              print(f'{repository}:{tag}', digest)
+          PYTHON
+          )
+
+          if [ "${stale}" -ne 0 ]; then
+            exit 1
+          fi
+
+      # ------------------------------------------------------------------------------------------
+      #  REGISTRY AUTHENTICATION WITH THE CLI. The token arrives on STDIN rather than in argv, so it
+      #  is not visible to another process on the runner, and it is the automatically provisioned
+      #  GITHUB_TOKEN - no declared secret exists in this project. Only a push event authenticates:
+      #  a pull-request run cannot write and does not try.
+      # ------------------------------------------------------------------------------------------
       - name: Authenticate to the container registry
         if: github.event_name == 'push'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${REGISTRY_PASSWORD}" \
+            | docker login ghcr.io --username "${REGISTRY_USERNAME}" --password-stdin
 
       # Every value written here comes from the run itself: the repository, the ref name and the run
       # number. Nothing is read from the legacy tree and no version is invented - the repository
@@ -867,40 +1279,108 @@ jobs:
 
           echo "${image} will be tagged ${GITHUB_SHA}, ${ref_tag}, ${ref_tag}-${GITHUB_RUN_NUMBER}"
 
-      - name: Build and publish the ${{ matrix.service }} image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
-        with:
-          # The repository root, for the reason recorded in section 6 of the header and in each
-          # Dockerfile. The orchestration manifest expresses the identical context as `..` because it
-          # sits one directory down.
-          context: .
-          file: services/${{ matrix.service }}/Dockerfile
-          # Build always; push only where the token can write. A pull-request run still proves the
-          # Dockerfile builds, which is the assertion that matters for a change under review.
-          push: ${{ github.event_name == 'push' }}
-          # THE BASE IMAGES ARE FETCHED RATHER THAN REUSED FROM WHATEVER THE BUILDER ALREADY HOLDS.
-          # Each Dockerfile pins a PATCH revision of the .NET base images - sdk:10.0.400 and
-          # aspnet:10.0.11, the 2026-08-11 security release - and a pinned tag is still only a NAME: a
-          # builder that already holds a layer under that name reuses it without consulting the
-          # registry. On a hosted runner the cache is empty, so this changes nothing there; on a
-          # self-hosted or reused builder it is the difference between building on the reviewed image
-          # and building on whatever was cached, which is exactly how a known-vulnerable base survives
-          # a rebuild that reports success (CWE-1104). Cheap, and it removes the one way the pin can be
-          # true in the file and false in the image.
-          pull: true
-          # One image, three names, all of them CI coordinates: the commit that produced it, the ref
-          # it was produced from, and that ref qualified by the run number so repeated runs of one
-          # commit stay distinguishable. No `latest`, and no semantic version - see ruling (a).
-          tags: |
-            ${{ steps.reference.outputs.image }}:${{ github.sha }}
-            ${{ steps.reference.outputs.image }}:${{ steps.reference.outputs.ref_tag }}
-            ${{ steps.reference.outputs.image }}:${{ steps.reference.outputs.ref_tag }}-${{ github.run_number }}
-          # Provenance and SBOM attestation are left at their defaults rather than switched on: no
-          # requirement in this refactor asks for either, and enabling them changes what is published.
-          # No build cache is configured either. A cache is a build-time optimization, this refactor
-          # asserts no performance property, and adding a cache backend to the one job whose behaviour
-          # on a hosted runner is reviewed rather than exercised would put an unproven dependency
-          # inside an unproven step. Correct and legible beats fast here.
+      # ------------------------------------------------------------------------------------------
+      #  THE BUILD, WITH THE CLI AND WITH ATTESTATION
+      #
+      #  The context is the repository root and the Dockerfile is named explicitly, for the structural
+      #  reason set out in section 6 of the header; the orchestration manifest expresses the identical
+      #  context as `..` because it sits one directory down.
+      #
+      #  `--pull` IS NOT AN OPTIMIZATION SWITCH TURNED THE WRONG WAY. A digest-pinned FROM is content
+      #  addressed, so a cached layer under that digest IS the reviewed content - but the SDK stage
+      #  also resolves NuGet, and a reused builder can hold an unrelated stale layer. On a hosted
+      #  runner the builder is fresh, so this costs nothing there and closes the one way a stale local
+      #  layer could substitute for the pinned base on a self-hosted one.
+      #
+      #  ONE IMAGE, THREE NAMES, all of them CI coordinates: the commit that produced it, the ref it
+      #  was produced from, and that ref qualified by the run number so repeated runs of one commit
+      #  stay distinguishable. No `latest` and no semantic version - see ruling (a) in section 4.
+      #
+      #  PUSH ONLY ON A PUSH EVENT. A pull-request run BUILDS every image - the assertion that matters
+      #  for a change under review - and publishes none, because that token cannot write. The two
+      #  paths differ in their exporter for a hard technical reason rather than a stylistic one: the
+      #  `docker` exporter cannot carry attestations at all, so the pull-request path builds to the
+      #  local daemon while the push path exports to the registry WITH an SBOM and a max-mode
+      #  provenance attestation.
+      # ------------------------------------------------------------------------------------------
+      - name: Build the ${{ matrix.service }} image and publish it with attestations
+        env:
+          SERVICE: ${{ matrix.service }}
+          IMAGE: ${{ steps.reference.outputs.image }}
+          REF_TAG: ${{ steps.reference.outputs.ref_tag }}
+          IS_PUSH: ${{ github.event_name == 'push' }}
+        run: |
+          set -euo pipefail
+
+          arguments=(
+            build
+            --file "services/${SERVICE}/Dockerfile"
+            --pull
+            --tag "${IMAGE}:${GITHUB_SHA}"
+            --tag "${IMAGE}:${REF_TAG}"
+            --tag "${IMAGE}:${REF_TAG}-${GITHUB_RUN_NUMBER}"
+            --metadata-file "${RUNNER_TEMP}/${SERVICE}-build-metadata.json"
+          )
+
+          if [ "${IS_PUSH}" = 'true' ]; then
+            arguments+=(
+              --push
+              --attest type=sbom
+              --attest type=provenance,mode=max
+            )
+          else
+            # No attestation is possible on this exporter, so none is claimed. The assertion this path
+            # makes is that the container definition builds.
+            arguments+=(--load)
+          fi
+
+          arguments+=(.)
+
+          docker buildx "${arguments[@]}"
+
+      # ------------------------------------------------------------------------------------------
+      #  THE ATTESTATION IS VERIFIED, NOT ASSUMED
+      #
+      #  A build flag that silently did nothing is worse than an absent flag, because the flag gets
+      #  cited as evidence that an SBOM exists. This step asks the registry for the published
+      #  manifest's attestation set and fails when either the SBOM or the provenance is missing.
+      #  It runs only where a push happened, because that is the only path on which either can exist.
+      # ------------------------------------------------------------------------------------------
+      - name: Verify the published SBOM and provenance attestations
+        if: github.event_name == 'push'
+        env:
+          IMAGE: ${{ steps.reference.outputs.image }}
+        run: |
+          set -euo pipefail
+
+          docker buildx imagetools inspect "${IMAGE}:${GITHUB_SHA}" --format '{{json .Provenance}}' \
+            > "${RUNNER_TEMP}/provenance.json"
+          docker buildx imagetools inspect "${IMAGE}:${GITHUB_SHA}" --format '{{json .SBOM}}' \
+            > "${RUNNER_TEMP}/sbom.json"
+
+          python3 - <<'PYTHON'
+          import json
+          import os
+          import sys
+
+          temporary = os.environ['RUNNER_TEMP']
+          missing = []
+
+          for name in ('provenance', 'sbom'):
+              with open(f'{temporary}/{name}.json', encoding='utf-8') as handle:
+                  text = handle.read().strip()
+
+              if not text or text == 'null' or json.loads(text) in (None, {}, []):
+                  missing.append(name)
+
+          if missing:
+              sys.exit(
+                  f'::error::The published image carries no {" and no ".join(missing)} attestation. '
+                  f'The build asked for both with --attest, so an absent one means the exporter did '
+                  f'not produce it and the supply-chain evidence this leg claims does not exist.')
+
+          print('SBOM and max-mode provenance attestations are both attached to the published image.')
+          PYTHON
 
   # ================================================================================================
   #  THE VERDICT - one required status for the whole workflow

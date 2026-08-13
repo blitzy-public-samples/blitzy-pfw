@@ -51,12 +51,12 @@ schemaVersion: "1"
 workflowId: persistence-sql-paging-rewrite
 
 title: >-
-  Dialect paging rewrites and the row-count wrapper - three SQL Server strategies, the
+  Dialect paging rewrites and the row-count wrapper - the four-arm SQL Server matrix, the
   Oracle nested form, the not-implemented arm, and byte-exact generated SQL
 
 capabilityArea: >-
   The dialect paging rewrites owned by Persistence, characterized as PURE STRING TRANSFORMS:
-  the dispatch on database type, the three SQL Server paging strategies, the single Oracle
+  the dispatch on database type, the four-arm SQL Server paging matrix, the single Oracle
   triple-nested row-number form, the empty-order-by substitution each of them applies when
   the input statement carries no ordering, the not-implemented arm the dispatch reserves for
   any other database type, and the row-count wrapper that reduces the same statement to a
@@ -111,7 +111,7 @@ description: >-
   - the only other references are the caller-side proxy forwarders, which forward and drive
   nothing. Two of the setters, the native-implementation flag and the unique-index column
   list, are not referenced even in commented form, and those two are precisely the inputs
-  that select among the three SQL Server strategies. The legacy master side of this pair is
+  that select among the four SQL Server arms. The legacy master side of this pair is
   therefore produced by exercising the legacy generators DIRECTLY through the public
   caller-side setter surface the read-only tree already exposes, driven from a harness that
   lives outside the legacy tree - never by driving a window, and never by editing the legacy
@@ -133,9 +133,15 @@ description: >-
   neither credentials nor interpolated user data and are recorded as they stand. The
   contingency is nevertheless declared under capturePhase.redaction rather than left to
   judgement: if a captured statement ever carries an interpolated literal that could be
-  sensitive, the treatment for this workflow's own recorded statement fields is
-  split-statement-and-parameters. That decision is scoped to this recording and does not reach
-  the published database-error payload's statement field, which characterization/README.md
+  sensitive, the treatment for this workflow's own recorded statement fields is redacted - the
+  same single redacted field the published payload takes, so this recording and the contract
+  agree rather than diverging. That treatment read split-statement-and-parameters until the
+  final security review: splitting withholds nothing, because it writes the values into a
+  tracked file, and a parameter collection is itself the sensitive data (docs/SECRETS.md
+  section 6.3 is the record of that being considered and rejected). A placeholder keeps the
+  statement SHAPE byte-comparable, which is the only property this workflow compares. The
+  scoping note still holds: this decision governs this recording's own fields and does not
+  reach the published database-error payload's statement field, which characterization/README.md
   section 6.2 rules is carried as one redacted field with nothing beside it. No key, password,
   certificate, token or fragment of one appears anywhere in this definition or in any
   recording taken under it.
@@ -268,14 +274,16 @@ capturePhase:
     rather than sampled. THE DISPATCH: the generator is driven once with each of the two
     declared database types and once with an undeclared type value, so the not-implemented arm
     is exercised as a FIRST-CLASS CASE rather than left as unreached code. THE SQL SERVER
-    FAMILY, three strategies, each captured separately together with the two inputs that
-    selected it and the reason that selection was made: the unique-index inner-join
-    optimization, which is selected when the unique-index column list is non-empty and which
-    itself forks on the native-implementation flag into an offset-fetch inner form and a
-    top-plus-row-number inner form, so both of its variants are captured; the plain
-    offset-fetch form, selected when the list is empty and the native flag is set; and the
-    top-plus-row-number fallback, selected when the list is empty and the native flag is
-    clear, which is the strategy the field defaults select. THE ORACLE FORM, one strategy, the
+    FAMILY IS A 2x2 MATRIX OVER TWO INDEPENDENT BOOLEANS - the emptiness of the unique-index
+    column list and the state of the native-implementation flag - giving FOUR ARMS, each captured
+    separately together with the two inputs that selected it and the reason that selection was
+    made. Naming it three strategies, as the migration plan's prose does, invites merging a pair
+    of them, and all four emit DIFFERENT statement text, so a merge breaks byte-exact parity
+    outright. The four: unique-index columns PRESENT with the native flag SET, an offset-fetch
+    form inside an inner-join sub-query; PRESENT with the flag CLEAR, a top-plus-row-number form
+    inside the same inner-join sub-query; ABSENT with the flag SET, offset-fetch appended to the
+    order-by clause; and ABSENT with the flag CLEAR, the top-plus-row-number wrapper - the only
+    arm carrying a trailing order-by, and the arm the field defaults select. THE ORACLE FORM, one strategy, the
     triple-nested row-number statement, captured twice - once with an input statement that
     carries an ordering and once with an input statement that carries none - because the
     empty-order-by substitution is invisible in the first case and is the whole point of the
@@ -328,8 +336,8 @@ capturePhase:
       case and is captured as one.
     - >-
       Both halves use the identical native-implementation flag and the identical unique-index
-      column list per case, in the same order. These two inputs are what select among the
-      three SQL Server strategies, and no legacy caller sets either of them anywhere, so the
+      column list per case, in the same order. These two inputs are the two axes of the 2x2
+      matrix that selects the SQL Server arm, and no legacy caller sets either of them anywhere, so the
       capture must set them explicitly and record what it set - a case whose selecting inputs
       are not recorded cannot be reproduced on the other side.
     - >-
@@ -391,16 +399,15 @@ capturePhase:
         :L396
     - name: strategySelection
       description: >-
-        Which of the three SQL Server strategies was selected, which of its two inner variants
-        was taken where it has them, and the two input values that made the selection - the
-        emptiness of the unique-index column list and the state of the native-implementation
-        flag. The selection is itself behaviour and is compared, never masked: a candidate that
+        Which of the FOUR SQL Server arms of the 2x2 matrix was selected, and the two input
+        values that made the selection - the emptiness of the unique-index column list and the
+        state of the native-implementation flag. The selection is itself behaviour and is compared, never masked: a candidate that
         produced correct text by a different route has diverged, because the route determines
         what happens for every input the matrix does not contain. The field defaults select the
         top-plus-row-number fallback, so the recording states for each case whether the
         selection followed a default or an explicit input.
       format: >-
-        Canonical JSON per case - strategy by name, inner variant by name where applicable, the
+        Canonical JSON per case - the arm by name, its two matrix coordinates, the
         two selecting input values, and a short recorded reason naming the branch condition
         that decided it.
       locator: >-
@@ -602,8 +609,11 @@ capturePhase:
         matrix as declared all three fields are recorded as they stand. This entry is scoped to
         this recording and is NOT the published database-error payload's statement field, which
         characterization/README.md section 6.2 rules is carried as a single redacted field with
-        nothing beside it.
-      treatment: split-statement-and-parameters
+        nothing beside it. The contingency treatment is that same single redacted field: this
+        entry read split-statement-and-parameters, which contradicted the ruling it cites one
+        sentence earlier, and which docs/SECRETS.md section 6.3 records as considered and
+        rejected because a parameter collection is itself the sensitive data.
+      treatment: redacted
   recordingArtifacts:
     - filename: capture-inputs.json
     - filename: dispatch-outcomes.json
@@ -885,8 +895,8 @@ provesDefects:
       unique-index column list is supplied through five public setters, and NO LIVE CALL TO ANY OF
       THEM EXISTS ANYWHERE IN THE LEGACY TREE. The one window carrying the paging surface has its
       three calls commented out; the only other references are the caller-side proxy forwarders,
-      which forward and drive nothing; and the two setters that choose among the three SQL Server
-      strategies are not referenced even in commented form.
+      which forward and drive nothing; and the two setters that choose among the four SQL Server
+      arms are not referenced even in commented form.
     locator: >-
       ws_objects/pfw.tests.pbl.src/w_test_thread_sqlquery.srw:L259, :L264, :L266
     note: >-

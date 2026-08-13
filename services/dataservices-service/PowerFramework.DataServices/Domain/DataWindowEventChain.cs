@@ -578,11 +578,20 @@ internal sealed record DataWindowDispatchReport
 /// to an <see cref="IDataWindowEventObserver"/> rather than stored on the chain.
 /// </para>
 /// <para>
-/// THE TWO VETO EDGES ARE SEPARATE FIELDS AND NOT ONE COMBINED VERDICT. A raw event consults its
-/// semantic handler and then the broker, and either edge can stop the dispatch
-/// [<c>se_cst_dw.sru:L115-L117</c> for both, <c>:L120-L121</c> for the broker alone]. One verdict
-/// would say that the dispatch stopped without saying WHICH edge stopped it, and since the two edges
-/// have different subscribers they have different remedies.
+/// THE TWO VETO EDGES ARE SEPARATE FIELDS AND NOT ONE COMBINED VERDICT. A raw event has up to two
+/// independent edges - a partner call and a broker trigger - and either can stop the dispatch
+/// [<c>se_cst_dw.sru:L115-L117</c> for both]. One verdict would say that the dispatch stopped without
+/// saying WHICH edge stopped it, and since the two edges have different subscribers they have different
+/// remedies.
+/// </para>
+/// <para>
+/// WHICH EDGES EXIST IS PER EVENT, NOT UNIFORM, so an absent edge reports no veto rather than a permit.
+/// <c>ondwnrbuttonup</c> and <c>ondwnlbuttonup</c> have a broker edge and NO partner call
+/// [<c>:L120-L122</c>, <c>:L395-L397</c>]; <c>ondwnkillfocus</c> and <c>ondwnsetfocus</c> trigger the
+/// broker BEFORE the partner and return the partner's result [<c>:L387-L393</c>, <c>:L399-L401</c>]; and
+/// <c>ondwnrowchange</c> has a broker edge that CANNOT veto, because its answer is discarded and the event
+/// always returns 0 [<c>:L124-L128</c>] - unlike its <c>ondwnrowchanging</c> sibling, where the same
+/// broker edge does veto [<c>:L130-L134</c>].
 /// </para>
 /// </remarks>
 internal sealed record DataWindowEventOutcome
@@ -807,10 +816,13 @@ internal interface IDataWindowEventObserver
 ///   <item>
 ///     <term>Drop-down search</term>
 ///     <description>
-///     <b>(b) SYNCHRONOUS.</b> The first event produces its result through a <c>ref string</c>
-///     OUT-PARAMETER [<c>se_cst_dw.sru:L13</c>], which has no asynchronous representation at all - the
-///     caller blocks on the produced filter because the filter is the only thing the call exists to
-///     obtain.
+///     <b>(b) SYNCHRONOUS.</b> The first event declares NO RETURN TYPE and produces its result by
+///     mutating a <c>ref string</c> OUT-PARAMETER [<c>se_cst_dw.sru:L13</c>]. The parameter itself
+///     projects onto the wire without difficulty - <c>EventResult.produced_filter</c> carries it with
+///     explicit presence, so "assigned an empty filter" stays distinct from "not touched". What does NOT
+///     survive being fired and forgotten is the SEQUENCING: the filter is the only thing the call exists
+///     to obtain, so the caller cannot proceed until it arrives, and a reordered or dropped answer has no
+///     defined meaning.
 ///     </description>
 ///   </item>
 ///   <item>
@@ -1157,7 +1169,7 @@ internal sealed class DataWindowEventSequencer
     /// estate was a sort inside a test.
     /// </para>
     /// <para>
-    /// THE RULE IS NOW STRICTLY INCREASING PAST THE MARK, AND THE TWO HALVES OF THAT ARE BOTH DELIBERATE.
+    /// THE RULE IS STRICTLY INCREASING PAST THE MARK, AND THE TWO HALVES OF THAT ARE BOTH DELIBERATE.
     /// A token ABOVE the mark is accepted even when it is not the immediate successor - a GAP IS
     /// LEGITIMATE here, because both directions draw from one counter and a client's token is one past
     /// the highest it has SEEN, so the numbers the server consumed are numbers the client never uses. A
@@ -1514,7 +1526,7 @@ internal abstract class DataWindowEventChain : DataWindowServiceHost, IItemChang
     /// </summary>
     /// <remarks>
     /// <see cref="Ancestry.IsAncestor(object?, string)"/> compares the UNQUALIFIED
-    /// <see cref="Type.Name"/> while walking base types, so the argument must be the .NET class name
+    /// <c>Type.Name</c> while walking base types, so the argument must be the .NET class name
     /// and not the PowerScript one; <see cref="DataWindowServiceBase"/> is the port of
     /// <c>n_cst_dwsvc</c>. Spelled with <c>nameof</c> so a rename of that type cannot leave this test
     /// silently matching nothing. The walk is SELF-INCLUSIVE - a type is its own ancestor - which is
@@ -1929,14 +1941,13 @@ internal abstract class DataWindowEventChain : DataWindowServiceHost, IItemChang
     //  because an ATTACHED SERVICE raises them on its host rather than the chain raising them on
     //  itself, and they are OVERRIDDEN below with the bodies se_cst_dw gives them.
     //
-    //  THE CONTEXT-MENU PAIR MOVED, AND THE MOVE WAS FORCED BY THE ORACLE RATHER THAN CHOSEN. Both were
-    //  originally declared here as `virtual`, while the doc-comment on each already recorded that they
-    //  are raised BY THE CONTEXT-MENU SERVICE ON ITS HOST and cited
-    //  n_cst_dwsvc_contextmenu.sru:L147 and :L194 for it. A service holds its host as a
-    //  DataWindowServiceHost, so those two raise sites could not compile against a member declared only
-    //  here. They are now declared on the host and OVERRIDDEN here, so the chain's surface is unchanged
-    //  for every existing consumer - including the nine-event reflection table in
-    //  DataWindowEventChainTests - and there is still exactly ONE definition of each legacy event.
+    //  THE CONTEXT-MENU PAIR SITS ON THE HOST BECAUSE THE ORACLE FORCES IT, NOT BECAUSE IT READS BETTER.
+    //  Both are raised BY THE CONTEXT-MENU SERVICE ON ITS HOST - n_cst_dwsvc_contextmenu.sru:L147 and
+    //  :L194 - and a service holds its host as a DataWindowServiceHost, so declaring either only here
+    //  would leave those two raise sites with nothing to call. They are therefore declared on the host
+    //  and OVERRIDDEN here, which keeps the chain's surface whole for every consumer - including the
+    //  nine-event reflection table in DataWindowEventChainTests - with exactly ONE definition of each
+    //  legacy event.
     //
     //  VIRTUAL WITH A NO-OP DEFAULT, NOT ABSTRACT, AND THE ORACLE PROVES THE VIRTUAL IS USED. Five
     //  objects derive from se_cst_dw - the w_test_dwsvc_* windows in ws_objects/pfw.tests.pbl.src -
@@ -2003,9 +2014,10 @@ internal abstract class DataWindowEventChain : DataWindowServiceHost, IItemChang
     /// </param>
     /// <remarks>
     /// <para>
-    /// <b>THE <c>ref</c> OUT-PARAMETER IS WHY DROP-DOWN SEARCH IS ASSIGNED PATTERN (b).</b> A
-    /// <c>ref</c> out-parameter has NO ASYNCHRONOUS REPRESENTATION: the caller blocks on the produced
-    /// filter because the filter is the only thing the call exists to obtain. Modelled as a
+    /// <b>THE <c>ref</c> OUT-PARAMETER IS WHY DROP-DOWN SEARCH IS ASSIGNED PATTERN (b).</b> The caller
+    /// blocks on the produced filter because the filter is the only thing the call exists to obtain, so
+    /// the answer has NO FIRE-AND-FORGET FORM - the parameter itself projects onto a wire field with
+    /// explicit presence, but a reordered or dropped answer has no defined meaning. Modelled as a
     /// <c>ref</c> parameter per AAP 0.4.5.2 and NOT converted into a return value - a return value
     /// would destroy the distinction between "the handler assigned an empty filter", which means match
     /// nothing, and "the handler did not touch the parameter", which means it declined to filter.
@@ -2397,7 +2409,7 @@ internal abstract class DataWindowEventChain : DataWindowServiceHost, IItemChang
     //  touching the control again.
     //
     //  WHY Predicates.IsValidObject IS *NOT* WHAT THIS CALLS. That function is the port of
-    //  ws_objects/pfw.common.pbl.src/isvalidobject.srf, a DIFFERENT function; and its own
+    //  ws_objects/pfw.shared.pbl.src/isvalidobject.srf, a DIFFERENT function; and its own
     //  documentation records that in .NET the exact equivalent of "created and not yet destroyed"
     //  reduces to "not null", which for `this` is unconditionally true. Routing the guard through it
     //  would make all three sites inert - the guard would never fire, and the skip it exists to

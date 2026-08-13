@@ -96,12 +96,6 @@
 // preserve on this route, only a new boundary to secure. Not one line of it is ported here, and the
 // legacy tree is never edited, moved or reformatted (constraint C-C).
 //
-// RULES POSITION, STATED PLAINLY
-// The project's rules document was retrieved in full and contains exactly one statement: no user
-// rules were provided. That is a finding, not latitude, and nothing is invented in its place. The
-// binding constraints are the twelve non-rule constraints C-A through C-L of the transformation
-// plan together with its enterprise baseline; the ones governing this file are cited by name above
-// and at their point of application below (constraint C-K).
 // ================================================================================================
 
 using Microsoft.AspNetCore.Http.HttpResults;

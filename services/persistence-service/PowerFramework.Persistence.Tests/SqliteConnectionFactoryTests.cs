@@ -111,7 +111,7 @@
 //       provider's credential pattern, or as null. No connection-string literal is asserted into
 //       existence, and the sentinel's absence from a record is asserted as a BOOLEAN rather than with
 //       `Assert.DoesNotContain`, which renders both operands and would print the value at exactly the
-//       moment the defect it guards against was present.
+//       moment the defect it guards against is present.
 //  C-H  This unit is the declared coverage win. The 18-case matrix plus the facade rows below take it
 //       there cheaply, which is what the per-service 80 percent line floor is measured from.
 //  C-K  The two decisions above are documented at the point they are pinned, with their mechanisms
@@ -143,10 +143,6 @@
 //  therefore never reach a configured data directory, the `persistence-db` volume mount, or the
 //  legacy `test.db` at the repository root.
 //
-//  RULES POSITION
-//  No user rules were provided for this project: the rules document contains exactly one line saying
-//  so. Nothing is invented or back-filled from convention in its place; the constraints honoured are
-//  the enterprise-standard baseline and the named non-rule constraints listed above.
 // ==================================================================================================
 
 using System.Data;
@@ -496,7 +492,7 @@ public sealed class SqliteConnectionFactoryTests
     /// The absence of the sentinel is asserted as a BOOLEAN rather than through
     /// <c>Assert.DoesNotContain</c>, matching the convention the sibling
     /// <c>DataDirectoryFaultTests</c> established: that overload renders both operands on failure and
-    /// would print the value at exactly the moment the defect it guards against was present. The
+    /// would print the value at exactly the moment the defect it guards against is present. The
     /// value here is a declared non-secret, so nothing would actually leak - but the habit is the
     /// point, because the next reader who copies this row may not be using a sentinel (C-F).
     /// </para>

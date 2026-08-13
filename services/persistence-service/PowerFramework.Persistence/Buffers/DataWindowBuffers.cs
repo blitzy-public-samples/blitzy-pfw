@@ -207,14 +207,7 @@
 //        resolved through ItemStatusMachine rather than compared to a bare 0 here.
 //
 //  ============================================================================================
-//  RULES POSITION
-//  ============================================================================================
-//  review_rules returns exactly one line, "No user rules provided.", so NO user-specified rule
-//  governs this file and none is invented here; the absence is not treated as licence to lower the
-//  bar. The enterprise-standard baseline applies in their place and the binding constraints are the
-//  refactor plan's own non-rule inventory. Those bearing on this file are cited inline where each is
-//  discharged: C-A, C-B, C-C, C-D, C-E, C-F, C-G, C-H, C-I, C-K and risk R9.
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  C-F / C-G SELF-AUDIT: no key, credential, token, password, connection string or secret-shaped
 //  literal appears anywhere in this file. The database-error hook forwards `sqlSyntax`, which per
 //  AAP 0.6.3.8 carries the COMPLETE generated statement including interpolated literal values, and
@@ -985,7 +978,7 @@ internal sealed class CarrierRow
 /// <para>
 /// <b>WHY THIS EXISTS AT ALL, AND WHY THERE IS EXACTLY ONE OF IT.</b> Both cross-thread transfer
 /// paths - the changeset codec and the full-state codec - move column values across the C-05 and C-06
-/// boundaries, and each used to carry its own private byte-level tag table. Two tables meant two
+/// boundaries, and each could carry its own private byte-level tag table. Two tables would mean two
 /// answers to "how does a decimal appear on the wire", and the two could drift without either failing
 /// to compile. One mapper, reached from both, is what makes the answer checkable by reading.
 /// </para>

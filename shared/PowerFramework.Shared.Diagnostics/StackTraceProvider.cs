@@ -235,6 +235,10 @@
 //  StackTraceProvider exists precisely to keep out of its way. PowerFramework.Shared.Kernel is
 //  also deliberately not imported: this project references it for the return-code predicates that
 //  the assertion overloads in Assert.cs guard on, and nothing in THIS file needs a symbol from it.
+//
+//  LOCATOR CONVENTION: every bare `pfw.sra:L...` in this file means ws_objects/pfw.pbl.src/pfw.sra,
+//  the framework application - never the same-named packager object at
+//  ws_objects/pfw.pack.pbl.src/pfw.sra (AAP 0.8.6 R7).
 // ==============================================================================================
 
 using System.Globalization;
@@ -791,7 +795,7 @@ public static class StackTraceProvider
     /// <remarks>
     /// See <c>DECISION 6</c> above for the format contract, the four invariants every emitted frame
     /// satisfies, the four degradation cases, and the reasons the file path is absent and
-    /// <see cref="Type.Name"/> is walked rather than <see cref="Type.FullName"/> used. This format
+    /// <c>Type.Name</c> is walked rather than <see cref="Type.FullName"/> used. This format
     /// has no legacy equivalent to copy - the native primitive's output cannot be read - so it is
     /// defined here and <c>Assert.cs</c> must be authored against it.
     /// </remarks>

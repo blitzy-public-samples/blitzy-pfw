@@ -60,11 +60,6 @@
 //   5. EveryMemberIsAPublicConstAndNothingElse     no static readonly, no property, no method.
 //   6. ... then the named behavioural facts, one per family that a consumer depends on.
 //
-//  RULES POSITION
-//  review_rules returns "No user rules provided.", so no user-specified rule governs this file. The
-//  enterprise baseline applies, and the binding constraints cited inline are C-B (replicate legacy
-//  behaviour and defects, never improve), C-C (the legacy tree is read-only and is the oracle) and
-//  C-K (document every boundary decision).
 // ==================================================================================================
 
 using System.Collections.Generic;

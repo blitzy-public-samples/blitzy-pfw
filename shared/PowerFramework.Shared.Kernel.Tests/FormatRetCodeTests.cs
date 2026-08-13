@@ -889,15 +889,14 @@ public sealed class FormatRetCodeTests
     /// is why its return type is <c>string?</c>; see its DECISION 4.
     /// </para>
     /// <para>
-    /// AN EARLIER REVISION OF THIS TEST ASSERTED <c>string.Empty</c> HERE, having derived the null
-    /// in its own remarks and then declined to assert it. That is the worst of the available
-    /// positions: it made a known semantic change permanently green, and it would have failed the
-    /// moment the production code was corrected - so the test would have read as the authority and
-    /// the correction as the regression. The empty string is also exactly the null flattening
-    /// AAP 0.4.5.4 forbids, one type over from the integer case it names. The cost the old reasoning
-    /// was avoiding turned out not to exist either: <c>FormatRetCode</c> has no caller anywhere in
-    /// this repository outside this suite, so widening the return type propagated a null check to
-    /// nothing at all.
+    /// ASSERTING <c>string.Empty</c> HERE - deriving the null in the remarks and then declining to
+    /// assert it - is the worst of the available positions: it makes a known semantic divergence
+    /// permanently green, and it would fail the moment the production code was brought back into line,
+    /// so the test would read as the authority and the correction as the regression. The empty string is
+    /// also exactly the null flattening AAP 0.4.5.4 forbids, one type over from the integer case it
+    /// names. The cost that reasoning avoids does not exist either: <c>FormatRetCode</c> has no caller
+    /// anywhere in this repository outside this suite, so the nullable return type propagates a null
+    /// check to nothing at all.
     /// </para>
     /// <para>
     /// THE EXACT BOUNDARY OF THE CLAIM, so it is not overstated: no call site in the corpus passes a
@@ -917,8 +916,8 @@ public sealed class FormatRetCodeTests
         Assert.Null(actual);
 
         // Specifically NOT the shapes a reader might reach for instead. Each is a DIFFERENT answer
-        // that the oracle does not produce, and each has been a real temptation: the empty string is
-        // what this file used to assert, "UNKNOWN ()" is what a fallback that ignored the null
+        // that the oracle does not produce, and each is a real temptation: the empty string is the
+        // obvious "nothing to format" answer, "UNKNOWN ()" is what a fallback that ignored the null
         // propagation would render, and "OK" is what treating an absent code as a zero would give.
         Assert.NotEqual(string.Empty, actual);
         Assert.NotEqual("UNKNOWN ()", actual);

@@ -702,7 +702,8 @@ public sealed class CryptoAuthorizationTests
     /// Reports whether one caller holds a grant covering both the given audience and the cryptographic
     /// scope.
     /// </summary>
-    /// <param name="caller">The caller under consideration.</param>
+    /// <param name="grantedAudience">The audience actually granted.</param>
+    /// <param name="grantedScopes">The scope set actually granted, which may be narrower than the requested one.</param>
     /// <param name="audience">The audience to match.</param>
     /// <returns><see langword="true"/> when such a grant exists.</returns>
     /// <remarks>

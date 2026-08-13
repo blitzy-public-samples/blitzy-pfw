@@ -22,6 +22,10 @@
 //  ws_objects/pfw.pbl.src/pfw.sra:L94. The DEFECT is the hardcoding, so the fix is to preserve the
 //  observable default while removing the UN-CONFIGURABILITY - which is a structural property, not a
 //  behaviour. That distinction is why the value is "en" and yet settable.
+//
+//  LOCATOR CONVENTION: every bare `pfw.sra:L...` in this file means ws_objects/pfw.pbl.src/pfw.sra,
+//  the framework application - never the same-named packager object at
+//  ws_objects/pfw.pack.pbl.src/pfw.sra (AAP 0.8.6 R7).
 // ==================================================================================================
 
 using System.ComponentModel.DataAnnotations;
@@ -183,10 +187,10 @@ public sealed class GatewayOptionsTests
         //
         // THE PORT: DataServices declares ONE endpoint, `https://+:5102` with `Protocols:
         // Http1AndHttp2`, which answers the readiness probe over HTTP/1.1 and the C-03/C-04 gRPC
-        // contracts over HTTP/2. Gateway calls those contracts over gRPC and names that same 5102. An
-        // earlier revision defaulted this to 5112, a second Http2-only endpoint outside the documented
-        // band; it was withdrawn because AAP 0.3.2.2 assigns C-03 and C-04 to 5102, so a channel built on
-        // 5112 reached a port the map does not give those contracts.
+        // contracts over HTTP/2. Gateway calls those contracts over gRPC and names that same 5102.
+        // Defaulting this to 5112 - a second Http2-only endpoint outside the documented band - is the
+        // tempting alternative and is not available: AAP 0.3.2.2 assigns C-03 and C-04 to 5102, so a
+        // channel built on 5112 reaches a port the map does not give those contracts.
         Assert.Equal("https://localhost:5102", upstreams.DataServices);
         Assert.Equal("https://localhost:5104", upstreams.Security);
     }
@@ -197,14 +201,14 @@ public sealed class GatewayOptionsTests
         // A REGRESSION GUARD WITH A SPECIFIC FAILURE IN MIND, NOT A RESTATEMENT OF THE TEST ABOVE.
         //
         // `https://localhost:5112` is the value that looks plausible from every angle except the one that
-        // matters: right service, right host, right scheme, and it is what this default USED to be while
-        // DataServices bound a second Http2-only listener there. Nothing binds 5112 now. A channel built
-        // on it fails at connect, BEFORE any request reaches DataServices, so nothing in DataServices
+        // matters: right service, right host, right scheme, and it is the address a second Http2-only
+        // DataServices listener would carry. NOTHING BINDS 5112 - no such listener is declared. A channel
+        // built on it fails at connect, BEFORE any request reaches DataServices, so nothing in DataServices
         // logs it - the symptom is a Gateway 502 on every /v1/datawindow route and the cause is two
         // characters of port.
         //
         // The positive half is asserted here too rather than left to the equality above, because the
-        // discriminating property is that the CALL address and the PROBE address now agree: 5102 carries
+        // discriminating property is that the CALL address and the PROBE address agree: 5102 carries
         // both surfaces, so naming anything else is the defect.
         Assert.EndsWith(":5102", new GatewayOptions().Upstreams.DataServices, StringComparison.Ordinal);
         Assert.DoesNotContain(":5112", new GatewayOptions().Upstreams.DataServices, StringComparison.Ordinal);
@@ -226,9 +230,9 @@ public sealed class GatewayOptionsTests
 
         // THE PROBE AND THE CALL EDGE NAME THE SAME ENDPOINT OF THE SAME SERVICE, AND THAT IS WHAT IS
         // ASSERTED. DataServices binds one `Http1AndHttp2` listener on 5102: ALPN gives the probe HTTP/1.1
-        // and the gRPC channel HTTP/2 on that single port, so both members carry 5102. An earlier revision
-        // split them - probe on 5102, channel on a second Http2-only 5112 - and this row asserted they
-        // DIFFERED; the split was withdrawn because AAP 0.3.2.2 assigns C-03 and C-04 to 5102.
+        // and the gRPC channel HTTP/2 on that single port, so both members carry 5102. Splitting them -
+        // probe on 5102, channel on a second Http2-only 5112 - would make this row assert they DIFFER, and
+        // the split is not available because AAP 0.3.2.2 assigns C-03 and C-04 to 5102.
         //
         // THE TWO MEMBERS STAY SEPARATE ANYWAY, AND THE REASON IS AUTHORITY RATHER THAN ADDRESS. The probe
         // group authorises one anonymous GET /health; the upstream group is a call address a gRPC channel

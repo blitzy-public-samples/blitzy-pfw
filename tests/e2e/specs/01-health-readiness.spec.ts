@@ -46,10 +46,10 @@
  *  the aggregate useful to the operator reading a failure, and it is the observable consequence of
  *  Gateway actually composing three upstream verdicts rather than reporting only on itself.
  *
- *  🔴 WHY THE BODY IS NOW READ AGAINST THE PUBLISHED SHAPE, NOT DEFENSIVELY
+ *  🔴 WHY THE BODY IS READ AGAINST THE PUBLISHED SHAPE, NOT DEFENSIVELY
  *  -----------------------------------------------------------------------
- *  This file used to state the opposite, and the reasoning was wrong on the facts. It read the body as
- *  TEXT, parsed it as JSON only if it happened to parse, and inspected the serialized form either way -
+ *  READING THE BODY DEFENSIVELY IS THE PLAUSIBLE POSITION AND IT IS WRONG ON THE FACTS: read the body as
+ *  TEXT, parse it as JSON only if it happens to parse, and inspect the serialized form either way -
  *  on the argument that "the invariant contract C-10 actually publishes is 'the aggregate names each
  *  upstream and reports a verdict'; the exact member spelling around it is the implementation's to
  *  choose and to version".
@@ -59,12 +59,13 @@
  *  exactly three items, and declares both status enumerations as closed sets. The member spelling is
  *  not the implementation's to choose - it is what every client generated from the document reads.
  *
- *  What the tolerance bought was a suite that passed against documents no client can consume: a
+ *  What such tolerance buys is a suite that passes against documents no client can consume: a
  *  plain-text `ok`, a bare quoted `"up"`, an upstream's own verdict mistaken for the aggregate's
- *  because the last fallback searched the WHOLE body, and an upstream counted as "named" because the
- *  word appeared in an unrelated member. Every one of those is now a failure.
+ *  because a last fallback searched the WHOLE body, and an upstream counted as "named" because the
+ *  word appeared in an unrelated member. Every one of those is a failure here.
  *
- *  ADDING A MEMBER IS STILL NOT A FAILURE, which was the legitimate half of the original concern: the
+ *  ADDING A MEMBER IS NOT A FAILURE, which is the legitimate half of the concern the tolerant reading
+ *  answers: the
  *  required members are asserted as present rather than as the complete key set, so a
  *  contract-conformant document that grew `checkedAt` or `checks` still passes. The tolerance removed
  *  is tolerance of a DIFFERENT shape, not of a richer one.
@@ -153,19 +154,19 @@ import {
 } from '../fixtures/contract-shape';
 
 /**
- * THE VERDICT IS ONE EXACT TOKEN, AND IT USED TO BE A VOCABULARY.
+ * THE VERDICT IS ONE EXACT TOKEN, NOT A VOCABULARY.
  *
- * This file once matched the aggregate verdict against `/\b(healthy|ok|up|pass)\b/i`, described as
- * "deliberately tolerant across spellings ... the token an implementation chooses for the healthy end
- * of it is not the thing this file exists to pin down." That reasoning was wrong about the contract.
+ * Matching the aggregate verdict against `/\b(healthy|ok|up|pass)\b/i` is the tolerant form, defensible
+ * as "deliberately tolerant across spellings ... the token an implementation chooses for the healthy end
+ * of it is not the thing this file exists to pin down." That reasoning is wrong about the contract.
  * `AggregateHealthReport.status` is a CLOSED ENUMERATION of exactly three case-sensitive tokens
  * — `Healthy`, `Degraded`, `Unhealthy` — and `Healthy` is the one that means ready. The pattern
  * accepted three tokens the contract does not declare (`ok`, `up`, `pass`) in any casing, so a
  * projection that changed its verdict vocabulary passed the readiness assertion, and an operator's
  * gate keyed on `Healthy` would have broken while this suite stayed green.
  *
- * The two properties the pattern was written for are preserved and strengthened rather than lost:
- * `Unhealthy` cannot be read as healthy because the comparison is now equality against `Healthy`, and
+ * The two properties the tolerant pattern is reached for are held here and held more tightly:
+ * `Unhealthy` cannot be read as healthy because the comparison is equality against `Healthy`, and
  * the `upstreams` member cannot be mistaken for the verdict because the verdict is read from the
  * `status` member by name and from nowhere else.
  *
@@ -195,14 +196,13 @@ const DEFERRED_SERVICE_NAMES = ['DesignSystem', 'Documents', 'Integration', 'Scr
 const IN_SCOPE_SERVICE_COUNT = 4;
 
 /**
- * THE DEFENSIVE READER IS GONE, AND ITS JOB SURVIVES AS A DIAGNOSTIC.
+ * THERE IS NO DEFENSIVE READER, AND ITS JOB SURVIVES AS A DIAGNOSTIC.
  *
- * A `HealthDocument` pair — the parsed value and a re-serialized searchable string — used to be the
- * subject of every assertion in this file, with a header explaining that "these assertions are
- * deliberately schema-agnostic ... a deep structural equality here would fail on a
- * contract-conformant document that had merely added a member." The second half of that is true and is
- * why `assertMembers` distinguishes REQUIRED from OPTIONAL members rather than demanding equality; the
- * first half was the defect. `AggregateHealthReport` sets `additionalProperties: false`, so a member
+ * A `HealthDocument` pair — the parsed value and a re-serialized searchable string — as the subject of
+ * every assertion here is the shape to avoid, and it is defended as "deliberately schema-agnostic ... a
+ * deep structural equality here would fail on a contract-conformant document that had merely added a
+ * member." The second half of that is true and is why `assertMembers` distinguishes REQUIRED from
+ * OPTIONAL members rather than demanding equality; the first half is the defect. `AggregateHealthReport` sets `additionalProperties: false`, so a member
  * the schema does not declare is not an addition a conformant document may make — it is drift.
  *
  * What the pair genuinely bought was a good failure message for a body that did not parse, and that is
@@ -327,11 +327,11 @@ function readUpstreams(
  * These three assertions are independent single-request reads that mutate nothing, so no ordering
  * relationship exists between them and declaring one would be a false statement about the file.
  *
- * NO SPEC IN THIS SUITE DECLARES `mode: 'serial'` ANY LONGER. The two state-mutating workflows once
- * did, to order tests that shared module-scope state; the concurrency workflow is now one atomic test
- * with a step per former step, and the DataWindow workflow's tests each arrange their own row, so
- * neither has an order left to declare. Serialization is still real, but it comes from where it always
- * belonged — `fullyParallel: false` and `workers: 1` in the runner configuration, which is a
+ * NO SPEC IN THIS SUITE DECLARES `mode: 'serial'`. Declaring it is what a suite needs when tests share
+ * module-scope state and must be ordered; neither state-mutating workflow here does. The concurrency
+ * workflow is ONE atomic test with a step per stage, and the DataWindow workflow's tests each arrange
+ * their own row, so neither has an order to declare. Serialization is still real, and it comes from
+ * where it belongs — `fullyParallel: false` and `workers: 1` in the runner configuration, which is a
  * repository-wide correctness decision about a shared `persistence-db` volume rather than a per-file
  * one.
  */

@@ -88,21 +88,15 @@
 //  dressed up as robustness, and the fail-fast posture is called out in the AAP twice (0.1.4 and
 //  0.6.7) precisely because it is the tempting thing to soften.
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  review_rules returns exactly "No user rules provided." - NO user rule governs this file. That is a
-//  finding, not licence to lower the bar: the enterprise baseline applies in its place. The
-//  constraints cited inline are the AAP's own: C-A (no coupling across a service boundary), C-B
-//  (replicate behaviour and defects), C-C (ws_objects is read-only - this file was authored FROM
-//  pfw.sra and takes no build-time or run-time dependency on any path under it), C-H (this file
-//  carries no test attribute, so it adds no test to the coverage-gated suite), C-I and the 0.7.2
-//  baseline (nullable enabled, warnings are errors, warning-clean), and AAP 0.8.2 (legacy text
-//  preserved verbatim - the Chinese report labels below are byte-for-byte from pfw.sra:L129-L138).
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  Naming: the repository root .editorconfig scopes its naming-analyzer suppressions to the named
 //  PRODUCTION files on its BAND 3 roster - the single source of truth for that list - and none of
 //  them is in this project, so every identifier here is conventional
 //  PascalCase and no SCREAMING_SNAKE constant is declared.
+//
+//  LOCATOR CONVENTION: every bare `pfw.sra:L...` in this file means ws_objects/pfw.pbl.src/pfw.sra,
+//  the framework application - never the same-named packager object at
+//  ws_objects/pfw.pack.pbl.src/pfw.sra (AAP 0.8.6 R7).
 // ==================================================================================================
 
 using System;

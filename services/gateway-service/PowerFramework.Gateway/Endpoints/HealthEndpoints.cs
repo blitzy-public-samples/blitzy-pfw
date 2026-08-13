@@ -7,7 +7,7 @@
 //   One route, and the contact point the container orchestration probes. `/health` composes Gateway's
 //   own readiness with the individually reported readiness of its three upstreams - Persistence,
 //   DataServices and Security - and answers 200 only when every one of them is ready
-//   [shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml:L423-L486].
+//   [shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml:L480-L547].
 //
 //   OpenApi/gateway.v1.yaml is AUTHORITATIVE FOR THE WIRE and was read in full before a single route,
 //   status code or payload member was written here. Where it and docs/CONTRACTS.md disagree the
@@ -1204,7 +1204,7 @@ public static class HealthEndpoints
     /// purpose, and is ALSO stated in <c>detail</c> together with the participants responsible. Both
     /// halves are needed and neither substitutes for the other: <c>detail</c> is prose for a human, and
     /// prose is not something an aggregator can branch on. Stating the verdict only in <c>detail</c> is
-    /// what previously left <c>retCode</c> as the sole machine-readable member of this body - and
+    /// what leaves <c>retCode</c> as the sole machine-readable member of this body - and
     /// <c>retCode</c> is <see cref="RetCode.E_RETRY"/> for <c>Degraded</c> and <c>Unhealthy</c> alike.
     /// </para>
     /// <para>

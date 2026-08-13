@@ -21,15 +21,7 @@
 //    ws_objects/pfw.common.pbl.src/replaceall.srf                          the substitution primitive
 //    ws_objects/pfw.utility.container.pbl.src/n_vector.sru                 the calculation stack
 //
-//  RULES POSITION
-//  --------------
-//  `review_rules` reports, verbatim, that NO USER RULES WERE PROVIDED for this project - so no user
-//  rule governs this file and none is invented here. Their absence is not latitude. This file is held
-//  instead to the enterprise-standard baseline of AAP section 0.7.2 (nullable enabled, warnings as
-//  errors, no new package, no secret in source, a test per shippable behaviour, a hard per-service
-//  coverage gate) and to the binding non-rule constraints of AAP section 0.7.3. The ones that bite in
-//  a test file are:
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //    C-B  Replicate legacy behaviour EXACTLY, defects included, and never correct one. Several
 //         assertions below encode behaviour that looks wrong and is not: the abort sentinel, the
 //         `FAILED`-not-`E_INVALID_ARGUMENT` parse arm, the double underscore in a generated compute

@@ -60,13 +60,6 @@
 //       can produce identical text, so only a recording of the `source` argument tells them apart.
 //    4. NEITHER L17 NOR L21 CAPTURES THE EVENT'S RESULT. The event is invoked as a bare statement.
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  `review_rules` returns exactly "No user rules provided." - the whole document is that one line,
-//  and it was re-read rather than assumed. NO user-specified rule governs this file. The binding
-//  constraints in their place are the Agent Action Plan's own non-rule constraint inventory, and the
-//  four that reach this file are recorded below at the point each one bites.
-//
 //  C-B - NO NEW FEATURES, NO BEHAVIOUR IMPROVEMENTS; PRESERVE VERBATIM
 //  ------------------------------------------------------------------------------------------------
 //  This is the constraint most at risk of being inverted by a well-meaning author, because both

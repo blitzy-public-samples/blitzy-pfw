@@ -855,8 +855,9 @@ public sealed class IdentityColumnResolverTests
         // 3. THE COUNTS, on the success path regardless of the identity payload [:L247].
         Assert.Equal(DwSqliteFixture.SampleRowCounts, outcome.Counts);
 
-        // No null is involved on this fixture: `id` is INTEGER PRIMARY KEY AUTOINCREMENT, so the
-        // database always assigns it [w_test_sqlite.srw:L463-L469].
+        // No null is involved on this fixture: `id` is ID INTEGER PRIMARY KEY NOT NULL - rowid
+        // aliasing with no AUTOINCREMENT keyword - so the database always assigns it
+        // [w_test_sqlite.srw:L464].
         Assert.False(payload.ContainsNullValue);
     }
 

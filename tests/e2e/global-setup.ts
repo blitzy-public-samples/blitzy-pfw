@@ -20,9 +20,9 @@
  * THE ENTIRE SUITE while the stack was up and serving. That is the shape of
  * defect that masks a deployment finding rather than reporting it.
  *
- * SO THE DEFAULT IS INVERTED, AND THAT IS THE WHOLE FIX
- * ----------------------------------------------------
- * A full-topology run is now the default and it FAILS when the topology is not
+ * SO THE DEFAULT IS THE STRICT ONE
+ * -------------------------------
+ * A full-topology run is the default and it FAILS when the topology is not
  * there. Skipping is available, but only when an operator asks for it by name:
  *
  *   npx playwright test                  # strict. All four services must answer.
@@ -32,7 +32,7 @@
  * The opt-in is an environment variable rather than a config flag because the
  * decision belongs to the person running the command, not to the checked-in
  * configuration — a file that permitted skipping would permit it for everybody,
- * including CI, which is exactly the state this replaces.
+ * including CI, which is exactly the permissive state this closes.
  *
  * WHAT IT PROBES, AND WHY ALL FOUR RATHER THAN ONLY GATEWAY
  * --------------------------------------------------------
@@ -85,11 +85,10 @@ import { ALL_SERVICE_KEYS, SERVICE_ENDPOINTS } from './fixtures/service-endpoint
  * `fixtures/run-mode.ts` owns the variable name, the accepted values and the two
  * booleans derived from them, and it imports nothing — no runner, no fixture, no
  * filesystem — precisely so that this hook, `fixtures/live-stack.ts` and
- * `playwright.config.ts` can all read one answer. An earlier revision of this file
- * carried its own copy of that variable, its own accepted-value list and its own
- * predicate; two declarations of one decision is how a suite comes to refuse a run
- * in one place and permit it in another, so the copy is gone and the import below is
- * the only source.
+ * `playwright.config.ts` can all read one answer. Carrying a local copy of that
+ * variable, its accepted-value list and its predicate here is the tempting
+ * shortcut; two declarations of one decision is how a suite comes to refuse a run
+ * in one place and permit it in another, so the import below is the only source.
  *
  * This hook and `live-stack.ts` still both apply the decision, and that is not
  * duplication: this one asks once for the whole run and refuses before any test

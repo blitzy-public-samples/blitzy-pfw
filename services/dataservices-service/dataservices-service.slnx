@@ -96,7 +96,8 @@
 
   INHERITED CONFIGURATION, DELIBERATELY NOT DUPLICATED
 
-  global.json (SDK 10.0.302, rollForward latestFeature), Directory.Build.props (net10.0, nullable
+  global.json (the SDK pin and rollForward latestFeature; the version is read there, never copied
+  here), Directory.Build.props (net10.0, nullable
   reference types, implicit usings, warnings promoted to errors, central package management) and
   Directory.Packages.props (every version pin, including the two mandatory security pins) all live at
   the repository root and reach this service by MSBuild directory walk up. No per service copy of any

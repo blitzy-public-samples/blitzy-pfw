@@ -268,7 +268,7 @@ public sealed class EventOrderingPatternTests
                 OrderingDiscipline.Synchronous,
                 string.Join(EventChainArrow, "onddsgetfilter", "onddsfiltered"),
                 "THE FIRST EVENT PRODUCES ITS RESULT THROUGH A `ref string` OUT-PARAMETER "
-                    + "[se_cst_dw.sru:L13], WHICH HAS NO ASYNCHRONOUS REPRESENTATION. The event has no "
+                    + "[se_cst_dw.sru:L13], SO ITS ANSWER HAS NO FIRE-AND-FORGET FORM. The event has no "
                     + "return type at all: its result is the mutation of the reference, so the caller "
                     + "BLOCKS on the produced filter because the filter is the only thing the call "
                     + "exists to obtain. The counts the second event carries are computed from that "
@@ -317,7 +317,7 @@ public sealed class EventOrderingPatternTests
                 "PURE DIAGNOSTICS, FIRE-AND-FORGET. The value has already been computed by the time the "
                     + "trace is raised [n_cst_dwsvc_columnexp.sru:L752-L758], and the only live legacy "
                     + "consumer appends it to a multi-line edit "
-                    + "[ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L317-L320]. Dropping, "
+                    + "[ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L315-L316]. Dropping, "
                     + "delaying or reordering a trace record cannot change a calculation result, so the "
                     + "token is a reorder key and a failing sink is absorbed rather than propagated."
             ),
@@ -869,15 +869,15 @@ public sealed class EventOrderingPatternTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THIS ROW USED TO DO THE REORDERING ITSELF, AND THAT WAS THE DEFECT IT WAS HIDING. It fed four
-    /// displaced tokens to the sequencer, asserted that none was refused, then called
-    /// <c>OrderBy(token)</c> IN THE TEST and asserted the sorted result was contiguous. Both halves passed
-    /// against an implementation that recorded the token and did nothing with it - the sort was the test's
+    /// DOING THE REORDERING IN THE TEST ITSELF WOULD HIDE THE DEFECT. That shape feeds four
+    /// displaced tokens to the sequencer, asserts that none is refused, then calls
+    /// <c>OrderBy(token)</c> IN THE TEST and asserts the sorted result is contiguous. Both halves pass
+    /// against an implementation that records the token and does nothing with it - the sort is the test's
     /// own, so all it proved was that <c>OrderBy</c> sorts. Production dispatched in arrival order
     /// throughout.
     /// </para>
     /// <para>
-    /// WHAT IT ASSERTS NOW is the rule the sequencer actually applies, in its permissive direction: an
+    /// WHAT IT ASSERTS is the rule the sequencer actually applies, in its permissive direction: an
     /// ASCENDING run with gaps is admitted and each arrival moves the mark to itself. The restrictive
     /// direction - a reversal or a duplicate - is the row below, and the consumer-level counterpart is in
     /// the region at the end of this file, driven through the real <c>EventChain</c>.
@@ -922,9 +922,9 @@ public sealed class EventOrderingPatternTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THE HALF THAT USED TO BE MISSING ENTIRELY. The sequenced arm accepted every positive token, so a
-    /// reversal and a duplicate were both dispatched silently and in arrival order; the token was
-    /// measurable and unused. This row is the enforcement, and it fails against the old implementation.
+    /// THE HALF MOST EASILY MISSED ENTIRELY. A sequenced arm that accepts every positive token dispatches
+    /// a reversal and a duplicate silently and in arrival order; the token is
+    /// measurable and unused. This row is the enforcement, and it fails against exactly that shape.
     /// </para>
     /// <para>
     /// THE ONE PLACE THE TWO PATTERNS AGREE, AND FOR DIFFERENT REASONS. Pattern (b) refuses it because the
@@ -990,8 +990,8 @@ public sealed class EventOrderingPatternTests
         sequenced.Accept(arrivals[1], OrderingDiscipline.Sequenced, EventId.Ondwnrowchange);
         Assert.Equal(3L, sequenced.LastAccepted);
 
-        // AND THE REVERSAL BEHIND IT IS REFUSED, which is the enforcement that used to be absent: under
-        // the old rule this very arrival was accepted and dispatched out of order.
+        // AND THE REVERSAL BEHIND IT IS REFUSED. Without that enforcement this very arrival is accepted
+        // and dispatched out of order, which is the failure this row exists to catch.
         DataWindowEventSequenceException reversed =
             Assert.Throws<DataWindowEventSequenceException>(
                 () => sequenced.Accept(
@@ -1251,7 +1251,7 @@ public sealed class EventOrderingPatternTests
         const long remaining = 3L;
         const long removed = 6L;
 
-        // ---- THE SIGNATURE HAS NO ASYNCHRONOUS FORM ----------------------------------------------
+        // ---- THE SIGNATURE ANSWERS ONLY THROUGH ITS ref PARAMETER --------------------------------
         System.Reflection.MethodInfo getFilter = Assert.IsType<System.Reflection.MethodInfo>(
             typeof(DataWindowServiceHost).GetMethod(nameof(DataWindowServiceHost.OnDDSGetFilter)),
             exactMatch: false);

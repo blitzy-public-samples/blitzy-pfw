@@ -527,6 +527,137 @@ public sealed class CharacterizationWorkflowGuardTests
     }
 
     /// <summary>
+    /// No recording may persist a literal value: the treatment set is closed to placeholder-redaction and
+    /// omission, and every declared treatment is a member of it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THE REDACTION ARRAY WAS THE ONE MEMBER OF THIS SCHEMA WITH NO GUARD AT ALL, and it is the most
+    /// security-sensitive member in it. <see cref="AssertCapturePhase"/> checks the capture phase's
+    /// behaviour text and its observed outputs and stops there, so the treatments went entirely unread -
+    /// and because <see cref="EveryDefinitionSatisfiesItsSchema"/> is a hand-written member walk rather
+    /// than a JSON Schema validator, tightening the schema's own enumeration would not have been enforced
+    /// by any existing row either. Both halves are closed here.
+    /// </para>
+    /// <para>
+    /// WHAT THE WITHDRAWN TREATMENT DID. <c>split-statement-and-parameters</c> recorded a statement's text
+    /// separately from the values it carried, which means it WROTE those values - into a tracked, committed
+    /// file, for a field the legacy fills with the complete generated statement including interpolated
+    /// literals wherever the connection's bind-disabling flag is set. Four persistence workflows declared
+    /// it. <c>docs/SECRETS.md</c> §6.3 had already recorded the decision against it - a parameter
+    /// collection is itself the sensitive data, so separating a literal from its statement moves the value
+    /// rather than protecting it - and <c>characterization/README.md</c> §6.2 already stated the recording
+    /// rule as one redacted field with nothing beside it. The enum member was residue of wording withdrawn
+    /// elsewhere, and it described a shape the published contract cannot even produce:
+    /// <c>common.v1.DbError</c> declares <c>sqlsyntax</c> and has no <c>parameters</c> member.
+    /// </para>
+    /// <para>
+    /// NOTHING IS LOST BY REDACTING INSTEAD. Byte-exact parity is measured on a statement's SHAPE, and the
+    /// placeholder preserves the shape exactly; the values were never part of what the comparison reads.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void NoRecordingTreatmentMayPersistALiteralValue()
+    {
+        // THE SCHEMA'S OWN ENUMERATION, PINNED. Read from the schema rather than restated, so this row
+        // fails if the enumeration changes rather than silently describing a stale one.
+        JsonElement treatment = CharacterizationStore.Schema.RootElement
+            .GetProperty("properties")
+            .GetProperty("capturePhase")
+            .GetProperty("properties")
+            .GetProperty("redaction")
+            .GetProperty("items")
+            .GetProperty("properties")
+            .GetProperty("treatment");
+
+        ImmutableArray<string> permitted = CharacterizationStore.SchemaEnum(treatment);
+
+        // Both sides materialised into arrays before comparison: a collection expression here binds
+        // ambiguously between Assert.Equal<T>(T?, T?) and the ReadOnlySpan<T> overload (CS0121).
+        string[] expected = ["redacted", "omitted"];
+        string[] declared = [.. permitted];
+
+        Assert.Equal(expected, declared);
+
+        // NAMED EXPLICITLY, so a reader of a failure knows which value must never return and why.
+        Assert.DoesNotContain("split-statement-and-parameters", permitted);
+
+        int declarations = 0;
+
+        foreach (WorkflowDefinition definition in CharacterizationStore.Definitions)
+        {
+            IDictionary<object, object> capture = Mapping(definition.Root, "capturePhase");
+
+            foreach (IDictionary<object, object> entry in Items(capture, "redaction"))
+            {
+                declarations++;
+
+                Assert.NotEmpty(Text(entry, "field"));
+
+                Assert.Contains(Text(entry, "treatment"), permitted);
+            }
+        }
+
+        // THE STORE REALLY DOES DECLARE REDACTIONS, so a guard that read nothing cannot pass as a guard
+        // that found nothing wrong. Every treatment above was checked against the closed set.
+        Assert.True(
+            declarations >= 15,
+            $"Only {declarations} redaction declarations were read across the store, which is fewer than "
+                + "the persistence and security workflows alone declare - the walk is not reaching them.");
+    }
+
+    /// <summary>
+    /// Wherever a workflow withholds the transaction descriptor's password it also withholds its user
+    /// name, because both recordings READMEs rule the two equally excluded.
+    /// </summary>
+    /// <remarks>
+    /// <b>AN EXCLUSION THAT RESTED ON PROSE ALONE.</b> Both recordings READMEs already ruled the
+    /// descriptor's user-name field "equally sensitive and equally excluded from every recording", yet no
+    /// workflow named it while three named the password beside it - so the store asserted an exclusion its
+    /// own declarations did not carry, in the one array whose entire purpose is that a withheld field is
+    /// declared rather than assumed. Both fields take <c>omitted</c> rather than <c>redacted</c>, and for a
+    /// different reason than a statement does: a credential half is sensitive in its entirety rather than a
+    /// shape with values inside it, so a placeholder would preserve nothing while still asserting that an
+    /// account was configured and how long its name was.
+    /// </remarks>
+    [Fact]
+    public void WithholdingTheTransactionPasswordAlsoWithholdsItsUserName()
+    {
+        int pairs = 0;
+
+        foreach (WorkflowDefinition definition in CharacterizationStore.Definitions)
+        {
+            IDictionary<object, object> capture = Mapping(definition.Root, "capturePhase");
+
+            ImmutableArray<IDictionary<object, object>> redactions = Items(capture, "redaction");
+
+            string[] fields = [.. redactions.Select(entry => Text(entry, "field"))];
+
+            if (!fields.Contains("transactionDescriptor.logpass", StringComparer.Ordinal))
+            {
+                continue;
+            }
+
+            pairs++;
+
+            Assert.Contains("transactionDescriptor.logid", fields, StringComparer.Ordinal);
+
+            // AND BOTH ARE OMITTED, not merely present. A masked credential is still a disclosure of the
+            // fact and the length.
+            Assert.All(
+                redactions.Where(entry =>
+                    Text(entry, "field") is "transactionDescriptor.logpass"
+                        or "transactionDescriptor.logid"),
+                entry => Assert.Equal("omitted", Text(entry, "treatment"), StringComparer.Ordinal));
+        }
+
+        Assert.True(
+            pairs >= 3,
+            $"Only {pairs} workflows were found declaring the transaction password, which is fewer than "
+                + "the three persistence workflows that carry a transaction descriptor.");
+    }
+
+    /// <summary>
     /// Every determinism mask in the store applies to BOTH halves of its pair.
     /// </summary>
     /// <remarks>

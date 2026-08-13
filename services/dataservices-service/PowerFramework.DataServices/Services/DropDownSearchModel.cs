@@ -160,9 +160,10 @@
 //  Expressions/PinyinFirstLetterMatcher.cs is registered as an expression-callable function by
 //  Expressions/DataWindowExpressionEvaluator.cs for exactly this reason. This file therefore takes
 //  NO compile-time dependency on the matcher: it does not `using` it, does not call it and does not
-//  inject it. AAP risk R1 - the lookup table exists only inside the closed `pfw.dll` and the flag
-//  semantics are undocumented - and the BLOCKED result path that follows from it are that file's
-//  responsibility, reached through the evaluator. Neither is duplicated or approximated here.
+//  inject it. AAP risk R1 - the lookup table, the matching algorithm and the fuzzy-equivalence set exist
+//  only inside the closed `pfw.dll`; the FLAGS themselves are documented at enums.sru:L1147-L1149 - and
+//  the BLOCKED result path that follows from it are that file's responsibility, reached through the
+//  evaluator. Neither is duplicated or approximated here.
 //
 //  ============================================================================================
 //  DECISION 5 - THE NUMERAL COINCIDENCE: FILTER_ALL IS 7 AND THE PINYIN FLAGS ARE ALSO 7, AND THEY
@@ -2073,7 +2074,7 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
     /// </para>
     /// <para>
     /// STRICTLY SYNCHRONOUS. The semantic event's result travels through a <c>ref string</c>, which has
-    /// no asynchronous representation, so AAP 0.6.1.4 assigns this capability area pattern (b) - request
+    /// no fire-and-forget representation, so AAP 0.6.1.4 assigns this capability area pattern (b) - request
     /// and response with no reordering permitted. The caller blocks on the produced filter.
     /// </para>
     /// <para>
@@ -2095,19 +2096,19 @@ public sealed class DropDownSearchModel : DataWindowServiceBase, IDataWindowDrop
     /// </returns>
     /// <remarks>
     /// <para>
-    /// <b>THE SPLICE SITES ARE STILL THE ORACLE'S, AND WHAT CHANGED IS ONLY WHAT GOES INTO THEM.</b> Every
+    /// <b>THE SPLICE SITES ARE THE ORACLE'S, AND ONLY WHAT GOES INTO THEM DIFFERS.</b> Every
     /// clause below is composed at the same line, under the same guard, in the same order and with the same
-    /// fixed syntax as before; the difference is that a caller-derived value now enters as a PLACEHOLDER
-    /// and its rendered fragment is recorded beside it. <see cref="BoundFilterExpression.ObservableText"/>
+    /// fixed syntax as the oracle's; the one difference is that a caller-derived value enters as a
+    /// PLACEHOLDER and its rendered fragment is recorded beside it. <see cref="BoundFilterExpression.ObservableText"/>
     /// substitutes those fragments back, so the reported and recorded expression is byte-identical to what
     /// the oracle produces - including DEFECT 1's dangling <c>" OR "</c> and DEFECT 2's absent escaping.
     /// </para>
     /// <para>
     /// <b>WHY THIS IS NOT A CORRECTION OF DEFECT 2.</b> Constraint C-B forbids correcting a legacy defect,
     /// and nothing here does: the OBSERVABLE expression is unchanged, character for character, so every
-    /// parity comparison and every characterization recording is unaffected. What changed is which string
-    /// is EXECUTED - and the legacy had only one string, so there was no observable behaviour to preserve
-    /// in the choice. CWE-94 is closed without the defect being edited.
+    /// parity comparison and every characterization recording is unaffected. The only divergence from the
+    /// oracle is which string is EXECUTED - and the oracle had only one string, so there is no observable
+    /// behaviour to preserve in the choice. CWE-94 is closed without the defect being edited.
     /// </para>
     /// <para>
     /// THE TWO COLUMN NAMES ARE STILL SPLICED AS SYNTAX, DELIBERATELY. Both come from the child's own

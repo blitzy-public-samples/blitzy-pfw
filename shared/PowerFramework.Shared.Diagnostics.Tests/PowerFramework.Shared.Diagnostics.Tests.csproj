@@ -19,7 +19,7 @@
     none items: it takes no build time or run time dependency on any path under ws_objects, which
     is read only and is the parity oracle, never a build input.
 
-    HAND AUTHORED ON PURPOSE. SDK 10.0.302 has no `dotnet new xunit3` template, and
+    HAND AUTHORED ON PURPOSE. the pinned SDK has no `dotnet new xunit3` template, and
     `dotnet new xunit` scaffolds the xunit v2 line with an older test SDK and coverage packages.
     Do not regenerate this file from a template.
 

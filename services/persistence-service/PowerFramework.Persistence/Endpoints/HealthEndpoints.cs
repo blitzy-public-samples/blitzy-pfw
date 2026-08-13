@@ -10,13 +10,6 @@
 //  positives: getting a positive slightly wrong yields a mildly imperfect probe, whereas getting the
 //  central negative wrong deadlocks the whole local orchestration path.
 //
-//  RULES POSITION
-//  No user rules were provided for this project. The rules document contains exactly one line saying
-//  so, and re-reading it returns the same. Nothing is invented or back filled from convention in their
-//  place: the binding constraints are the enterprise standard baseline - nullable enabled, warnings as
-//  errors, no secret in source, structured logging, a genuinely testable design - plus the named non
-//  rule constraints C-A through C-L, each cited below at the point it applies, as C-K requires.
-//
 //  ================================================================================================
 //  THE DECISION RECORD
 //  ================================================================================================
@@ -1241,6 +1234,7 @@ internal sealed class SqliteReachabilityHealthCheck : IHealthCheck
     /// migrations before this host serves anything, so an unprovisionable database refuses the process
     /// rather than reaching this probe at all; what still reaches it there is a volume replaced under an
     /// already-running container. In every one of those cases applying the migrations is what is required.
+    /// </para>
     /// </remarks>
     private const string StorageUnreachableDescription =
         "The storage engine did not answer a read-only reachability probe. The database file may not exist "
@@ -1340,8 +1334,8 @@ internal sealed class SqliteReachabilityHealthCheck : IHealthCheck
     /// any realistic interval with an answer measured after its previous one.
     /// </para>
     /// <para>
-    /// WHAT THE WINDOW ACTUALLY COSTS, STATED PRECISELY, because an earlier version of this note claimed
-    /// it cost nothing and that was not true. The seam caches ONLY a success and deliberately never
+    /// WHAT THE WINDOW ACTUALLY COSTS, STATED PRECISELY, because it is easy to conclude it costs nothing
+    /// and that is not true. The seam caches ONLY a success and deliberately never
     /// remembers a failure, and those two facts have DIFFERENT consequences on the two edges of a
     /// transition:
     /// </para>

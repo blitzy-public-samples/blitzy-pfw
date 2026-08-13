@@ -60,7 +60,7 @@
 //  THE CORRESPONDING WIRE ENUM LIVES IN persistence.v1.proto AND NOT IN common.v1.proto. Stated
 //  explicitly so nobody searches the wrong file for it:
 //
-//      shared/PowerFramework.Contracts/Proto/persistence.v1.proto:L244-L255
+//      shared/PowerFramework.Contracts/Proto/persistence.v1.proto:L233-L244
 //          enum SqlModifyStyle { SQL_MS_UNSPECIFIED = 0; SQL_MS_REPLACE = 1;
 //                                SQL_MS_APPEND = 2; SQL_MS_PREPEND = 3; }
 //
@@ -475,7 +475,7 @@ public sealed class ClauseModifierTests
     ///         exit                                // :L276
     ///     end if
     /// next                                        // :L278
-    /// _whereClauses[nIndex].index  = selectIndex  // :L279  <-- AFTER the loop
+    /// _whereClauses[nIndex].index  = selectIndex  // :L279  &lt;-- AFTER the loop
     /// _whereClauses[nIndex].ms     = ms           // :L280
     /// _whereClauses[nIndex].clause = clause       // :L281
     /// </code>
@@ -1005,7 +1005,7 @@ public sealed class ClauseModifierTests
     // ==========================================================================================
     //  THE WIRE-TO-LEGACY STYLE MAPPING
     //  ------------------------------------------------------------------------------------------
-    //  THE WIRE ENUM IS DECLARED IN persistence.v1.proto:L244-L255 AND NOT IN common.v1.proto (C-K).
+    //  THE WIRE ENUM IS DECLARED IN persistence.v1.proto:L233-L244 AND NOT IN common.v1.proto (C-K).
     //  Repeated here beside the cases that use it so a reader looking for SqlModifyStyle does not search
     //  the common file, which mentions SQL_MS_* only in prose. The reason it is not promoted is that its
     //  only consumer is C-05's clause modification, and the common file admits only shapes that BOTH

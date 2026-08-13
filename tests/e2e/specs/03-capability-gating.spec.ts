@@ -200,15 +200,15 @@ import {
  * for the `CapabilityReport` and `Capability` schemas. The alternatives that
  * follow are the plausible casings and synonyms a re-serialization might land on.
  *
- * ⚠ THE ALTERNATIVES ARE NO LONGER ACCEPTED. They were, on the reasoning that
- * accepting them "keeps a *capability* assertion from failing for a *naming*
+ * ⚠ THE ALTERNATIVES ARE NOT ACCEPTED. Accepting them is the tempting position, on
+ * the reasoning that it "keeps a *capability* assertion from failing for a *naming*
  * reason, so that a genuine gate regression is never masked by a renamed field".
- * The diagnostic half of that is right and is kept; the acceptance half was the
+ * The diagnostic half of that is right and is kept; the acceptance half is the
  * defect. A renamed field IS a contract regression on a boundary whose entire
  * purpose is to be read by a machine, and a suite that accepted `effective_mask`
  * for `effectiveMask` could not detect the single most likely drift there is.
  *
- * So the lists now do the opposite job: the FIRST entry — the contract's own
+ * So the lists do the opposite job: the FIRST entry — the contract's own
  * spelling — is required, and any of the alternatives found in its place is
  * reported as the drift it is, naming both spellings. Every read below goes
  * through `readCanonicalMember`, and no assertion is weakened by the change: what
@@ -698,20 +698,20 @@ function decodeReport(bodyText: string): Record<string, unknown> {
 /**
  * Reads the capability container as EXACTLY the shape the contract declares.
  *
- * THREE SHAPES USED TO BE ACCEPTED, and accepting all three was described as
- * "what lets the invariants below be written once": an array of objects, an array
- * of bare identifier strings, and an object map keyed by identifier whose values
- * might be numbers or booleans. Only the first is a shape the contract declares.
- * The other two were alternate ENVELOPES, and tolerating them meant a projection
- * that had collapsed each entry to a bare name — losing its bit value, its
- * enabled flag and its Phase-1 destination — still satisfied this file, with the
- * three assertions about those members quietly reading `undefined` and passing.
+ * ACCEPTING THREE SHAPES IS THE TEMPTING GENERALIZATION, defensible as "what lets
+ * the invariants below be written once": an array of objects, an array of bare
+ * identifier strings, and an object map keyed by identifier whose values might be
+ * numbers or booleans. Only the first is a shape the contract declares. The other
+ * two are alternate ENVELOPES, and tolerating them means a projection that
+ * collapsed each entry to a bare name — losing its bit value, its enabled flag and
+ * its Phase-1 destination — still satisfies this file, with the three assertions
+ * about those members quietly reading `undefined` and passing.
  *
  * `CapabilityReport.capabilities` is an array of `Capability` objects, pinned at
  * eight items, each with four required members. So an array is required, each
  * element is asserted against the `Capability` member set, and every one of the
  * four members is read as present. A non-array container is a shape failure the
- * caller reports; it is no longer normalized into something assertable.
+ * caller reports; it is never normalized into something assertable.
  */
 function normalizeCapabilityEntries(
   container: unknown,
@@ -846,9 +846,11 @@ function requireNumber(
 test.describe('Capability gating', () => {
   // THE TOKEN-ISSUANCE PRECONDITION, and it is the FIRST thing this group does.
   //
-  // `POST /v1/tokens` on Security is authenticated by a client certificate and by
-  // nothing else, on every topology including the local bring-up, so with no
-  // identity provisioned every authenticated assertion below is unrunnable. The
+  // `POST /v1/tokens` on Security is authenticated by a presented caller
+  // credential - an HTTP Basic credential or a trusted client certificate - and
+  // never by a bearer token, on every topology including the local bring-up, so
+  // with no identity provisioned every authenticated assertion below is
+  // unrunnable. The
   // hook fails this group's SETUP in a full acceptance run rather than letting
   // fifteen token calls fail one at a time with transport errors that never say
   // why; a run that has explicitly declared itself partial passes straight
@@ -1058,7 +1060,7 @@ test.describe('Capability gating', () => {
     // the independent transcription; this compares its result with the `const: 3847`
     // that `CapabilityReport.allMask` declares. Three descriptions of one number —
     // the legacy source, this file's transcription, and the published contract —
-    // and a drift in any of them is now visible rather than mutual.
+    // and a drift in any of them is visible rather than mutual.
     expect(
       summedTotal,
       'the legacy arithmetic must reproduce the constant the published contract ' +

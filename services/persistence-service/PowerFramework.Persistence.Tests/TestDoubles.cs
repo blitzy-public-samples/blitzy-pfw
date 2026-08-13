@@ -164,15 +164,7 @@
 //  clock is continuity with the oracle, not a new practice (C-K).
 //
 //  ==================================================================================================
-//  RULES POSITION
-//  ==================================================================================================
-//  `review_rules` returns exactly one line, "No user rules provided.", so NO user-specified rule
-//  governs this file and none is invented here; their absence is not treated as licence to lower the
-//  bar. The enterprise-standard baseline applies in their place - nullable enabled, warnings as errors,
-//  central package management, no secret in source - and the binding constraints are the refactor
-//  plan's own non-rule inventory. Those bearing on this file are cited inline where each is discharged:
-//  C-A, C-B, C-C, C-D, C-E, C-F, C-G, C-K and risk R9.
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  NAMING (AAP 0.7.2). No SCREAMING_SNAKE identifier is declared here. The constant-spelling exemption
 //  of AAP 0.4.5.3 is scoped by .editorconfig to the specific production files that carry legacy
 //  constant catalogues, and no test file is inside that scope; legacy constant VALUES are still
@@ -207,7 +199,7 @@ namespace PowerFramework.Persistence.Tests;
 /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase_ds_mt.sru:L37</c>] - are all deltas
 /// between two reads of ONE monotonic legacy counter, <c>CPU()</c>. They are not three clocks and they
 /// must not become three clock types: the service registers exactly one
-/// <see cref="TimeProvider"/> [<c>Program.cs:L318</c>], so a suite with three fakes would be testing a
+/// <see cref="TimeProvider"/> [<c>Program.cs:L351</c>], so a suite with three fakes would be testing a
 /// composition the host cannot produce.
 /// </para>
 /// <para>
@@ -1562,6 +1554,20 @@ internal sealed class ScriptedPooledTransaction : IPooledTransaction, IUpdateTra
 
     /// <inheritdoc/>
     public bool AutoCommit { get; set; }
+
+    /// <summary>Moves the auto-commit mode and answers <see cref="RetCode.OK"/>.</summary>
+    /// <param name="autoCommit">The mode to put in force.</param>
+    /// <returns>Always <see cref="RetCode.OK"/>.</returns>
+    /// <remarks>
+    /// ROUTED THROUGH THE PROPERTY, so this double moves exactly the state the assignment moves. There is
+    /// no engine beneath it whose begin could fail, which is the contract's own nothing-to-do case.
+    /// </remarks>
+    public long TrySetAutoCommit(bool autoCommit)
+    {
+        AutoCommit = autoCommit;
+
+        return RetCode.OK;
+    }
 
     /// <summary>
     /// How <see cref="IsSqlFailed"/> and <see cref="IsFailed"/> decide failure. Defaults to the

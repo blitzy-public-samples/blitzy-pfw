@@ -1416,6 +1416,8 @@ namespace PowerFramework.Persistence.Tasks
         /// <summary>
         /// Projects the current state of every row whose predicate matched nothing.
         /// </summary>
+        /// <param name="commands">The command source statements are issued through.</param>
+        /// <param name="table">The update table name the plan targets.</param>
         /// <param name="plan">The installed column plan, which names the columns to project.</param>
         /// <param name="unmatched">The buffer and row of each statement that affected zero rows.</param>
         /// <returns>

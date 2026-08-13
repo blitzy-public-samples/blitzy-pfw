@@ -11,10 +11,11 @@
 //  SAME expression parser and can both describe the same cell value - so if their rendered text differs,
 //  one of them is wrong and neither says which.
 //
-//  MacroInvoker used to carry its own format strings, with SIX fractional digits for `datetime` and
-//  `time`. ValueToExpression carries none: it composes its wrapper around the three culture-pinned
-//  formatters the validators publish, which emit WHOLE SECONDS. So a whole-second value rendered through
-//  a macro produced `DateTime('2024-03-05 14:07:09.000000')` while the same value rendered through the
+//  MacroInvoker deliberately carries no format strings of its own; carrying them, with SIX fractional
+//  digits for `datetime` and `time`, is the tempting shape. ValueToExpression carries none either: it
+//  composes its wrapper around the three culture-pinned formatters the validators publish, which emit
+//  WHOLE SECONDS. Two sets of format strings mean a whole-second value rendered through
+//  a macro produces `DateTime('2024-03-05 14:07:09.000000')` while the same value rendered through the
 //  validator path produced `DateTime('2024-03-05 14:07:09')`. A characterization recording comparing the
 //  two would have shown a difference with no legacy counterpart.
 //

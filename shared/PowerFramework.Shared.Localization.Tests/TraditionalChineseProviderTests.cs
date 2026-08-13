@@ -73,14 +73,6 @@
 //  TraditionalChineseProvider.cs's measured line coverage. What the brief asks for is honoured where it
 //  bites: the source filter is confirmed by a SINGLE row, which is all its single branch can take.
 //
-//  RULES POSITION
-//  review_rules returns "No user rules provided." - verified for this file, not assumed. AAP §0.7.3's
-//  constraints bind in their place, and the ones governing this file are cited inline where they bite:
-//  C-B (replicate behaviour exactly - the coinciding forms are hits, and no fallback of any kind is
-//  invented), C-C (the legacy tree and the resource table are read-only oracles, read and never
-//  written), C-D (the XML read is substituted through the reader, never coupled to the deferred XML
-//  object family), C-H (nullable and warning-clean, with both early returns and both the hit and the
-//  miss path covered), C-K (boundary decisions documented where they are reproduced).
 // ==================================================================================================
 
 using System.IO;
@@ -204,7 +196,8 @@ public class TraditionalChineseProviderTests
     /// reader-taking constructor rejects null. [:L62-L63]
     /// </summary>
     /// <remarks>
-    /// The default constructor is what <c>pfw.sra</c>'s open event reaches at :L101, so it has to work
+    /// The default constructor is what <c>ws_objects/pfw.pbl.src/pfw.sra</c>'s open event reaches at
+    /// :L101 - the framework application, not the same-named packager object - so it has to work
     /// with no arguments at all; the reader-taking one exists so tests and future hosts can point it at
     /// a different table. A null reader is a programming error rather than a translation miss, which is
     /// why it throws where everything else in this provider stays silent.

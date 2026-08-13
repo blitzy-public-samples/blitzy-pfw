@@ -1,19 +1,19 @@
 // ==================================================================================================
 //  PersistenceWorkScope - THE MISSING HALF OF THE C-05 AND C-06 HANDLE LIFECYCLE
 //  ------------------------------------------------------------------------------------------------
-//  WHAT WAS WRONG, STATED AS A FACT ABOUT THE CODE RATHER THAN A DESIGN OPINION
+//  WHY THIS TYPE EXISTS, STATED AS A FACT ABOUT THE CODE RATHER THAN A DESIGN OPINION
 //
 //  `persistence.v1` issues an opaque server-held handle for a transaction session and another for a task,
 //  and every operating call names one: `QueryRequest.task` and `UpdateRequest.task` are field 1 of each.
-//  `Grpc/DataWindowService.cs` was building both requests with a DEFAULT handle - a message whose task_id
-//  is the empty string - because nothing ever created one. Persistence rejects a blank handle outright:
-//  `Grpc/QueryService.cs:L2422-L2427` and `Grpc/UpdateService.cs:L1668-L1673` both answer
-//  `RetCode.E_INVALID_HANDLE`. So every retrieval and every update this service issued was refused before
-//  it reached a statement, and the refusal was indistinguishable from a caller error.
+//  Building either request with a DEFAULT handle - a message whose task_id is the empty string - is what
+//  happens when nothing creates one, and Persistence rejects a blank handle outright:
+//  `Grpc/QueryService.cs:L2971-L2980` and `Grpc/UpdateService.cs:L2692-L2697` both answer
+//  `RetCode.E_INVALID_HANDLE`. Every retrieval and every update would then be refused before
+//  it reached a statement, with the refusal indistinguishable from a caller error.
 //
-//  `Clients/PersistenceClient.cs` already exposed all six lifecycle operations - BeginSession, EndSession,
-//  CreateQueryTask, ReleaseQueryTask, CreateUpdateTask, ReleaseUpdateTask - and NOTHING CALLED ANY OF THEM.
-//  The capability was published and unreachable, which is the shape of defect this type closes.
+//  `Clients/PersistenceClient.cs` exposes all six lifecycle operations - BeginSession, EndSession,
+//  CreateQueryTask, ReleaseQueryTask, CreateUpdateTask, ReleaseUpdateTask - and a service that CALLS NONE
+//  OF THEM has published an unreachable capability. This type is what makes them reachable.
 //
 //  ============ WHY A SCOPE TYPE RATHER THAN SIX CALLS AT EACH SITE ================================
 //  Because the release obligation is the part that is easy to get almost right. A handle is server-held

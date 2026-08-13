@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  F-31 - THE INGRESS ENFORCES WHAT THE CONTRACT DECLARES, AND CLASSIFIES ITS OWN REFUSALS
+//  THE INGRESS ENFORCES WHAT THE CONTRACT DECLARES, AND CLASSIFIES ITS OWN REFUSALS
 // =====================================================================================================
 //
 //  WHY THIS FILE EXISTS, STATED AS THE DEFECTS IT WOULD HAVE CAUGHT. Three separate faults were found at
@@ -26,7 +26,8 @@
 //
 //  THE ASYMMETRY WITH THE RETRIEVAL IS DELIBERATE AND IS ASSERTED. A retrieval terminates itself with a
 //  final-marked chunk, so a window that cut it short would produce a SHORT ARRAY THAT CLOSES CLEANLY -
-//  indistinguishable from a complete one, which is the one failure mode F-15 exists to prevent. Only the
+//  indistinguishable from a complete one, which is the one failure mode the element bound and the
+//  buffer-then-write order exist to prevent. Only the
 //  subscription opts in. The test at the end of section 3 pins that difference.
 //
 //  WHERE DEFECT 1 IS PROVEN, AND WHY IT TAKES TWO LAYERS. Under live Kestrel the binding failure reaches
@@ -325,7 +326,8 @@ public sealed class DataServicesProxySessionBindingTests
     /// <para>
     /// THE ASYMMETRY, ASSERTED RATHER THAN DESCRIBED IN A COMMENT. A retrieval terminates itself with a
     /// final-marked chunk, so a window that ended one early would produce a short array THAT CLOSES
-    /// CLEANLY - indistinguishable from a complete result, which is the single failure mode F-15 exists to
+    /// CLEANLY - indistinguishable from a complete result, which is the single failure mode the
+    /// buffer-then-write order exists to
     /// prevent. Passing no window is what keeps that impossible, and this test fails if anything other than
     /// the producer ever ends a windowless retrieval.
     /// </para>
@@ -333,10 +335,10 @@ public sealed class DataServicesProxySessionBindingTests
     /// DRIVEN BY SIGNALS RATHER THAN BY A STALL OF SOME CHOSEN LENGTH. The producer stalls between its two
     /// chunks - which is the position where a window would cut a retrieval to one element and close the
     /// array cleanly - and it stalls until THIS TEST releases it, with no duration named anywhere. An
-    /// earlier form waited four hundred milliseconds on the reasoning that this was "far longer than the
-    /// subscription window", which was two guesses at once: that the agent would schedule the continuation
-    /// promptly, and that no future window would exceed it. Both are load-dependent, and neither is the
-    /// property under test.
+    /// A fixed four-hundred-millisecond wait is the tempting alternative, on the reasoning that it is "far
+    /// longer than the subscription window" - which is two guesses at once: that the agent will schedule the
+    /// continuation promptly, and that no future window will exceed it. Both are load-dependent, and neither
+    /// is the property under test.
     /// </para>
     /// <para>
     /// OBSERVED FROM INSIDE THE FORWARDING LOOP, WHICH IS THE ONLY PLACE IT IS OBSERVABLE. The prefetch
@@ -346,7 +348,7 @@ public sealed class DataServicesProxySessionBindingTests
     /// is stalled the forwarding MUST still be pending, because the producer is the only thing entitled to
     /// end it. That assertion fails if anything else does - an already-expired window closing the array
     /// cleanly after one element, an element bound of one, or an eager close - which is precisely the
-    /// indistinguishable-short-array failure F-15 exists to prevent.
+    /// indistinguishable-short-array failure a windowless retrieval exists to prevent.
     /// </para>
     /// <para>
     /// WHAT IT DOES NOT CLAIM, STATED PLAINLY. Because nothing here waits for a duration, it cannot detect

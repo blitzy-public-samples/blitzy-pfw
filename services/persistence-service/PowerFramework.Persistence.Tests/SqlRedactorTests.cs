@@ -1039,10 +1039,10 @@ public sealed class SqlRedactorTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// A mandatory redactor PARAMETER was the earlier shape of this control, and it was not a control
-    /// at all: any implementation satisfied it, including one that masked nothing, so the wire boundary
-    /// was one argument away from being bypassed at every call site. The policy therefore moved INTO
-    /// the projection. What has to be asserted now is an absence - that no seam has been reintroduced -
+    /// A mandatory redactor PARAMETER reads as this control and is not a control
+    /// at all: any implementation satisfies it, including one that masks nothing, so the wire boundary
+    /// would be one argument away from being bypassed at every call site. The policy therefore lives INSIDE
+    /// the projection - which makes what has to be asserted an ABSENCE, that no such seam exists,
     /// and an absence can only be asserted structurally.
     /// </para>
     /// </remarks>
@@ -1256,7 +1256,7 @@ public sealed class SqlRedactorTests
     }
 
     // ==============================================================================================
-    //  F-04 - THE PROVIDER'S OWN DIAGNOSTIC ENVELOPE
+    //  THE PROVIDER'S OWN DIAGNOSTIC ENVELOPE
     // ==============================================================================================
 
     /// <summary>

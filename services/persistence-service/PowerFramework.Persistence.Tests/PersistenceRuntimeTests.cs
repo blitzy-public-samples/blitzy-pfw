@@ -128,7 +128,7 @@ public sealed class PersistenceRuntimeTests : IDisposable
     /// <summary>
     /// ⚠ A CONNECT THAT CANNOT OPEN ITS EXPLICIT TRANSACTION FAILS, rather than reporting success for a
     /// session that holds no transaction - asserted here through the ONE cause that is reachable, an
-    /// unopenable data source, because the begin itself can no longer be made to fail on purpose.
+    /// unopenable data source, because the begin itself cannot be made to fail on purpose.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -139,9 +139,9 @@ public sealed class PersistenceRuntimeTests : IDisposable
     /// [<c>n_cst_thread_trans.sru:L129-L133</c>].
     /// </para>
     /// <para>
-    /// Previously the begin failure was only LOGGED and the connect answered success, so
-    /// <c>BeginSession</c> handed back a session whose first commit refused for a reason the caller could
-    /// not relate to its own request. Now the provider's own failure is the connect's answer, and the
+    /// LOGGING the begin failure and answering the connect with success is the lenient reading, and it has
+    /// <c>BeginSession</c> hand back a session whose first commit refuses for a reason the caller cannot
+    /// relate to its own request. The provider's own failure is the connect's answer instead, and the
     /// connection is released rather than left half-open.
     /// </para>
     /// <para>
@@ -308,6 +308,256 @@ public sealed class PersistenceRuntimeTests : IDisposable
     }
 
     /// <summary>
+    /// 🔴 THE ONE COMBINATION IN WHICH NO STATEMENT MAY RUN, asserted over the whole truth table.
+    /// </summary>
+    /// <param name="autoCommit">The mode in force.</param>
+    /// <param name="connected">Whether a connection is open.</param>
+    /// <param name="transactionOpen">Whether an explicit transaction is open on it.</param>
+    /// <param name="expected">Whether that state owes the caller a transaction it does not have.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>THE PREDICATE IS TESTED DIRECTLY BECAUSE ITS TRUE ARM IS NO LONGER REACHABLE THROUGH THE
+    /// ENGINE.</b> That is the point of the fix rather than a gap in it: with the begin deferred there is
+    /// no provider fault left that can fail one, so the state "connected, auto-commit off, no
+    /// transaction" cannot be driven from outside - and the three consultation sites would then be
+    /// reasoned about rather than exercised. Asserting the table pins the rule itself: auto-commit ON
+    /// with no transaction is CORRECT and must stay executable, an unconnected engine owes nothing
+    /// because its verbs already refuse, and only the remaining combination is the silent one.
+    /// </para>
+    /// <para>
+    /// It is a silent state, which is what makes it worth its own case: SQLite would apply each statement
+    /// as it executed, a later rollback would undo nothing, and every response would say success.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(false, true, false, true)]
+    [InlineData(false, true, true, false)]
+    [InlineData(true, true, false, false)]
+    [InlineData(true, true, true, false)]
+    [InlineData(false, false, false, false)]
+    [InlineData(false, false, true, false)]
+    [InlineData(true, false, false, false)]
+    [InlineData(true, false, true, false)]
+    public void OnlyAConnectedNonAutoCommitEngineWithoutATransactionOwesOne(
+        bool autoCommit,
+        bool connected,
+        bool transactionOpen,
+        bool expected) =>
+        Assert.Equal(
+            expected,
+            SqliteTransactionEngine.RequiresExplicitTransaction(autoCommit, connected, transactionOpen));
+
+    /// <summary>
+    /// 🔴 THE INVARIANT ACROSS EVERY STATE CHANGE A CALLER CAN DRIVE: while auto-commit is off and the
+    /// engine is connected, an explicit transaction is open and BOTH execution doors are open with it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE CARRIER DOOR IS ASSERTED ALONGSIDE THE STATEMENT DOOR, AND THAT IS THE HALF THAT WAS
+    /// MISSING.</b> A retrieval or an update reaches the connection through
+    /// <c>ISqliteCommandSource</c> rather than through <c>Execute</c>, and the command it hands out is
+    /// enlisted in whatever the engine holds - so the transaction state is part of that capability's
+    /// precondition, not a detail beneath it. <c>CanCreateCommand</c> therefore has to answer for the
+    /// transaction as well as for the connection, and it has to keep answering TRUE under auto-commit,
+    /// where holding none is correct.
+    /// </para>
+    /// <para>
+    /// Every transition is walked in one case on purpose: connect, statement, commit, rollback, mode off
+    /// and on again. The re-begin after a commit and after a rollback is exactly where the outcome used to
+    /// be discarded, so a case that stopped at the connect would have passed throughout the defect.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ConnectedWithAutoCommitOffTheEngineAlwaysHoldsATransactionAndBothDoorsAreOpen()
+    {
+        using SqliteTransactionEngine engine = CreateEngine();
+
+        // UNCONNECTED: nothing is owed, and the carrier door is shut for the connection rather than for
+        // the transaction.
+        Assert.Equal(RetCode.OK, engine.TrySetAutoCommit(false).SqlCode);
+        Assert.False(engine.HasExplicitTransaction);
+        Assert.False(engine.CanCreateCommand);
+
+        Assert.Equal(0L, engine.Connect(TestContext.Current.CancellationToken).SqlCode);
+
+        Assert.True(engine.HasExplicitTransaction);
+        Assert.True(engine.CanCreateCommand);
+
+        Assert.Equal(
+            1L,
+            engine.Execute(
+                "INSERT INTO COMPANY (NAME, AGE) VALUES ('Invariant', 30)",
+                TestContext.Current.CancellationToken).SqlNRows);
+
+        Assert.True(engine.HasExplicitTransaction);
+        Assert.True(engine.CanCreateCommand);
+
+        // AFTER A COMMIT AND AFTER A ROLLBACK - the two re-begin sites.
+        Assert.Equal(0L, engine.Commit().SqlCode);
+        Assert.True(engine.HasExplicitTransaction);
+        Assert.True(engine.CanCreateCommand);
+
+        Assert.Equal(0L, engine.Rollback().SqlCode);
+        Assert.True(engine.HasExplicitTransaction);
+        Assert.True(engine.CanCreateCommand);
+
+        // AUTO-COMMIT ON: no transaction, and the door STAYS OPEN because holding none is correct here.
+        // A guard that tested the transaction alone would shut the carrier out of every auto-commit
+        // session, which is a regression dressed as safety.
+        Assert.Equal(RetCode.OK, engine.TrySetAutoCommit(true).SqlCode);
+        Assert.False(engine.HasExplicitTransaction);
+        Assert.True(engine.CanCreateCommand);
+
+        Assert.Equal(
+            1L,
+            engine.Execute(
+                "INSERT INTO COMPANY (NAME, AGE) VALUES ('Immediate', 31)",
+                TestContext.Current.CancellationToken).SqlNRows);
+
+        // AND BACK OFF: the transition opens one again and reports that it did.
+        Assert.Equal(RetCode.OK, engine.TrySetAutoCommit(false).SqlCode);
+        Assert.True(engine.HasExplicitTransaction);
+        Assert.True(engine.CanCreateCommand);
+
+        Assert.Equal(0L, engine.Disconnect().SqlCode);
+        Assert.False(engine.HasExplicitTransaction);
+        Assert.False(engine.CanCreateCommand);
+    }
+
+    /// <summary>
+    /// 🔴 A WRITE ISSUED AFTER A COMMIT IS STILL INSIDE A TRANSACTION - unseen by another connection until
+    /// the caller commits again, and discarded outright by a rollback.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE BEHAVIOURAL PROOF OF THE POST-COMMIT RE-BEGIN, OBSERVED FROM OUTSIDE THE SESSION.</b> The
+    /// state assertions above prove the engine still HOLDS a transaction; this proves the statement is
+    /// enlisted in it, which is the property a caller actually depends on and the one the discarded
+    /// re-begin outcome put at risk. Had the re-begin failed silently, the second insert would have
+    /// applied itself immediately: the reader below would have seen it before any commit, and the
+    /// rollback would have had nothing to undo while still answering success.
+    /// </para>
+    /// <para>
+    /// WAL, because it is the one journal mode in the legacy grammar under which a held write lock still
+    /// admits a reader - see <c>CreateWalConnectionFactory</c>. The reader is a SEPARATE connection
+    /// deliberately: a read through the engine's own command source would be enlisted in the very
+    /// transaction under test and would see the uncommitted row by design.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AWriteAfterACommitIsUnseenByAnotherConnectionUntilTheNextCommit()
+    {
+        SqliteConnectionFactory wal = CreateWalConnectionFactory();
+
+        using SqliteTransactionEngine engine = CreateEngine(wal);
+        engine.AutoCommit = false;
+
+        Assert.Equal(0L, engine.Connect(TestContext.Current.CancellationToken).SqlCode);
+
+        // THE FIRST UNIT OF WORK, committed, so what follows runs on the RE-BEGUN transaction.
+        Assert.Equal(
+            1L,
+            engine.Execute(
+                "INSERT INTO COMPANY (NAME, AGE) VALUES ('First', 41)",
+                TestContext.Current.CancellationToken).SqlNRows);
+        Assert.Equal(0L, engine.Commit().SqlCode);
+
+        await using SqliteConnection reader = await wal.CreateOpenConnectionAsync(
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal("1", OutsideCount(reader, "First"));
+
+        // THE SECOND UNIT OF WORK, on the transaction the commit re-opened: written, and INVISIBLE
+        // outside the session.
+        Assert.Equal(
+            1L,
+            engine.Execute(
+                "INSERT INTO COMPANY (NAME, AGE) VALUES ('Second', 42)",
+                TestContext.Current.CancellationToken).SqlNRows);
+
+        Assert.Equal("0", OutsideCount(reader, "Second"));
+
+        // A ROLLBACK DISCARDS IT, which is only true of a row that was never applied.
+        Assert.Equal(0L, engine.Rollback().SqlCode);
+        Assert.Equal("0", OutsideCount(reader, "Second"));
+
+        // AND THE THIRD, on the transaction the ROLLBACK re-opened, becomes visible when committed - so
+        // both re-begin sites are covered from the outside.
+        Assert.Equal(
+            1L,
+            engine.Execute(
+                "INSERT INTO COMPANY (NAME, AGE) VALUES ('Third', 43)",
+                TestContext.Current.CancellationToken).SqlNRows);
+        Assert.Equal("0", OutsideCount(reader, "Third"));
+        Assert.Equal(0L, engine.Commit().SqlCode);
+        Assert.Equal("1", OutsideCount(reader, "Third"));
+
+        Assert.Equal(0L, engine.Disconnect().SqlCode);
+    }
+
+    /// <summary>
+    /// The mode transition REPORTS its outcome, and the property setter moves the same state without one.
+    /// </summary>
+    /// <remarks>
+    /// <b>THE TWO SPELLINGS MUST NOT DIVERGE.</b> The property exists because the legacy call shape is an
+    /// assignment - <c>transObject.AutoCommit = false</c>, which the command task's native arm performs
+    /// around a statement - and the method exists because that assignment has nowhere to report the
+    /// provider work the transition performs. A double set is a no-op in both spellings, because the
+    /// oracle's own assignment of an unchanged value does nothing either.
+    /// </remarks>
+    [Fact]
+    public void TheModeTransitionReportsItsOutcomeAndTheSetterMovesTheSameState()
+    {
+        using SqliteTransactionEngine engine = CreateEngine();
+
+        Assert.Equal(0L, engine.Connect(TestContext.Current.CancellationToken).SqlCode);
+
+        // AN ENGINE THAT WAS HANDED NO DESCRIPTOR IS NOT IN AUTO-COMMIT MODE - the field's default is the
+        // transactional one - so connecting has already opened a transaction. Stated rather than assumed,
+        // because the two transitions below only mean what they claim from a known starting state.
+        Assert.False(engine.AutoCommit);
+        Assert.True(engine.HasExplicitTransaction);
+
+        // AN UNCHANGED MODE IS A NO-OP SUCCESS that leaves the transaction it already had, because the
+        // oracle's own assignment of an unchanged value does nothing either.
+        SqliteTransaction? held = Ambient(engine);
+
+        Assert.Equal(0L, engine.TrySetAutoCommit(false).SqlCode);
+        Assert.Same(held, Ambient(engine));
+
+        // INTO AUTO-COMMIT: the transition commits and releases, and REPORTS that it did so.
+        SqlState retired = engine.TrySetAutoCommit(true);
+
+        Assert.Equal(0L, retired.SqlCode);
+        Assert.Empty(retired.SqlErrText);
+        Assert.True(engine.AutoCommit);
+        Assert.False(engine.HasExplicitTransaction);
+
+        // AND BACK OUT OF IT: the transition opens one and reports the outcome of the begin, which is the
+        // half whose failure used to be dropped.
+        SqlState opened = engine.TrySetAutoCommit(false);
+
+        Assert.Equal(0L, opened.SqlCode);
+        Assert.Empty(opened.SqlErrText);
+        Assert.False(engine.AutoCommit);
+        Assert.True(engine.HasExplicitTransaction);
+
+        // THE PROPERTY MOVES THE SAME STATE, which is what lets the ported native arm keep assigning.
+        engine.AutoCommit = true;
+
+        Assert.True(engine.AutoCommit);
+        Assert.False(engine.HasExplicitTransaction);
+
+        engine.AutoCommit = false;
+
+        Assert.False(engine.AutoCommit);
+        Assert.True(engine.HasExplicitTransaction);
+
+        Assert.Equal(0L, engine.Disconnect().SqlCode);
+    }
+
+
+    /// <summary>
     /// The engine connects, reports an open handle, executes and unwinds.
     /// </summary>
     [Fact]
@@ -361,16 +611,16 @@ public sealed class PersistenceRuntimeTests : IDisposable
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>THE REGRESSION THIS PINS TOOK THE WHOLE DATA PLANE DOWN.</b> The migration tool leaves a freshly
-    /// provisioned file in WAL and the configured mode is <c>DELETE</c>, so every connect against a
+    /// <b>THE REGRESSION THIS PINS WOULD TAKE THE WHOLE DATA PLANE DOWN.</b> The migration tool leaves a
+    /// freshly provisioned file in WAL and the configured mode is <c>DELETE</c>, so every connect against a
     /// provisioned database meets a disagreement. Converting out of WAL can answer <c>SQLITE_BUSY</c>, and
-    /// while that failure was allowed to fail the connect, every session answered
-    /// <see cref="RetCode.E_INVALID_TRANSACTION"/> permanently - one anonymous <c>GET /health</c> was
+    /// letting that failure fail the connect makes every session answer
+    /// <see cref="RetCode.E_INVALID_TRANSACTION"/> permanently - one anonymous <c>GET /health</c> is
     /// enough to cause it.
     /// </para>
     /// <para>
     /// <b>WHAT THIS CASE ASSERTS, AND WHY IT DOES NOT ASSERT A REFUSAL.</b> Whether the provider refuses a
-    /// given conversion is not something a test can pin down reliably, and it was measured rather than
+    /// given conversion is not something a test can pin down reliably, and it is measured rather than
     /// assumed: with the connection-string shape this service actually uses, the conversion out of WAL
     /// SUCCEEDS immediately even with another connection holding a read mark or the write slot, while with
     /// an un-pooled string and the same holders it answers "database is locked". Asserting one of those two
@@ -838,7 +1088,7 @@ public sealed class PersistenceRuntimeTests : IDisposable
     }
 
     // ==============================================================================================
-    //  F-05 - THE READ-BACK GUARD: STORED TEXT A DECLARED NUMBER CANNOT HOLD
+    //  THE READ-BACK GUARD: STORED TEXT A DECLARED NUMBER CANNOT HOLD
     // ==============================================================================================
 
     /// <summary>
@@ -846,13 +1096,13 @@ public sealed class PersistenceRuntimeTests : IDisposable
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>WHAT WAS WRONG.</b> The read path's documented fallback - "a coercion the provider refuses
-    /// falls back to the provider's own value" - never fired for the numeric families, because
-    /// <c>sqlite3_column_int64</c> and <c>sqlite3_column_double</c> do not refuse text that is not a
-    /// number: they apply the engine's conversion rules and answer <c>0</c>. So the text
-    /// <c>not-a-number</c> stored in a column the DataWindow declares <c>number</c> was answered to every
-    /// caller as the double <c>0</c> - a value nothing had written, that no round trip could reproduce,
-    /// and that arrived with no error anywhere.
+    /// <b>THE FAILURE THIS GUARD RULES OUT.</b> The read path's documented fallback - "a coercion the
+    /// provider refuses falls back to the provider's own value" - does not fire for the numeric families,
+    /// because <c>sqlite3_column_int64</c> and <c>sqlite3_column_double</c> do not refuse text that is not a
+    /// number: they apply the engine's conversion rules and answer <c>0</c>. Left to that fallback alone,
+    /// the text <c>not-a-number</c> stored in a column the DataWindow declares <c>number</c> reaches every
+    /// caller as the double <c>0</c> - a value nothing wrote, that no round trip can reproduce,
+    /// and that arrives with no error anywhere.
     /// </para>
     /// <para>
     /// THREE OF THESE FOUR ROWS ARE CONTROLS, and they are what stops the guard from becoming a blanket
@@ -1661,7 +1911,7 @@ public sealed class PersistenceRuntimeTests : IDisposable
     }
 
     // ==============================================================================================
-    //  F-04 - A CALLER-CONTROLLED CONSTRAINT REFUSAL, AND THE TRANSACTION STATE THAT MAKES IT LEGIBLE
+    //  A CALLER-CONTROLLED CONSTRAINT REFUSAL, AND THE TRANSACTION STATE THAT MAKES IT LEGIBLE
     // ==============================================================================================
 
     /// <summary>
@@ -1670,14 +1920,14 @@ public sealed class PersistenceRuntimeTests : IDisposable
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>WHAT WAS WRONG, AND IT WAS TWO THINGS COMPOUNDING.</b> First, nothing in this service ever wrote
-    /// the transaction's SQL state, so the classification's else arm built its failure payload from
-    /// <c>transaction.SqlDbCode</c> and <c>transaction.SqlErrText</c> and got an EMPTY one every time -
-    /// and the discrimination that reads the same code could never fire. Second, the provider's diagnostic
-    /// went through the strict mask, which read the wrapper <c>SQLite Error 19: '...'</c> as a numeric
-    /// literal beside a quoted string and masked both. So a caller who omitted a required field was told
-    /// the database had failed - HTTP 502, the fault lies behind the gateway - by a message that would not
-    /// say which column.
+    /// <b>THE FAILURE THIS CASE RULES OUT, AND IT IS TWO THINGS COMPOUNDING.</b> First, if nothing in this
+    /// service writes the transaction's SQL state, the classification's else arm builds its failure payload
+    /// from <c>transaction.SqlDbCode</c> and <c>transaction.SqlErrText</c> and gets an EMPTY one every time -
+    /// and the discrimination that reads the same code can never fire. Second, if the provider's diagnostic
+    /// goes through the strict mask, that mask reads the wrapper <c>SQLite Error 19: '...'</c> as a numeric
+    /// literal beside a quoted string and masks both. A caller who omitted a required field would then be
+    /// told the database had failed - HTTP 502, the fault lies behind the gateway - by a message that would
+    /// not say which column.
     /// </para>
     /// <para>
     /// DRIVEN THROUGH THE REAL CARRIER AND THE REAL ENGINE, because the discriminator is the DRIVER's own
@@ -2574,6 +2824,26 @@ public sealed class PersistenceRuntimeTests : IDisposable
         return Convert.ToString(command.ExecuteScalar(), CultureInfo.InvariantCulture) ?? string.Empty;
     }
 
+    /// <summary>Counts rows with a given name through a connection OUTSIDE the engine's session.</summary>
+    /// <param name="reader">A separate open connection, enlisted in no transaction of the engine's.</param>
+    /// <param name="name">The <c>NAME</c> value to count.</param>
+    /// <returns>The count as invariant text.</returns>
+    /// <remarks>
+    /// THE POINT IS THE ISOLATION, WHICH IS WHY IT IS NOT <see cref="ScalarText"/>. A read through the
+    /// engine's own command source is enlisted in the engine's explicit transaction and therefore sees
+    /// uncommitted work by design; only a separate connection can tell "written inside a transaction" apart
+    /// from "already applied". The value is bound rather than spliced, because a test is not exempt from the
+    /// parameterization rule.
+    /// </remarks>
+    private static string OutsideCount(SqliteConnection reader, string name)
+    {
+        using SqliteCommand command = reader.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM COMPANY WHERE NAME = @p0";
+        _ = command.Parameters.AddWithValue("@p0", name);
+
+        return Convert.ToString(command.ExecuteScalar(), CultureInfo.InvariantCulture) ?? string.Empty;
+    }
+
     /// <summary>Observes whether an explicit transaction is open on a connected engine.</summary>
     /// <param name="engine">The connected engine.</param>
     /// <returns>The open explicit transaction, or <see langword="null"/> under auto-commit.</returns>
@@ -3079,6 +3349,20 @@ public sealed class PersistenceRuntimeTests : IDisposable
 
         /// <inheritdoc/>
         public bool AutoCommit { get; set; }
+
+        /// <summary>Moves the auto-commit mode and answers <see cref="RetCode.OK"/>.</summary>
+        /// <param name="autoCommit">The mode to put in force.</param>
+        /// <returns>Always <see cref="RetCode.OK"/>.</returns>
+        /// <remarks>
+        /// ROUTED THROUGH THE PROPERTY, so this double moves exactly the state the assignment moves. There is
+        /// no engine beneath it whose begin could fail, which is the contract's own nothing-to-do case.
+        /// </remarks>
+        public long TrySetAutoCommit(bool autoCommit)
+        {
+            AutoCommit = autoCommit;
+
+            return RetCode.OK;
+        }
 
         /// <inheritdoc/>
         public void StampSqlState(in SqlState state)

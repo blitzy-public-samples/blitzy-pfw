@@ -424,6 +424,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     /// Puts rows into the DataWindow this service's sessions bind, SERVER-SIDE, because no published
     /// operation does.
     /// </summary>
+    /// <param name="target">The target the operation acts on.</param>
     /// <param name="rows">One entry per row: the columns to populate, by name.</param>
     /// <remarks>
     /// <para>
@@ -473,6 +474,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
 
     /// <summary>Opens and enables a session over a DataWindow carrying one row.</summary>
     /// <param name="client">The client.</param>
+    /// <param name="target">The target the operation acts on.</param>
     /// <returns>The ready session.</returns>
     private async Task<Session> ReadySessionAsync(
         WireClient client,
@@ -1113,7 +1115,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     //  -----------------------------------------------------------------------------------------------
     //  The legacy documentation describes nine methods and CLOSES BY SAYING IT IS INCOMPLETE
     //  [docs/n_cst_dwsvc_columnexp.md:L166]. The prototype block at [:L124-L209] declares far more, and
-    //  the wire surface is taken from there - including two groups an earlier reading omitted: the
+    //  the wire surface is taken from there - including the two groups most easily missed: the
     //  CACHEABLE flag [:L196-L197] and the CALCULATE-EMPTY arities [:L199-L200].
     // =================================================================================================
 
@@ -3481,6 +3483,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     /// Opens a ready session and defines the two variables the documented macro examples use.
     /// </summary>
     /// <param name="client">The client.</param>
+    /// <param name="target">The target the operation acts on.</param>
     /// <returns>The session.</returns>
     /// <remarks>
     /// THE VARIABLES ARE DEFINED THE WAY THE DOCUMENTATION DEFINES THEM - <c>of_SetVar("精度", 1)</c> and

@@ -112,7 +112,10 @@
   play, and nothing in the refactor requires any other, so none is declared. Everything else
   arrives from the repository root by MSBuild directory walk up:
 
-      global.json                 pins SDK 10.0.302, roll forward confined to latest feature
+      global.json                 pins the SDK version, roll forward confined to latest feature. The
+                                  version itself is deliberately NOT repeated here - this line carried
+                                  10.0.302 after the pin had moved on, which is the drift this whole
+                                  comment block warns against, committed by the warning itself
       Directory.Build.props       net10.0, nullable, implicit usings, warnings as errors, and
                                   central package management turned on
       Directory.Packages.props    every package version, including the two mandatory security pins

@@ -59,7 +59,7 @@
 //  DECISIONS, RECORDED SO THEY ARE AUDITABLE RATHER THAN MERELY ASSERTED
 //  --------------------------------------------------------------------------------------------
 //  D1  MEDIA TYPE AND BODY SCHEMA: application/json carrying ReservedRouteBody, NOT
-//      application/problem+json. gateway.v1.yaml:L2795-L2805 defines the ReservedForPhaseTwo
+//      application/problem+json. gateway.v1.yaml:L3893-L3903 defines the ReservedForPhaseTwo
 //      response with `content: application/json` and `schema: ReservedRouteBody`, while
 //      problem+json is reserved in that document for the 4xx/5xx ProblemDetails family. The
 //      reserved routes are not a fault to be diagnosed; they are a declaration with a fixed,
@@ -106,7 +106,7 @@
 //      authored document references. The two are not two outcomes of one handler: the 401 is the
 //      pre-handler refusal (D5) and the 501 is the only result the handler computes - unconditionally,
 //      for every method and every path remainder, with nothing evaluated first.
-//      AN EARLIER REVISION DECLARED {501} ALONE, on the reasoning that a status produced by the
+//      DECLARING {501} ALONE IS THE TEMPTING READING, on the reasoning that a status produced by the
 //      security scheme is not a response this ROUTE computes. That is right about the origin and wrong
 //      about the obligation: a client generated from a set that omits 401 is told these operations
 //      cannot return the status they demonstrably do return, and a conformance tool checking response
@@ -122,7 +122,7 @@
 //      cannot enumerate the deferred roster". Every mapping below is therefore authorized, which
 //      means an anonymous request is answered 401 by the authentication middleware and never reaches
 //      the 501. That ordering is asserted from the outside by
-//      tests/e2e/specs/deferred-routes.spec.ts, which requires 401 and explicitly NOT 501 for an
+//      tests/e2e/specs/04-deferred-routes.spec.ts, which requires 401 and explicitly NOT 501 for an
 //      anonymous probe, and from the inside by DeferredRouteTests.
 //      THE ORIGIN OF THAT 401 IS PUBLISHED SEPARATELY FROM ITS ENUMERATION, because the two say
 //      different things. gateway.v1.yaml carries an `x-cross-cutting-responses` declaration at document

@@ -153,6 +153,32 @@ public sealed class TransactionServiceTests
 
         public bool AutoCommit { get; set; }
 
+        /// <summary>What <see cref="TrySetAutoCommit(bool)"/> answers - the C-08 mode transition's outcome.</summary>
+        /// <remarks>
+        /// SCRIPTABLE BECAUSE THE REAL ENGINE'S FAILURE ARM IS NOT REACHABLE THROUGH ITS OWN SURFACE. Its
+        /// begin is deferred, which is what keeps a second session from inventing a lock conflict the oracle
+        /// does not have - and a deferred begin has nothing left to fail on. Scripting it here is the only way
+        /// to drive the projection a failed transition must produce.
+        /// </remarks>
+        internal SqlState SetAutoCommitResult { get; set; } = SqlState.Succeeded();
+
+        /// <summary>
+        /// Moves the auto-commit mode and answers <see cref="SetAutoCommitResult"/>.
+        /// </summary>
+        /// <param name="autoCommit">The mode to put in force.</param>
+        /// <returns>Whatever this double was scripted to answer.</returns>
+        /// <remarks>
+        /// THE MODE IS STILL RECORDED ON THE FAILURE PATH, deliberately: the real engine keeps the mode the
+        /// caller asked for and refuses to execute a statement until the transaction it promises exists, so a
+        /// double that skipped the assignment when it failed would model a state the engine cannot be in.
+        /// </remarks>
+        public SqlState TrySetAutoCommit(bool autoCommit)
+        {
+            AutoCommit = autoCommit;
+
+            return SetAutoCommitResult;
+        }
+
         /// <summary>
         /// How many times <see cref="Connect"/> has been entered, counted atomically.
         /// </summary>
@@ -256,8 +282,8 @@ public sealed class TransactionServiceTests
     /// <remarks>
     /// Needed by section 20, where the observable outcome of the behaviour under test is deliberately
     /// UNCHANGED - a non-positive keep-alive expiry is accepted, as the oracle accepts it - and the whole
-    /// of the fix is that the caller is no longer told nothing. An assertion on the outcome alone could
-    /// not tell the fixed code from the unfixed code.
+    /// of the property is that the caller is TOLD. An assertion on the outcome alone cannot distinguish a
+    /// substitution that is reported from one that is silent.
     /// </remarks>
     private sealed class CapturingLogger : ILogger<TransactionService>
     {
@@ -1282,6 +1308,81 @@ public sealed class TransactionServiceTests
         Assert.Null(response.Status.DbError);
     }
 
+    /// <summary>
+    /// 🔴 <c>SetAutoCommit</c> PROJECTS THE TRANSITION'S REAL OUTCOME, so an engine that could not open the
+    /// transaction the mode promises is reported rather than answered <c>OK</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>WHAT THE UNCONDITIONAL <c>OK</c> COST.</b> Moving out of auto-commit obliges the engine to open an
+    /// EXPLICIT transaction, because .NET has no implicit one after connecting the way PowerBuilder does.
+    /// The handler wrote the mode through a void property and answered success whatever happened, so a
+    /// caller could receive <c>OK</c> for a session that held no transaction - and every write it then
+    /// issued applied itself immediately while a later rollback undid nothing. Nothing in the response said
+    /// so, which is why this is a durability defect rather than a diagnostics gap.
+    /// </para>
+    /// <para>
+    /// <b>THE DRIVER PAYLOAD IS ASSERTED, AND SO IS THE STATEMENT FIELD BEING EMPTY.</b> The failure travels
+    /// as <c>E_DB_ERROR</c> with the provider's own code and text, exactly as a failed commit does, and the
+    /// statement field stays masked because the transition generated no statement of the caller's - the same
+    /// sanctioned projection region 11's commit cases assert.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task SetAutoCommitReportsATransitionTheEngineCouldNotPerform()
+    {
+        Harness harness = new();
+        SessionHandle session = await Open(harness);
+
+        harness.Engine.SetAutoCommitResult = SqlState.Failed(9003, "the explicit transaction was refused");
+
+        SetTransactionAutoCommitResponse refused = await harness.Service.SetAutoCommit(
+            new SetTransactionAutoCommitRequest { Session = session, Autocommit = false },
+            null!);
+
+        Assert.Equal(WireRetCode.EDbError, refused.Status.RetCode);
+        Assert.NotNull(refused.Status.DbError);
+        Assert.Equal(9003, refused.Status.DbError.Sqldbcode);
+        Assert.Equal("the explicit transaction was refused", refused.Status.DbError.Sqlerrtext);
+        Assert.Equal(string.Empty, refused.Status.DbError.Sqlsyntax);
+
+        // AND THE SUCCESS PATH IS UNCHANGED, so the projection is the outcome's rather than a new refusal:
+        // the same call answers OK with no driver payload once the engine can perform the transition, and
+        // the mode reaches the engine either way.
+        harness.Engine.SetAutoCommitResult = SqlState.Succeeded();
+
+        SetTransactionAutoCommitResponse accepted = await harness.Service.SetAutoCommit(
+            new SetTransactionAutoCommitRequest { Session = session, Autocommit = true },
+            null!);
+
+        Assert.Equal(WireRetCode.Ok, accepted.Status.RetCode);
+        Assert.Null(accepted.Status.DbError);
+        Assert.True(harness.Engine.AutoCommit);
+    }
+
+    [Fact]
+    public async Task SetAutoCommitRefusesAnUnknownSessionWithoutTouchingTheEngine()
+    {
+        Harness harness = new();
+        _ = await Open(harness);
+
+        // THE REFUSAL THAT MUST SURVIVE THE PROJECTION CHANGE. Routing the handler through the shared
+        // project-and-run helper must not alter what an unnamed session receives, and the engine must stay
+        // untouched - a handler that moved the mode first and validated afterwards would leave the mode of
+        // whichever session it happened to reach.
+        SetTransactionAutoCommitResponse response = await harness.Service.SetAutoCommit(
+            new SetTransactionAutoCommitRequest
+            {
+                Session = new SessionHandle { SessionId = "not-a-session" },
+                Autocommit = true,
+            },
+            null!);
+
+        Assert.Equal(WireRetCode.EInvalidTransaction, response.Status.RetCode);
+        Assert.Null(response.Status.DbError);
+        Assert.False(harness.Engine.AutoCommit);
+    }
+
     // ---------------------------------------------------------------------------------------------
     //  12. GRID SYNTAX - EMPTY STATEMENT AND EMPTY SYNTAX BOTH YIELD E_INVALID_SQL
     // ---------------------------------------------------------------------------------------------
@@ -1864,10 +1965,10 @@ public sealed class TransactionServiceTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>THE PROPERTY THIS CASE PINS IS UNCHANGED; WHAT CHANGED IS THE CANCELLED CALLER'S OWN OUTCOME.</b>
-    /// It used to assert that the second caller received a session, on the reading that a live pooled
-    /// transaction is not reconnected, so "no work is issued and the cancellation has nothing to refuse".
-    /// The premise is right and the conclusion cost a permanent leak: a caller whose token is already
+    /// <b>THE CANCELLED CALLER IS REFUSED, AND THAT REFUSAL IS THE LOAD-BEARING HALF OF THIS CASE.</b>
+    /// Asserting that the second caller receives a session is the tempting reading, on the grounds that a
+    /// live pooled transaction is not reconnected, so "no work is issued and the cancellation has nothing
+    /// to refuse". The premise is right and the conclusion costs a permanent leak: a caller whose token is already
     /// signalled IS GONE, gRPC discards the response, and the handle that response carried is the ONLY way
     /// that session could ever be named - so the session could never be ended. Nothing reclaimed it either,
     /// because the registry has no expiry sweep and the pool reference the session held stopped the pool's
@@ -1875,7 +1976,7 @@ public sealed class TransactionServiceTests
     /// handle ceiling against sessions it did not know it owned.
     /// </para>
     /// <para>
-    /// THE THREE ASSERTIONS THAT WERE WORTH KEEPING ARE KEPT AND SHARPENED: the connect is not undone, the
+    /// THE THREE PROPERTIES PINNED ALONGSIDE IT ARE THE ONES A CANCELLATION MUST NOT DISTURB: the connect is not undone, the
     /// FIRST caller's session is untouched, and one pool entry still serves the descriptor. A cancellation
     /// is a refusal to be issued a handle, never a rollback of work already done - which is exactly what the
     /// original name says, now asserted over the caller it actually applies to.
@@ -1931,7 +2032,7 @@ public sealed class TransactionServiceTests
     /// <para>
     /// THE FIRST SESSION IS OPENED UNCANCELLED ON PURPOSE. It connects the shared transaction, which is what
     /// makes every subsequent request take the already-connected path - the path on which the only
-    /// cancellation check used to sit inside a branch that path skips entirely.
+    /// cancellation check must not sit inside a branch that path skips entirely.
     /// </para>
     /// </remarks>
     [Fact]
@@ -2064,19 +2165,19 @@ public sealed class TransactionServiceTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>⚠ THIS IS THE REGRESSION TEST FOR A DEFECT THAT LOST EVERY CONCURRENT REQUEST.</b> The pool keys
-    /// entries on whole-descriptor value equality with reference counting, so every session opened with an
-    /// equal descriptor borrows the SAME transaction instance. Acquisition was the one path on this
-    /// contract that took no gate, so N concurrent openings all observed that transaction as unconnected
-    /// and all connected it. Because the engine assigns its connection and only then begins its
-    /// transaction, it was left holding one caller's connection beside another's transaction, and every
-    /// command built from that pair failed as not associated with the same connection - five concurrent
-    /// retrievals produced five HTTP 500s over one shared pool lease.
+    /// <b>⚠ THIS CASE GUARDS THE ONE UNGATED PATH THAT WOULD LOSE EVERY CONCURRENT REQUEST.</b> The pool
+    /// keys entries on whole-descriptor value equality with reference counting, so every session opened
+    /// with an equal descriptor borrows the SAME transaction instance. Acquisition is the one path on this
+    /// contract where an ungated liveness test is fatal: N concurrent openings all observe that transaction
+    /// as unconnected and all connect it. Because the engine assigns its connection and only then begins
+    /// its transaction, it is left holding one caller's connection beside another's transaction, and every
+    /// command built from that pair fails as not associated with the same connection - five concurrent
+    /// retrievals producing five HTTP 500s over one shared pool lease.
     /// </para>
     /// <para>
     /// THE CONNECT COUNT IS THE ASSERTION THAT MATTERS. Asserting only that every caller got a handle
-    /// would have passed before the fix as well: <c>BeginSession</c> itself answered OK, and the damage
-    /// only surfaced later when a command was built. Counting connects tests the invariant directly -
+    /// pass against an ungated implementation too: <c>BeginSession</c> itself answers OK, and the damage
+    /// only surfaces later when a command is built. Counting connects tests the invariant directly -
     /// <c>[:L173]</c> says a live pooled connection is NOT reconnected, and under concurrency that means
     /// exactly one connect for one shared transaction.
     /// </para>
@@ -2372,9 +2473,10 @@ public sealed class TransactionServiceTests
         // ⚠ AND HERE IS THE REFERENCE-DROP ASSERTION, READ THROUGH THE COLLECTOR. A forced collect
         // overrides the IDLE WINDOW and nothing else - the reference count still has to be zero for an
         // entry to go [:L215] - so an entry that survives a forced collect is an entry somebody is still
-        // counted as holding. Before the fix the failed release returned early and left this session's
-        // reference standing, so the entry could never reach zero: its connection was never disconnected
-        // and its slot was never reclaimed. A leak produced by the one path whose job is to prevent one.
+        // counted as holding. A failed release that returned early would leave this session's
+        // reference standing, so the entry could never reach zero: its connection would never be
+        // disconnected and its slot never reclaimed - a leak produced by the one path whose job is to
+        // prevent one.
         harness.Pool.Collect(force: true);
 
         Assert.Equal(0, harness.Pool.UpperBound);
@@ -2387,8 +2489,8 @@ public sealed class TransactionServiceTests
     //  Two sessions opened with EQUAL descriptors share one pooled transaction (section 15), so one
     //  session's commit commits the other's uncommitted work as well. That is the oracle's own behaviour -
     //  the pool keys entries on whole-descriptor equality [n_cst_thread_trans_pool.sru:L136-L146] - and
-    //  constraint C-B forbids changing it. What was missing was any way for a caller to KNOW, so the
-    //  count is now on the response and the operation records a warning when it exceeds one.
+    //  constraint C-B forbids changing it. What a caller has no other way to KNOW is that it is sharing, so
+    //  the count is on the response and the operation records a warning when it exceeds one.
     //
     //  A COUNT AND NOT A LIST (constraint C-F). A handle belongs to whoever was issued it; naming another
     //  holder's would disclose it to a caller who was never given it.
@@ -2512,9 +2614,9 @@ public sealed class TransactionServiceTests
     }
 
     // ---------------------------------------------------------------------------------------------
-    //  20. A NON-POSITIVE KEEP-ALIVE EXPIRY IS ACCEPTED, AND NO LONGER SILENTLY - L-5
+    //  20. A NON-POSITIVE KEEP-ALIVE EXPIRY IS ACCEPTED, AND NOT SILENTLY
     //
-    //  THE REPORTED FINDING ASKED FOR A REFUSAL, AND A REFUSAL WOULD HAVE BEEN WRONG. The oracle reads
+    //  A REFUSAL IS THE TEMPTING ANSWER AND IT WOULD BE WRONG. The oracle reads
     //  the expiry and then folds anything non-positive to its own default:
     //      constant long KEEPALIVE_EXPIRE = 30000                        [:L53]
     //      _nKeepAliveExpireTime = ...GetDataDouble(...) * 1000           [:L78]
@@ -2556,7 +2658,7 @@ public sealed class TransactionServiceTests
         // number the caller sent was genuinely not used as a duration.
         Assert.Equal(30_000, harness.Pool.KeepAliveExpireMilliseconds);
 
-        // AND THE CALLER IS NO LONGER TOLD NOTHING. Informational, not a warning: nothing went wrong.
+        // AND THE CALLER IS TOLD SO. Informational, not a warning: nothing went wrong.
         Assert.Contains(
             log.Records,
             record => record.StartsWith("Information|", StringComparison.Ordinal)

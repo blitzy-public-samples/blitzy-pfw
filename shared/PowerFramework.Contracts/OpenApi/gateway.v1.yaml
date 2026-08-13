@@ -73,21 +73,21 @@
 #  states the measured wire truth. The Tier 3 section header in components/schemas records every rule
 #  the generator applied.
 #
-#  AN EARLIER REVISION DELEGATED EVERY PROJECTED BODY TO ONE OPEN SCHEMA, AND THAT WAS A DEFECT
-#  rather than a trade. `ProtoPayload` published `additionalProperties: true` with no members and a
+#  DELEGATING EVERY PROJECTED BODY TO ONE OPEN SCHEMA IS A DEFECT rather than a trade, which is why
+#  this document does not. Such a schema publishes `additionalProperties: true` with no members and a
 #  pointer at the `x-proto-*` extension naming the real message - while the projection binds every
 #  request with the STRICT canonical parser, which REJECTS a member the target message does not
-#  declare. The document therefore promised a permissiveness the runtime does not have, and a consumer
-#  generating a client from it could not see a single member it was required to send.
+#  declare. The document would therefore promise a permissiveness the runtime does not have, and a
+#  consumer generating a client from it could not see a single member it was required to send.
 #
-#  The delegation's stated objection was sound and is answered rather than overruled: transcribing the
-#  shapes BY HAND would have created a second source of truth with nothing keeping the two in step, so
-#  the first divergence would be silent. Tier 3 is not transcribed, it is GENERATED, and every schema
-#  carrying `x-proto-message` or `x-proto-enum` - all 135 of them, Tier 1 included - is cross-checked
+#  The objection that argues FOR delegating is sound and is answered rather than overruled:
+#  transcribing the shapes BY HAND creates a second source of truth with nothing keeping the two in
+#  step, so the first divergence is silent. Tier 3 is not transcribed, it is GENERATED, and every schema
+#  carrying `x-proto-message` or `x-proto-enum` - all 133 of them, Tier 1 included - is cross-checked
 #  against its descriptor member for member and value for value by the sibling test project on every
-#  build. A divergence is now a BUILD FAILURE, which is precisely the mechanism whose absence
-#  justified delegating in the first place. The `x-proto-*` operation extensions remain, and remain
-#  checked: they still name each operation's RPC input and output type.
+#  build. A divergence is a BUILD FAILURE, which is precisely the mechanism whose absence would
+#  justify delegating. The `x-proto-*` operation extensions are checked the same way: they name each
+#  operation's RPC input and output type.
 #
 #  What this document specifies exhaustively, because it is the ingress contract and nothing else
 #  publishes it: every route, its authentication posture, its HTTP status surface, the gRPC-to-HTTP
@@ -200,9 +200,9 @@ info:
     computes. `x-cross-cutting-responses` below records that origin machine-readably.
 
     **Where the refusal comes from does not change what the contract owes a consumer, and every guarded
-    operation in this document - the four reserved route families included - enumerates `401`.** An
-    earlier revision omitted it from the reserved families on the reasoning that a cross-cutting concern
-    is not a response those routes produce. The reasoning is sound about the origin and wrong about the
+    operation in this document - the four reserved route families included - enumerates `401`.**
+    Omitting it from the reserved families is the tempting reading, on the reasoning that a cross-cutting
+    concern is not a response those routes produce. The reasoning is sound about the origin and wrong about the
     obligation: a client generated from a response set that omits `401` is told the status cannot occur
     on paths that demonstrably return it, and a conformance tool checking response coverage reports a
     violation against a correct server. So the reserved families declare `{401, 501}`, exactly like every
@@ -248,10 +248,10 @@ info:
     what makes that work: on cleartext, `Http1AndHttp2` silently means HTTP/1.1 alone, because Kestrel
     disables HTTP/2 without application-protocol negotiation.
 
-    An earlier revision gave those two services a SECOND `Http2`-only endpoint each, above the documented
-    band, and projected onto that instead. It was withdrawn because AAP 0.3.2.2 assigns C-05..C-08 to 5101
-    and C-03/C-04 to 5102: a published contract answering on a port the map does not name is not on the
-    port the map gives it. Nothing was moved into 5103 by the collapse.
+    Giving those two services a SECOND `Http2`-only endpoint each, above the documented band, and
+    projecting onto that instead is the tempting shape. It is not available, because AAP 0.3.2.2 assigns
+    C-05..C-08 to 5101 and C-03/C-04 to 5102: a published contract answering on a port the map does not
+    name is not on the port the map gives it. Sharing one endpoint moves nothing into 5103.
 
     **5103 is reserved rather than reassigned, and that is a decision.** The attached environment had
     assigned it to a design service, and DesignSystem is precisely one of the four deferred services, so
@@ -409,6 +409,29 @@ x-cross-cutting-responses:
       generated client the status cannot occur on a path that demonstrably returns it. Recording the
       origin here is what keeps the two facts reconciled: on a reserved family the enumerated `401` is
       the pre-handler refusal, and `501` is still the single unconditional result its handler computes.
+  - status: 429
+    appliesTo: every-operation-except-the-anonymous-health-probe
+    producedBy: ingress-rate-limiter
+    evaluatedBefore: route-handler
+    declaredPerOperation: all-operations-except-the-four-reserved-families
+    body: >-
+      application/problem+json, described by the shared UpstreamBusy response, carrying an optional
+      `Retry-After` header. `/health` is exempt from the limiter and therefore cannot answer it.
+    reason: >-
+      Gateway is this system's first-ever listener - the legacy was an in-process library with no
+      listener at all - so a caller able to exhaust it is a failure mode decomposition itself created,
+      and the limiter that bounds it is global middleware rather than a per-path policy. It therefore
+      runs before every route handler in this document except the exempt `/health`, and the operations
+      that compute something enumerate it beside their own outcomes.
+      THE FOUR RESERVED FAMILIES ARE THE DELIBERATE EXCEPTION, AND THIS ENTRY IS WHY OMITTING IT THERE
+      IS NOT A GAP. Their declared set is exactly `{401, 501}`: this document states above that any
+      `4xx` on those families other than the `401` would say the route inspects the request before
+      answering, and a reserved family inspects nothing - it answers `501` unconditionally for every
+      method and every path remainder. The `401` earns its place there because the operation itself
+      carries the requirement that produces it; the limiter carries no such per-operation declaration.
+      So the status is reconciled HERE, machine-readably, rather than enumerated on a family whose
+      closed response set is the deferred-service compliance position. A caller of a reserved path may
+      receive `429` and should read this declaration for it.
 
 servers:
   # ONE ENTRY, DELIBERATELY. Port 5105 is Gateway's listener per docs/ARCHITECTURE.md 4.1, and it is
@@ -576,6 +599,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
 
   # ================================================================================================
   #  C-09 - CAPABILITY PROJECTION
@@ -647,6 +672,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/UpstreamBusy'
 
   # ================================================================================================
   #  C-09 - THE /v1/datawindow PROJECTION OF C-03 (dataservices.v1.DataWindowService)
@@ -1616,7 +1643,7 @@ paths:
   #  C-09 - THE /v1/datawindow/expression PROJECTION OF C-04
   #  (dataservices.v1.ColumnExpressionService)
   #
-  #  Twenty-five of C-04's twenty-seven methods are projected, including `EventStream` - the engine's own
+  #  Twenty-four of C-04's twenty-six methods are projected, including `EventStream` - the engine's own
   #  SERVER stream of the three events it declares on itself, which projects as an ordered collection
   #  for the same reason `Retrieve` does.
   #
@@ -3042,8 +3069,8 @@ paths:
   #    401  What an UNAUTHENTICATED request meets. The document-level bearer requirement applies to all
   #         eight operations and none overrides it, so the deferred roster is not anonymously
   #         enumerable - the request is refused by the authentication middleware BEFORE any handler
-  #         runs. An earlier revision declared {501} alone on the reasoning that a cross-cutting concern
-  #         is not a response this ROUTE produces. The reasoning is sound about where the refusal comes
+  #         runs. Declaring {501} alone is the tempting reading, on the reasoning that a cross-cutting
+  #         concern is not a response this ROUTE produces. The reasoning is sound about where the refusal comes
   #         from and wrong about what a consumer needs: a client generated from a set that omits 401 is
   #         told these operations cannot return the status they demonstrably do return, and a
   #         conformance tool checking response coverage reports a violation against a correct server.
@@ -3574,8 +3601,8 @@ components:
         This scheme is applied as `bearerAuth: []` throughout, and that empty array carries **no
         information about scope**: OpenAPI defines the security-requirement array as a scope list for
         `oauth2` and `openIdConnect` schemes only, so for an `http`/`bearer` scheme an empty array is
-        the sole meaningful value. Reading it as "this operation requires no scope" is a mistake this
-        document previously invited, and it has a concrete cost: an operator provisioning an external
+        the sole meaningful value. Reading it as "this operation requires no scope" is the mistake an
+        empty array invites, and it has a concrete cost: an operator provisioning an external
         caller grants a placeholder scope, issuance succeeds, and **every** request the caller makes is
         then refused `403`.
 
@@ -3655,11 +3682,11 @@ components:
         remainder may be EMPTY, so the bare prefix `/v1/design` also resolves here; and every HTTP
         method answers identically, not only the two enumerated below.
 
-        An earlier revision tried to say this with `allowReserved: true` on this parameter. That was
-        INVALID: OpenAPI 3.1 defines `allowReserved` for `in: query` parameters only, so the field made
-        the document fail validation while still not expressing catch-all semantics - a path parameter
-        is defined to match a single segment whatever `allowReserved` says. The field is therefore
-        removed and the behaviour is stated in `x-catch-all` below, which a tool can read and which
+        `allowReserved: true` on this parameter is the tempting way to say it, and it is INVALID:
+        OpenAPI 3.1 defines `allowReserved` for `in: query` parameters only, so the field makes the
+        document fail validation while still not expressing catch-all semantics - a path parameter
+        is defined to match a single segment whatever `allowReserved` says. The behaviour is therefore
+        stated in `x-catch-all` below, which a tool can read and which
         makes no false claim about the standard template. A consumer generating a client from this
         document should treat the parameter as an opaque remainder and NOT URL-encode its separators.
       schema:
@@ -3698,10 +3725,9 @@ components:
 
         All three conditions are answered identically, with `retCode` carrying `E_INVALID_ARGUMENT`
         (-3), and the value is never echoed back. An omitted parameter and an empty one are two
-        spellings of one mistake and must not be distinguishable: an earlier revision answered the
-        first as `500` with `UNKNOWN`, because the omission was refused by parameter binding before
-        the route ran and the carried status was discarded - a caller was told this service had
-        failed for a request only it could correct.
+        spellings of one mistake and must not be distinguishable. Answering the first as `500` with
+        `UNKNOWN` is what happens if the omission is left to parameter binding and the carried status is
+        discarded - the caller is told this service failed for a request only the caller can correct.
 
 
         Whitespace is neither trimmed nor refused. A single space satisfies the declared
@@ -3807,12 +3833,31 @@ components:
             $ref: '#/components/schemas/ProblemDetails'
 
     InternalError:
-      description: >-
+      description: |-
         The projected gRPC method returned `Internal`. **The statement field is redacted**: the legacy
         `sqlsyntax` field carries the complete generated statement including interpolated literal
         values and the legacy logger performs no redaction at all, so the projection redacts or
         parameter-separates it before it reaches a caller. `detail` never carries key material, a
         stack trace, a file path or a connection string.
+
+        **This status also carries the unavailable-capability outcome, and that is a deliberate choice
+        rather than a fallback.** An implemented operation can report that the specific capability a
+        request asked for has no available implementation - the pinyin comparison whose lookup table
+        exists only inside the closed legacy binary, the column-expression engine's macro and
+        foreign-variable arms, or a `pinyinFlags` mask that disagrees with the deployment's configured
+        one - and it does so with the legacy `retCode` `E_NO_SUPPORT` (`-2000`) or `E_NO_IMPLEMENTATION`
+        (`-2001`) on this body. The same status answers an upstream that reports a method its own
+        contract publishes as unimplemented, which is deployment or version skew.
+
+        **It is deliberately not `501`, and that is a hard constraint rather than a taste.** `501`
+        belongs exclusively to the four reserved deferred-capability routes of this document, whose
+        purpose is to declare that an entire capability area is unbuilt; answering it on an implemented
+        operation would present that operation as a placeholder and would leave a caller unable to tell
+        the two situations apart from this contract alone. It is not `400` either: the request is well
+        formed and the limitation is this port's rather than the caller's. The legacy vocabulary carries
+        the distinction the status cannot, which is why `retCode` is the member to branch on. Security's
+        contract answers its two symmetric-cipher narrowings the identical way, for the identical
+        reason.
       content:
         application/problem+json:
           schema:
@@ -3833,6 +3878,34 @@ components:
         **Distinct from `503` on purpose.** `503` says the upstream is not currently serving; this says it
         is serving and declining to take more. Distinct from `502` for the same reason: a `502` means no
         gRPC response arrived at all.
+
+        ## A SECOND CAUSE REACHES THIS STATUS, AND A CALLER TREATS BOTH THE SAME WAY
+
+        This gateway also bounds its OWN ingress, and a request refused by that bound is answered `429`
+        without any upstream being called. Two bounds reach it - a process-wide concurrency ceiling and a
+        per-caller request allowance over a fixed window - and a caller cannot tell them apart, nor tell
+        either from the upstream ceiling above, deliberately: distinguishing them would report how much of
+        this deployment's capacity its OTHER callers are holding. `retCode` carries `E_BUSY` (-23) in every
+        case, and the correct response is the same one: release what is held, or retry later.
+
+        `Retry-After` is present whenever the limiter can determine it and absent when it cannot; an absent
+        header means "retry with backoff", never "retry immediately".
+
+        The ingress bound exists because the decomposition created this system's first listening socket
+        (C-B): the legacy was an in-process library that received no unsolicited request, so nothing could
+        be flooded and there was no legacy limit to port. `/health` is exempt, because it is the readiness
+        gate this gateway's own health condition is published through and a rate-limited probe would make a
+        busy service a permanently unready one.
+      headers:
+        Retry-After:
+          description: >-
+            How many seconds to wait before retrying, when the limiter can determine it. Absent when it
+            cannot.
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
       content:
         application/problem+json:
           schema:
@@ -3927,8 +4000,8 @@ components:
         operator record for this occurrence. RFC 9457 explicitly permits extension members, which is
         why this schema - **alone in this document, apart from its own conflict specialization** - sets
         `additionalProperties: true` rather than `false`. A consumer must ignore any member it does not
-        recognise. Every other schema in this document, including all 104 generated protobuf shapes, is
-        CLOSED, because the projection's parser rejects a member the target message does not declare.
+        recognise. Every other schema in this document, generated and mirrored alike, is CLOSED, because
+        the projection's parser rejects a member the target message does not declare.
 
         `traceId` is declared rather than merely tolerated by that openness, and deliberately so: it is
         the only member through which a caller can reach anything this body withholds, so a caller needs
@@ -4184,17 +4257,16 @@ components:
     #  established generator convention; `x-enum-values` is this document's own extension, declared here
     #  once so it is not mistaken for one. Every set also states its numbers in prose, for a reader.
     #
-    #  EVERY SCHEMA IN THIS TIER IS NOW REACHED BY A `$ref`, AND THE ONE THAT PREVIOUSLY WAS NOT IS
-    #  WORTH RECORDING. `ExpressionBinding` is the shape carried by the `bindings` member of C-04's
-    #  `GetExpressionStateResponse` and by the `binding` member of `GetExpressionResponse`. Both of those
-    #  used to be DELEGATED envelopes, so no `$ref` in this document reached this schema and a style
-    #  linter reported it as unused; it was mirrored anyway, because it is the ONE contract detail the
-    #  requirements single out as not surviving naive serialization - the static versus dynamic expansion
-    #  distinction - and a consumer that could not see the three-part payload and the per-reference mode
-    #  would send an already-expanded string and destroy that distinction silently. Both envelopes are now
-    #  published concretely in Tier 3 and both `$ref` it, so the justification is no longer needed and the
-    #  reachability is a fact a tool can follow. The decision it records still stands: publish the shape a
-    #  consumer must act on, and say why.
+    #  EVERY SCHEMA IN THIS TIER IS REACHED BY A `$ref`, AND ONE OF THEM IS WORTH RECORDING BECAUSE ITS
+    #  REACHABILITY DEPENDS ON A DECISION. `ExpressionBinding` is the shape carried by the `bindings`
+    #  member of C-04's `GetExpressionStateResponse` and by the `binding` member of `GetExpressionResponse`.
+    #  DELEGATING either envelope leaves no `$ref` in this document reaching this schema, and a style
+    #  linter then reports it as unused; it is mirrored regardless, because it is the ONE contract detail
+    #  the requirements single out as not surviving naive serialization - the static versus dynamic
+    #  expansion distinction - and a consumer that could not see the three-part payload and the
+    #  per-reference mode would send an already-expanded string and destroy that distinction silently. Both
+    #  envelopes are published concretely in Tier 3 and both `$ref` it, so the reachability is a fact a
+    #  tool can follow. The rule stands either way: publish the shape a consumer must act on, and say why.
     #
     #  THE THREE SCHEMAS STILL PUBLISHED WITHOUT A `$ref` ARE THE THREE BODY-LESS OPERATIONS' REQUEST
     #  MESSAGES - `GetEventGateRequest`, `CloseValidationSessionRequest` and
@@ -5117,12 +5189,12 @@ components:
             it already holds.
 
 
-            A PLAIN `$ref` WITH A SIBLING `description`, WHICH USED TO BE AN `allOf` WRAPPING THE `$ref`.
-            The wrapper was the OpenAPI 3.0 idiom for annotating a reference, and 3.1 does not need it:
-            JSON Schema 2020-12 permits keywords beside `$ref`, so all 26 of this document's annotated
-            references now read the same way, and the document declares `openapi: 3.1.0`. Unwrapping it also brought this member inside
-            the generated cross-check, which resolves a member's type through its reference and could
-            not see through an `allOf`.
+            A PLAIN `$ref` WITH A SIBLING `description`, RATHER THAN AN `allOf` WRAPPING THE `$ref`.
+            The wrapper is the OpenAPI 3.0 idiom for annotating a reference, and 3.1 does not need it:
+            JSON Schema 2020-12 permits keywords beside `$ref`, so every annotated reference in this
+            document reads the same way, and the document declares `openapi: 3.1.0`. The plain form also
+            keeps this member inside the generated cross-check, which resolves a member's type through its
+            reference and cannot see through an `allOf`.
 
     ExpressionEventStreamResult:
       title: ExpressionEventStreamResult
@@ -5433,9 +5505,9 @@ components:
 
         It is the shape of the `bindings` member of C-04's `GetExpressionStateResponse`, returned by
         `POST /v1/datawindow/expression/engine-state` when the request asks for bindings, and of the
-        `binding` member of `GetExpressionResponse`. Both of those are now published concretely in Tier 3
-        and both `$ref` this schema, so the reachability this section previously had to justify in prose
-        is now a fact a tool can follow. It was mirrored here before either of them existed, because this
+        `binding` member of `GetExpressionResponse`. Both of those are published concretely in Tier 3
+        and both `$ref` this schema, so this schema's reachability is a fact a tool can follow rather than
+        something prose has to justify. It is mirrored here regardless of that, because this
         is the **one** contract detail the requirements single out as not surviving naive serialization: a
         consumer that could not see the three parts and the per-reference mode would reasonably send an
         already-expanded string, and the distinction would be destroyed silently rather than rejected.
@@ -5849,28 +5921,28 @@ components:
     #  COMPLETE TRANSITIVE CLOSURE of every message the 39 projected operations carry - 118 messages
     #  and 15 enums, of which Tier 1 already publishes 31.
     #
-    #  WHY THIS TIER REPLACED A DELEGATION, AND WHY THE DELEGATION'S OWN OBJECTION NO LONGER HOLDS
+    #  WHY THIS TIER IS CONCRETE RATHER THAN A DELEGATION, AND WHY THE ARGUMENT FOR DELEGATING IS ANSWERED
     #  --------------------------------------------------------------------------------------------
-    #  An earlier revision published ONE open schema, `ProtoPayload`, for every projected request and
-    #  response body - 75 of them on today's projection: `additionalProperties: true`, no members, and a pointer at the `x-proto-*`
-    #  extension naming the real message. That was WRONG IN THE ONE DIRECTION THAT MATTERS. The
+    #  Publishing ONE open schema, `ProtoPayload`, for every projected request and response body - 75 of
+    #  them on this projection: `additionalProperties: true`, no members, and a pointer at the
+    #  `x-proto-*` extension naming the real message - is WRONG IN THE ONE DIRECTION THAT MATTERS. The
     #  projection binds every request with the STRICT canonical parser, which REJECTS a member the
-    #  target message does not declare and answers 400 - so the document promised a permissiveness the
-    #  runtime does not have, and a consumer generating a client from it could not see a single member
+    #  target message does not declare and answers 400 - so the document would promise a permissiveness
+    #  the runtime does not have, and a consumer generating a client from it could not see a single member
     #  it was required to send. `UpdateResponse.rowsInserted`, `.rowsUpdated`, `.rowsDeleted` and
-    #  `.identity` were invisible to every standard OpenAPI consumer, on the one operation whose whole
+    #  `.identity` would be invisible to every standard OpenAPI consumer, on the one operation whose whole
     #  purpose is to tell a caller what it just changed - and `.identity` is the round trip a caller
     #  cannot reconstruct from anywhere else.
     #
-    #  The delegation's objection was that transcribing the shapes by hand would create a second
+    #  The argument FOR delegating is that transcribing the shapes by hand creates a second
     #  source of truth in a different language with nothing keeping the two in step, so the first
-    #  divergence would be silent. THAT OBJECTION WAS CORRECT, and it is answered rather than
+    #  divergence is silent. THAT OBJECTION IS CORRECT, and it is answered rather than
     #  overruled: these schemas are not transcribed, they are GENERATED from the descriptors, and the
     #  sibling test project's field-for-field cross-check compares EVERY member of EVERY schema
     #  carrying `x-proto-message` or `x-proto-enum` against its descriptor on every build - member
     #  set, JSON name, type, format, repeatedness, map shape, enum value set, enum numbers,
-    #  closedness, and the `required` rule stated below. A divergence is now a BUILD FAILURE, which is
-    #  precisely the mechanism whose absence justified delegating.
+    #  closedness, and the `required` rule stated below. A divergence is a BUILD FAILURE, which is
+    #  precisely the mechanism whose absence would justify delegating.
     #
     #  THE RULES THE GENERATOR APPLIED, so a reader can check any schema against its .proto by hand
     #  --------------------------------------------------------------------------------------------
@@ -5890,7 +5962,7 @@ components:
     #  characterization recordings, where a rename silently invalidates every stored comparison.
     #
     #  EVERY OBJECT IS CLOSED. `additionalProperties: false` is not a style preference here - it is
-    #  what the runtime does. Publishing an open object was the defect this tier exists to close.
+    #  what the runtime does. Publishing an open object is the defect this tier exists to close.
     #
     #  `required` IS THE MEASURED WIRE TRUTH, AND ITS ASYMMETRY IS DELIBERATE
     #  --------------------------------------------------------------------------------------------
@@ -6216,8 +6288,15 @@ components:
           format: uint64
           minimum: 0
           maximum: 18446744073709551615
-          description: >-
+          description: |-
             Absent means the legacy's 7 - see DropDownSearchState.pinyin_flags.
+
+            A SUPPLIED VALUE THAT DISAGREES WITH THE DEPLOYMENT'S CONFIGURED MASK IS REFUSED RATHER
+            THAN IGNORED, because ignoring it would emit an expression carrying flags the caller did
+            not ask for. The refusal is `500` with `retCode` `E_NO_SUPPORT` (`-2000`) and the state the
+            model currently holds, and it is not `501`: this operation is implemented, and `501`
+            identifies a reserved deferred-capability route. Send this field only to restate the
+            configured mask, or omit it.
         showFilteredRows:
           type: boolean
         clear:
@@ -7948,11 +8027,10 @@ components:
             TRAVELS, INCLUDING A NEGATIVE ONE, and C-05's guard adjudicates it: -5 and 500 are both
             refused with E_INVALID_ARGUMENT, which Gateway projects as HTTP 400, while 1001 and
             above are honoured. This is forwarding, NOT validating - the paragraph above is the
-            reason. An earlier revision forwarded only a POSITIVE size, so a nonsensical negative
-            was silently discarded and answered with a successful retrieval at the server's own size
-            while a nonsensical 500 was refused: two values equally wrong, two different outcomes,
-            and the more obviously wrong of the two accepted. The layer that owns the rule now
-            answers for both.
+            reason. Forwarding only a POSITIVE size silently discards a nonsensical negative and
+            answers with a successful retrieval at the server's own size while refusing a nonsensical
+            500: two values equally wrong, two different outcomes, and the more obviously wrong of the
+            two accepted. The layer that owns the rule answers for both instead.
 
     RowSelectState:
       type: object

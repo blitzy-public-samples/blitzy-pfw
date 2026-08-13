@@ -1,14 +1,14 @@
 // ==================================================================================================
 //  HandleLifecycle - THE BOUNDS ON SERVER-HELD WORK HANDLES
 //  ------------------------------------------------------------------------------------------------
-//  WHAT WAS WRONG, STATED AS A FACT ABOUT THE CODE
+//  WHY THIS TYPE EXISTS, STATED AS A FACT ABOUT THE CODE
 //
 //  All four of this service's handle tables - the transaction sessions, the query tasks, the update tasks
-//  and the command tasks - were plain `ConcurrentDictionary` singletons with no ceiling, no idle expiry
-//  and no shutdown drain. Every entry pins real resources: a session pins a pool reference and therefore
-//  an open connection; a command or update task pins a worker task and its synchronisation handles. A
-//  caller that crashed, timed out or simply forgot to release left all of that alive for the life of the
-//  PROCESS, and nothing anywhere would ever notice or report it.
+//  and the command tasks - are naturally plain `ConcurrentDictionary` singletons with no ceiling, no idle
+//  expiry and no shutdown drain. Every entry pins real resources: a session pins a pool reference and
+//  therefore an open connection; a command or update task pins a worker task and its synchronisation
+//  handles. Left unbounded, a caller that crashes, times out or simply forgets to release keeps all of
+//  that alive for the life of the PROCESS, and nothing anywhere notices or reports it.
 //
 //  ============ WHY THE LEGACY NEEDED NONE OF THIS, AND WHY THE PORT DOES =========================
 //  In process a caller held its task and its transaction BY REFERENCE. An abandoned one was collected the
@@ -119,6 +119,52 @@ internal sealed class HandlePrincipalResolver
             ?? user.Identity.Name;
 
         return string.IsNullOrWhiteSpace(subject) ? Unattributed : subject;
+    }
+
+    /// <summary>
+    /// Determines whether the caller of the current call is the one a handle was attributed to.
+    /// </summary>
+    /// <param name="attributedPrincipal">The identity stored on the handle when it was created.</param>
+    /// <returns><see langword="true"/> when the two identities are the same caller.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="attributedPrincipal"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>A HANDLE IS HIGH-ENTROPY, WHICH IS NOT THE SAME AS OWNER-BOUND.</b> Every handle this service
+    /// mints is an unguessable identifier, so no caller finds another's by search - but unguessable is a
+    /// bound on DISCOVERY, not on USE. A handle that leaks through a log, a proxy trace, a crash dump or a
+    /// caller's own bug is a bearer credential for the resource behind it: an update task carries another
+    /// caller's buffered rows and its conflict detail carries live table values, and a transaction session
+    /// carries an open transaction another caller's writes are inside. Comparing the identity closes the
+    /// gap between "cannot be found" and "cannot be used" (CWE-639, CWE-862, CWE-863).
+    /// </para>
+    /// <para>
+    /// <b>THE COMPARISON IS AGAINST THE SAME SOURCE THE ATTRIBUTION USED</b> - <see cref="Resolve"/>, and
+    /// therefore the subject claim - so the check cannot disagree with the quota about who a caller is.
+    /// One resolver, one notion of identity.
+    /// </para>
+    /// <para>
+    /// ORDINAL, BECAUSE A SUBJECT IS MACHINE INPUT. A case-insensitive or culture-aware comparison would
+    /// admit a caller whose subject differs from the owner's only in casing, which is a different caller as
+    /// far as the roster and the grant matrix are concerned.
+    /// </para>
+    /// <para>
+    /// <b>AN UNATTRIBUTED HANDLE IS OWNED BY UNATTRIBUTED CALLERS, NOT BY EVERYONE.</b> The sentinel
+    /// compares equal only to itself, so a host without an accessor - a test constructing a registry
+    /// directly - keeps working exactly as before, while an authenticated caller cannot reach a handle
+    /// created outside a request and an unauthenticated path cannot reach an authenticated caller's.
+    /// </para>
+    /// <para>
+    /// WHAT THIS MEMBER DELIBERATELY DOES NOT DO IS DECIDE THE OUTCOME. A caller-facing lookup answers a
+    /// foreign handle exactly as it answers an unknown one, so the two are indistinguishable and no caller
+    /// can use the difference to learn that a handle exists. That collapse belongs at the lookup, which is
+    /// where the not-found answer is also produced.
+    /// </para>
+    /// </remarks>
+    internal bool IsCaller(string attributedPrincipal)
+    {
+        ArgumentNullException.ThrowIfNull(attributedPrincipal);
+
+        return string.Equals(attributedPrincipal, Resolve(), StringComparison.Ordinal);
     }
 }
 

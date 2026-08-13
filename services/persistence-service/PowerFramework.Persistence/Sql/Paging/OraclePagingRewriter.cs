@@ -25,12 +25,7 @@
 //  changelog entry and no other document that could adjudicate a disagreement - which is why every
 //  behavioural claim below carries the line it was taken from.
 //
-//  RULES POSITION. No user rules were provided for this repository: the rules document contains
-//  exactly one line saying so, and it was read to its end. Nothing is invented or back-filled from
-//  convention in their place, and the absence is not treated as licence to lower the bar. The
-//  binding constraints are the enterprise-standard baseline together with the named non-rule
-//  constraints, and every non-obvious decision below cites the constraint that drives it (C-K).
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  THE LEGACY ARM, TRANSCRIBED VERBATIM [n_cst_thread_task_sqlquery.sru:L386-L395]
 //  --------------------------------------------------------------------------------------------
 //      L386  case TransObject.DBT_ORACLE
@@ -232,14 +227,11 @@
 //      the application project already grants internal access, and every branch below is reachable from
 //      a table-driven theory whose entire fixture is strings - no database, no connection, no client
 //      package and no fixture object of any kind (C-H).
-//      STATE, STATED PLAINLY: THAT THEORY IS PLANNED AND DOES NOT EXIST. No test in that project
-//      references this class, the SQL Server sibling or PagingRewriteDispatcher, and the project does
-//      not currently build because the application project it references has no entry point. The
-//      triple-nested form, its three nesting aliases and the empty-order-by substitution below are
-//      therefore UNPINNED. An earlier revision of this header read as though the tests existed; that
-//      reading is withdrawn. docs/PARITY.md section 6.2 lists the required rows and the rule that every
-//      expectation be derived from the LEGACY generator at n_cst_thread_task_sqlquery.sru:L392-L398
-//      rather than from this file.
+//      WHERE THEY LIVE: OraclePagingRewriterTests.cs holds the matrix for this class, and
+//      PagingDispatcherAndCountTests.cs covers its selection through PagingRewriteDispatcher. The
+//      triple-nested form, its three nesting aliases and the empty-order-by substitution below are all
+//      pinned there. docs/PARITY.md section 6.2 states the rule that every expectation be derived from
+//      the LEGACY generator at n_cst_thread_task_sqlquery.sru:L392-L398 rather than from this file.
 // ==============================================================================================
 
 using System.Globalization;
@@ -544,7 +536,7 @@ internal sealed class OraclePagingRewriter : IPagingRewriter
         // Arithmetic is done in `long`, the mapping the transformation plan gives PowerBuilder's
         // `long`, and it is CHECKED.
         //
-        // THE UNCHECKED READING WAS WRONG AND A REVIEW FOUND IT. The argument used to run: the oracle
+        // THE UNCHECKED READING IS WRONG. The argument for it runs: the oracle
         // has no overflow check, so adding one invents a failure mode the specification does not have.
         // It does not hold, for two reasons. First, an unchecked product does not preserve legacy
         // behaviour - it INVENTS behaviour of its own: `PageSize * PageIndex` wraps to a NEGATIVE

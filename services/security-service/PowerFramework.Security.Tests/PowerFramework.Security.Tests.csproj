@@ -32,14 +32,14 @@
         It is the property xunit.v3 itself validates: the package's build targets raise a hard
         error when the effective value is anything other than Exe, because a v3 test assembly runs
         as its own process instead of being loaded as a library the way a v2 one was. Measured on
-        this toolchain, SDK 10.0.302 with the pinned test SDK, that test SDK also forces the value
+        this toolchain, the pinned SDK with the pinned test SDK, that test SDK also forces the value
         from its own targets, so today the explicit declaration is belt as well as braces. It stays
         regardless, because this project must satisfy the test framework's contract on its own
         terms rather than depend on a transitive package continuing to set it: without the
         declaration the project is one package upgrade or one asset restriction away from building
         as a library that discovers no test at all, which would disable the coverage gate silently.
 
-      * Hand authored, never templated. In SDK 10.0.302 there is no `dotnet new xunit3` template,
+      * Hand authored, never templated. In the pinned SDK there is no `dotnet new xunit3` template,
         and `dotnet new xunit` scaffolds the v2 line with an older test SDK and older coverage
         packages. Any templated output must be discarded rather than patched.
 

@@ -179,12 +179,7 @@
 //  warnings-as-errors none could be. The shouty spellings that DO appear in this file appear only
 //  inside comments, where they quote the .proto's own member names for traceability.
 //
-//  RULES POSITION. review_rules returns exactly one line, "No user rules provided.", so NO
-//  user-specified rule governs this file and none is invented here. The enterprise-standard
-//  baseline applies in their place, and the binding constraints are the refactor plan's own
-//  non-rule inventory; those that bear on this file are cited inline at the point each is
-//  discharged: C-B, C-C, C-D, C-E, C-H, C-I, C-K and risk R9.
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  C-F SELF-AUDIT: no key, credential, token, password, connection string or secret-shaped
 //  placeholder appears anywhere in this file, in any member, default, message or comment.
 // ==============================================================================================

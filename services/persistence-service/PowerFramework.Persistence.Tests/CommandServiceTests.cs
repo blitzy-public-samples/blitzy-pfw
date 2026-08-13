@@ -56,6 +56,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using PowerFramework.Persistence.Configuration;
 using PowerFramework.Persistence.Grpc;
+using PowerFramework.Persistence.Runtime;
 using PowerFramework.Persistence.Tasks;
 using PowerFramework.Persistence.Tasks.TaskProxies;
 using PowerFramework.Persistence.Transactions;
@@ -81,7 +82,7 @@ public sealed class CommandServiceTests
     /// The call context every handler in this suite is invoked with.
     /// </summary>
     /// <remarks>
-    /// <b>A REAL CONTEXT RATHER THAN <c>null!</c>, BECAUSE THE HANDLERS NOW READ IT.</b> Every C-07 and
+    /// <b>A REAL CONTEXT RATHER THAN <c>null!</c>, BECAUSE THE HANDLERS READ IT.</b> Every C-07 and
     /// C-08 handler validates its context and threads <c>context.CancellationToken</c> into the provider
     /// call, so passing null would fail the argument guard before reaching the behaviour under test - and
     /// passing a non-cancellable stand-in would hide the fact that the token is threaded at all. One shared
@@ -176,6 +177,21 @@ public sealed class CommandServiceTests
                 _autoCommit = value;
                 AutoCommitWrites.Add(value);
             }
+        }
+
+        /// <summary>Moves the auto-commit mode and answers success, because this double opens no transaction.</summary>
+        /// <param name="autoCommit">The mode to put in force.</param>
+        /// <returns>Always a succeeded state.</returns>
+        /// <remarks>
+        /// ROUTED THROUGH THE PROPERTY so whatever the property records still records. A double with no
+        /// provider behind it has nothing the transition can fail on, which is the contract's own
+        /// nothing-to-do case.
+        /// </remarks>
+        public SqlState TrySetAutoCommit(bool autoCommit)
+        {
+            AutoCommit = autoCommit;
+
+            return SqlState.Succeeded();
         }
 
         public void ApplyConnectionFields(in TransactionData descriptor) => DbmsValue = descriptor.Dbms;
@@ -520,7 +536,7 @@ public sealed class CommandServiceTests
                 Clock,
                 new PooledTransactionActivator(() => Engine, Clock));
 
-            // The two registries now carry a ceiling and an idle window, so both take the bound settings
+            // The two registries carry a ceiling and an idle window, so both take the bound settings
             // and the harness's fake clock - which is what lets a test drive expiry without waiting.
             IOptions<PersistenceOptions> handleOptions = Options.Create(new PersistenceOptions());
 
@@ -941,7 +957,7 @@ public sealed class CommandServiceTests
     /// <para>
     /// BOTH arms are asserted because both are shipped: the container image is built
     /// <c>-c Release</c>, while the documented per-service gate's bare <c>dotnet test</c> builds Debug.
-    /// Asserting only the Release arm - as this row previously did - made the suite pass under the
+    /// Asserting only the Release arm makes the suite pass under the
     /// whole-solution Release sweep and fail under the documented per-service command, for a
     /// difference the port intends.
     /// </para>
@@ -1006,11 +1022,11 @@ public sealed class CommandServiceTests
     /// answer the legacy gave.
     /// </para>
     /// <para>
-    /// 🔴 <b>A BOUNDARY BLANKNESS REFUSAL WAS ADDED HERE AND HAS BEEN WITHDRAWN, AND THIS ROW IS WHAT
-    /// STOPS IT COMING BACK.</b> It answered <c>E_INVALID_SQL</c> with its own diagnostic for a
+    /// 🔴 <b>A BOUNDARY BLANKNESS REFUSAL IS THE TEMPTING ADDITION HERE, AND THIS ROW IS WHAT KEEPS IT
+    /// OUT.</b> It would answer <c>E_INVALID_SQL</c> with its own diagnostic for a
     /// whitespace-only statement, on the reasoning that submitting one is a success that did nothing and
     /// an actionable refusal is better. That reasoning is a JUDGEMENT ABOUT THE LEGACY'S DESIGN, not a
-    /// statement about its behaviour, and acting on it made the port refuse input the legacy accepts.
+    /// statement about its behaviour, and acting on it makes the port refuse input the legacy accepts.
     /// Constraint C-B and AAP G2 forbid that in either direction: a port that is stricter than its
     /// oracle has changed behaviour exactly as much as one that is laxer, and "the legacy defect is
     /// documented, never corrected" is the whole posture of this refactor.
@@ -1886,8 +1902,8 @@ public sealed class CommandServiceTests
     /// <remarks>
     /// <para>
     /// <b>THE HALF OF THE REDACTION CLAIM THE STATEMENT FIELD ALONE COULD NOT ESTABLISH.</b> The message
-    /// field used to be copied through verbatim on the reasoning that it is opaque display text a consumer
-    /// must not parse. Opacity describes how a consumer may READ a field; it says nothing about what the
+    /// field invites being copied through verbatim, on the reasoning that it is opaque display text a
+    /// consumer must not parse. Opacity describes how a consumer may READ a field; it says nothing about what the
     /// provider PUTS in it, and SQLite routinely puts the caller's own data there - a uniqueness violation
     /// names the duplicated column, a constraint or type failure quotes the offending value, a bad
     /// identifier echoes the text the caller sent. The legacy could publish that safely because it
@@ -2004,6 +2020,92 @@ public sealed class CommandServiceTests
 
         Assert.Equal(WireRetCode.EInvalidTransaction, response.Status.RetCode);
         Assert.Null(response.Task);
+    }
+
+    /// <summary>
+    /// A caller that does not own a command task can neither use it nor release it, and cannot tell either
+    /// refusal from one naming a task this service never issued.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A HANDLE IS UNGUESSABLE, WHICH IS NOT THE SAME AS OWNER-BOUND.</b> Unguessable bounds DISCOVERY
+    /// and not USE: a handle that escapes through a log record, a proxy trace or the caller's own bug is
+    /// otherwise a bearer credential for the command behind it - and a command task EXECUTES STATEMENTS
+    /// inside another caller's transaction, so a foreign use here writes, and a foreign release disposes a
+    /// task its owner is mid-execution on (CWE-639, CWE-862, CWE-863).
+    /// </para>
+    /// <para>
+    /// <b>THE SECOND CALLER IS PRODUCED BY RE-ATTRIBUTING THE ENTRY, AND THAT IS THE SAME COMPARISON.</b>
+    /// This harness constructs the service directly, so there is no ambient request to read a principal
+    /// from and every task is attributed to the unattributed sentinel. Ownership is decided by comparing
+    /// the STORED principal against the RESOLVED caller, so moving the stored value away from the caller
+    /// exercises the same code path a second caller's request would, without a host.
+    /// <c>HandleOwnershipTests</c> drives the comparison from the other side by varying the ambient
+    /// caller, and additionally proves the deployed host supplies one.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AForeignCallerCanNeitherUseNorReleaseAnotherCallersCommandTask()
+    {
+        Harness harness = new();
+        TaskHandle handle = await CreateTask(harness);
+        TaskHandle unknownHandle = new() { TaskId = "no-such-command-task" };
+
+        Assert.True(harness.Tasks.TryResolve(handle, out CommandTask? task));
+        Assert.NotNull(task);
+        Assert.Equal(HandlePrincipalResolver.Unattributed, task.Principal);
+
+        // Charged to somebody else from here on.
+        task.Principal = "powerframework-another-caller";
+
+        // --- USE: the registry refuses, and refuses as it does for an unknown handle. ---------------
+        Assert.False(harness.Tasks.TryResolve(handle, out CommandTask? foreignResolve));
+        Assert.Null(foreignResolve);
+        Assert.False(harness.Tasks.TryResolve(unknownHandle, out CommandTask? unknownResolve));
+        Assert.Null(unknownResolve);
+
+        // --- USE, over the wire: a per-task mutator answers exactly as it does for an unknown task. --
+        SetCommandSqlResponse foreignSet = await harness.Commands.SetSql(
+            new SetCommandSqlRequest { Task = handle, Sql = "DELETE FROM COMPANY" },
+            Context);
+
+        SetCommandSqlResponse unknownSet = await harness.Commands.SetSql(
+            new SetCommandSqlRequest { Task = unknownHandle, Sql = "DELETE FROM COMPANY" },
+            Context);
+
+        Assert.Equal(unknownSet.Status.RetCode, foreignSet.Status.RetCode);
+        Assert.Equal(unknownSet.Status.ErrorText, foreignSet.Status.ErrorText);
+
+        // --- RELEASE: refused the same way, and the task SURVIVES the attempt. ----------------------
+        ReleaseCommandTaskResponse foreignRelease = await harness.Commands.ReleaseCommandTask(
+            new ReleaseCommandTaskRequest { Task = handle },
+            Context);
+
+        ReleaseCommandTaskResponse unknownRelease = await harness.Commands.ReleaseCommandTask(
+            new ReleaseCommandTaskRequest { Task = unknownHandle },
+            Context);
+
+        Assert.Equal(unknownRelease.Status.RetCode, foreignRelease.Status.RetCode);
+        Assert.Equal(unknownRelease.Status.ErrorText, foreignRelease.Status.ErrorText);
+        Assert.Equal(1, harness.Tasks.Count);
+
+        // --- THE POSITIVE ARM, so a registry refusing everybody cannot pass this row. ---------------
+        task.Principal = HandlePrincipalResolver.Unattributed;
+
+        Assert.True(harness.Tasks.TryResolve(handle, out _));
+
+        SetCommandSqlResponse mineSet = await harness.Commands.SetSql(
+            new SetCommandSqlRequest { Task = handle, Sql = "DELETE FROM COMPANY" },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, mineSet.Status.RetCode);
+
+        ReleaseCommandTaskResponse mineRelease = await harness.Commands.ReleaseCommandTask(
+            new ReleaseCommandTaskRequest { Task = handle },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, mineRelease.Status.RetCode);
+        Assert.Equal(0, harness.Tasks.Count);
     }
 
     /// <summary>
@@ -2162,10 +2264,10 @@ public sealed class CommandServiceTests
         Assert.NotSame(firstTask.Worker, secondTask.Worker);
 
         // Both run against the SAME session object, and therefore against its ONE gate - which is what
-        // serializes their executions against the single borrowed connection. The gate is now compared
-        // DIRECTLY as well: it became a TransactionGate - a class - when the streaming query needed to hold
-        // it across an await, and a reference comparison on it is the strongest available statement that the
-        // two tasks are genuinely serialized rather than merely co-located on one session.
+        // serializes their executions against the single borrowed connection. The gate is compared
+        // DIRECTLY as well: it is a TransactionGate - a class, because the streaming query has to hold
+        // it across an await - and a reference comparison on it is the strongest available statement that
+        // the two tasks are genuinely serialized rather than merely co-located on one session.
         Assert.Same(firstTask.Session, secondTask.Session);
         Assert.Same(firstTask.Session.Gate, secondTask.Session.Gate);
     }
@@ -2373,7 +2475,7 @@ public sealed class CommandServiceTests
     {
         // THE ORDERING CASE, AND THE ONLY WAY TO OBSERVE IT FROM OUTSIDE. The purge's teardown reaches the
         // worker-side host, so a create injected from there runs at the exact instant EndSession is walking
-        // this registry. If the mark were written AFTER the walk - which is what this handler used to do -
+        // this registry. If the mark were written AFTER the walk - the obvious ordering -
         // the injected create would see a live session, publish a task, and that task would survive its own
         // session holding a transaction the pool has taken back.
         Harness harness = new();
@@ -2500,9 +2602,9 @@ public sealed class CommandServiceTests
     // ---------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// THE DEFECT, IN ONE CASE. A prefixed statement reaches the provider WITHOUT its selector, and the
-    /// mode reaches the engine instead - where previously the selector reached the provider as statement
-    /// text and the mode reached nothing.
+    /// THE DEFECT THIS RULES OUT, IN ONE CASE. A prefixed statement reaches the provider WITHOUT its
+    /// selector, and the mode reaches the engine instead - where a naive split sends the selector to the
+    /// provider as statement text and the mode nowhere.
     /// </summary>
     /// <remarks>
     /// <para>

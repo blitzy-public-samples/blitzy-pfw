@@ -1,23 +1,26 @@
 // ==================================================================================================
 //  TokenIssuancePermissionMatrixTests - WHO MAY ASK FOR WHAT, ON THE SOLE ISSUER
 //  ------------------------------------------------------------------------------------------------
-//  WHAT THIS FILE GUARDS, STATED AS THE DEFECT IT CLOSES
+//  WHAT THIS FILE GUARDS
 //
-//  Issuance used to check two things and then grant everything: that the caller's certificate common
-//  name matched the claimed subject, and that the requested audience was a member of the global
-//  audience roster. Every requested scope was then granted verbatim. Since all four service identities
-//  are on that roster, ANY caller whose certificate chained to the configured authority could mint
-//  itself a token addressed to ANY service in the system, carrying ANY scope set it chose to name - a
-//  confused deputy sitting in the middle of the token topology, and the exact opposite of what a sole
-//  issuer exists for (CWE-862 missing authorization, CWE-863 incorrect authorization).
+//  AUTHENTICATING A CALLER IS NOT AUTHORISING IT. An issuer that checks only that the claimed subject
+//  matches the presented credential and that the audience is one it serves would grant every requested
+//  scope verbatim - and since all four service identities are on the audience roster, any caller this
+//  service can authenticate could mint itself a token addressed to ANY service, carrying ANY scope set
+//  it chose to name. That is a confused deputy in the middle of the token topology and the exact
+//  opposite of what a sole issuer exists for (CWE-862 missing authorization, CWE-863 incorrect
+//  authorization).
 //
-//  The issuer now consults a PERMISSION MATRIX - `Security:Callers` - with one grant per
+//  So issuance consults a PERMISSION MATRIX - `Security:Callers` - with one grant per
 //  (caller, audience) pair, and:
 //
 //    * refuses a pairing the deployment did not grant, with the SAME outcome as an audience this issuer
 //      does not serve at all, so the response cannot be used to enumerate the roster; and
 //    * grants the INTERSECTION of the requested scope set with that grant's permitted set, reporting
-//      the granted value to the caller and stamping the same string into the token's scope claim.
+//      the granted value to the caller and stamping the same string into the token's scope claim, and
+//      refusing outright when that intersection is empty.
+//
+//  These rows are what keep that matrix load-bearing rather than decorative.
 //
 //  WHY THE ROSTER IS A MATRIX AND NOT TWO LISTS, WHICH ONE ROW BELOW EXISTS ENTIRELY TO PROVE
 //  ------------------------------------------------------------------------------------------------
@@ -179,10 +182,11 @@ public sealed class TokenIssuancePermissionMatrixTests
     /// audience names and reading which refusal came back.
     /// </para>
     /// <para>
-    /// WHERE THE SAMENESS BELONGS, AND WHY THIS ROW NO LONGER ASSERTS IT HERE. An earlier revision asserted
-    /// the two OUTCOMES equal. The published document settles it the other way: it declares these as case 2
-    /// and case 3 of four DISTINCT decisions that deliberately answer the same MESSAGE, and states that the
-    /// sameness belongs to the response - "so an operator reading this service's own records can still tell a
+    /// WHERE THE SAMENESS BELONGS, AND WHY THIS ROW DELIBERATELY DOES NOT ASSERT IT HERE. Asserting the two
+    /// OUTCOMES equal is the tempting reading, and the published document settles it the other way: it
+    /// declares these as case 2 and case 3 of four DISTINCT decisions that deliberately answer the same
+    /// MESSAGE, and states that the sameness belongs to the response - "so an operator reading this service's
+    /// own records can still tell a
     /// roster gap from a matrix gap - one is fixed on the audience roster and the other in the authorization
     /// matrix" [security.v1.yaml, the 403 on POST /v1/tokens]. Collapsing the two outcomes would satisfy a
     /// naive reading of "indistinguishable" while destroying the only diagnostic that sends an operator to

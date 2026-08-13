@@ -100,8 +100,8 @@ export const PARTIAL_RUN_VARIABLE: string = 'E2E_ALLOW_MISSING_ISSUANCE_IDENTITY
  *
  * FOUR NAMES AND NOT TWO, BECAUSE THE OPERATION ACCEPTS TWO SCHEMES. Either pair
  * on its own is sufficient: `POST /v1/tokens` declares `clientCredential` and
- * `mutualTls` as ALTERNATIVES. This list used to name only
- * `SECURITY_MTLS_CERT_PATH` and `SECURITY_MTLS_KEY_PATH`, so a run that had
+ * `mutualTls` as ALTERNATIVES. Naming only
+ * `SECURITY_MTLS_CERT_PATH` and `SECURITY_MTLS_KEY_PATH` here would mean a run that had
  * provisioned an issuance roster entry — the documented path, and the only one
  * that needs no certificate material at all — was told it could obtain no token
  * and either failed its setup or skipped every authenticated workflow.

@@ -2,7 +2,7 @@
 //  AssertGuardTests.cs - THE SIX ASSERTION GUARDS, AND THE TRI-STATE HOLE THEY INHERIT
 //  ------------------------------------------------------------------------------------------------
 //  UNIT UNDER TEST   PowerFramework.Shared.Diagnostics.Assertions - the six Assert guard overloads
-//  ORACLES           ws_objects/pfw.common.pbl.src/assert.srf:L89-L127   the six guards themselves
+//  ORACLES           ws_objects/pfw.common.pbl.src/assert.srf:L89-L124   the six guards themselves
 //                    ws_objects/pfw.common.pbl.src/assert.srf:L16-L87    AssertFailed, the producer
 //                    ws_objects/pfw.shared.pbl.src/issucceeded.srf       the numeric guard predicate
 //                    ws_objects/pfw.shared.pbl.src/isvalidobject.srf     the object guard predicate
@@ -85,13 +85,7 @@
 //  and the unit under test is always spelled `Assertions`.
 //
 //  ------------------------------------------------------------------------------------------------
-//  RULES POSITION, STATED SO IT IS NOT MISTAKEN FOR AN OMISSION
-//  ------------------------------------------------------------------------------------------------
-//  review_rules returns exactly "No user rules provided." NO USER RULE GOVERNS THIS FILE. Nothing is
-//  invented or back-filled from convention in their place, and the absence is not read as licence to
-//  lower the bar. The binding constraints are AAP 0.7.2, the enterprise-standard baseline, and
-//  AAP 0.7.3, the twelve non-rule constraints. Four bind this file and are cited where they apply:
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //      C-B  Replicate legacy behaviour, including defects; correct nothing. Every expectation below
 //           that looks wrong carries a comment saying it is deliberately preserved legacy behaviour,
 //           so a future reader cannot mistake it for a mistake and "fix" it.
@@ -817,7 +811,8 @@ public class AssertGuardTests
     /// <remarks>
     /// <para>
     /// The exactness matters because the legacy consumer discriminates on the identity of the thrower
-    /// [pfw.sra:L114] and the managed analogue of that test is catching this precise type. A thrown
+    /// [ws_objects/pfw.pbl.src/pfw.sra:L114 - the framework application, not the same-named packager
+    /// object] and the managed analogue of that test is catching this precise type. A thrown
     /// subclass, or a base <see cref="Exception"/>, would pass a lenient catch and then fail the
     /// consumer's discrimination.
     /// </para>
@@ -931,11 +926,11 @@ public class AssertGuardTests
     /// <para>
     /// THE TERMINATION SEAM IS NOT REACHED - not on the non-firing path, and not on the firing path
     /// either. The legacy consumer decodes the payload and then executes <c>HALT CLOSE</c>
-    /// [pfw.sra:L143], but that terminating half belongs to the Gateway composition root and is
-    /// deliberately NOT reproduced in this layer: this project RAISES and the composition root
-    /// TERMINATES. The assertion is that a firing guard produces a CATCHABLE exception and execution
-    /// continues afterwards - if the seam lived here, the process would be gone and the line after the
-    /// catch would never run.
+    /// [ws_objects/pfw.pbl.src/pfw.sra:L143], but that terminating half belongs to the Gateway
+    /// composition root and is deliberately NOT reproduced in this layer: this project RAISES and the
+    /// composition root TERMINATES. The assertion is that a firing guard produces a CATCHABLE
+    /// exception and execution continues afterwards - if the seam lived here, the process would be gone
+    /// and the line after the catch would never run.
     /// </para>
     /// </remarks>
     [Fact]

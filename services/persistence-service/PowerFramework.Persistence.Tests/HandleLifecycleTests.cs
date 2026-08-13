@@ -687,6 +687,21 @@ internal sealed class LifecycleEngine : ITransactionEngine
     /// <inheritdoc/>
     public bool AutoCommit { get; set; }
 
+    /// <summary>Moves the auto-commit mode and answers success, because this double opens no transaction.</summary>
+    /// <param name="autoCommit">The mode to put in force.</param>
+    /// <returns>Always a succeeded state.</returns>
+    /// <remarks>
+    /// ROUTED THROUGH THE PROPERTY so whatever the property records still records. A double with no
+    /// provider behind it has nothing the transition can fail on, which is the contract's own
+    /// nothing-to-do case.
+    /// </remarks>
+    public SqlState TrySetAutoCommit(bool autoCommit)
+    {
+        AutoCommit = autoCommit;
+
+        return SqlState.Succeeded();
+    }
+
     /// <inheritdoc/>
     public void ApplyConnectionFields(in TransactionData descriptor) => Dbms = descriptor.Dbms;
 

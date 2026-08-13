@@ -2197,8 +2197,8 @@ public sealed class OraclePagingRewriterTests
     /// </para>
     /// <para>
     /// The literal test is the precise one: <c>const</c> fields are reflected as static fields, so
-    /// an assertion of "no fields whatsoever" would fail against the five sentinel constants that
-    /// SHOULD be there. What must not exist is a static field that can be WRITTEN.
+    /// an assertion of "no fields whatsoever" would fail against the five compile-time constants that
+    /// SHOULD be there - this arm's four sentinel aliases plus its absent-order-by substitution. What must not exist is a static field that can be WRITTEN.
     /// </para>
     /// </remarks>
     [Fact]

@@ -97,16 +97,6 @@
 //  either sibling: a message named for a deferred capability is their finding to report, not this
 //  file's, and a class named RetCodeMapper is this file's regardless of what it is named after.
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  review_rules returns exactly "No user rules provided.", verified for this file. NO user-specified
-//  rule governs it and none is invented here. The enterprise-standard baseline of AAP 0.7.2 applies
-//  in its place and is honoured: nullable and warnings-as-errors are inherited from the
-//  repository-root Directory.Build.props and are never relaxed - there is no NoWarn, no #pragma and
-//  no suppression anywhere below, and every reflection result that the framework types as nullable
-//  is handled explicitly rather than silenced (constraint C-H). No secret, key, token or credential
-//  literal appears in this file in any form; it needs none, and it asserts on shapes rather than on
-//  values throughout.
 // ==================================================================================================
 
 using System.Reflection;
@@ -1101,7 +1091,7 @@ public sealed class ContractsCarryNoBehaviourTests
 
                 {ContractsAssemblyName} carries NO BEHAVIOUR - it is the boundary definition, not a
                 shared-code back door (AAP 0.4.2.3) - and all four services reference it, so this
-                method is now shared code across four service boundaries.
+                method is shared code across four service boundaries.
 
                 protoc emits generated messages as `partial` classes, so this is most likely a
                 hand-written partial declaration. Move it out:
@@ -1393,12 +1383,12 @@ public sealed class ContractsCarryNoBehaviourTests
                     // Descriptor property - report PropertyName "Descriptor_", and every other field
                     // reports the plain PascalCase form.
                     //
-                    // The previous rule permitted `Foo`, `Foo_`, `HasFoo` and `HasFoo_` for EVERY
-                    // field, which was four spellings where the generator emits at most two. That
-                    // accepted `Descriptor` on the two mangled messages, where protoc emits only
-                    // `Descriptor_`, and accepted a trailing-underscore spelling on all 244 messages,
-                    // where protoc emits it on two - so a hand-written `RowCount_` property would have
-                    // passed. Deriving the name removes the guess entirely.
+                    // PERMITTING `Foo`, `Foo_`, `HasFoo` and `HasFoo_` for EVERY field would be four
+                    // spellings where the generator emits at most two. It would accept `Descriptor` on the
+                    // two mangled messages, where protoc emits only `Descriptor_`, and would accept a
+                    // trailing-underscore spelling on every authored message, where protoc emits it on two
+                    // - so a hand-written `RowCount_` property would pass. Deriving the name from the
+                    // descriptor removes the guess entirely.
                     permitted.Add(field.PropertyName);
 
                     if (GeneratesTheHasAndClearForms(field))
@@ -1466,8 +1456,8 @@ public sealed class ContractsCarryNoBehaviourTests
     /// SELF-REFERENTIAL POSITIONS ARE MODELLED RATHER THAN LOOSENED. <c>Clone</c> returns the message
     /// type, and <c>Equals</c> and <c>MergeFrom</c> each have a strongly typed overload taking it, so
     /// those positions cannot be written as a fixed <see cref="Type"/>. Encoding them as
-    /// <see langword="null"/> and substituting the type under test keeps the assertion exact for all
-    /// 244 messages from one table, instead of degrading to "some overload with the right name".
+    /// <see langword="null"/> and substituting the type under test keeps the assertion exact for every
+    /// generated message from one table, instead of degrading to "some overload with the right name".
     /// </para>
     /// <para>
     /// Measured against every message in the assembly, all nine present and none extra. The two

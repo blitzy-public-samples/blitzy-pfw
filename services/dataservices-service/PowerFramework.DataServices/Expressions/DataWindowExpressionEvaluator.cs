@@ -2022,6 +2022,7 @@ public sealed class DataWindowExpressionEvaluator
     /// <param name="host">The DataWindow host.</param>
     /// <exception cref="ArgumentNullException"><paramref name="host"/> is <see langword="null"/>.</exception>
     /// <remarks>
+    /// <para>
     /// BLOCKED IS THE HONEST DEFAULT, not a degraded one. AAP 0.6.5 records pinyin first-letter matching
     /// as the single genuine parity risk in the in-scope set, and the risk is precisely the LOOKUP TABLE
     /// AND THE MATCHING RULE: both exist only inside the closed <c>pfw.dll</c>, with no table, data file
@@ -2037,6 +2038,7 @@ public sealed class DataWindowExpressionEvaluator
     /// exist. An evaluator built without a characterized table therefore reports the gap - as a structured
     /// error, from <see cref="PinyinFirstLetterMatcher.CreateUnavailableExpressionError"/> - rather than
     /// approximating a filter that would return subtly different rows.
+    /// </para>
     /// </remarks>
     public DataWindowExpressionEvaluator(DataWindowServiceHost host)
         : this(host, PinyinFirstLetterMatcher.Blocked)
@@ -2804,6 +2806,7 @@ public sealed class DataWindowExpressionEvaluator
     /// Splits an expression into tokens.
     /// </summary>
     /// <param name="expression">The expression, already normalised and non-empty.</param>
+    /// <param name="boundValues">The ordered values bound to the statement.</param>
     /// <param name="tokens">The tokens, terminated by an <see cref="TokenKind.End"/> token.</param>
     /// <param name="error">The diagnostic when the return is <see langword="false"/>.</param>
     /// <param name="position">The one-based position of the offending character.</param>

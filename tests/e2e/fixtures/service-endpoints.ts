@@ -45,13 +45,13 @@
  * Kestrel disables HTTP/2 without application-protocol negotiation. Security is
  * REST-only and Gateway is the REST ingress, so both pin `Http1`.
  *
- * EVERY PORT IN THIS MAP IS REACHABLE BY `fetch`, WHICH IS NEW. An earlier revision
- * gave Persistence and DataServices a second `Http2`-only listener each, on 5111 and
- * 5112, and those two ports answered an HTTP/1.1 `GET` with `400` — so the map had six
- * rows of which this suite could address only four. They were withdrawn because AAP
- * §0.3.2.2 assigns C-05..C-08 to 5101 and C-03/C-04 to 5102; the in-estate gRPC callers
- * — DataServices dialling Persistence, Gateway dialling DataServices — now dial those
- * same two ports over HTTP/2, and this suite still never dials either directly.
+ * EVERY PORT IN THIS MAP IS REACHABLE BY `fetch`, AND THAT IS A PROPERTY WORTH
+ * NAMING. Giving Persistence and DataServices a second `Http2`-only listener each, on
+ * 5111 and 5112, would make the map six rows of which this suite could address only
+ * four — an `Http2`-only port answers an HTTP/1.1 `GET` with `400`. It is refused
+ * because AAP §0.3.2.2 assigns C-05..C-08 to 5101 and C-03/C-04 to 5102; the in-estate
+ * gRPC callers — DataServices dialling Persistence, Gateway dialling DataServices —
+ * dial those same two ports over HTTP/2, and this suite never dials either directly.
  *
  * The band runs 5101 to 5105 and the composition root is published on 5105,
  * both preserved from the attached environment (C-L) so the environment's
@@ -184,7 +184,7 @@
  * value, which is precisely the case that must stop the run. The sibling
  * `playwright.config.ts` already behaves this way for the Gateway URL and is
  * evaluated first, so for that one variable the run ends there; these rules
- * extend the same posture to the other three, which previously had none.
+ * extend the same posture to the other three, which have no validation of their own.
  *
  * NO MESSAGE ECHOES THE CONFIGURED VALUE. A rejected address may carry
  * credentials — rule 5 exists precisely because one can — and a diagnostic
@@ -199,10 +199,9 @@
  *                     appears in the orchestration environment file
  * @param fallback the default used when the variable is unset; it is returned
  *                 as authored and needs no normalisation
- * @returns an absolute http/https base URL with no trailing slash
- * @throws Error when the variable is set to a blank, unparseable,
- *         non-http/https, credential-bearing, query-bearing or
- *         fragment-bearing value
+ * @returns an absolute https base URL with no trailing slash
+ * @throws Error when the variable is set to a blank, unparseable, non-https,
+ *         credential-bearing, query-bearing or fragment-bearing value
  */
 function resolveBaseUrl(variableName: string, fallback: string): string {
   const configured: string | undefined = process.env[variableName];
@@ -216,7 +215,7 @@ function resolveBaseUrl(variableName: string, fallback: string): string {
   if (trimmed.length === 0) {
     throw new Error(
       `${variableName} is set but empty. Unset it to use the default service ` +
-        'address, or set it to an absolute http/https URL.',
+        'address, or set it to an absolute https URL.',
     );
   }
 
@@ -226,15 +225,42 @@ function resolveBaseUrl(variableName: string, fallback: string): string {
   } catch {
     throw new Error(
       `${variableName} is not a valid absolute URL. Expected a value such as ` +
-        'http://host:port. The configured value is deliberately not quoted ' +
+        'https://host:port. The configured value is deliberately not quoted ' +
         'here, because a rejected address may carry a credential.',
     );
   }
 
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+  // 🔴 HTTPS ONLY, AND `http:` IS REJECTED RATHER THAN MERELY DISCOURAGED.
+  //
+  // This check accepted `http:` as well, and the reason that mattered differs by
+  // which base is being resolved - both reasons are stated because only the first
+  // is about secrecy and a reader should not have to guess which applies:
+  //
+  //  - GATEWAY_BASE_URL and SECURITY_BASE_URL are CREDENTIAL-BEARING. Gateway is
+  //    the sole ingress and every functional request composed onto it carries a
+  //    bearer token; the Security base carries the token issuance call itself, and
+  //    with it the `Basic` credential that authenticates that one operation. An
+  //    override to `http:` put both on the wire in cleartext, silently, because the
+  //    request still succeeds whenever something is listening.
+  //  - DATASERVICES_BASE_URL and PERSISTENCE_BASE_URL are used for the ANONYMOUS
+  //    `/health` probe only, so no credential is exposed by a plaintext scheme
+  //    there. They are still required to be `https:` for a different reason: each
+  //    of those services declares exactly ONE listener and it is TLS, so an
+  //    `http:` value addresses a listener that does not exist. That is not
+  //    hypothetical - the assertion in specs/02-authentication.spec.ts exists
+  //    because a `http:` default once did exactly that and nothing failed loudly.
+  //
+  // So the rule is uniform even though the harm is not, and NOTHING LEGITIMATE IS
+  // LOST BY IT: all four defaults below are already `https:`, and this system
+  // publishes no plaintext endpoint for any override to reach.
+  if (parsed.protocol !== 'https:') {
     throw new Error(
-      `${variableName} must use the http or https scheme, got ` +
-        `"${parsed.protocol}".`,
+      `${variableName} must use the https scheme, got "${parsed.protocol}". ` +
+        'The Gateway and Security bases carry credentials - a bearer token, and ' +
+        'the issuance credential behind it - so a plaintext scheme would put ' +
+        'them on the wire; the DataServices and Persistence bases reach a ' +
+        'health probe only, but each of those services declares a single TLS ' +
+        'listener, so a plaintext address reaches nothing at all.',
     );
   }
 
@@ -312,11 +338,11 @@ function stripTrailingSlashes(value: string): string {
  * disables HTTP/2 and logs that it has, and configured for HTTP/2 alone it answers
  * an HTTP/1.1 probe with `400`.
  *
- * An earlier revision therefore split the two surfaces across two endpoints, with
- * the gRPC contracts on a second `Http2`-only port, 5111. That was withdrawn: AAP
- * §0.3.2.2 assigns contracts C-05..C-08 to 5101, so answering them beside that port
- * rather than on it put a published contract where the map does not place it. The
- * separation of surfaces the split was also defended on is preserved without a
+ * Splitting the two surfaces across two endpoints, with the gRPC contracts on a
+ * second `Http2`-only port such as 5111, is the tempting resolution and is refused:
+ * AAP §0.3.2.2 assigns contracts C-05..C-08 to 5101, so answering them beside that
+ * port rather than on it puts a published contract where the map does not place it.
+ * The separation of surfaces such a split is also defended on is preserved without a
  * second socket — the REST health path and the gRPC contracts are still distinct
  * routes with distinct audiences and distinct readiness meanings.
  *
@@ -357,9 +383,9 @@ export const PERSISTENCE_BASE_URL: string = resolveBaseUrl(
  * **The scheme is `https` and the port is 5102, its only endpoint**, for exactly the
  * reason given on {@link PERSISTENCE_BASE_URL}: it declares `Http1AndHttp2`, so its
  * gRPC contracts answer over HTTP/2 on this same 5102 that Gateway's generated client
- * dials and that this suite probes over HTTP/1.1. An earlier revision put those
- * contracts on a separate HTTP/2 endpoint, 5112, and it was withdrawn because AAP
- * §0.3.2.2 assigns C-03 and C-04 to 5102.
+ * dials and that this suite probes over HTTP/1.1. Putting those contracts on a
+ * separate HTTP/2 endpoint such as 5112 is refused because AAP §0.3.2.2 assigns C-03
+ * and C-04 to 5102.
  */
 export const DATASERVICES_BASE_URL: string = resolveBaseUrl(
   'DATASERVICES_BASE_URL',
@@ -392,16 +418,16 @@ export const SECURITY_DEFAULT_BASE_URL: string = 'https://localhost:5104';
  *
  * ⚠ THE DEFAULT IS `https`, AND THE SCHEME IS THE ONE THE REPOSITORY BINDS ⚠
  *
- * This constant and the runtime AGREE, which is the whole point of this note, and
- * they have disagreed in BOTH directions at different times — so both superseded
- * readings are recorded below rather than left to be re-argued.
+ * This constant and the runtime AGREE, which is the whole point of this note. There
+ * is a plausible argument for disagreement in EACH direction, so both are answered
+ * below rather than left to be re-argued.
  *
  * THE ONE GENUINE TENSION, AND HOW IT IS RESOLVED (C-L against C-G). The attached
  * environment gates this service's readiness on
  * `curl -sf http://localhost:5104/health` and supplies no certificate material of
  * any kind, and AAP §0.8.3 enumerates the deviations from that contract the
- * refactor may take. That is a real argument for a cleartext listener, and it was
- * once acted on. It is outweighed, and not narrowly: this is the SOLE TOKEN
+ * refactor may take. That is a real argument for a cleartext listener. It is
+ * outweighed, and not narrowly: this is the SOLE TOKEN
  * ISSUER, and the key set at `/.well-known/jwks.json` is the whole estate's trust
  * bootstrap. Fetched in the clear it is substitutable on path — an attacker who
  * replaces it makes all three verifiers accept tokens the attacker signed, each
@@ -625,11 +651,13 @@ export const DATAWINDOW_PATH_PREFIX: string = '/v1/datawindow';
  * detail, and a spec asserting on them is asserting the boundary is
  * authenticated:
  *
- * * `401` — no client certificate presented, or the certificate is not
- *   trusted. There is no bearer-token alternative to fall back to.
- * * `403` — the certificate is trusted but the caller is not permitted the
+ * * `401` — no accepted caller credential was presented: no matching HTTP
+ *   Basic credential, and no trusted client certificate either. There is no
+ *   bearer-token alternative, because a caller cannot present a token to
+ *   obtain its first token.
+ * * `403` — the credential is accepted but the caller is not permitted the
  *   requested subject or audience; in particular the claimed `subject` does
- *   not match the identity the certificate establishes.
+ *   not match the identity that credential establishes.
  *
  * See {@link SECURITY_CLIENT_CERTIFICATE} for how a spec supplies the
  * certificate, and `fixtures/token-issuance.ts` for the precondition that
@@ -913,7 +941,7 @@ export interface ClientCertificate {
    *
    * Playwright matches this against the request origin exactly, and a client
    * certificate only exists inside a TLS handshake, so this is an `https`
-   * origin — which the default now is. It is taken from
+   * origin — which the default is. It is taken from
    * {@link SECURITY_BASE_URL} rather than hardcoded so that the certificate
    * follows wherever `SECURITY_BASE_URL` points; an override that named a
    * cleartext origin would leave the entry inert, and that is one of the three

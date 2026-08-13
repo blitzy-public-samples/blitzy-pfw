@@ -81,12 +81,7 @@
 //  publishes no latency budget, no throughput target and no availability commitment, so there is no
 //  baseline against which such a claim could even be stated.
 //
-//  RULES POSITION. No user rules were provided for this project: the rules document contains exactly
-//  one line saying so. Nothing is invented in their place; the bar applied instead is the
-//  enterprise-standard baseline - nullable and warnings-as-errors inherited from the repository root,
-//  ordinal string comparison throughout, no secret in source, and the named non-rule constraints
-//  cited above at each point they apply.
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  EVERY VALUE HERE IS SYNTHETIC (constraint C-F). No password, account name, host or connection
 //  string is copied from the legacy tree or from any catalogued in-source secret site.
 // ==================================================================================================

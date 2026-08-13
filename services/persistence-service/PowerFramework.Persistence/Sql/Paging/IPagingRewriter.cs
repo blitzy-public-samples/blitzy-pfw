@@ -23,13 +23,7 @@
 //                 document that could adjudicate a disagreement - which is why every behavioural
 //                 claim below carries the :L line reference it was taken from.
 //
-//  RULES POSITION No user rules were provided for this repository: the rules document contains
-//                 exactly one line saying so, and it was read to its end. Nothing is invented or
-//                 back filled from convention in their place, and the absence is not treated as
-//                 licence to lower the bar. The binding constraints are the enterprise standard
-//                 baseline together with the named non-rule constraints C-A through C-L, and every
-//                 non-obvious decision below cites the constraint that drives it, as C-K requires.
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  THE LEGACY OPERATION, TRANSCRIBED [n_cst_thread_task_sqlquery.sru:L303-L404]
 //  --------------------------------------------------------------------------------------------
 //      private function long _of_buildpagedsql (
@@ -771,8 +765,8 @@ internal readonly record struct PagingRewriteResult
 /// <para>
 /// <b>WHAT THIS CHANGES ABOUT OBSERVABLE BEHAVIOUR, STATED PLAINLY (C-B).</b> For every identifier the
 /// oracle could splice and produce executable SQL from, the generated statement is unchanged byte for
-/// byte - the validator accepts it and the arm emits exactly what it emitted before. What changes is that
-/// three previously-reachable outcomes are now refused: a crafted identifier that would have altered the
+/// byte - the validator accepts it and the arm emits exactly what the oracle emits. What the validator
+/// adds is that three otherwise-reachable outcomes are refused: a crafted identifier that would alter the
 /// statement, an identifier naming a column the enumerated statement does not have, and the EMPTY
 /// identifier - which the arm already turned into the malformed predicate
 /// <c>"pfwPagedSQL_OutterTbl. = "</c> in both the legacy and this port, and so never yielded executable
@@ -1101,8 +1095,8 @@ internal static class PagedUniqueIndexColumnValidator
                 string trailing = source[(separator + 1)..];
 
                 // The trailing segment maps to ITSELF rather than to the qualified spelling, because a
-                // caller who wrote the unqualified name previously had it spliced unqualified and that
-                // statement was valid. Resolving it to the qualified form would change correct output.
+                // caller who writes the unqualified name has it spliced unqualified and that statement is
+                // valid. Resolving it to the qualified form would change output that is already correct.
                 resolutions[trailing] = trailing;
             }
         }
@@ -1177,10 +1171,10 @@ internal static class PagedUniqueIndexColumnValidator
     /// <remarks>
     /// <para>
     /// <b>THE SOURCE AND THE ALIAS ARE DISTINGUISHED HERE, AND THAT DISTINCTION IS THE WHOLE FIX.</b>
-    /// This method used to add EVERY whitespace-delimited token of the term to one flat set, so
-    /// <c>c.id AS ident</c> contributed <c>c.id</c>, <c>id</c> and <c>ident</c> as though all three
-    /// named a source column. A review found the consequence: the arm replaces the sub-query's select
-    /// list with the caller's identifiers <c>[:L331, :L345]</c>, so a caller who named the ALIAS got
+    /// Adding EVERY whitespace-delimited token of the term to one flat set makes
+    /// <c>c.id AS ident</c> contribute <c>c.id</c>, <c>id</c> and <c>ident</c> as though all three
+    /// named a source column. The consequence: the arm replaces the sub-query's select
+    /// list with the caller's identifiers <c>[:L331, :L345]</c>, so a caller who named the ALIAS gets
     /// <c>SELECT ident FROM &lt;table&gt;</c> - a projection of a column the table does not have - plus
     /// a join predicate on the same non-existent name.
     /// </para>
@@ -1286,8 +1280,8 @@ internal static class PagedUniqueIndexColumnValidator
     /// </para>
     /// <para>
     /// <b>THE QUALIFIED FALLBACK ANSWERS THE CALLER'S OWN SPELLING, NOT THE MAPPED ONE.</b> A caller who
-    /// writes <c>t.id</c> against a statement that selects a bare <c>id</c> previously had <c>t.id</c>
-    /// spliced, and that statement was valid - the qualifier names a table the sub-query's FROM clause
+    /// writes <c>t.id</c> against a statement that selects a bare <c>id</c> has <c>t.id</c>
+    /// spliced, and that statement is valid - the qualifier names a table the sub-query's FROM clause
     /// still carries. Returning the map's value here would replace it with the unqualified <c>id</c> and
     /// change correct output, so the fallback deliberately confirms membership by trailing segment while
     /// splicing the full spelling the caller supplied.
@@ -1655,11 +1649,11 @@ internal static class PagingRewriteDispatcher
         // guards and after arm selection, and it is conditional on the selected arm actually splicing
         // these identifiers - see PagedUniqueIndexColumnValidator and the ordering note in the remarks.
         //
-        // IT NOW ALSO RESOLVES, and the arm is handed the RESOLVED identifiers rather than the caller's
-        // raw ones. A caller who named an output ALIAS - `SELECT c.id AS ident ...` plus a unique-index
-        // column of `ident` - previously reached the arm unchanged and produced `SELECT ident FROM
+        // IT ALSO RESOLVES, and the arm is handed the RESOLVED identifiers rather than the caller's
+        // raw ones. Without that, a caller who named an output ALIAS - `SELECT c.id AS ident ...` plus a
+        // unique-index column of `ident` - would reach the arm unchanged and produce `SELECT ident FROM
         // <table>`, a projection of a column no table has. Every other spelling resolves to itself
-        // character for character, so nothing that was already correct changes. See TryValidate.
+        // character for character, so nothing already correct is disturbed. See TryValidate.
         if (rewriter.ConsumesPagedUniqueIndexColumns && request.HasPagedUniqueIndexColumns)
         {
             if (!PagedUniqueIndexColumnValidator.TryValidate(

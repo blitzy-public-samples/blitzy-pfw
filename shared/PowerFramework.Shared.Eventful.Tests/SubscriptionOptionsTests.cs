@@ -30,9 +30,6 @@
 //  A single shared comparer would break one of the three. Asserted below in both directions - what each
 //  comparer accepts AND what it rejects - because "they are all ordinal" is the mistake that compiles.
 //
-//  RULES POSITION
-//  review_rules returns "No user rules provided.". Constraints cited inline: C-B (replicate behaviour),
-//  AAP 0.4.5.3 (constant values and spellings survive verbatim), C-K (document boundary decisions).
 // ==================================================================================================
 
 using System;

@@ -102,9 +102,9 @@
 //  WHAT IT CANNOT BE EVIDENCE OF. It cannot prove byte-exact agreement with the closed binary.
 //  Four observables are genuinely open and are annotated at every point of use rather than
 //  smuggled in as fact: DECISION D1's text encoding of string key material and string payloads,
-//  DECISION D3's all-zero initialization vector on the eight mode-without-IV arms, DECISION D4's
-//  choice of Base64 over hexadecimal for every string-shaped payload, and DECISION H2's CRC32
-//  variant. Adjudicating any of the four requires the behavioural oracle; this file makes each
+//  DECISION D3's REFUSAL of the eight mode-without-IV arms for vector-consuming modes and of CFB
+//  entirely, DECISION D4's choice of Base64 over hexadecimal for every string-shaped payload, and
+//  DECISION H2's CRC32 variant. Adjudicating any of the four requires the behavioural oracle; this file makes each
 //  one FAIL VISIBLY if a provider changes it unilaterally, which is the most a repository-only
 //  suite can honestly offer.
 //
@@ -694,9 +694,9 @@ public sealed class CryptoParityTests
     /// </summary>
     /// <param name="ntype">The published cipher identifier.</param>
     /// <param name="zeroVector">
-    /// When <see langword="true"/>, the initialization vector is all zero bytes - the vector
-    /// DECISION D3 synthesizes for the eight mode-without-IV arms. It is COMPUTED from the block
-    /// length, never written down as a literal.
+    /// When <see langword="true"/>, the initialization vector is all zero bytes - the degenerate value
+    /// a vector-consuming mode is most likely to be handed by accident, which is why rows exercise it
+    /// explicitly. It is COMPUTED from the block length, never written down as a literal.
     /// </param>
     /// <returns>Material whose text and byte spellings are byte-identical.</returns>
     /// <remarks>
@@ -1505,12 +1505,12 @@ public sealed class CryptoParityTests
     /// build-visible difference instead of a silent one.
     /// </para>
     /// <para>
-    /// THESE REFUSALS ARE NOW PUBLISHED RATHER THAN MERELY CORRECT, WHICH IS WHAT CHANGED AROUND THIS
-    /// TEST. The behaviour asserted here was always right, but the contract used to advertise the full
-    /// six-member set on all four keyed and signing operations - so a request naming the checksum was
-    /// schema-valid, was accepted by the calling client, and only then failed here. The promise and
-    /// the implementation disagreed, and this test was the only place the truth was recorded. The
-    /// wire contract now narrows those four operations to a `CryptoKeyedHashType` schema that omits
+    /// THESE REFUSALS ARE PUBLISHED RATHER THAN MERELY CORRECT, WHICH IS THE PROPERTY WORTH PINNING
+    /// AROUND THIS TEST. Advertising the full six-member set on all four keyed and signing operations
+    /// is the tempting shape, and it costs a promise the implementation does not keep: a request naming
+    /// the checksum would be schema-valid, would be accepted by the calling client, and would only then
+    /// fail here - leaving this test as the only place the truth was recorded. The
+    /// wire contract instead narrows those four operations to a `CryptoKeyedHashType` schema that omits
     /// the checksum, and the calling client refuses it at request construction, so the refusal happens
     /// at the earliest point it can be detected. The full six-member set remains published for the two
     /// unkeyed digest operations, where computing a checksum is well defined - as the first assertion
@@ -2051,8 +2051,8 @@ public sealed class CryptoParityTests
     //          ws_objects/pfw.shared.pbl.src/enums.sru:L936-L945
     //  ------------------------------------------------------------------------------------------
     //  WHY ROUND-TRIPPING IS THE ONLY AVAILABLE VALUE ASSERTION HERE. There is no oracle capture and
-    //  no published vector for the legacy's own key normalization, its payload text encoding or its
-    //  synthesized vector, so an expected cipher text would have to be INVENTED - and an invented
+    //  no published vector for the legacy's own key normalization or its payload text encoding, so an
+    //  expected cipher text would have to be INVENTED - and an invented
     //  cipher text asserts only that the implementation has not changed since the day the test was
     //  written, while looking like parity. This region therefore asserts round trips, agreements
     //  between shapes, and the structural rules that reflection can prove, and it fabricates nothing.
@@ -2226,8 +2226,8 @@ public sealed class CryptoParityTests
     /// </para>
     /// <para>
     /// The fully-specified shapes are used - vector and mode both supplied [n_crypto.sru:L33 and :L41
-    /// for the string-key spelling, :L37 and :L45 for the blob-key spelling] - so nothing about this
-    /// assertion depends on DECISION D3's synthesized vector.
+    /// for the string-key spelling, :L37 and :L45 for the blob-key spelling] - so this assertion never
+    /// reaches the arms DECISION D3 refuses.
     /// </para>
     /// <para>
     /// ANNOTATION, REQUIRED BY CONSTRAINT C-K: that the rendering is Base64 rather than hexadecimal is
@@ -2329,20 +2329,19 @@ public sealed class CryptoParityTests
     /// <param name="ntype">The published cipher type under test.</param>
     /// <remarks>
     /// <para>
-    /// THE PREDECESSOR OF THIS TEST IS THE CLEAREST EXAMPLE IN THE SUITE OF SELF-CONSISTENCY
-    /// MASQUERADING AS PARITY. It asserted that the vector-supplying shape and the vector-omitting
-    /// shape produced identical ciphertext when the supplied vector happened to be all zero - which
-    /// was true by construction, because the omitting shape synthesised exactly that vector and then
-    /// called the same core. Sixteen assertions per cipher type, none of which could ever have failed
-    /// while the synthesised vector matched the one the test itself built, and none of which said
-    /// anything about the closed binary.
+    /// THE ALTERNATIVE TO THIS ROW WOULD BE SELF-CONSISTENCY MASQUERADING AS PARITY, which is why the
+    /// refusal is what gets asserted. Were the port to substitute an all-zero vector, a row asserting
+    /// that the vector-supplying shape and the vector-omitting shape produce identical ciphertext under
+    /// an explicit all-zero vector would pass BY CONSTRUCTION - the omitting shape would derive exactly
+    /// that vector and call the same core. Sixteen assertions per cipher type, none of which could ever
+    /// fail, and none of which would say anything about the closed binary.
     /// </para>
     /// <para>
-    /// The vector the oracle substituted is unobservable - <c>n_crypto</c> is
+    /// The vector the oracle uses is unobservable - <c>n_crypto</c> is
     /// <c>native "pfw.dll"</c> [n_crypto.sru:L8] with no PowerScript body - and a wrong choice would
     /// round-trip perfectly while producing ciphertext the legacy could not read. The refusal is the
-    /// behaviour, and it is asserted across the same shape matrix the old test walked, so the coverage
-    /// of those eight arms is retained rather than reduced.
+    /// behaviour, and it is asserted across the FULL shape matrix, so all eight arms are covered in
+    /// every payload and key spelling.
     /// </para>
     /// </remarks>
     [Theory]

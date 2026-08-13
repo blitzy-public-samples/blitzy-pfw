@@ -7,7 +7,7 @@
 //   One route, and the standing proof that this boundary is authenticated. `/v1/ping` returns a trivial
 //   success when a valid bearer token is presented and 401 when one is not, and BOTH outcomes are the
 //   published contract rather than implementation detail
-//   [shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml:L413-L440].
+//   [shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml:L548-L583].
 //
 //   The route exists for exactly one reason, stated by the contract itself: to make the
 //   authenticated-boundary requirement TESTABLE rather than merely asserted. It is present on all four
@@ -388,7 +388,7 @@ public static class PingEndpoints
             // absent-credential case a 401 rather than a 403.
             .RequireAuthorization(GatewayScopes.Ping)
 
-            // The 403 the scope requirement can now answer.
+            // The 403 the scope requirement can answer.
             .ProducesProblem(StatusCodes.Status403Forbidden)
 
             // Published metadata. WithName supplies the contract's operationId as well as the endpoint
@@ -401,7 +401,7 @@ public static class PingEndpoints
             .Produces<PingResponse>(StatusCodes.Status200OK, MediaTypeNames.Application.Json)
             .ProducesProblem(StatusCodes.Status401Unauthorized, MediaTypeNames.Application.ProblemJson)
 
-            // AND THE 403 THE SCOPE POLICY ABOVE MAKES REACHABLE. Declared because it is now a genuine
+            // AND THE 403 THE SCOPE POLICY ABOVE MAKES REACHABLE. Declared because it is a genuine
             // outcome of this operation: an authenticated caller whose issuance roster entry never granted
             // this scope is refused here. An undeclared response on the ingress is an undocumented
             // surface, which is what C-G forbids.

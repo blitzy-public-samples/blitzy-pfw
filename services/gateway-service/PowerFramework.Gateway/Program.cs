@@ -129,6 +129,38 @@ using PowerFramework.Shared.Localization;
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 // --------------------------------------------------------------------------------------------------
+// 0. FILE-BACKED SECRET MATERIAL, RESOLVED BEFORE ANYTHING READS A SECRET
+//
+// Gateway holds no signing key and mints nothing, but it does hold one secret: the client credential it presents to Security
+// in exchange for a token. It is read through a flat configuration key whose NAME is declared on the
+// options type and whose VALUE the deployment supplies. Supplied as an environment variable, that
+// credential is exposed to `docker compose config`, `docker inspect`, `/proc/<pid>/environ` and every
+// child process; supplied as a projected file, to none of those.
+//
+// SO THE KEY ACCEPTS A `<KEY>_FILE` COMPANION, resolved here. It runs FIRST because the options graph
+// and the outbound client both read that key, and a later registration would leave one reader on the
+// environment value and the other on the file. The environment-variable form still works, so the
+// documented bring-up is unchanged. Configuration/FileBackedSecrets.cs carries the refusal rules.
+_ = builder.AddFileBackedSecrets();
+
+// --------------------------------------------------------------------------------------------------
+// 0. THE BOUNDS THIS SERVICE PLACES ON ITS OWN INGRESS, APPLIED BEFORE ANYTHING ELSE IS REGISTERED
+//
+// Decomposition creates this system's first-ever listening socket [Agent Action Plan 0.1.4]: the legacy
+// was a library that received no unsolicited request, so no legacy path could be flooded and no legacy
+// limit existed to port. The bounds registered here answer a failure mode the TRANSITION introduced,
+// which is the same reason outbound resilience is present (0.5.3) rather than a behaviour improvement
+// layered on top of it (constraint C-B). No package is added: the limiter is shared-framework code.
+//
+// It is FIRST because its transport half configures the listener, and a listener bound must be in place
+// before the host is built rather than after the first request has already been accepted without one.
+// Configuration/IngressOptions.cs states every value and argues each; Composition/IngressHardening.cs
+// is the wiring and explains the two chained limiters and why the request-layer one runs after
+// authentication. The pipeline half is installed further down, immediately after UseAuthentication.
+// --------------------------------------------------------------------------------------------------
+builder.AddIngressHardening();
+
+// --------------------------------------------------------------------------------------------------
 // 1. CONFIGURATION, VALIDATED AT STARTUP RATHER THAN AT FIRST REQUEST
 //
 // Both sections are bound through the options pattern and both are validated ON START, so a
@@ -157,20 +189,20 @@ builder.Services
     // the material the deployment actually supplied. Applied the other way round, a deployment that
     // supplied the secret correctly would be refused at startup for presenting nothing.
     //
-    // GUARDED ON PRESENCE, WHICH IS THE OTHER HALF AND WAS MISSING. An earlier form assigned
-    // unconditionally with `?? string.Empty`, so an ABSENT flat key did not leave the property alone -
-    // it OVERWROTE whatever binding had put there with empty. `Gateway:SecurityClientSecret` is a
+    // GUARDED ON PRESENCE, WHICH IS THE OTHER HALF AND THE HALF MOST EASILY OMITTED. Assigning
+    // unconditionally with `?? string.Empty` does not leave the property alone when the flat key is ABSENT -
+    // it OVERWRITES whatever binding put there with empty. `Gateway:SecurityClientSecret` is a
     // bindable leaf (the environment provider folds `Gateway__SecurityClientSecret` onto it), so a
-    // deployment could supply the credential by that route, watch the binder accept it, and be refused at
+    // deployment can supply the credential by that route, watch the binder accept it, and be refused at
     // startup for presenting nothing - with a message naming the flat key it had deliberately not used.
     // A silently discarded input is worse than a rejected one: there is nothing to read that says the
     // value was dropped.
     //
-    // THE SEMANTICS ARE NOW THE SIBLINGS' SEMANTICS RATHER THAN A THIRD SET. Security's signing-key step
+    // THE SEMANTICS ARE THE SIBLINGS' SEMANTICS RATHER THAN A THIRD SET. Security's signing-key step
     // states the rule normatively - "when the key is ABSENT this step assigns nothing at all, so material
     // that reached the options instance through another legitimate ingress survives rather than being
-    // overwritten with nothing" - and DataServices' ApplyIssuanceSecret is the same shape. Gateway was
-    // the outlier, which meant one idea had three different behaviours across three services.
+    // overwritten with nothing" - and DataServices' ApplyIssuanceSecret is the same shape. All three
+    // therefore express one idea once, rather than one idea with three different behaviours.
     //
     // PRECEDENCE IS EXPLICIT: the flat key WINS WHEN PRESENT. It is the documented route, it is the name
     // Security's issuance roster and orchestration/.env.example declare for this caller, and a deployment
@@ -488,39 +520,40 @@ builder.Services
 // AddScopeAuthorization() - so the fallback is the floor for a route that declared nothing, not the
 // ceiling for the routes that did.
 //
-// THE SUPERSEDED ARGUMENT IS RECORDED RATHER THAN DELETED, BECAUSE IT WAS WRONG IN A WAY THAT COST
-// SOMETHING. An earlier revision reasoned that Gateway needs no scope check at all: it is the INGRESS,
-// nothing inside the system calls it, so it has no internal caller roster to check against; the
-// published document applies `bearerAuth` with an EMPTY scope array throughout and declares no
-// per-operation scope; and the 403 it declares was read as a RELAY of a downstream PermissionDenied.
-// Two of those three premises are true and the conclusion still does not follow:
+// THE ARGUMENT AGAINST A SCOPE CHECK IS RECORDED RATHER THAN OMITTED, BECAUSE IT IS WRONG IN A WAY
+// THAT COSTS SOMETHING. It runs: Gateway is the INGRESS, nothing inside the system calls it, so it has
+// no internal caller roster to check against; the published document applies `bearerAuth` with an EMPTY
+// scope array throughout and declares no per-operation scope; and the 403 it declares reads as a RELAY
+// of a downstream PermissionDenied. Two of those three premises are true and the conclusion still does
+// not follow:
 //
 //   * AN EMPTY ARRAY UNDER A BEARER SCHEME CARRIES NO SCOPE INFORMATION. OpenAPI defines the
 //     security-requirement array as a scope list for `oauth2` and `openIdConnect` schemes only, so for
 //     an `http`/`bearer` scheme an empty array is the sole meaningful value. Reading it as "no scope
-//     required" was an inference from a field that cannot say otherwise.
-//   * WITHOUT A SCOPE CHECK, ONE TOKEN REACHED EVERYTHING. Any token minted for this service's
-//     audience opened /v1/ping, /v1/capabilities and all thirty-nine /v1/datawindow projections alike,
-//     the issuance roster's per-identity least privilege was enforced nowhere in this service, and the
-//     403 the contract declares was unreachable at the one boundary external clients can reach.
+//     required" is an inference from a field that cannot say otherwise.
+//   * WITHOUT A SCOPE CHECK, ONE TOKEN REACHES EVERYTHING. Any token minted for this service's
+//     audience would open /v1/ping, /v1/capabilities and all thirty-nine /v1/datawindow projections
+//     alike, the issuance roster's per-identity least privilege would be enforced nowhere in this
+//     service, and the 403 the contract declares would be unreachable at the one boundary external
+//     clients can reach.
 //
-// The document now states the requirement machine-readably as `x-required-scope` on every operation -
+// The document states the requirement machine-readably as `x-required-scope` on every operation -
 // ping, capabilities, datawindow, and `none` for the anonymous probe and the eight reserved routes -
 // so the contract and this composition root are checkable against each other rather than merely
 // consistent-sounding. Audience validation above still does its own containment work, and Security
-// still pre-grants no caller the gateway audience; those remain true and are no longer load-bearing
-// on their own.
+// still pre-grants no caller the gateway audience; both remain true, and neither is load-bearing on its
+// own once the scope policies below are in force.
 //
 // Expressed through AddAuthorizationBuilder rather than AddAuthorization(options => ...) because the
 // ASP.NET Core analyzers direct the builder form for exactly this shape (ASP0025); the registration
 // and the resulting policy are identical, so this is a spelling decision and not a behavioural one.
 //
-// AND THREE NAMED SCOPE POLICIES, BECAUSE A FALLBACK POLICY IS NOT AN ENTITLEMENT CHECK. Every
-// protected route used to require only that the caller be AUTHENTICATED, which every token this system
-// mints for Gateway's audience is - so one token reached /v1/ping, /v1/capabilities and all
-// forty /v1/datawindow operations alike. The issuance roster states least privilege per calling
-// identity and, until these policies existed, no surface in this service enforced it and the 403 the
-// contract declares was unreachable.
+// AND THREE NAMED SCOPE POLICIES, BECAUSE A FALLBACK POLICY IS NOT AN ENTITLEMENT CHECK. A fallback
+// alone requires only that the caller be AUTHENTICATED, which every token this system mints for
+// Gateway's audience is - so one token would reach /v1/ping, /v1/capabilities and all thirty-nine
+// /v1/datawindow operations alike. The issuance roster states least privilege per calling identity, and
+// without these policies no surface in this service would enforce it and the 403 the contract declares
+// would be unreachable.
 //
 // EACH POLICY NAME AND ITS REQUIRED SCOPE ARE DECLARED BY THE ROUTE THAT NEEDS THEM. This file reads
 // those constants, so a route and its requirement keep ONE spelling. The direction matters: a route
@@ -542,19 +575,19 @@ builder.Services
 // "datawindow" - because that is what each endpoint passes to RequireAuthorization, reading it from
 // GatewayScopes so a route and its policy keep one spelling.
 //
-// 🔴 A SECOND, PARALLEL FAMILY USED TO BE REGISTERED HERE AND NOTHING REQUIRED IT. Two independent
-// remediations of the same finding arrived at this composition root: this declarative requirement plus
-// handler, and three inline assertion policies registered under `gateway:scope:<name>` names taken from
-// per-endpoint ScopePolicyName constants. The merge was left half-done - the endpoints name the bare
-// scope policies, so the three `gateway:scope:*` policies were required by NO route and enforced
-// nothing, which is precisely the failure mode this file warns about two paragraphs down and the half
-// that looks correct in review. They also carried a SECOND implementation of "is this scope granted",
-// duplicating ScopeHandler's clause for clause; two copies of an authorization predicate can diverge,
-// and only one of them was reachable. The duplicate policies, their constants and their local predicate
-// are removed: what remains is the family the routes actually require.
+// 🔴 A SECOND, PARALLEL FAMILY MUST NOT BE REGISTERED HERE, AND NOTHING REQUIRES ONE. The shape that
+// arrives when two independent remediations of the same finding reach this composition root is this
+// declarative requirement plus handler ALONGSIDE inline assertion policies registered under
+// `gateway:scope:<name>` names taken from per-endpoint ScopePolicyName constants. Such a merge is
+// half-done by construction - the endpoints name the bare scope policies, so the `gateway:scope:*`
+// policies are required by NO route and enforce nothing, which is precisely the failure mode this file
+// warns about two paragraphs down and the half that looks correct in review. They also carry a SECOND
+// implementation of "is this scope granted", duplicating ScopeHandler's clause for clause; two copies of
+// an authorization predicate can diverge, and only one of them is reachable. Exactly one family is
+// registered here: the one the routes actually require.
 //
 // AUTHENTICATION IS NOT AUTHORIZATION, AND THE FALLBACK BELOW ONLY DELIVERS THE FIRST. This service's
-// published contract declares a 403 on forty operations whose shared description says the token is
+// published contract declares a 403 on forty-one operations whose shared description says the token is
 // valid but does not carry the scope the operation requires, "deliberately distinguished from 401 so a
 // caller can tell a missing credential from an insufficient one". Until these policies existed nothing
 // here read the scope claim, so every authenticated route was reachable by any token addressed to this
@@ -916,22 +949,34 @@ app.UseExceptionHandler();
 // this service was not keeping. This middleware writes the missing body through the problem-details
 // service configured above, which is why the members that customization fills reach these responses too.
 //
-// It is the narrow exception to the no-unrequested-middleware rule (constraint C-B): the requirement that
-// creates it is the published contract, and nothing else is added here - no CORS, no rate limiting, no
-// compression, no output caching. It is ordered with UseExceptionHandler and BEFORE authentication for the
-// reason both diagnostics middlewares share: each works by observing what the middlewares beneath it
-// produced, and the response they most need to observe is the challenge the authentication middleware
-// writes.
+// It is a narrow exception to the no-unrequested-middleware rule (constraint C-B): the requirement that
+// creates it is the published contract, and no CORS, no compression and no output caching are added here.
+// It is ordered with UseExceptionHandler and BEFORE authentication for the reason both diagnostics
+// middlewares share: each works by observing what the middlewares beneath it produced, and the response
+// they most need to observe is the challenge the authentication middleware writes.
 app.UseStatusCodePages();
 
 app.UseAuthentication();
+
+// THE REQUEST-LAYER INGRESS BOUND, AND ITS POSITION IS THE WHOLE REASON IT IS HERE RATHER THAN OUTERMOST.
+// Its per-caller partition is the AUTHENTICATED PRINCIPAL, which does not exist until the line above has
+// run - and partitioning on the source address instead would put an entire upstream service in one bucket,
+// because inside a container network every request from one peer shares one address. What that ordering
+// leaves unbounded is the work done BEFORE a caller is known, and the transport bounds registered in
+// section 0 are what answer it: a connection ceiling, a header ceiling and a header-completion deadline
+// all apply beneath every middleware, which is the only place a bound on unauthenticated work can live.
+// It sits before UseAuthorization so that an authenticated caller flooding routes it is not granted is
+// counted rather than being refused for free. /health is exempt - it is the readiness gate three
+// dependents are held behind, so rate-limiting it would make a busy service a permanently unready one.
+app.UseIngressHardening();
+
 app.UseAuthorization();
 
 // The published contract document, AUTHENTICATED like every other route that has not been granted an
-// explicit exemption. It used to be anonymous on the argument that a description of a surface is not part
-// of the surface, and that argument does not survive the AAP: the anonymous exceptions are enumerated and
-// this is not among them - `/health` on all four services (C-10), and Security's key set and discovery
-// document (C-01), and nothing else. The circularity worry it was defending against is not real either. A
+// explicit exemption. Serving it anonymously is defensible on the argument that a description of a surface
+// is not part of the surface, and that argument does not survive the AAP: the anonymous exceptions are
+// enumerated and this is not among them - `/health` on all four services (C-10), and Security's key set and
+// discovery document (C-01), and nothing else. The circularity worry behind it is not real either. A
 // consumer learns how to authenticate from the AUTHORED contract at
 // shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml, which is a file in the repository and needs no
 // credential to read; this route serves a GENERATED projection of that same document, so putting it behind
@@ -966,51 +1011,37 @@ app.MapDeferredCapabilityEndpoints();
 
 app.Run();
 
-/// <summary>
-/// Classifies a framework-generated failure status as a legacy return code, so that a body this
-/// service did not compose still carries the member the published contract declares.
-/// </summary>
-/// <param name="statusCode">The status the framework is answering with.</param>
-/// <returns>
-/// The legacy code for that status, and <see cref="RetCode.UNKNOWN"/> for anything unclassifiable.
-/// </returns>
-/// <remarks>
-/// <para>
-/// EVERY ARM IS WRITTEN OUT RATHER THAN DERIVED FROM A TRUTHINESS TEST. The codes are taken from the
-/// published contract's own response catalogue: a malformed request is <c>E_INVALID_ARGUMENT</c>, a
-/// refused caller is <c>E_ACCESS_DENIED</c> whether the refusal was authentication or authorization, an
-/// unmatched route is <c>E_OBJECT_NOT_FOUND</c>, a rejected method is <c>E_NO_SUPPORT</c>, and a reserved
-/// extension point is <c>E_NO_IMPLEMENTATION</c> - the same value
-/// <c>Endpoints/DeferredCapabilityEndpoints.cs</c> writes by hand, so the two agree.
-/// </para>
-/// <para>
-/// <b>429 IS CLASSIFIED BECAUSE THIS SERVICE PRODUCES IT, AND IT WAS THE ONE PUBLISHED STATUS MISSING
-/// HERE.</b> <c>Endpoints/DataServicesProxyEndpoints.cs</c> declares it on every projected route and
-/// reaches it twice - from an upstream <c>ResourceExhausted</c>, and from an in-band <c>E_BUSY</c> outcome -
-/// so it is a status a caller genuinely receives. Without an arm it fell to <c>UNKNOWN</c>, which reports
-/// "unclassifiable" for a refusal this service classifies precisely everywhere else, and it broke the
-/// round trip: the in-band direction maps <c>E_BUSY</c> ONTO 429, so the reverse must map 429 back onto
-/// <c>E_BUSY</c> or the two directions disagree about the same event. It shares the code with 503 for the
-/// reason the two refusals share a nature - the request was declined because capacity was not available -
-/// and the statuses stay distinct so a caller can still tell a shed request from an unavailable upstream.
-/// </para>
-/// <para>
-/// THE REFUSAL AND THE FORBIDDEN CASE SHARE ONE CODE, AND THAT ASYMMETRY IS PRESERVED RATHER THAN PAPERED
-/// OVER. The legacy algebra declares exactly one access code and draws no distinction between "no
-/// credential" and "credential without permission". The HTTP statuses stay distinct, so a caller can still
-/// tell the two apart; the code simply does not gain a member the oracle never declared.
-/// </para>
-/// <para>
-/// THE GUARD IS THE POINT OF THE FINAL CHECK. The algebra is tri-state and has a documented hole:
-/// <c>PREVENT</c> is 1 and <c>IsSucceeded</c> tests greater-than-or-equal-to zero, so a prevention reads
-/// as a SUCCESS [<c>ws_objects/pfw.shared.pbl.src/issucceeded.srf:L11-L13</c>, <c>retcode.sru:L42</c>],
-/// and <c>CANCELLED</c> is excluded from <c>IsFailed</c>, so a cancellation is NEITHER
-/// [<c>isfailed.srf:L11-L13</c>]. An error body must never carry a code from either class, and the kernel
-/// predicate is CONSUMED to enforce that rather than the comparison being re-derived here. Every arm below
-/// already satisfies it; the check exists so a future edit introducing one that did not would degrade to
-/// <c>UNKNOWN</c> instead of publishing a failure a consumer's own predicate would read as a success.
-/// </para>
-/// </remarks>
+// Classifies a framework-generated failure status as a legacy return code, so that a body this
+// service did not compose still carries the member the published contract declares.
+// statusCode: The status the framework is answering with.
+// The legacy code for that status, and RetCode.UNKNOWN for anything unclassifiable.
+// EVERY ARM IS WRITTEN OUT RATHER THAN DERIVED FROM A TRUTHINESS TEST. The codes are taken from the
+// published contract's own response catalogue: a malformed request is E_INVALID_ARGUMENT, a
+// refused caller is E_ACCESS_DENIED whether the refusal was authentication or authorization, an
+// unmatched route is E_OBJECT_NOT_FOUND, a rejected method is E_NO_SUPPORT, and a reserved
+// extension point is E_NO_IMPLEMENTATION - the same value
+// Endpoints/DeferredCapabilityEndpoints.cs writes by hand, so the two agree.
+// <b>429 IS CLASSIFIED BECAUSE THIS SERVICE PRODUCES IT, AND IT WAS THE ONE PUBLISHED STATUS MISSING
+// HERE.</b> Endpoints/DataServicesProxyEndpoints.cs declares it on every projected route and
+// reaches it twice - from an upstream ResourceExhausted, and from an in-band E_BUSY outcome -
+// so it is a status a caller genuinely receives. Without an arm it fell to UNKNOWN, which reports
+// "unclassifiable" for a refusal this service classifies precisely everywhere else, and it broke the
+// round trip: the in-band direction maps E_BUSY ONTO 429, so the reverse must map 429 back onto
+// E_BUSY or the two directions disagree about the same event. It shares the code with 503 for the
+// reason the two refusals share a nature - the request was declined because capacity was not available -
+// and the statuses stay distinct so a caller can still tell a shed request from an unavailable upstream.
+// THE REFUSAL AND THE FORBIDDEN CASE SHARE ONE CODE, AND THAT ASYMMETRY IS PRESERVED RATHER THAN PAPERED
+// OVER. The legacy algebra declares exactly one access code and draws no distinction between "no
+// credential" and "credential without permission". The HTTP statuses stay distinct, so a caller can still
+// tell the two apart; the code simply does not gain a member the oracle never declared.
+// THE GUARD IS THE POINT OF THE FINAL CHECK. The algebra is tri-state and has a documented hole:
+// PREVENT is 1 and IsSucceeded tests greater-than-or-equal-to zero, so a prevention reads
+// as a SUCCESS [ws_objects/pfw.shared.pbl.src/issucceeded.srf:L11-L13, retcode.sru:L42],
+// and CANCELLED is excluded from IsFailed, so a cancellation is NEITHER
+// [isfailed.srf:L11-L13]. An error body must never carry a code from either class, and the kernel
+// predicate is CONSUMED to enforce that rather than the comparison being re-derived here. Every arm below
+// already satisfies it; the check exists so a future edit introducing one that did not would degrade to
+// UNKNOWN instead of publishing a failure a consumer's own predicate would read as a success.
 static long ClassifyFailure(int statusCode)
 {
     long classified = statusCode switch
@@ -1033,27 +1064,19 @@ static long ClassifyFailure(int statusCode)
     return Predicates.IsFailed(classified) ? classified : RetCode.UNKNOWN;
 }
 
-/// <summary>
-/// Selects the localization provider for a locale token, reproducing the three-way selection at
-/// <c>ws_objects/pfw.pbl.src/pfw.sra:L95-L102</c>.
-/// </summary>
-/// <param name="locale">
-/// The configured locale token. <see cref="GatewayOptions"/> restricts it to <c>en</c>, <c>chs</c> or
-/// <c>cht</c> and validates that on start, so an unrecognised value cannot reach here through
-/// configuration.
-/// </param>
-/// <returns>The provider for that locale.</returns>
-/// <exception cref="InvalidOperationException">
-/// The token is not one of the three the legacy declares. Unreachable through configuration, and a
-/// hard failure rather than a silent default because a Gateway that quietly fell back to another
-/// locale would return text no caller asked for.
-/// </exception>
-/// <remarks>
-/// Compared with <see cref="StringComparer.Ordinal"/>: these are legacy symbols rather than
-/// human-readable text, and no culture may participate in matching them. The Simplified Chinese
-/// provider is a genuine no-op because Simplified Chinese is the base locale, and it is registered
-/// anyway so that the three-provider shape of the legacy survives intact.
-/// </remarks>
+// Selects the localization provider for a locale token, reproducing the three-way selection at
+// ws_objects/pfw.pbl.src/pfw.sra:L95-L102.
+// The configured locale token. GatewayOptions restricts it to en, chs or
+// cht and validates that on start, so an unrecognised value cannot reach here through
+// configuration.
+// Returns: The provider for that locale.
+// The token is not one of the three the legacy declares. Unreachable through configuration, and a
+// hard failure rather than a silent default because a Gateway that quietly fell back to another
+// locale would return text no caller asked for.
+// Compared with StringComparer.Ordinal: these are legacy symbols rather than
+// human-readable text, and no culture may participate in matching them. The Simplified Chinese
+// provider is a genuine no-op because Simplified Chinese is the base locale, and it is registered
+// anyway so that the three-provider shape of the legacy survives intact.
 static II18nProvider CreateLocaleProvider(string locale) => locale switch
 {
     "en" => new EnglishProvider(),
@@ -1065,31 +1088,21 @@ static II18nProvider CreateLocaleProvider(string locale) => locale switch
             + "ws_objects/pfw.pbl.src/pfw.sra:L95-L102 - en, chs or cht."),
 };
 
-/// <summary>
-/// Builds the primary handler for an outbound internal channel - the two gRPC clients and the
-/// readiness-probe client - with internal trust applied.
-/// </summary>
-/// <param name="serviceProvider">The provider the shared trust anchor is resolved from.</param>
-/// <returns>A handler that verifies its peer against the mounted anchor when one is configured.</returns>
-/// <remarks>
-/// <para>
-/// ONE FACTORY FOR THREE CHANNELS, so all three demonstrably share the same trust decision. Three
-/// lambdas would let one drift during a later edit, and a channel that quietly kept platform default
-/// trust is exactly the defect this replaces - the readiness probe had no registered client at all and
-/// so was silently using a default-configured one.
-/// </para>
-/// <para>
-/// <c>EnableMultipleHttp2Connections</c> is set explicitly because supplying a primary handler replaces
-/// the one the gRPC client factory would otherwise build, and that one sets this property. Leaving it
-/// at its default would silently cap concurrent streams per connection at the peer's advertised limit
-/// and queue calls behind it - a behavioural change to the transport that has nothing to do with trust.
-/// </para>
-/// <para>
-/// The Security typed client does NOT come through here, and that is deliberate: it needs the client
-/// certificate as well as the anchor, so its handler is built at its own registration where both halves
-/// are in view.
-/// </para>
-/// </remarks>
+// Builds the primary handler for an outbound internal channel - the two gRPC clients and the
+// readiness-probe client - with internal trust applied.
+// serviceProvider: The provider the shared trust anchor is resolved from.
+// Returns: A handler that verifies its peer against the mounted anchor when one is configured.
+// ONE FACTORY FOR THREE CHANNELS, so all three demonstrably share the same trust decision. Three
+// lambdas would let one drift during a later edit, and a channel that quietly keeps platform default
+// trust is exactly the defect this prevents - a readiness probe with no registered client of its own
+// silently uses a default-configured one.
+// EnableMultipleHttp2Connections is set explicitly because supplying a primary handler replaces
+// the one the gRPC client factory would otherwise build, and that one sets this property. Leaving it
+// at its default would silently cap concurrent streams per connection at the peer's advertised limit
+// and queue calls behind it - a behavioural change to the transport that has nothing to do with trust.
+// The Security typed client does NOT come through here, and that is deliberate: it needs the client
+// certificate as well as the anchor, so its handler is built at its own registration where both halves
+// are in view.
 static HttpMessageHandler CreateInternalChannelHandler(IServiceProvider serviceProvider)
 {
     ArgumentNullException.ThrowIfNull(serviceProvider);
@@ -1101,36 +1114,24 @@ static HttpMessageHandler CreateInternalChannelHandler(IServiceProvider serviceP
     return handler;
 }
 
-/// <summary>
-/// Configures the HTTP-level resilience pipeline for a gRPC channel, WITH ITS RETRY DISABLED.
-/// </summary>
-/// <param name="resilience">The standard resilience options for this client.</param>
-/// <param name="serviceProvider">The provider the bound options are read from.</param>
-/// <remarks>
-/// <para>
-/// 🔴 EXACTLY ONE LAYER MAY RETRY A gRPC CALL, AND IT IS THE gRPC ONE.
-/// </para>
-/// <para>
-/// Both layers retrying the same failure MULTIPLIES rather than adds: with four attempts configured at
-/// each, one call against a failing upstream made SIXTEEN. That was measured, not predicted - the
-/// deployed-pipeline test counted them - and it is precisely the amplification the base-delay validation
-/// message warns about, aimed at an upstream that is by definition already struggling.
-/// </para>
-/// <para>
-/// THE gRPC LAYER IS THE RIGHT ONE TO KEEP because it is strictly better informed. It sees a connect
-/// failure, which the HTTP handler never does - the balancer establishes the connection outside the
-/// handler pipeline - AND it sees a status delivered in trailers, which is the only thing the HTTP layer
-/// could ever have acted on. Retrying at the HTTP layer as well adds no reachable failure mode.
-/// </para>
-/// <para>
-/// EVERYTHING ELSE IN THE PIPELINE IS KEPT: the circuit breaker with its own predicate, the per-attempt
-/// timeout and the total request timeout all still apply, and the breaker still protects the upstream
-/// from a caller that keeps trying. Only the retry strategy is stood down, and only on these two
-/// channels - the Security REST client is not a gRPC channel, has no service config, and keeps HTTP-level
-/// retry as its only mechanism, which is why <c>OutboundCallPolicy.ShouldRetryAsync</c> and its crypto
-/// path classifications remain live.
-/// </para>
-/// </remarks>
+// Configures the HTTP-level resilience pipeline for a gRPC channel, WITH ITS RETRY DISABLED.
+// resilience: The standard resilience options for this client.
+// serviceProvider: The provider the bound options are read from.
+// 🔴 EXACTLY ONE LAYER MAY RETRY A gRPC CALL, AND IT IS THE gRPC ONE.
+// Both layers retrying the same failure MULTIPLIES rather than adds: with four attempts configured at
+// each, one call against a failing upstream made SIXTEEN. That was measured, not predicted - the
+// deployed-pipeline test counted them - and it is precisely the amplification the base-delay validation
+// message warns about, aimed at an upstream that is by definition already struggling.
+// THE gRPC LAYER IS THE RIGHT ONE TO KEEP because it is strictly better informed. It sees a connect
+// failure, which the HTTP handler never does - the balancer establishes the connection outside the
+// handler pipeline - AND it sees a status delivered in trailers, which is the only thing the HTTP layer
+// could ever have acted on. Retrying at the HTTP layer as well adds no reachable failure mode.
+// EVERYTHING ELSE IN THE PIPELINE IS KEPT: the circuit breaker with its own predicate, the per-attempt
+// timeout and the total request timeout all still apply, and the breaker still protects the upstream
+// from a caller that keeps trying. Only the retry strategy is stood down, and only on these two
+// channels - the Security REST client is not a gRPC channel, has no service config, and keeps HTTP-level
+// retry as its only mechanism, which is why OutboundCallPolicy.ShouldRetryAsync and its crypto
+// path classifications remain live.
 static void ConfigureGrpcOutboundResilience(
     HttpStandardResilienceOptions resilience,
     IServiceProvider serviceProvider)
@@ -1143,42 +1144,30 @@ static void ConfigureGrpcOutboundResilience(
     resilience.Retry.ShouldHandle = OutboundCallPolicy.NeverRetryAtTheHttpLayerAsync;
 }
 
-/// <summary>
-/// Attaches the gRPC-level retry configuration to a channel.
-/// </summary>
-/// <param name="channelActions">The channel-configuration actions the client factory will run.</param>
-/// <param name="outbound">The bound outbound-call options.</param>
-/// <remarks>
-/// <para>
-/// A SECOND RETRY LAYER, AND IT IS NOT REDUNDANT. The Polly pipeline configured by
-/// <see cref="ConfigureOutboundResilience"/> is attached to the HttpClient's message handler, and
-/// Grpc.Net establishes its connection in the balancer's subchannel transport - outside that handler. So
-/// the one failure the policy was taken for, "the upstream is down", never reached it. This layer runs
-/// inside the gRPC client, where the connect failure happens.
-/// </para>
-/// <para>
-/// The two layers are kept in agreement by construction rather than by review: the method roster and the
-/// retryable status set both come from
-/// <see cref="OutboundCallPolicy.BuildRetryServiceConfig(int, TimeSpan)"/>, which reads the same
-/// definitions the HTTP-level predicate reads. Only replay-safe methods are named, so every
-/// state-advancing call stays single-attempt.
-/// </para>
-/// <para>
-/// ATTEMPTS ARE COUNTED INCLUSIVELY HERE. The Polly setting is a number of RETRIES; a gRPC retry policy
-/// takes a number of ATTEMPTS, so it is one greater. Getting that wrong would silently change the number
-/// of calls a replay-safe read makes. The increment is CHECKED - see
-/// <see cref="GatewayOptions.OutboundCallOptions.ResolveGrpcAttemptCount"/> for the negative count the
-/// unchecked form used to produce and every layer used to accept.
-/// </para>
-/// <para>
-/// 🔴 <b>A CONFIGURED ZERO INSTALLS NOTHING AT ALL, WHICH IS WHAT MAKES THE DISABLE REAL.</b> The setting
-/// was documented as disabling retry while this method consumed it unconditionally: zero produced
-/// <c>MaxAttempts = 1</c>, which the gRPC retry policy rejects, so the one value an operator would reach
-/// for to turn retry off could not be deployed. Returning early leaves <c>ServiceConfig</c> and the
-/// channel's own ceiling unset, which is the absence of a retry policy rather than a policy configured to
-/// do nothing - and the HTTP layer is disabled by predicate in the sibling method.
-/// </para>
-/// </remarks>
+// Attaches the gRPC-level retry configuration to a channel.
+// channelActions: The channel-configuration actions the client factory will run.
+// outbound: The bound outbound-call options.
+// A SECOND RETRY LAYER, AND IT IS NOT REDUNDANT. The Polly pipeline configured by
+// ConfigureOutboundResilience is attached to the HttpClient's message handler, and
+// Grpc.Net establishes its connection in the balancer's subchannel transport - outside that handler. So
+// the one failure the policy was taken for, "the upstream is down", never reached it. This layer runs
+// inside the gRPC client, where the connect failure happens.
+// The two layers are kept in agreement by construction rather than by review: the method roster and the
+// retryable status set both come from
+// OutboundCallPolicy.BuildRetryServiceConfig(int, TimeSpan), which reads the same
+// definitions the HTTP-level predicate reads. Only replay-safe methods are named, so every
+// state-advancing call stays single-attempt.
+// ATTEMPTS ARE COUNTED INCLUSIVELY HERE. The Polly setting is a number of RETRIES; a gRPC retry policy
+// takes a number of ATTEMPTS, so it is one greater. Getting that wrong would silently change the number
+// of calls a replay-safe read makes. The increment is CHECKED - see
+// GatewayOptions.OutboundCallOptions.ResolveGrpcAttemptCount for the negative count the
+// unchecked form used to produce and every layer used to accept.
+// 🔴 <b>A CONFIGURED ZERO INSTALLS NOTHING AT ALL, WHICH IS WHAT MAKES THE DISABLE REAL.</b> The setting
+// was documented as disabling retry while this method consumed it unconditionally: zero produced
+// MaxAttempts = 1, which the gRPC retry policy rejects, so the one value an operator would reach
+// for to turn retry off could not be deployed. Returning early leaves ServiceConfig and the
+// channel's own ceiling unset, which is the absence of a retry policy rather than a policy configured to
+// do nothing - and the HTTP layer is disabled by predicate in the sibling method.
 static void ApplyGrpcRetry(
     IList<Action<GrpcChannelOptions>> channelActions,
     GatewayOptions.OutboundCallOptions outbound)
@@ -1204,58 +1193,49 @@ static void ApplyGrpcRetry(
     });
 }
 
-/// <summary>
-/// Applies Gateway's outbound resilience policy to one client's standard pipeline.
-/// </summary>
-/// <param name="resilience">The pipeline's options, mutated in place.</param>
-/// <param name="serviceProvider">The provider the outbound bounds are read from.</param>
-/// <remarks>
-/// <para>
-/// ONE FUNCTION FOR ALL THREE OUTBOUND CLIENTS, so the token channel and the two gRPC channels cannot
-/// drift into three different postures. Before this existed, all three called
-/// <c>AddStandardResilienceHandler()</c> with no configuration at all, which meant a stock HTTP retry
-/// policy sat on top of gRPC channels it could not read and REST calls it should not replay.
-/// </para>
-/// <para>
-/// WHAT EACH LINE FIXES, in the order they appear:
-/// </para>
-/// <list type="number">
-/// <item>
-/// The TOTAL REQUEST TIMEOUT is taken from the same setting that produces the gRPC deadline, so the
-/// local budget and the bound the upstream is told about are one number. Left at its default, the two
-/// were independent and a change to either would have silently desynchronised them.
-/// </item>
-/// <item>
-/// The BACKOFF TYPE and JITTER are set explicitly rather than inherited. Both happen to match the
-/// package's defaults today, and that is exactly why they are written down: "bounded backoff with
-/// jitter" is a requirement of this policy, and a requirement that holds only because a dependency's
-/// default happens to satisfy it is not actually being enforced.
-/// </item>
-/// <item>
-/// The RETRY PREDICATE is replaced, which is the substantive change. The stock predicate reads the HTTP
-/// status, and a gRPC call the server refused carries HTTP 200 - so it never retried a server-declared
-/// Unavailable, while it happily replayed a transport fault on an update, a session open or a
-/// transaction commit. The replacement decides from the operation first and the gRPC status second.
-/// </item>
-/// <item>
-/// The CIRCUIT-BREAKER PREDICATE is replaced for the first half of the same reason: an upstream that
-/// answers Unavailable to every call is unhealthy, and a breaker that cannot see the status never
-/// notices. It deliberately does NOT count the deliberate refusals - admission limits, concurrency
-/// conflicts, authorization decisions - because those are correct answers and breaking on them would
-/// deny the reads that were still working.
-/// </item>
-/// </list>
-/// <para>
-/// THE RETRY COUNT AND ITS BASE DELAY ARE NOW CONFIGURED HERE TOO, and that is a change of position
-/// worth stating. They were left at the package's defaults on the ground that choosing them would
-/// assert an availability posture the repository publishes nothing to derive from (AAP 0.8.5). They are
-/// set now for a CORRECTNESS reason instead: the gRPC channels carry a second retry layer whose attempt
-/// count has to be the same number as this one, and a number that exists in two places under two
-/// defaults is a number that will disagree. So one setting feeds both - see <c>ApplyGrpcRetry</c> - and
-/// no latency or throughput target is claimed by either. The CIRCUIT-BREAKER THRESHOLDS remain at the
-/// package's defaults, for the original reason, unchanged.
-/// </para>
-/// </remarks>
+// Applies Gateway's outbound resilience policy to one client's standard pipeline.
+// resilience: The pipeline's options, mutated in place.
+// serviceProvider: The provider the outbound bounds are read from.
+// ONE FUNCTION FOR ALL THREE OUTBOUND CLIENTS, so the token channel and the two gRPC channels cannot
+// drift into three different postures. Before this existed, all three called
+// AddStandardResilienceHandler() with no configuration at all, which meant a stock HTTP retry
+// policy sat on top of gRPC channels it could not read and REST calls it should not replay.
+// WHAT EACH LINE FIXES, in the order they appear:
+// <list type="number">
+// <item>
+// The TOTAL REQUEST TIMEOUT is taken from the same setting that produces the gRPC deadline, so the
+// local budget and the bound the upstream is told about are one number. Left at its default, the two
+// were independent and a change to either would have silently desynchronised them.
+// </item>
+// <item>
+// The BACKOFF TYPE and JITTER are set explicitly rather than inherited. Both happen to match the
+// package's defaults today, and that is exactly why they are written down: "bounded backoff with
+// jitter" is a requirement of this policy, and a requirement that holds only because a dependency's
+// default happens to satisfy it is not actually being enforced.
+// </item>
+// <item>
+// The RETRY PREDICATE is replaced, which is the substantive change. The stock predicate reads the HTTP
+// status, and a gRPC call the server refused carries HTTP 200 - so it never retried a server-declared
+// Unavailable, while it happily replayed a transport fault on an update, a session open or a
+// transaction commit. The replacement decides from the operation first and the gRPC status second.
+// </item>
+// <item>
+// The CIRCUIT-BREAKER PREDICATE is replaced for the first half of the same reason: an upstream that
+// answers Unavailable to every call is unhealthy, and a breaker that cannot see the status never
+// notices. It deliberately does NOT count the deliberate refusals - admission limits, concurrency
+// conflicts, authorization decisions - because those are correct answers and breaking on them would
+// deny the reads that were still working.
+// </item>
+// </list>
+// THE RETRY COUNT AND ITS BASE DELAY ARE CONFIGURED HERE TOO, and the reason is worth stating because it
+// is NOT the obvious one. Leaving them at the package's defaults is the defensible position, on the
+// ground that choosing them would assert an availability posture the repository publishes nothing to
+// derive from (AAP 0.8.5). They are set for a CORRECTNESS reason instead: the gRPC channels carry a
+// second retry layer whose attempt
+// count has to be the same number as this one, and a number that exists in two places under two
+// defaults is a number that will disagree. So one setting feeds both - see ApplyGrpcRetry - and
+// no latency or throughput target is claimed by either. The CIRCUIT-BREAKER THRESHOLDS stay at the
+// package's defaults, for exactly the AAP 0.8.5 reason above.
 static void ConfigureOutboundResilience(
     HttpStandardResilienceOptions resilience,
     IServiceProvider serviceProvider)
@@ -1304,49 +1284,33 @@ static void ConfigureOutboundResilience(
     resilience.CircuitBreaker.ShouldHandle = OutboundCallPolicy.ShouldBreakAsync;
 }
 
-/// <summary>
-/// Loads the client identity Gateway presents on the system's single mutual-TLS edge, or an empty
-/// collection when this deployment presents none.
-/// </summary>
-/// <param name="mutualTls">
-/// The validated <c>Gateway:MutualTls</c> group. Both members are filesystem paths naming material
-/// mounted from the orchestration secret layer; the type has no member that could carry a certificate
-/// body, a private key body or a passphrase, so there is nowhere for one to be placed.
-/// </param>
-/// <returns>
-/// A collection holding the one client certificate when the pair is configured, and an EMPTY
-/// collection when it is not. Empty is a legitimate result and not an error: it means this run does
-/// not reach the token-issuance edge, which a local bring-up without a generated certificate set
-/// genuinely is.
-/// </returns>
-/// <exception cref="InvalidOperationException">
-/// The pair is configured but the material cannot be read or does not parse. That is a structural
-/// fault and it stops the host, matching the fail-fast posture described in the file header - a
-/// deployment that meant to authenticate to the issuer and cannot has already lost every authenticated
-/// call it would make, so continuing would only defer the failure to first use.
-/// </exception>
-/// <remarks>
-/// <para>
-/// NO PATH IS EVER ECHOED INTO A MESSAGE, and the exception below names the two CONFIGURATION KEYS
-/// instead. A path is not itself a credential, but it names the location of one, and a startup log is
-/// exactly the wrong place to publish where a private key is mounted. The configuration key is
-/// sufficient for an operator to find the setting, which is the same rule
-/// <c>Configuration/GatewayOptions.cs</c> applies to its own validation messages.
-/// </para>
-/// <para>
-/// HALF A PAIR CANNOT REACH HERE. <c>GatewayOptions</c> validates the group as both-or-neither and the
-/// registration above validates on start, so by the time this runs the pair is either wholly present
-/// or wholly absent. The second check below is therefore a guard against a future caller rather than a
-/// reachable configuration state, and it is written as one rather than as an assumption.
-/// </para>
-/// <para>
-/// The material is read from a PEM certificate and a separate PEM key, which is the shape the
-/// generation recipe in <c>docs/ARCHITECTURE.md</c> produces and the shape the four
-/// <c>*_MTLS_CERT_PATH</c> / <c>*_MTLS_KEY_PATH</c> variables name. The resulting key is ephemeral,
-/// which is directly usable for TLS client authentication on Linux - the target operating system for
-/// every container in this refactor.
-/// </para>
-/// </remarks>
+// Loads the client identity Gateway presents on the system's single mutual-TLS edge, or an empty
+// collection when this deployment presents none.
+// The validated Gateway:MutualTls group. Both members are filesystem paths naming material
+// mounted from the orchestration secret layer; the type has no member that could carry a certificate
+// body, a private key body or a passphrase, so there is nowhere for one to be placed.
+// A collection holding the one client certificate when the pair is configured, and an EMPTY
+// collection when it is not. Empty is a legitimate result and not an error: it means this run does
+// not reach the token-issuance edge, which a local bring-up without a generated certificate set
+// genuinely is.
+// The pair is configured but the material cannot be read or does not parse. That is a structural
+// fault and it stops the host, matching the fail-fast posture described in the file header - a
+// deployment that meant to authenticate to the issuer and cannot has already lost every authenticated
+// call it would make, so continuing would only defer the failure to first use.
+// NO PATH IS EVER ECHOED INTO A MESSAGE, and the exception below names the two CONFIGURATION KEYS
+// instead. A path is not itself a credential, but it names the location of one, and a startup log is
+// exactly the wrong place to publish where a private key is mounted. The configuration key is
+// sufficient for an operator to find the setting, which is the same rule
+// Configuration/GatewayOptions.cs applies to its own validation messages.
+// HALF A PAIR CANNOT REACH HERE. GatewayOptions validates the group as both-or-neither and the
+// registration above validates on start, so by the time this runs the pair is either wholly present
+// or wholly absent. The second check below is therefore a guard against a future caller rather than a
+// reachable configuration state, and it is written as one rather than as an assumption.
+// The material is read from a PEM certificate and a separate PEM key, which is the shape the
+// generation recipe in docs/ARCHITECTURE.md produces and the shape the four
+// *_MTLS_CERT_PATH / *_MTLS_KEY_PATH variables name. The resulting key is ephemeral,
+// which is directly usable for TLS client authentication on Linux - the target operating system for
+// every container in this refactor.
 static X509Certificate2Collection LoadMutualTlsClientIdentity(
     GatewayOptions.MutualTlsClientOptions mutualTls)
 {
@@ -1450,14 +1414,17 @@ internal static class ProblemContractMembers
 /// no environment-conditional bypass anywhere in this service (constraint C-G).
 /// </para>
 /// <para>
-/// REVOCATION IS NOT CHECKED, AND THAT IS A CONSEQUENCE OF THE TOPOLOGY RATHER THAN A RELAXATION. A
-/// local authority generated by two <c>openssl</c> invocations publishes no certificate revocation
-/// list and runs no responder, so an online check has nothing to ask and an offline check has nothing
-/// to read; requesting one would make every internal handshake wait for a lookup that must fail. The
-/// certificates it issues are short-lived by the recipe's own <c>-days 30</c>, which is the control
-/// that substitutes for revocation here. A deployment whose authority does publish revocation
-/// information leaves this path unset and uses platform trust, where the platform's own default
-/// revocation behaviour applies.
+/// REVOCATION IS A SETTING, AND ITS DEFAULT IS A CONSEQUENCE OF THE TOPOLOGY RATHER THAN A RELAXATION.
+/// <c>Gateway:InternalTls:RevocationMode</c> selects the posture, so a deployment whose authority DOES
+/// publish revocation information can ask for a real check - which a hardcoded value denied it, leaving a
+/// stolen peer certificate acceptable until it expired. The shipped default is the only value the
+/// DOCUMENTED topology can answer, and that was measured rather than assumed: a local authority generated
+/// by two <c>openssl</c> invocations publishes no distribution point and runs no responder, so chain
+/// building for a leaf it issued succeeds with no check and fails under both stricter modes with an
+/// indeterminate revocation status. An indeterminate status is a REFUSAL under those modes and never a
+/// pass, because no verification flag ignores it. While the default stands, the substituting control is
+/// certificate lifetime - the recipe's own <c>-days 30</c> - and the operational surfaces carry both the
+/// production recommendation and the emergency procedure for a compromise.
 /// </para>
 /// <para>
 /// LOADED ONCE AND SHARED. The handler factories recycle their primary handlers on a schedule, so
@@ -1468,7 +1435,24 @@ internal static class ProblemContractMembers
 /// </remarks>
 internal sealed class InternalTlsTrust
 {
+    /// <summary>The configuration path of the group this type is built from.</summary>
+    /// <remarks>
+    /// Composed once so the resolver's failure message and the loader's failure message name the group
+    /// the same way, and so neither can drift from the property names it quotes.
+    /// </remarks>
+    private static readonly string ConfigurationKeyPrefix =
+        $"{GatewayOptions.SectionName}:{nameof(GatewayOptions.InternalTls)}";
+
     private readonly X509Certificate2Collection _anchors;
+
+    /// <summary>
+    /// The revocation posture the configured group selected, resolved once at construction.
+    /// </summary>
+    /// <remarks>
+    /// RESOLVED HERE RATHER THAN PER POLICY, so an unrecognised value fails the host's start instead of
+    /// failing the first outbound handshake - the fail-fast posture the rest of this file keeps.
+    /// </remarks>
+    private readonly X509RevocationMode _revocationMode;
 
     /// <summary>
     /// Loads the anchor bundle, or records that this deployment uses platform default trust.
@@ -1489,6 +1473,11 @@ internal sealed class InternalTlsTrust
     public InternalTlsTrust(GatewayOptions.InternalTlsTrustOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
+
+        // RESOLVED BEFORE THE EARLY RETURN, DELIBERATELY. An unrecognised mode is a misconfiguration
+        // whether or not this deployment pins an anchor, and a deployment that later sets a path would
+        // otherwise discover the typo only once it had.
+        _revocationMode = options.ResolveRevocationMode(ConfigurationKeyPrefix);
 
         if (!options.IsConfigured)
         {
@@ -1571,8 +1560,18 @@ internal sealed class InternalTlsTrust
         X509ChainPolicy policy = new()
         {
             TrustMode = X509ChainTrustMode.CustomRootTrust,
-            RevocationMode = X509RevocationMode.NoCheck,
+
+            // THE CONFIGURED POSTURE, not a constant. See the option's own remarks for why the shipped
+            // default cannot be the strict value on the documented topology, and why an indeterminate
+            // status under the stricter two is a refusal rather than a pass.
+            RevocationMode = _revocationMode,
         };
+
+        // ONLY MEANINGFUL WHEN A CHECK IS ACTUALLY PERFORMED, and it excludes the root because a locally
+        // generated authority does not revoke itself - asking about it would turn every check into an
+        // indeterminate answer and therefore into a refusal, which is the failure the mode's own remarks
+        // describe. It matches the flag Security's issuance-credential check already uses.
+        policy.RevocationFlag = X509RevocationFlag.ExcludeRoot;
 
         policy.CustomTrustStore.AddRange(_anchors);
 

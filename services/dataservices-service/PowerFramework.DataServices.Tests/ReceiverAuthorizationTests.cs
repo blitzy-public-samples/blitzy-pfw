@@ -7,9 +7,9 @@
 //
 //  WHY THIS FILE EXISTS
 //  ------------------------------------------------------------------------------------------------
-//  Every receiver in this service used to be protected by the PARAMETERLESS RequireAuthorization,
-//  which requires an authenticated user and nothing else. Combined with an issuer that granted every
-//  requested scope to any caller whose certificate chained to the configured authority, that meant:
+//  Protecting every receiver in this service with the PARAMETERLESS RequireAuthorization requires an
+//  authenticated user and nothing else. Combined with an issuer that grants every
+//  requested scope to any caller whose certificate chains to the configured authority, that means:
 //
 //    - a credential obtained to read a DataWindow could drive the column-expression engine, and
 //    - a credential minted for a caller with no business here at all could drive either.
@@ -342,6 +342,7 @@ public sealed class ReceiverAuthorizationTests(DataServicesTestHostFactory host)
     /// <param name="route">The route to request.</param>
     /// <param name="method">The method to request it with.</param>
     /// <param name="expected">The status the framework answers.</param>
+    /// <param name="expectedRetCode">The return code the case expects.</param>
     /// <returns>A task representing the assertion.</returns>
     /// <remarks>
     /// <para>

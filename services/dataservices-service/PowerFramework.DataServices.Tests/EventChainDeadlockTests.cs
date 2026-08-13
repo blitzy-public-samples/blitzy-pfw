@@ -254,7 +254,7 @@ public sealed class EventChainDeadlockTests
     /// blocked on the question would sit out the whole <c>AnswerTimeout</c>, and the CALL CANNOT FINISH
     /// UNTIL IT DOES. With the shipped five-minute default that is five minutes of a stream held open, a
     /// session reporting itself mid-handler, and the item-change re-entrancy flag still set
-    /// [<c>se_cst_dw.sru:L92</c>]. Observed against the live service before this was closed.
+    /// [<c>se_cst_dw.sru:L92</c>]. Reproducible against the live service without the seal below.
     /// </para>
     /// <para>
     /// THE BUDGET IS DELIBERATELY FAR BELOW THE BACKSTOP HERE. The configured backstop is five minutes and

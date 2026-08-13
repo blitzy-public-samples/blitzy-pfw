@@ -298,7 +298,7 @@ public static class CryptoEndpoints
     /// <para>
     /// EVIDENCED BY THE ONLY CALLER IN THE REPOSITORY, NOT INVENTED HERE. DataServices requests exactly
     /// this scope when it obtains a token addressed to this service
-    /// [services/dataservices-service/PowerFramework.DataServices/Clients/SecurityClient.cs:L2232, its
+    /// [services/dataservices-service/PowerFramework.DataServices/Clients/SecurityClient.cs:L2234, its
     /// <c>CryptoScope</c> constant],
     /// and that request is the whole of the evidence for what this surface's scope is called. A name
     /// chosen here instead would have refused the one caller the system has.
@@ -1028,6 +1028,66 @@ public static class CryptoEndpoints
         + "the declared parameter type and NOT a cryptographic minimum or maximum: 1024 remains a "
         + "legal value and no floor is imposed anywhere.";
 
+    /// <summary>
+    /// The largest modulus length this boundary will spend work generating.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A WORK BOUND CREATED BY THE DECOMPOSITION, NOT A CRYPTOGRAPHIC POLICY (constraint C-B). The legacy
+    /// generator was called in-process by the application that owned it; nothing could ask it for a key on
+    /// a stranger's behalf, so its only bound was the declared argument's 16-bit domain and that was
+    /// sufficient. Across a network boundary that domain is not a bound at all: the platform will attempt
+    /// any size it considers legal, and generating a 16384-bit modulus occupies a core for minutes. A
+    /// handful of concurrent requests at the top of the legal range is a denial of service against the
+    /// service that holds the system's only signing key, delivered entirely through legitimate calls.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>IT IS THE LARGEST PUBLISHED SIZE, WHICH IS WHY IT NARROWS NOTHING A CALLER CAN USE.</b> The
+    /// legacy declares exactly three convenience sizes - 1024, 2048 and 4096 [enums.sru:L965-L967] - and
+    /// this is the third of them, so every size the legacy names as first-class is still accepted,
+    /// INCLUDING the weak one. What is refused is only the range above the published vocabulary, which no
+    /// legacy caller could have named from a declared constant. The 1024-bit weakness stays annotated and
+    /// unenforced, exactly as the plan requires [AAP 0.6.6.4]: this is a ceiling, and there is no floor.
+    /// </para>
+    /// <para>
+    /// THE BOUND SITS AT THE BOUNDARY AND NOT IN THE PROVIDER. Crypto/RsaProvider.cs is a parity surface
+    /// and still answers the platform's own legal-size question for the whole 16-bit domain, so the
+    /// provider-level parity rows that assert what the legacy returns for an extreme size are untouched.
+    /// </para>
+    /// </remarks>
+    internal const long MaximumGeneratedModulusBits = 4_096;
+
+    /// <summary>
+    /// The largest file this boundary will read in order to digest it.
+    /// </summary>
+    /// <remarks>
+    /// The file is chosen by the DEPLOYMENT - a caller names an opaque reference and this service resolves
+    /// it - so the bound is not there to stop a caller naming an arbitrary path. It is there because the
+    /// caller chooses HOW OFTEN, and an unbounded read repeated under an authenticated credential is an I/O
+    /// amplifier whose multiplier is the file's size. A deployment that needs to expose something larger
+    /// through this surface should reconsider the surface rather than the bound.
+    /// </remarks>
+    internal const long MaximumDigestedFileBytes = 67_108_864;
+
+    /// <summary>Detail for a modulus length above the published work bound.</summary>
+    /// <remarks>
+    /// It states the bound. A published ceiling is not a fact about this deployment's state or its other
+    /// callers, so quoting it tells a caller how to correct the request and discloses nothing - unlike the
+    /// store-full refusal below, which deliberately says nothing about how much of the store is held.
+    /// </remarks>
+    private static readonly string KeySizeOverBudgetDetail =
+        $"The requested modulus length is above the {MaximumGeneratedModulusBits} bits this boundary will "
+            + "spend work generating. That is a work bound rather than a cryptographic policy: generating a "
+            + "modulus far above the published sizes occupies a core for minutes, and this service holds "
+            + "the system's only signing key. Every size the legacy publishes as first-class - 1024, 2048 "
+            + "and 4096 - is accepted, and no minimum is imposed. No key was generated.";
+
+    /// <summary>Detail for a configured file larger than the published work bound.</summary>
+    private static readonly string FileTooLargeDetail =
+        $"The file this reference names is larger than the {MaximumDigestedFileBytes} bytes this boundary "
+            + "will read in order to digest it. That is a work bound on a repeatable read rather than a "
+            + "statement about the request. No path, filename, location or content is reported.";
+
     /// <summary>Detail for a key size the platform will not generate.</summary>
     private const string KeySizeUnavailableDetail =
         "The platform will not generate a key pair of the requested modulus length. The legal sizes "
@@ -1304,12 +1364,12 @@ public static class CryptoEndpoints
             // requirement satisfied by OMISSION is invisible at the declaration and would evaporate
             // silently if that policy were ever relaxed.
             //
-            // AND THE POLICY IS NAMED, WHICH IT DID NOT USED TO BE. The parameterless form required an
-            // authenticated principal and nothing more, so any holder of any token minted for this
-            // service's audience could drive all 18 cryptographic operations - keyed HMAC, symmetric
-            // encryption and decryption, RSA signing and RSA key generation among them - regardless of
-            // what that credential was obtained for and regardless of which caller it was minted for
-            // (CWE-862, CWE-863). Contract C-02 says who this surface is for: Security serves
+            // AND THE POLICY IS NAMED RATHER THAN PARAMETERLESS, WHICH IS THE LOAD-BEARING HALF. The
+            // parameterless form requires an authenticated principal AND NOTHING MORE, so any holder of any
+            // token minted for this service's audience could drive all 18 cryptographic operations - keyed
+            // HMAC, symmetric encryption and decryption, RSA signing and RSA key generation among them -
+            // regardless of what that credential was obtained for and regardless of which caller it was
+            // minted for (CWE-862, CWE-863). Contract C-02 says who this surface is for: Security serves
             // DataServices, and DataServices requests exactly `security.crypto` for it. The named policy
             // requires that scope AND a configured permitted caller identity, because either alone
             // leaves a hole. None of this contract's operations is one of the service's three anonymous
@@ -1325,7 +1385,7 @@ public static class CryptoEndpoints
         group.AddOpenApiOperationTransformer(DeclareBearerRequirementAsync);
 
         // THE FORBIDDEN STATUS IS DECLARED AT THE GROUP, BECAUSE THE SCOPE REQUIREMENT IS AT THE GROUP.
-        // Every operation here can now answer 403 for a reason that has nothing to do with its own
+        // Every operation here can answer 403 for a reason that has nothing to do with its own
         // parameters - a valid token that is not scoped `security.crypto` - so the status belongs to the
         // group exactly as the requirement producing it does. The TEN reference-resolving operations also
         // declare it individually for their own second cause, an unpermitted reference; the generator
@@ -1685,11 +1745,13 @@ public static class CryptoEndpoints
     /// </remarks>
     internal static Results<Ok<DigestResponse>, ProblemHttpResult> Hmac(
         HmacRequest request,
+        ClaimsPrincipal user,
         [FromServices] HmacProvider authenticators,
         [FromServices] EncodingProvider encodings,
         [FromServices] CryptoReferenceResolver references,
         [FromServices] ILoggerFactory loggerFactory)
     {
+        ArgumentNullException.ThrowIfNull(user);
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(authenticators);
         ArgumentNullException.ThrowIfNull(encodings);
@@ -1714,7 +1776,11 @@ public static class CryptoEndpoints
             return rejection;
         }
 
-        rejection = references.TryResolveReference(request.KeyRef, loggerFactory, out string keyMaterial);
+        rejection = references.TryResolveReference(
+            request.KeyRef,
+            OwnerOf(user),
+            loggerFactory,
+            out string keyMaterial);
 
         if (rejection is not null)
         {
@@ -1801,6 +1867,13 @@ public static class CryptoEndpoints
             return rejection;
         }
 
+        rejection = ScreenFileSize(path, loggerFactory);
+
+        if (rejection is not null)
+        {
+            return rejection;
+        }
+
         string digest;
 
         try
@@ -1825,6 +1898,44 @@ public static class CryptoEndpoints
     }
 
     /// <summary>
+    /// Screens a resolved file against the published work bound.
+    /// </summary>
+    /// <param name="path">The resolved path, which is never reported.</param>
+    /// <param name="loggerFactory">The logger factory a refusal is recorded through.</param>
+    /// <returns>A refusal, or <see langword="null"/> when the file is within the bound.</returns>
+    /// <remarks>
+    /// <para>
+    /// ONE HELPER FOR BOTH FILE OPERATIONS, because two copies of a bound is how one of them is forgotten
+    /// when the other moves. Both operations reach it after the reference has resolved, so the screen reads
+    /// a path this deployment configured rather than anything a caller supplied.
+    /// </para>
+    /// <para>
+    /// AN UNREADABLE FILE IS NOT THIS SCREEN'S BUSINESS. Reading the size can fail for exactly the reasons
+    /// reading the content can, and those are already answered - with their own return code and their own
+    /// sentence - by the operations themselves. Reporting them here as well would give one condition two
+    /// different answers depending on which read happened to fail first, so an unreadable file passes the
+    /// screen and is refused by the operation.
+    /// </para>
+    /// </remarks>
+    private static ProblemHttpResult? ScreenFileSize(string path, ILoggerFactory loggerFactory)
+    {
+        long length;
+
+        try
+        {
+            length = new FileInfo(path).Length;
+        }
+        catch (Exception failure) when (failure is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+
+        return length > MaximumDigestedFileBytes
+            ? Reject(RetCode.E_OUT_OF_RANGE, FileTooLargeDetail, loggerFactory)
+            : null;
+    }
+
+    /// <summary>
     /// Computes a keyed digest over a file this service has been configured to expose.
     /// </summary>
     /// <param name="request">The keyed file digest request.</param>
@@ -1842,10 +1953,12 @@ public static class CryptoEndpoints
     /// </remarks>
     internal static Results<Ok<DigestResponse>, ProblemHttpResult> HmacFile(
         HmacFileRequest request,
+        ClaimsPrincipal user,
         [FromServices] HmacProvider authenticators,
         [FromServices] CryptoReferenceResolver references,
         [FromServices] ILoggerFactory loggerFactory)
     {
+        ArgumentNullException.ThrowIfNull(user);
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(authenticators);
         ArgumentNullException.ThrowIfNull(references);
@@ -1859,7 +1972,11 @@ public static class CryptoEndpoints
             return rejection;
         }
 
-        rejection = references.TryResolveReference(request.KeyRef, loggerFactory, out string keyMaterial);
+        rejection = references.TryResolveReference(
+            request.KeyRef,
+            OwnerOf(user),
+            loggerFactory,
+            out string keyMaterial);
 
         if (rejection is not null)
         {
@@ -1867,6 +1984,13 @@ public static class CryptoEndpoints
         }
 
         rejection = references.TryResolveFile(request.FileRef, loggerFactory, out string path);
+
+        if (rejection is not null)
+        {
+            return rejection;
+        }
+
+        rejection = ScreenFileSize(path, loggerFactory);
 
         if (rejection is not null)
         {
@@ -1914,12 +2038,14 @@ public static class CryptoEndpoints
     /// </remarks>
     internal static Results<Ok<PayloadResponse>, ProblemHttpResult> SymmetricEncrypt(
         SymEncryptRequest request,
+        ClaimsPrincipal user,
         [FromServices] SymmetricCipherProvider ciphers,
         [FromServices] EncodingProvider encodings,
         [FromServices] CryptoReferenceResolver references,
         [FromServices] ILoggerFactory loggerFactory) =>
         SymmetricOperation(
             request,
+            user,
             ciphers,
             encodings,
             references,
@@ -1945,12 +2071,14 @@ public static class CryptoEndpoints
     /// </remarks>
     internal static Results<Ok<PayloadResponse>, ProblemHttpResult> SymmetricDecrypt(
         SymDecryptRequest request,
+        ClaimsPrincipal user,
         [FromServices] SymmetricCipherProvider ciphers,
         [FromServices] EncodingProvider encodings,
         [FromServices] CryptoReferenceResolver references,
         [FromServices] ILoggerFactory loggerFactory) =>
         SymmetricOperation(
             request,
+            user,
             ciphers,
             encodings,
             references,
@@ -1993,6 +2121,7 @@ public static class CryptoEndpoints
     /// </remarks>
     private static Results<Ok<PayloadResponse>, ProblemHttpResult> SymmetricOperation(
         ISymmetricCipherRequest request,
+        ClaimsPrincipal user,
         SymmetricCipherProvider ciphers,
         EncodingProvider encodings,
         CryptoReferenceResolver references,
@@ -2000,6 +2129,7 @@ public static class CryptoEndpoints
         bool encrypting,
         string operation)
     {
+        ArgumentNullException.ThrowIfNull(user);
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(ciphers);
         ArgumentNullException.ThrowIfNull(encodings);
@@ -2051,8 +2181,11 @@ public static class CryptoEndpoints
             return RefuseBlockedCell(parity, effectiveMode, loggerFactory);
         }
 
-        ProblemHttpResult? rejection =
-            references.TryResolveReference(request.KeyRef, loggerFactory, out string keyMaterial);
+        ProblemHttpResult? rejection = references.TryResolveReference(
+            request.KeyRef,
+            OwnerOf(user),
+            loggerFactory,
+            out string keyMaterial);
 
         if (rejection is not null)
         {
@@ -2065,6 +2198,7 @@ public static class CryptoEndpoints
         {
             rejection = references.TryResolveReference(
                 request.IvRef,
+                OwnerOf(user),
                 loggerFactory,
                 out string resolvedVector);
 
@@ -2292,12 +2426,14 @@ public static class CryptoEndpoints
     /// </remarks>
     internal static Results<Ok<PayloadResponse>, ProblemHttpResult> RsaEncrypt(
         RsaCipherRequest request,
+        ClaimsPrincipal user,
         [FromServices] RsaProvider rsa,
         [FromServices] EncodingProvider encodings,
         [FromServices] CryptoReferenceResolver references,
         [FromServices] ILoggerFactory loggerFactory) =>
         RsaCipherOperation(
             request,
+            user,
             rsa,
             encodings,
             references,
@@ -2322,12 +2458,14 @@ public static class CryptoEndpoints
     /// </remarks>
     internal static Results<Ok<PayloadResponse>, ProblemHttpResult> RsaDecrypt(
         RsaCipherRequest request,
+        ClaimsPrincipal user,
         [FromServices] RsaProvider rsa,
         [FromServices] EncodingProvider encodings,
         [FromServices] CryptoReferenceResolver references,
         [FromServices] ILoggerFactory loggerFactory) =>
         RsaCipherOperation(
             request,
+            user,
             rsa,
             encodings,
             references,
@@ -2364,6 +2502,7 @@ public static class CryptoEndpoints
     /// </remarks>
     private static Results<Ok<PayloadResponse>, ProblemHttpResult> RsaCipherOperation(
         RsaCipherRequest request,
+        ClaimsPrincipal user,
         RsaProvider rsa,
         EncodingProvider encodings,
         CryptoReferenceResolver references,
@@ -2371,6 +2510,7 @@ public static class CryptoEndpoints
         bool encrypting,
         string operation)
     {
+        ArgumentNullException.ThrowIfNull(user);
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(rsa);
         ArgumentNullException.ThrowIfNull(encodings);
@@ -2399,8 +2539,11 @@ public static class CryptoEndpoints
 
         long effectivePadding = request.Padding ?? LegacyDefaults.RSA_PADDING_DEFAULT;
 
-        ProblemHttpResult? rejection =
-            references.TryResolveReference(request.KeyRef, loggerFactory, out string keyMaterial);
+        ProblemHttpResult? rejection = references.TryResolveReference(
+            request.KeyRef,
+            OwnerOf(user),
+            loggerFactory,
+            out string keyMaterial);
 
         if (rejection is not null)
         {
@@ -2514,6 +2657,7 @@ public static class CryptoEndpoints
     /// </remarks>
     internal static Results<Ok<PayloadResponse>, ProblemHttpResult> RsaSign(
         RsaSignRequest request,
+        ClaimsPrincipal user,
         [FromServices] RsaProvider rsa,
         [FromServices] EncodingProvider encodings,
         [FromServices] CryptoReferenceResolver references,
@@ -2543,7 +2687,11 @@ public static class CryptoEndpoints
             return rejection;
         }
 
-        rejection = references.TryResolveReference(request.KeyRef, loggerFactory, out string keyMaterial);
+        rejection = references.TryResolveReference(
+            request.KeyRef,
+            OwnerOf(user),
+            loggerFactory,
+            out string keyMaterial);
 
         if (rejection is not null)
         {
@@ -2625,6 +2773,7 @@ public static class CryptoEndpoints
     /// </remarks>
     internal static Results<Ok<RsaVerifyResponse>, ProblemHttpResult> RsaVerify(
         RsaVerifyRequest request,
+        ClaimsPrincipal user,
         [FromServices] RsaProvider rsa,
         [FromServices] EncodingProvider encodings,
         [FromServices] CryptoReferenceResolver references,
@@ -2659,7 +2808,11 @@ public static class CryptoEndpoints
             return rejection;
         }
 
-        rejection = references.TryResolveReference(request.KeyRef, loggerFactory, out string keyMaterial);
+        rejection = references.TryResolveReference(
+            request.KeyRef,
+            OwnerOf(user),
+            loggerFactory,
+            out string keyMaterial);
 
         if (rejection is not null)
         {
@@ -2728,6 +2881,7 @@ public static class CryptoEndpoints
     /// Generates an RSA key pair, returning the public half and retaining the private half.
     /// </summary>
     /// <param name="request">The generation request.</param>
+    /// <param name="user">The caller identity presented with the credential.</param>
     /// <param name="rsa">The RSA provider.</param>
     /// <param name="random">The random provider, used to mint the opaque reference.</param>
     /// <param name="references">The reference resolver, which owns the retained-key store.</param>
@@ -2766,7 +2920,7 @@ public static class CryptoEndpoints
     /// string cannot be wiped. The generated private key therefore lives until the retained-key store
     /// releases it and the garbage collector reclaims it; nothing here can zero it, and pretending
     /// otherwise would be worse than saying so. What CAN be bounded is how long it is held and how much
-    /// of it one caller may hold, and both now are - see <see cref="CryptoReferenceResolver"/>.
+    /// of it one caller may hold, and both are - see <see cref="CryptoReferenceResolver"/>.
     /// </para>
     /// </remarks>
     internal static Results<Ok<GenRsaKeyResponse>, ProblemHttpResult> GenerateRsaKey(
@@ -2795,6 +2949,16 @@ public static class CryptoEndpoints
         if (declaredBits is < 0 or > ushort.MaxValue)
         {
             return Reject(RetCode.E_INVALID_ARGUMENT, KeySizeOutOfDomainDetail, loggerFactory);
+        }
+
+        // ORDERED AFTER THE DOMAIN CHECK, DELIBERATELY. The domain check is a parity statement about the
+        // legacy argument's declared width and keeps its own meaning and its own return code; this is a
+        // work bound created by the boundary. Putting it first would re-attribute every out-of-domain
+        // request to a bound the legacy never had. Ordered BEFORE the store reservation for the reason
+        // that reservation is ordered before generation: a refusal must cost nothing.
+        if (declaredBits > MaximumGeneratedModulusBits)
+        {
+            return Reject(RetCode.E_OUT_OF_RANGE, KeySizeOverBudgetDetail, loggerFactory);
         }
 
         // RESERVED BEFORE GENERATION. A refusal here has cost nothing: no key exists yet.
@@ -3942,9 +4106,9 @@ internal sealed class CryptoReferenceResolver
     /// THE GLOBAL CAP IS RESERVED ATOMICALLY AND BEFORE GENERATION, which is the half that matters
     /// under load. A read of the entry count followed by an insertion is not atomic, so concurrent
     /// callers could each observe room and collectively exceed the bound; worse, RSA generation is the
-    /// expensive part and it used to run BEFORE capacity was checked, so a caller could drive
-    /// unbounded key-generation work and have every pair discarded. Both are closed by reserving a
-    /// slot first - see <see cref="TryReserveGeneratedKeySlot"/>.
+    /// expensive part, so checking capacity AFTER it would let a caller drive unbounded key-generation work
+    /// and have every pair discarded. Both are closed by reserving a slot FIRST - see
+    /// <see cref="TryReserveGeneratedKeySlot"/>.
     /// </para>
     /// </remarks>
     internal const int MaximumRetainedGeneratedKeys = 64;
@@ -4114,13 +4278,20 @@ internal sealed class CryptoReferenceResolver
     /// Resolves a key or vector reference to the material behind it.
     /// </summary>
     /// <param name="reference">The opaque reference as the request carried it.</param>
+    /// <param name="owner">
+    /// The calling caller's identity - the token's subject, as <c>CryptoEndpoints.OwnerOf</c> reads it. A
+    /// MINTED reference resolves only for the caller it was minted for; a CONFIGURED reference is
+    /// deployment material and is not owned by any caller, so this value does not gate it.
+    /// </param>
     /// <param name="loggerFactory">The logger factory a rejection is recorded through.</param>
     /// <param name="material">
     /// The resolved material, or the empty string when this method returns a rejection. The caller uses
     /// it as a call argument and lets it fall out of scope; it is not stored here.
     /// </param>
     /// <returns><see langword="null"/> when the reference resolved; otherwise the rejection.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="loggerFactory"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="owner"/> or <paramref name="loggerFactory"/> is <see langword="null"/>.
+    /// </exception>
     /// <remarks>
     /// <para>
     /// THE ORDER OF THE FOUR SCREENS IS PART OF THE DESIGN.
@@ -4128,9 +4299,23 @@ internal sealed class CryptoReferenceResolver
     /// <para>
     /// First, the retained store, because a reference this service minted seconds ago cannot be in a
     /// set that was configured before the process started. A minted reference is 32 hexadecimal
-    /// characters of entropy drawn through the injected source, so it is not guessable, and possession
-    /// of it is the authority to use it - on top of the bearer token that every operation of this
-    /// contract already requires.
+    /// characters of entropy drawn through the injected source, so it is not guessable.
+    /// </para>
+    /// <para>
+    /// <b>BUT POSSESSION IS NOT THE AUTHORITY TO USE IT, WHICH IS THE CORRECTION IN THIS SCREEN.</b> An
+    /// earlier revision resolved a retained reference on a bare table hit, so a minted reference that
+    /// leaked - through a caller's log, a proxy trace or a crash dump - let ANOTHER authenticated caller
+    /// sign, decrypt and authenticate with a private key it never held (CWE-639, CWE-863). Release already
+    /// compared the owner [<see cref="TryReleaseGeneratedKey"/>]; use did not, so the weaker of the two
+    /// operations was the guarded one. The owner is now compared on both, from the same subject claim.
+    /// </para>
+    /// <para>
+    /// <b>A FOREIGN MINTED REFERENCE FALLS THROUGH RATHER THAN BEING REFUSED IN PLACE, AND THAT IS WHAT
+    /// MAKES IT INDISTINGUISHABLE.</b> It then meets the same length, membership and configuration screens
+    /// any unknown value meets, and answers exactly what an unpublished reference answers - so no caller
+    /// can use this operation to discover that a reference exists, or that it belongs to somebody else.
+    /// Refusing with a distinct code or detail here would have turned the surface into precisely that
+    /// oracle.
     /// </para>
     /// <para>
     /// Second, the length bound, refused as a non-permitted reference rather than as a distinct
@@ -4154,9 +4339,11 @@ internal sealed class CryptoReferenceResolver
     /// </remarks>
     internal ProblemHttpResult? TryResolveReference(
         string? reference,
+        string owner,
         ILoggerFactory loggerFactory,
         out string material)
     {
+        ArgumentNullException.ThrowIfNull(owner);
         ArgumentNullException.ThrowIfNull(loggerFactory);
 
         material = string.Empty;
@@ -4173,9 +4360,17 @@ internal sealed class CryptoReferenceResolver
         // not-permitted rather than resolved from a map that had not been tidied yet.
         SweepExpiredGeneratedKeys();
 
-        // SCREEN ONE - a reference this service minted. Checked first because it cannot appear in the
-        // configured set, and answered without consulting that set at all.
-        if (_retained.TryGetValue(reference, out RetainedGeneratedKey? retained))
+        // SCREEN ONE - a reference this service minted FOR THIS CALLER. Checked first because it cannot
+        // appear in the configured set, and answered without consulting that set at all.
+        //
+        // THE OWNER IS NORMALISED EXACTLY AS THE RESERVATION AND THE RELEASE NORMALISE IT, so a token
+        // carrying no subject charges to, and reads from, the one shared unattributed bucket rather than
+        // matching every entry or none.
+        if (_retained.TryGetValue(reference, out RetainedGeneratedKey? retained)
+            && string.Equals(
+                retained.Owner,
+                owner.Length == 0 ? UnattributedOwner : owner,
+                StringComparison.Ordinal))
         {
             material = retained.PrivateKey;
 
@@ -4363,14 +4558,13 @@ internal sealed class CryptoReferenceResolver
     /// <exception cref="ArgumentNullException">An argument is <see langword="null"/>.</exception>
     /// <remarks>
     /// <para>
-    /// <b>THE RESERVATION IS THE FIX, AND ITS ORDER IS THE WHOLE POINT.</b> Capacity used to be checked
-    /// by reading the entry count and then inserting, which is two operations and therefore not atomic:
-    /// concurrent callers each saw room and collectively exceeded the bound. And the check ran AFTER
-    /// generation, so a caller whose key was then discarded had still consumed the expensive work -
-    /// which makes a full store an amplifier rather than a limit. Reserving first closes both: the
-    /// counter is advanced with a single interlocked operation and rolled back on refusal, so the bound
-    /// holds exactly under any amount of concurrency, and no RSA key is generated for a request that
-    /// cannot be retained.
+    /// <b>THE RESERVATION IS THE POINT, AND SO IS ITS ORDER.</b> Checking capacity by reading the entry
+    /// count and then inserting is two operations and therefore not atomic: concurrent callers would each
+    /// see room and collectively exceed the bound. And checking AFTER generation would let a caller whose
+    /// key is then discarded still consume the expensive work, which makes a full store an amplifier rather
+    /// than a limit. Reserving first closes both: the counter is advanced with a single interlocked
+    /// operation and rolled back on refusal, so the bound holds exactly under any amount of concurrency,
+    /// and no RSA key is generated for a request that cannot be retained.
     /// </para>
     /// <para>
     /// <b>THE PER-OWNER QUOTA IS RESERVED IN THE SAME WAY AND ROLLED BACK TOGETHER.</b> A global cap
@@ -5784,12 +5978,12 @@ public sealed record BlobReverseResponse(
 /// </summary>
 /// <remarks>
 /// <para>
-/// WHY THIS EXISTS. The group used to require an authenticated principal and nothing more, so any holder of
-/// any token minted for this service's audience could drive keyed HMAC, symmetric encryption and
-/// decryption, RSA signing and RSA key generation - regardless of what the credential was obtained for and
-/// regardless of which caller it was minted for. Combined with an issuer that granted every requested scope
-/// to any caller whose certificate chained to the configured authority, a credential obtained for one
-/// purpose reached the whole cryptographic surface (CWE-862, CWE-863).
+/// WHY THIS EXISTS. Requiring an authenticated principal AND NOTHING MORE would let any holder of any token
+/// minted for this service's audience drive keyed HMAC, symmetric encryption and decryption, RSA signing and
+/// RSA key generation - regardless of what the credential was obtained for and regardless of which caller it
+/// was minted for. Paired with an issuer that granted every requested scope to any caller it authenticated,
+/// a credential obtained for one purpose would reach the whole cryptographic surface (CWE-862, CWE-863).
+/// This policy is what makes neither of those true.
 /// </para>
 /// <para>
 /// THE SCOPE NAME IS NOT INVENTED HERE. DataServices requests exactly <c>security.crypto</c> for this edge,
@@ -5936,8 +6130,8 @@ internal static class CryptoCallerAuthorization
         // `Security:Callers` nests each caller's grants under its identity and `Security:CallerAuthorizations`
         // states one flat (caller, audience, scopes) row at a time; TokenIssuer folds the two into ONE matrix
         // and decides from that, so a deployment may author either or both. Reading only the nested shape -
-        // which this used to do - refused the ENTIRE cryptographic surface for every caller of any deployment
-        // that stated its matrix in flat rows, while that same deployment's issuer happily minted the
+        // the tempting simplification - refuses the ENTIRE cryptographic surface for every caller of any
+        // deployment that states its matrix in flat rows, while that same deployment's issuer happily mints the
         // credential being refused. That is the worst shape this drift can take: the issuing side and the
         // receiving side disagree, the mint succeeds, the call is refused, and nothing names the cause.
         //

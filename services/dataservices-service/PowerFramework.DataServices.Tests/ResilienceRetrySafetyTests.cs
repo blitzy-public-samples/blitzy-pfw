@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  F-12 - RETRY SAFETY ON THE NETWORK EDGES DECOMPOSITION CREATES
+//  RETRY SAFETY ON THE NETWORK EDGES DECOMPOSITION CREATES
 // =====================================================================================================
 //
 //  WHY RETRIES ARE A CORRECTNESS PROBLEM AND NOT A TUNING ONE. A transport failure does not reveal
@@ -142,7 +142,7 @@ public sealed class ResilienceRetrySafetyTests
     }
 
     // ==============================================================================================
-    //  F-10 - THE LAYER THAT ACTUALLY SEES A CONNECT FAILURE
+    //  THE LAYER THAT ACTUALLY SEES A CONNECT FAILURE
     //
     //  Everything above this line asserts the HTTP-level pipeline. That pipeline is attached to the
     //  HttpClient's message handler, and Grpc.Net establishes its connection in the BALANCER's subchannel
@@ -456,9 +456,9 @@ public sealed class ResilienceRetrySafetyTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// 🔴 <b>THE DISABLE USED TO BE UNDEPLOYABLE, WHICH IS WHY THE FIRST ASSERTION IS THAT THE HOST STARTS
-    /// AT ALL.</b> Zero was documented as disabling retrying and annotated as legal, while both retry
-    /// layers consumed it unconditionally. The resilience package declares its retry strategy's count in
+    /// 🔴 <b>THE DISABLE IS EASILY UNDEPLOYABLE, WHICH IS WHY THE FIRST ASSERTION IS THAT THE HOST STARTS
+    /// AT ALL.</b> Documenting zero as disabling retrying and annotating it as legal, while both retry
+    /// layers consume it unconditionally, is the trap. The resilience package declares its retry strategy's count in
     /// the range one to <see cref="int.MaxValue"/>, so resolving a client threw "The field
     /// &lt;client&gt;-standard.Retry.MaxRetryAttempts must be between 1 and 2147483647" - observed on the
     /// sibling Gateway edge, whose wiring is identical - and the gRPC layer's <c>MaxAttempts = retries + 1</c>

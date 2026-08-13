@@ -461,7 +461,8 @@ public sealed class ThrowExceptionTests
     //  ArgumentException on the empty name. That fix is FORBIDDEN. Constraint C-B requires
     //  documented legacy defects to be replicated rather than corrected, and the fail-fast posture
     //  the plan mandates elsewhere governs STRUCTURAL faults - the Gateway composition root and
-    //  the Diagnostics assert path, where pfw.sra:L111-L144 unpacks a seven-field assert payload
+    //  the Diagnostics assert path, where ws_objects/pfw.pbl.src/pfw.sra:L111-L144 - the framework
+    //  application, not the same-named packager object - unpacks a seven-field assert payload
     //  and then executes HALT CLOSE. It does not license hardening this path, whose legacy
     //  behaviour is to return.
     //

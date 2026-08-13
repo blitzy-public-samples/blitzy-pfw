@@ -4,23 +4,23 @@
  *
  * WHY THIS MODULE EXISTS
  * ----------------------
- * Every spec in this suite used to read a response TOLERANTLY: a media type
- * accepted by `toContain('json')`, a verdict matched by
- * `/\b(healthy|ok|up|pass)\b/i`, an upstream "named" by a case-insensitive
- * substring anywhere in the serialized body, a service identity accepted under
- * any of three spellings, a member resolved through a candidate list of three or
- * four alternative spellings, and an advertised key-set URI checked by
+ * READING A RESPONSE TOLERANTLY IS THE NATURAL THING TO WRITE AND IT IS WHAT THIS
+ * MODULE EXISTS TO PREVENT: a media type accepted by `toContain('json')`, a verdict
+ * matched by `/\b(healthy|ok|up|pass)\b/i`, an upstream "named" by a
+ * case-insensitive substring anywhere in the serialized body, a service identity
+ * accepted under any of three spellings, a member resolved through a candidate list
+ * of three or four alternative spellings, an advertised key-set URI checked by
  * `endsWith`.
  *
- * Each tolerance had a defensible local reason — usually that a spec should
- * report "the boundary serialized this differently" rather than "the field is
- * missing" — and together they added up to a suite that could not fail for the
- * single most likely defect on a freshly decomposed boundary: A RESPONSE FIELD
- * RENAME, OR WIRE-SHAPE DRIFT. `retCode` becoming `ret_code`, `Healthy` becoming
- * `ok`, the aggregate collapsing three named upstreams into one opaque verdict, a
- * bare array acquiring an envelope, `application/json` becoming `text/html` with
- * JSON inside it — every one of those passed. A contract test that cannot detect
- * a contract change is not a contract test.
+ * Each tolerance has a defensible local reason — usually that a spec should report
+ * "the boundary serialized this differently" rather than "the field is missing" —
+ * and together they add up to a suite that cannot fail for the single most likely
+ * defect on a freshly decomposed boundary: A RESPONSE FIELD RENAME, OR WIRE-SHAPE
+ * DRIFT. `retCode` becoming `ret_code`, `Healthy` becoming `ok`, the aggregate
+ * collapsing three named upstreams into one opaque verdict, a bare array acquiring
+ * an envelope, `application/json` becoming `text/html` with JSON inside it — a
+ * tolerant suite passes every one of those. A contract test that cannot detect a
+ * contract change is not a contract test.
  *
  * THE RULE THIS MODULE ENFORCES, AND THE ONE IT KEEPS
  * --------------------------------------------------
@@ -96,6 +96,21 @@ const PERMITTED_MEDIA_TYPE_PARAMETERS: readonly string[] = Object.freeze([
  * ANYTHING ELSE IS A FAILURE, which is the half that detects a rename: a
  * response that dropped `retCode` and added `ret_code` satisfies no member set
  * here, because the new name is in neither list and the old one is missing.
+ *
+ * `requiredOnResponse` EXISTS BECAUSE TWO SCHEMAS TRAVEL IN BOTH DIRECTIONS, and
+ * one `required` list cannot be true of both. `gateway.v1.yaml` says so itself on
+ * `DataWindowRow` and on `ColumnValue`: a `required` list on a shape that also
+ * arrives in a request "would publish a check nothing performs and would make a
+ * validator reject a body the runtime accepts", because the projection binds every
+ * request with the strict canonical protobuf JSON parser, which reads an absent
+ * member as its default. So the document declares nothing required there and states
+ * the response-direction presence in prose instead.
+ *
+ * This member is that prose, made executable. It is asserted on a LIVE RESPONSE
+ * exactly as `required` is, and it is asserted against the DOCUMENT differently:
+ * the schema must declare the member and must NOT mark it `required` — if the
+ * document ever does mark it, the member belongs in `required` and the drift is
+ * reported rather than absorbed.
  */
 export interface MemberContract {
   /** The schema in the published contract this set was taken from. */
@@ -103,6 +118,12 @@ export interface MemberContract {
 
   /** Members the schema marks `required`. Each must be present. */
   readonly required: readonly string[];
+
+  /**
+   * Members a RESPONSE always carries although the schema marks nothing required,
+   * because the schema also travels in a request. Asserted present on a response.
+   */
+  readonly requiredOnResponse: readonly string[];
 
   /** Members the schema declares but does not require. Permitted, not required. */
   readonly optional: readonly string[];
@@ -128,8 +149,35 @@ function contract(
   return Object.freeze({
     schema,
     required: Object.freeze([...required]),
+    requiredOnResponse: Object.freeze<string[]>([]),
     optional: Object.freeze([...optional]),
     lowerCamelCase,
+  });
+}
+
+/**
+ * Build a member contract for a schema that travels in BOTH directions.
+ *
+ * The name is the reason: such a schema declares nothing `required`, so there is no
+ * `required` argument to pass and no way to pass one by accident. What a response
+ * always carries is stated separately and asserted separately.
+ *
+ * @param schema the schema in the published contract
+ * @param requiredOnResponse members a response always carries
+ * @param optional members permitted in either direction and required in neither
+ * @returns the frozen member contract
+ */
+function bidirectionalContract(
+  schema: string,
+  requiredOnResponse: readonly string[],
+  optional: readonly string[] = [],
+): MemberContract {
+  return Object.freeze({
+    schema,
+    required: Object.freeze<string[]>([]),
+    requiredOnResponse: Object.freeze([...requiredOnResponse]),
+    optional: Object.freeze([...optional]),
+    lowerCamelCase: true,
   });
 }
 
@@ -187,18 +235,45 @@ export const RETRIEVE_CHUNK: MemberContract = contract(
   ['buffer', 'error'],
 );
 
-/** `DataWindowRow` — the carrier that makes a result a DataWindow rather than a rowset. */
-export const DATAWINDOW_ROW: MemberContract = contract(
+/**
+ * `DataWindowRow` — the carrier that makes a result a DataWindow rather than a rowset.
+ *
+ * BIDIRECTIONAL, so the schema marks nothing `required`: it is what a retrieval chunk
+ * carries out and what an update submits in, and the obligation on `originalValues` is
+ * CONDITIONAL on the row's status rather than universal — a `New!` row generates an
+ * `INSERT` with no predicate and needs no baseline at all. `gateway.v1.yaml` records
+ * that reasoning on the schema and enforces the real rule at runtime in
+ * `Validators/UpdateRowValidator` instead.
+ *
+ * WHAT A RESPONSE ALWAYS CARRIES is the first four, and it is a fact about the
+ * projection rather than about the schema: Gateway formats with
+ * `WithFormatDefaultValues(true)`, so a field without explicit protobuf presence is
+ * emitted even at its default — which matters precisely here, because a Primary row is
+ * buffer 0 and a `NotModified!` row is status 0. Those four are also exactly what a
+ * flat rowset would have discarded, which is why asserting them is what proves the
+ * payload is a carrier.
+ */
+export const DATAWINDOW_ROW: MemberContract = bidirectionalContract(
   'DataWindowRow',
   ['buffer', 'row', 'itemStatus', 'columns'],
   ['originalValues'],
 );
 
-/** `ColumnValue` — one column of one row. */
-export const COLUMN_VALUE: MemberContract = contract(
+/**
+ * `ColumnValue` — one column of one row.
+ *
+ * BIDIRECTIONAL for the same reason, and `value` is DELIBERATELY NOT REQUIRED even on a
+ * response. `gateway.v1.yaml` states the measurement: `value` has explicit protobuf
+ * presence and stays absent until set, so "a strict consumer validating a real response
+ * against that list would have rejected a valid body". An earlier revision of this
+ * fixture required it, and the document already carried the correction. `itemStatus` is
+ * proto3 `optional` for the same class of reason. `columnName` and `columnId` have no
+ * explicit presence, so the response formatter emits both on every column.
+ */
+export const COLUMN_VALUE: MemberContract = bidirectionalContract(
   'ColumnValue',
-  ['columnName', 'columnId', 'value'],
-  ['itemStatus'],
+  ['columnName', 'columnId'],
+  ['value', 'itemStatus'],
 );
 
 /** `ConflictDetail` — the `409` payload's detail (C-06 over C-09). */
@@ -389,7 +464,7 @@ function fail(message: string): never {
  *
  * Parses `Content-Type` into its type/subtype and its parameters and compares the
  * type/subtype for equality, case-insensitively as RFC 9110 requires of the
- * subtype itself. `toContain('json')` used to stand in for this, and it accepted
+ * subtype itself. `toContain('json')` is the tempting stand-in for this, and it accepts
  * `text/html` with the word JSON anywhere in it, `application/problem+json` where
  * a success body was expected, and a missing header on some paths.
  *
@@ -490,14 +565,22 @@ export function assertMembers(
   const record: Record<string, unknown> = assertJsonObject(value, context);
   const present: readonly string[] = Object.keys(record);
 
-  const missing: readonly string[] = memberContract.required.filter(
+  // Both designations are asserted here, because both are obligations ON A RESPONSE and
+  // this function only ever reads one. They differ in what the DOCUMENT says about them,
+  // not in what a body must carry - see MemberContract.requiredOnResponse.
+  const mustBePresent: readonly string[] = [
+    ...memberContract.required,
+    ...memberContract.requiredOnResponse,
+  ];
+
+  const missing: readonly string[] = mustBePresent.filter(
     (member: string) => !Object.prototype.hasOwnProperty.call(record, member),
   );
 
   if (missing.length > 0) {
     fail(
-      `${context} is missing the required member(s) ${missing.join(', ')} that ` +
-        `schema ${memberContract.schema} declares. Present: ` +
+      `${context} is missing the member(s) ${missing.join(', ')} that a response ` +
+        `carrying schema ${memberContract.schema} always has. Present: ` +
         `${present.join(', ') || '(none)'}.`,
     );
   }
@@ -519,6 +602,7 @@ export function assertMembers(
 
   const permitted: readonly string[] = [
     ...memberContract.required,
+    ...memberContract.requiredOnResponse,
     ...memberContract.optional,
   ];
 
@@ -577,7 +661,7 @@ export function assertEnumToken(
 /**
  * Assert a URI equals the FULL expected URI rather than merely ending with it.
  *
- * `endsWith(JWKS_PATH)` used to stand in for this, and it accepted an advertised
+ * `endsWith(JWKS_PATH)` is the tempting stand-in for this, and it accepts an advertised
  * key set on ANY origin — including one this suite never probed, which is
  * precisely the drift that would make a consumer's stock bearer handler fetch
  * keys from somewhere nobody verified. Origin, port, path and the absence of a
@@ -649,8 +733,8 @@ export function assertFullUri(
  * `is_final` and `Rows` all satisfied a read, and a projection that renamed a
  * field passed every assertion downstream of it.
  *
- * The table survives, and so does its diagnostic value; only the verdict
- * changed. The canonical name is now REQUIRED, and a variant found in its place
+ * The table and its diagnostic value are kept; what it must NOT be is the
+ * verdict. The canonical name is REQUIRED, and a variant found in its place
  * is reported as the drift it is, naming both spellings. That is the tolerant
  * reader in its proper role: it tells you what happened AFTER the exact
  * assertion has already failed the run.
@@ -689,7 +773,7 @@ export function readCanonicalMember(
   if (drifted !== undefined) {
     fail(
       `${context} carries "${drifted}" where the contract declares ` +
-        `"${canonical}". This suite once accepted either. It no longer does: a ` +
+        `"${canonical}". Accepting either spelling is the tempting leniency: a ` +
         'response-field rename is the most likely drift on a freshly decomposed ' +
         'boundary, and a reader that accepts both spellings cannot detect it.',
     );
@@ -950,6 +1034,13 @@ export function readSchemaFacts(
  * that matters most — every member the DOCUMENT declares must appear in this
  * module, so a member added to the contract cannot go unasserted.
  *
+ * A `requiredOnResponse` member is checked DIFFERENTLY and deliberately so: the
+ * schema must declare it and must NOT mark it `required`. That is the whole point of
+ * the designation — the two bidirectional schemas declare nothing required for a
+ * measured reason the document states on each of them — and the last check below is
+ * what stops the designation from drifting into a place to keep a member the document
+ * does require.
+ *
  * @param documentText the contract document
  * @param memberContract the member set to verify
  * @throws Error when the module and the document disagree
@@ -961,6 +1052,7 @@ export function assertContractDeclaresShape(
   const facts: SchemaFacts = readSchemaFacts(documentText, memberContract.schema);
   const declared: readonly string[] = [
     ...memberContract.required,
+    ...memberContract.requiredOnResponse,
     ...memberContract.optional,
   ];
 
@@ -1012,6 +1104,25 @@ export function assertContractDeclaresShape(
         `on schema ${memberContract.schema}, and ` +
         'fixtures/contract-shape.ts treats it as optional, so this suite would ' +
         'pass over a response that omitted it.',
+    );
+  }
+
+  // The two designations must stay DISJOINT, and this is the direction that keeps
+  // `requiredOnResponse` from becoming a place to hide a member the document does
+  // require. A member the schema marks `required` belongs in `required`, where the
+  // two checks above hold it in step with the document; leaving it in
+  // `requiredOnResponse` would exempt it from both of them while still asserting it
+  // on a body, so the fixture and the document could drift with nothing reporting it.
+  const requiredByDocument: readonly string[] = memberContract.requiredOnResponse.filter(
+    (member: string) => facts.required.includes(member),
+  );
+
+  if (requiredByDocument.length > 0) {
+    throw new Error(
+      `fixtures/contract-shape.ts lists ${requiredByDocument.join(', ')} as ` +
+        `required-on-response for schema ${memberContract.schema}, but the published ` +
+        'contract now marks it `required` outright. Move it to the required list, ' +
+        'which is the one the document is checked against in both directions.',
     );
   }
 }

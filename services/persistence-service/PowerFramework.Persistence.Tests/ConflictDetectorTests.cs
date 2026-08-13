@@ -56,7 +56,7 @@
 //                                        projection TryProjectAborted. IT THROWS NO RpcException.
 //                                        NoRpcExceptionEverEscapesTheDetector is the guard.
 //      Program.cs                        owns the CENTRAL mismatch-to-Aborted mapping for the host
-//                                        [Program.cs:L2022-L2024 passes an RpcException through
+//                                        [Program.cs:L2123-L2126 passes an RpcException through
 //                                        untouched].
 //      Grpc/UpdateService.cs             THE DESIGNATED THROW SITE [its header, and :L2537].
 //
@@ -1442,10 +1442,10 @@ public sealed class ConflictDetectorTests
     [Fact]
     public void TheElseArmRaisesNothingAndCarriesTheTransactionsCodeAndText()
     {
-        // ⚠ THE CODE CHOSEN HERE MATTERS. This row used to send SQLITE_CONSTRAINT_PRIMARYKEY (1555),
-        // which is now RECLASSIFIED as a caller payload fault - see the constraint rows below - so the
-        // else arm is exercised with a genuine SERVER-SIDE failure instead. SQLITE_IOERR is exactly that:
-        // nothing a corrected payload could avoid.
+        // ⚠ THE CODE CHOSEN HERE MATTERS. SQLITE_CONSTRAINT_PRIMARYKEY (1555) is the tempting choice and
+        // is CLASSIFIED as a caller payload fault - see the constraint rows below - so it would not reach
+        // the else arm at all. This row therefore uses a genuine SERVER-SIDE failure: SQLITE_IOERR is
+        // exactly that, nothing a corrected payload could avoid.
         _target.UpdateResult = DataWindowBufferStore.DataStoreFailure;
         _transaction.SqlDbCode = RetCode.SQLITE_IOERR;
         _transaction.SqlErrText = "disk I/O error";
@@ -2299,7 +2299,7 @@ public sealed class ConflictDetectorTests
     /// Every outcome kind is REACHABLE through <c>Classify</c>, and each is MUTUALLY EXCLUSIVE of every
     /// other - one classification answers exactly one kind and one code.
     /// </summary>
-    /// <param name="expected">The kind to reach.</param>
+    /// <param name="arm">The update arm the theory is driving.</param>
     /// <remarks>
     /// <para>
     /// EXCLUSIVITY IS ASSERTED BY ELIMINATION rather than by inspecting one field: every other kind is
@@ -2512,7 +2512,7 @@ public sealed class ConflictDetectorTests
     /// <summary>
     /// Drives <c>Classify</c> down the arm that produces one specific outcome kind, on the shared fakes.
     /// </summary>
-    /// <param name="kind">The kind to reach.</param>
+    /// <param name="arm">The update arm the theory is driving.</param>
     /// <returns>The outcome.</returns>
     /// <remarks>
     /// ONE PLACE THAT KNOWS HOW TO REACH EACH ARM, so the sweeps above assert on outcomes rather than each

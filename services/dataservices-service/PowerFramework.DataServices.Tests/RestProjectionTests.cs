@@ -82,12 +82,6 @@
 //  latency budget, no throughput target and no availability commitment, so none may be asserted
 //  (AAP 0.8.5). No row measures elapsed time.
 //
-//  RULES POSITION
-//  `review_rules` returns exactly "No user rules provided.", so NO USER-SPECIFIED RULE governs this
-//  file; none is invented. The enterprise-standard baseline of AAP 0.7.2 applies in its place and is
-//  honoured: nullable reference types and warnings-as-errors inherited and never relaxed, plain xunit
-//  assertions with no mocking or fluent-assertion package, no secret or key material of any kind, and
-//  the published contracts as the only coupling this suite reads across a service boundary.
 // =====================================================================================================
 
 using System.Collections.Concurrent;
@@ -600,7 +594,7 @@ internal sealed record ProjectedOperationDeclaration(string Method, string Path,
 /// <b>THE AUTHORED CONTRACT IS THE AUTHORITY AND IT IS READ RATHER THAN TRANSCRIBED.</b>
 /// <c>shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml</c> is the public mirror a consumer is
 /// handed, and constraint C-A says this projection exposes nothing beyond what it declares. A list of
-/// forty routes copied into this file would be a second source of truth that drifts silently on the
+/// thirty-nine routes copied into this file would be a second source of truth that drifts silently on the
 /// first contract change, and the drift would make the correspondence test pass while the product was
 /// already broken - so the list is parsed from the document itself.
 /// </para>
@@ -910,7 +904,7 @@ internal static class RestProjectionContract
 /// <remarks>
 /// <para>
 /// ONE HOST BUILDER, so no case can accidentally exercise a different composition from its neighbours -
-/// which is the same reason the projection has one status mapper rather than forty.
+/// which is the same reason the projection has one status mapper rather than thirty-nine.
 /// </para>
 /// <para>
 /// EVERY HELPER READS, AND NONE ASSERTS ON BEHALF OF A CASE. A helper that folded an assertion in would
@@ -1812,7 +1806,7 @@ public sealed class RestProjectionConflictTests
 
 
 // =====================================================================================================
-//  2. ONE SHARED STATUS MAPPING, NOT FORTY COPIES OF IT
+//  2. ONE SHARED STATUS MAPPING, NOT THIRTY-NINE COPIES OF IT
 // =====================================================================================================
 
 /// <summary>
@@ -1826,7 +1820,7 @@ public sealed class RestProjectionConflictTests
 /// </param>
 /// <remarks>
 /// <para>
-/// <b>WHY "SHARED" IS THE PROPERTY RATHER THAN "CORRECT".</b> Forty copies of a status table would each
+/// <b>WHY "SHARED" IS THE PROPERTY RATHER THAN "CORRECT".</b> Thirty-nine copies of a status table would each
 /// be correct on the day it was written and would drift apart on the first edit, and the drift would be
 /// invisible: a caller would receive one status for a condition on one route and a different status for
 /// the same condition on another, and its retry-or-surface policy would become unwritable. So the rows
@@ -1939,10 +1933,11 @@ public sealed class RestProjectionStatusMappingTests(DataServicesTestHostFactory
     /// <c>E_ACCESS_DENIED</c> is a <c>PermissionDenied</c> and therefore <b>403</b> - a valid-but-
     /// insufficient credential, distinct from none at all; <c>E_INVALID_HANDLE</c> is a <c>NotFound</c> and
     /// therefore <b>404</b>, which is the row the published table declares for it and the answer the unary
-    /// outcome map and both of DataWindowService's upstream maps already give it - it used to be a
-    /// <c>FailedPrecondition</c>, and since the published table declares no such row that arm fell to the
-    /// canonical mapping and reached the caller as <b>400</b> carrying <c>E_INVALID_ARGUMENT</c>, replacing
-    /// the originating code and blaming a malformed argument for a handle the upstream no longer holds;
+    /// outcome map and both of DataWindowService's upstream maps give it. Answering
+    /// <c>FailedPrecondition</c> instead is the tempting choice, and since the published table declares no
+    /// such row that arm falls to the canonical mapping and reaches the caller as <b>400</b> carrying
+    /// <c>E_INVALID_ARGUMENT</c>, replacing the originating code and blaming a malformed argument for a
+    /// handle the upstream no longer holds;
     /// <c>E_BUSY</c> is a <c>ResourceExhausted</c> and therefore <b>429</b>, the status
     /// that carries a retry hint, and NOT 503, because a busy resource is a ceiling that clears rather
     /// than a service that is down; and anything the acquisition map does not name reaches its default arm
@@ -2051,7 +2046,11 @@ public sealed class RestProjectionStatusMappingTests(DataServicesTestHostFactory
 
             // The remaining named arms, so none of them can quietly become the default.
             { StatusCode.PermissionDenied, false, 403, KernelRetCode.E_ACCESS_DENIED, false, RestProjection.DefaultProblemType },
-            { StatusCode.Unimplemented, false, 501, KernelRetCode.E_NO_IMPLEMENTATION, false, RestProjection.DefaultProblemType },
+            // 🔴 500 AND NOT 501. Every operation this projection publishes is implemented, and 501 is
+            // reserved system-wide for Gateway's four deferred-capability routes (AAP 0.4.4, C-D) - so the
+            // status this row used to assert was both undeclared on this document and a claim that an
+            // implemented surface was a placeholder. The legacy code still names the condition exactly.
+            { StatusCode.Unimplemented, false, 500, KernelRetCode.E_NO_IMPLEMENTATION, false, RestProjection.DefaultProblemType },
             { StatusCode.DeadlineExceeded, false, 504, KernelRetCode.E_TIME_OUT, false, RestProjection.DefaultProblemType },
             { StatusCode.FailedPrecondition, false, 400, KernelRetCode.E_INVALID_ARGUMENT, false, RestProjection.DefaultProblemType },
             { StatusCode.OutOfRange, false, 400, KernelRetCode.E_OUT_OF_RANGE, false, RestProjection.DefaultProblemType },
@@ -2290,12 +2289,12 @@ public sealed class RestProjectionStatusMappingTests(DataServicesTestHostFactory
     /// <returns>A task representing the assertions.</returns>
     /// <remarks>
     /// <para>
-    /// 🔴 <b>THIS ROW USED TO ASSERT 500, AND IT WAS PINNING A DEFECT RATHER THAN A PROPERTY.</b> Its own
-    /// reasoning said so out loud: it reached the map's DEFAULT arm because "<c>E_INVALID_DATA</c> is such
-    /// an outcome today", meaning this projection had not been taught a code the ingress had - so the SAME
-    /// refusal answered 400 through the gateway and 500 here, on two surfaces documented as equivalent. A
+    /// 🔴 <b>ASSERTING 500 HERE WOULD PIN A DEFECT RATHER THAN A PROPERTY.</b> The reasoning that leads
+    /// there says so out loud: it reaches the map's DEFAULT arm because "<c>E_INVALID_DATA</c> is such
+    /// an outcome", meaning this projection has not been taught a code the ingress has - so the SAME
+    /// refusal would answer 400 through the gateway and 500 here, on two surfaces documented as equivalent. A
     /// 500 told the caller that this service had failed and invited it to retry an identical payload that
-    /// can never succeed. <c>E_INVALID_DATA</c> is now an explicit arm and this row asserts 400, which is
+    /// can never succeed. <c>E_INVALID_DATA</c> is an explicit arm and this row asserts 400, which is
     /// the honest answer: the request's own DATA is what was refused.
     /// </para>
     /// <para>
@@ -2910,8 +2909,8 @@ public sealed class RestProjectionSurfaceTests(DataServicesTestHostFactory host)
 /// </summary>
 /// <remarks>
 /// <para>
-/// A CLASS FIXTURE BECAUSE A SWEEP IS FORTY ROWS. Booting the composition root per row would multiply one
-/// boot by forty for a property - "this route is not anonymous" - that has nothing to do with which host
+/// A CLASS FIXTURE BECAUSE A SWEEP IS THIRTY-NINE ROWS. Booting the composition root per row would multiply
+/// one boot by thirty-nine for a property - "this route is not anonymous" - that has nothing to do with which host
 /// answers it. Nothing in the sweep mutates host-wide state: the scripts are set once here and read, never
 /// rewritten.
 /// </para>
@@ -3034,7 +3033,7 @@ public sealed class RestProjectionAuthorizationTests(PreparedProjectionHostFixtu
     /// Most of these operations need a session, a handle or a payload this sweep deliberately does not
     /// supply, so a success would be the wrong claim; what matters is that authentication and authorization
     /// stopped refusing and the request reached the handler. Requiring 200 here would force the sweep to
-    /// arrange forty different scenarios and would test something else entirely.
+    /// arrange thirty-nine different scenarios and would test something else entirely.
     /// </para>
     /// <para>
     /// AND 403 IS EXCLUDED ALONGSIDE 401, because the fixture's principal carries BOTH published scopes -
@@ -3429,17 +3428,17 @@ public sealed class RestProjectionRedactionTests
     /// <returns>A task representing the assertions.</returns>
     /// <remarks>
     /// <para>
-    /// 🔴 <b>THE HANDLE WAS WRITTEN VERBATIM, AND THE ATTACK NEEDS NO SOPHISTICATION.</b> The record above
-    /// is the one that carries the caller's DataWindow handle - deliberately, because it is what makes a
-    /// failure traceable - and it wrote the value exactly as it arrived. Every console, file and syslog
-    /// provider renders a structured record to a LINE, so a handle containing a line break appended a
+    /// 🔴 <b>WRITING THE HANDLE VERBATIM IS THE OBVIOUS IMPLEMENTATION, AND THE ATTACK ON IT NEEDS NO
+    /// SOPHISTICATION.</b> The record above is the one that carries the caller's DataWindow handle -
+    /// deliberately, because it is what makes a failure traceable. Every console, file and syslog
+    /// provider renders a structured record to a LINE, so a handle containing a line break appends a
     /// COMPLETE fabricated record after the real one: same shape, same channel, carrying whatever severity,
-    /// service name and outcome the caller chose to write into it. Nothing downstream could tell the two
+    /// service name and outcome the caller chose to write into it. Nothing downstream can tell the two
     /// apart, which makes it a forgery rather than merely noise.
     /// </para>
     /// <para>
     /// <b>AND THE SECOND HALF IS SIZE.</b> The handle is read from a request body, so a caller chooses its
-    /// length; one request carrying a multi-megabyte handle produced a multi-megabyte record, and a loop of
+    /// length; one request carrying a multi-megabyte handle produces a multi-megabyte record, and a loop of
     /// them fills whatever the records are written to - taking the service down by way of its diagnostics
     /// rather than by way of its endpoints.
     /// </para>
@@ -3520,7 +3519,7 @@ public sealed class RestProjectionRedactionTests
 
         // 4. THE FORGED TAIL IS STILL THERE AND IS HARMLESS, which is the difference between escaping and
         //    censorship: the caller's value remains readable so an operator can see what was sent, and it
-        //    is now unambiguously PART OF the handle rather than a record of its own. Asserting its
+        //    is unambiguously PART OF the handle rather than a record of its own. Asserting its
         //    presence is what stops a future "just strip the newline and everything after it" from passing.
         Assert.Contains(ForgedTail, upstreamRecord, StringComparison.Ordinal);
 
@@ -4148,8 +4147,8 @@ public sealed class RestProjectionStatusEquivalenceTests
     /// HELD AS A TUPLE ARRAY RATHER THAN ONLY AS THEORY DATA so that
     /// <see cref="TheTableCoversEveryClassifiedArm"/> can walk the same entries the theory runs.
     /// Projecting both from one declaration is what makes it impossible for the per-row assertion and the
-    /// completeness guard to describe different sets and both pass. The six entries the finding added are
-    /// marked so a reader can see what changed and why each one is where it is.
+    /// completeness guard to describe different sets and both pass. Each entry whose status is not the
+    /// obvious one carries the reason it sits where it does.
     /// </remarks>
     private static readonly (long RetCode, int HttpStatus)[] PublishedMappingDeclarations =
     [
@@ -4159,10 +4158,10 @@ public sealed class RestProjectionStatusEquivalenceTests
         (KernelRetCode.E_OUT_OF_RANGE, StatusCodes.Status400BadRequest),
         (KernelRetCode.E_OUT_OF_BOUND, StatusCodes.Status400BadRequest),
 
-        // ⚠ ADDED. The payload could not be applied - the caller's DATA, not this service.
+        // The payload could not be applied - the caller's DATA, not this service.
         (KernelRetCode.E_INVALID_DATA, StatusCodes.Status400BadRequest),
 
-        // ⚠ ADDED. A DataWindow name in the request BODY that resolves to nothing. 400 and not 404,
+        // A DataWindow name in the request BODY that resolves to nothing. 400 and not 404,
         // because the retrieval side answers the same mistake with E_INVALID_ARGUMENT.
         (KernelRetCode.E_INVALID_DATAOBJECT, StatusCodes.Status400BadRequest),
 
@@ -4173,7 +4172,7 @@ public sealed class RestProjectionStatusEquivalenceTests
         (KernelRetCode.E_INVALID_HANDLE, StatusCodes.Status404NotFound),
         (KernelRetCode.E_OBJECT_NOT_FOUND, StatusCodes.Status404NotFound),
 
-        // ⚠ ADDED, all three. The same situation as the two above: a name with nothing behind it.
+        // All three are the same situation as the two above: a name with nothing behind it.
         (KernelRetCode.E_NOT_EXISTS, StatusCodes.Status404NotFound),
         (KernelRetCode.E_VAR_NOT_FOUND, StatusCodes.Status404NotFound),
         (KernelRetCode.E_MEMBER_NOT_FOUND, StatusCodes.Status404NotFound),
@@ -4187,15 +4186,18 @@ public sealed class RestProjectionStatusEquivalenceTests
         // 504 - the operation ran out of budget.
         (KernelRetCode.E_TIME_OUT, StatusCodes.Status504GatewayTimeout),
 
-        // 501 - reserved for a capability that is genuinely absent.
-        (KernelRetCode.E_NO_SUPPORT, StatusCodes.Status501NotImplemented),
-        (KernelRetCode.E_NO_IMPLEMENTATION, StatusCodes.Status501NotImplemented),
+        // 🔴 500 - an implemented operation with no implementation for the cell that was asked for. The two
+        // rows asserted 501, and 501 is reserved system-wide for Gateway's four deferred-capability routes
+        // (AAP 0.4.4, C-D): it says an entire capability area is unbuilt, which is false of every operation
+        // this projection publishes. The retCode member is what names the absent cell.
+        (KernelRetCode.E_NO_SUPPORT, StatusCodes.Status500InternalServerError),
+        (KernelRetCode.E_NO_IMPLEMENTATION, StatusCodes.Status500InternalServerError),
 
         // 502 - the path behind this surface answered badly.
         (KernelRetCode.E_DB_ERROR, StatusCodes.Status502BadGateway),
         (KernelRetCode.E_INVALID_TRANSACTION, StatusCodes.Status502BadGateway),
 
-        // ⚠ ADDED. The oracle's own unspecific failure, answered by an operation that COMPLETED. 502 and
+        // The oracle's own unspecific failure, answered by an operation that COMPLETED. 502 and
         // not 500, because nothing on this side faulted - and it is what the ingress answers for it.
         (KernelRetCode.FAILED, StatusCodes.Status502BadGateway),
     ];

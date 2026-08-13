@@ -555,18 +555,18 @@ public sealed class ChangesetCodecReceiveTests
 /// </summary>
 /// <remarks>
 /// <para>
-/// WHAT THIS SUITE USED TO ASSERT, AND WHY IT NO LONGER DOES. It was written against a private binary
-/// payload owned by this assembly, so more than half of it - a format magic, a format version, a reserved
-/// flag byte, single-byte mutation sweeps, truncation sweeps, and three hand-built weaponised counts that
-/// proved a length was bounded before it reached <c>new byte[length]</c> - tested a FRAMING LAYER that no
-/// longer exists. The chunk payload is now <c>persistence.v1.CarrierState</c>, a published message
+/// WHAT THIS SUITE DELIBERATELY DOES NOT ASSERT, AND WHY. A suite written against a private binary
+/// payload owned by this assembly spends more than half of itself - a format magic, a format version, a
+/// reserved flag byte, single-byte mutation sweeps, truncation sweeps, and three hand-built weaponised
+/// counts proving a length is bounded before it reaches <c>new byte[length]</c> - testing a FRAMING LAYER
+/// that does not exist here. The chunk payload is <c>persistence.v1.CarrierState</c>, a published message
 /// (constraint C-A), and framing, bounds and truncation are protobuf's concern rather than this codec's:
 /// a truncated or foreign frame never reaches <see cref="ChangesetPayloadCodec"/> at all, because the
 /// generated parser rejects it at the transport edge.
 /// </para>
 /// <para>
-/// WHAT REPLACED THEM IS NOT A REDUCTION. The framing checks are gone because the framing is gone; the
-/// SEMANTIC checks they were mixed in with are all still here and several are new, because a well-formed
+/// THAT IS NOT A REDUCTION. There are no framing checks because there is no framing; the
+/// SEMANTIC checks such a suite mixes in with them are all here, because a well-formed
 /// protobuf message can still be a nonsense carrier image: three segments all tagged Primary, a Filter!
 /// row filed inside the Primary segment, a zero row ordinal, an undefined item status, column number
 /// zero, a duplicated column, an original naming a column the row never carried, or a processing kind
@@ -590,8 +590,8 @@ public sealed class ChangesetPayloadCodecTests
     /// <see cref="float"/> comes back as <see cref="double"/>.
     /// </para>
     /// <para>
-    /// The private format this suite used to exercise over-provisioned a distinct tag per runtime type, so
-    /// its predecessor asserted exact runtime-type identity and passed. Stating the widening as an
+    /// A private format that over-provisions a distinct tag per runtime type lets a suite assert exact
+    /// runtime-type identity and pass; the published carrier does not. Stating the widening as an
     /// input-to-expected matrix is what makes it VISIBLE rather than something a reader discovers when a
     /// consumer casts to <see cref="int"/> and throws. The values themselves are exact either way: nothing
     /// here loses magnitude, sign, precision or scale.
@@ -1289,8 +1289,9 @@ public sealed class ChangesetPayloadCodecTests
     // ==========================================================================================
     //  THE PROCESSING KIND IS RECONCILED, NOT ADOPTED
     //  ----------------------------------------------------------------------------------------
-    //  It used to be read and discarded, under the reading that detection is the caller's business. It
-    //  is not: the two sides built their carriers from their own definitions, so a disagreement means
+    //  Reading and discarding it, under the reading that detection is the caller's business, is the
+    //  tempting shortcut. It is not the caller's business: the two sides build their carriers from their
+    //  own definitions, so a disagreement means
     //  they disagree about which serialization is even applicable, and merging a crosstab image into a
     //  tabular carrier is what trusting the sender costs. An UNASSIGNED target - a carrier whose data
     //  object has not been set - is not a disagreement, so it adopts.
@@ -1668,7 +1669,7 @@ public sealed class ChangesetPayloadCodecTests
         //
         // The contract's own encoding says what absence means: TryProjectRow emits an original ONLY where
         // it differs from the current value, so no original IS a statement that the column did not move.
-        // That is now what it reads as - which also makes this the transfer path's exact reading rather
+        // That is what it reads as here - which also makes this the transfer path's exact reading rather
         // than a lenient one.
         CarrierState state = CanonicalStateWith(
             Row(

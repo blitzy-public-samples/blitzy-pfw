@@ -1973,9 +1973,9 @@ public sealed class SqlTaskBaseTests
     [Fact]
     public void RunUninit_RaisesTheUninitEvent_AndDisposalRaisesItToo()
     {
-        // TEARDOWN GOES THROUGH THE HOOK ON EVERY PATH, which is the point: the two used to carry the
-        // same three actions side by side, so disposing a task skipped the hook entirely - the ancestor's
-        // uninit never ran and a derived override never ran either.
+        // TEARDOWN GOES THROUGH THE HOOK ON EVERY PATH, which is the point: two paths carrying the
+        // same three actions side by side let disposal skip the hook entirely - the ancestor's
+        // uninit never runs and a derived override never runs either.
         using Harness harness = new();
         harness.Task.SetTransData(Descriptor("DisableBind=0"));
 
@@ -2565,10 +2565,11 @@ public sealed class SqlTaskBaseTests
     [Fact]
     public void BindParams_LogsTheSurplusItStillTolerates()
     {
-        // THE OUTCOME IS UNCHANGED (C-B): the guard at [:L454] stays commented out, and it is load-bearing
-        // because a DataWindow may declare more arguments than its statement references [:L412]. What
-        // changed is that the mismatch is no longer SILENT - and the record carries COUNTS ONLY, because a
-        // surplus parameter's value is exactly the live data constraint C-F keeps out of logs.
+        // THE OUTCOME MATCHES THE ORACLE (C-B): the guard at [:L454] stays commented out, and it is
+        // load-bearing because a DataWindow may declare more arguments than its statement references
+        // [:L412]. What this adds on top is that the mismatch is not SILENT - and the record carries
+        // COUNTS ONLY, because a surplus parameter's value is exactly the live data constraint C-F keeps
+        // out of logs.
         using Harness harness = new();
         harness.Task.AddParam("id", 7L);
         harness.Task.AddParam("surplus", "s3cret-value");
@@ -2795,8 +2796,9 @@ public sealed class SqlTaskBaseTests
     [Fact]
     public void OnDbError_TheLogRecordMasksBothTheStatementAndTheProviderText()
     {
-        // THE PROVIDER'S ERROR TEXT WAS THE SECOND ROUTE OUT, AND IT USED TO BE OPEN. The statement went
-        // through the redactor and the provider's own text went through nothing at all - and a provider
+        // THE PROVIDER'S ERROR TEXT IS THE SECOND ROUTE OUT, AND LEAVING IT OPEN IS THE EASY MISS. Passing
+        // the statement through the redactor while the provider's own text goes through nothing at all
+        // leaks it anyway - a provider
         // composes that text FROM the statement it was executing, so it quotes the offending value back:
         // this is what a UNIQUE-constraint or type-conversion message really looks like. One record, two
         // fields, one rule.
@@ -3718,6 +3720,20 @@ public sealed class SqlTaskBaseTests
         public string SqlReturnData => string.Empty;
 
         public bool AutoCommit { get; set; }
+
+        /// <summary>Moves the auto-commit mode and answers <see cref="RetCode.OK"/>.</summary>
+        /// <param name="autoCommit">The mode to put in force.</param>
+        /// <returns>Always <see cref="RetCode.OK"/>.</returns>
+        /// <remarks>
+        /// ROUTED THROUGH THE PROPERTY, so this double moves exactly the state the assignment moves. There is
+        /// no engine beneath it whose begin could fail, which is the contract's own nothing-to-do case.
+        /// </remarks>
+        public long TrySetAutoCommit(bool autoCommit)
+        {
+            AutoCommit = autoCommit;
+
+            return RetCode.OK;
+        }
 
         public void StampSqlState(in SqlState state)
         {

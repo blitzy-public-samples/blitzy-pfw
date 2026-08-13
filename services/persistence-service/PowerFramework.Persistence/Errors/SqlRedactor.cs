@@ -230,12 +230,7 @@
 //  and nothing asynchronous. This is a string function, which is what lets it be table-driven
 //  tested and registered as a singleton.
 //
-//  RULES POSITION. review_rules returns exactly one line, "No user rules provided.", so NO
-//  user-specified rule governs this file. That is a finding, not latitude: nothing is invented or
-//  back-filled from convention in its place. The enterprise-standard baseline applies instead, and
-//  the binding constraints are the plan's own non-rule inventory, of which C-A, C-B, C-C, C-F, C-H
-//  and C-K bite here and are each discharged at the point they are cited.
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  No performance property is asserted anywhere in this file, and no decision here is justified by
 //  one. The single forward scan is chosen because it is SIMPLE AND NON-BACKTRACKING, which makes it
 //  reviewable and exhaustively testable - not because of any throughput or latency property. The
@@ -321,13 +316,13 @@ public interface ISqlRedactor
 /// customer data into its own logs and responses. There is nothing to switch.
 /// </para>
 /// <para>
-/// <b>What replaced the flag, recorded so the removal is not re-litigated (C-K).</b> An earlier
-/// shape of this type took a <c>bool enabled</c> constructor argument bound from
-/// <c>Persistence:Errors:RedactSqlStatements</c> and returned the original statement instance when it
-/// was false. Two independent defects followed from it and both are now structurally impossible: an
-/// environment variable could disable the only control on this path, and the wire projection accepted
-/// any <see cref="ISqlRedactor"/> so a pass-through implementation could be injected in front of it.
-/// The configuration key is gone from <c>appsettings.json</c> as part of the same change, so no bound
+/// <b>WHY THERE IS NO FLAG, RECORDED SO ONE IS NOT ADDED (C-K).</b> A <c>bool enabled</c>
+/// constructor argument bound from <c>Persistence:Errors:RedactSqlStatements</c>, returning the
+/// original statement instance when false, is the configurable shape a reader may reach for. It
+/// carries two independent defects that the absence of the flag makes structurally impossible: an
+/// environment variable could disable the only control on this path, and the wire projection would
+/// accept any <see cref="ISqlRedactor"/> so a pass-through implementation could be injected in front
+/// of it. There is correspondingly no such key in <c>appsettings.json</c>, so no bound
 /// option is left dangling. A caller that genuinely needs the unmasked text for its own local
 /// diagnostics reads <see cref="DbErrorData.SqlSyntax"/> directly and does not go through the wire
 /// type - which is a visible, reviewable act at the call site rather than a silent configuration
@@ -460,7 +455,7 @@ public sealed class SqlRedactor : ISqlRedactor
                     nameof(placeholder));
             }
 
-            // THE PLACEHOLDER IS NOW ALSO WRITTEN INSIDE A COMMENT, so anything that can END a comment
+            // THE PLACEHOLDER IS ALSO WRITTEN INSIDE A COMMENT, so anything that can END a comment
             // would let the masked body escape back into scanned text. A line break closes a line
             // comment; every other control character is refused with it, because none of them belongs in
             // a diagnostic marker and admitting them would mean reasoning about each one separately.

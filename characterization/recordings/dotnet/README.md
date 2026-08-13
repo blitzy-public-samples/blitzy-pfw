@@ -736,7 +736,7 @@ redacted, and never raw. Two points of precision, because the shape is decided r
 
 - **The single redacted field is the implemented and published shape.**
   [`docs/SECRETS.md`](../../../docs/SECRETS.md) §6 owns that control and records the decision: a statement
-  plus a separate parameter collection was the alternative and it is **withdrawn**, because a parameter
+  plus a separate parameter collection is the alternative, and it is **closed**, because a parameter
   collection *is* the sensitive data — separating a literal from its statement moves the value rather than
   protecting it, and yields two fields to redact instead of one. The published contract matches: its database
   error message carries the statement field and **no** parameter member.
@@ -748,9 +748,13 @@ redacted, and never raw. Two points of precision, because the shape is decided r
   meaningful.
 
 A workflow declares which treatment each withheld field takes, from a closed set of *record with the value
-replaced*, *record the statement and its parameters separately*, or *record nothing for the field*. **That
-member records a decision; it does not make one** — and for these two fields the decision is already made and
-it is redaction. None of this weakens byte-exact SQL parity, because the workflow that measures it,
+replaced* or *record nothing for the field*. **That member records a decision; it does not make one** — and
+for these two fields the decision is already made and it is redaction. A third option, *record the statement
+and its parameters separately*, was admitted by the schema until the final security review and has been
+withdrawn: it writes the literal values into a tracked file, and a parameter collection is itself the
+sensitive data, so it forfeited the control while preserving nothing the comparison needs. It also described a
+shape this system cannot emit — as the paragraph above records, the error message carries the statement field
+and **no** parameter member. None of this weakens byte-exact SQL parity, because the workflow that measures it,
 `persistence-sql-paging-rewrite`, compares statements produced by pure string transforms that never see a row
 value.
 

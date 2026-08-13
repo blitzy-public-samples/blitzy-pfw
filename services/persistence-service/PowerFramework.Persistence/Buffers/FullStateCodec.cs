@@ -203,14 +203,7 @@
 //        carrier's own one-based counts.
 //
 //  ==============================================================================================
-//  RULES POSITION, AND THE CONSTRAINTS THAT APPLY IN THEIR PLACE
-//  ==============================================================================================
-//  review_rules returns exactly one line, "No user rules provided.", so NO user-specified rule
-//  governs this file, none is invented here, and the absence is not treated as licence to lower the
-//  bar. The enterprise-standard baseline applies instead, and the binding constraints are the
-//  migration plan's own non-rule inventory. Those bearing on this file are cited inline where each is
-//  discharged: C-A, C-B, C-C, C-D, C-E, C-H, C-I, C-K and risk R9.
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  C-B SELF-AUDIT: neither underlying fault is fixed. The workarounds ARE the behaviour. DEFECT 3
 //  keeps its gate, its trim, its two verbatim message prefixes and its E_INVALID_ARGUMENT result,
 //  including the asymmetry whereby the APPLIED value is trimmed but the REPORTED value is not.
@@ -1035,9 +1028,9 @@ internal static class FullStateCodec
         // `blbData = Blob("")` [:L101]. The ownership drop of hazard 2 of docs/PB多线程绕坑提示.md: the
         // sender releases what it has handed over.
         //
-        // THE RELEASE IS NOW A NO-OP AND IS RECORDED AS ONE RATHER THAN WRITTEN AS A GESTURE. When the
-        // payload was a byte array this line reassigned the local so this frame no longer reached the
-        // captured bytes; the chunk carried a copy and was unaffected. The chunk now holds the SAME
+        // THE RELEASE IS A NO-OP HERE AND IS RECORDED AS ONE RATHER THAN WRITTEN AS A GESTURE. With a
+        // byte-array payload this line would reassign the local so this frame no longer reached the
+        // captured bytes, and the chunk would carry a copy and be unaffected. The chunk holds the SAME
         // message instance this frame projected, so clearing the local would either do nothing or - if
         // it cleared the message - destroy the chunk that has already been handed over. The legacy's
         // intent is discharged by the fact that this frame returns immediately below and drops its only
@@ -1108,10 +1101,7 @@ internal static class FullStateCodec
     /// that maps any code above one down to one.
     /// </summary>
     /// <param name="target">The resolved destination, from <see cref="ResolveTarget"/>.</param>
-    /// <param name="payload">
-    /// The serialized image. An EMPTY payload means "clear the target", which is a distinct arm rather
-    /// than a degenerate apply.
-    /// </param>
+    /// <param name="state">The carrier state travelling with the payload, or <see langword="null"/> when none is carried.</param>
     /// <returns>
     /// <see cref="DataWindowBufferStore.DataStoreSuccess"/> when the image was applied or the target was
     /// cleared; <see cref="DataWindowBufferStore.DataStoreFailure"/> when the payload could not be
@@ -1286,9 +1276,9 @@ internal static class FullStateCodec
     /// <para>
     /// THE IMAGE IS A PUBLISHED MESSAGE AND IT IS DETERMINISTIC, and both matter. PUBLISHED because
     /// <c>persistence.v1.CarrierState</c> is declared in <c>shared/PowerFramework.Contracts</c>, which
-    /// constraint C-A makes the only cross-service coupling: the field this image travels in used to be
-    /// an opaque <c>bytes</c> described as the codecs' private concern, and the review found the
-    /// consequence - DataServices references the contracts project alone, so it could neither produce
+    /// constraint C-A makes the only cross-service coupling. An opaque <c>bytes</c> field described as the
+    /// codecs' private concern is the tempting shape, and its consequence is decisive:
+    /// DataServices references the contracts project alone, so it could neither produce
     /// nor consume the very payload the C-05 and C-06 contracts hand it. DETERMINISTIC because the parity
     /// model compares recordings byte for byte, so the same carrier state must always serialize to the
     /// same bytes; that is why the segments are written in a fixed order and why columns are taken from

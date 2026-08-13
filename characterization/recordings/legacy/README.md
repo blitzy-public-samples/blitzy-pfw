@@ -528,17 +528,30 @@ Verified in the transaction descriptor `ws_objects/pfw.thread.ext.pbl.src/transa
 A recording that carries a transaction descriptor carries it with both fields omitted or replaced by a mask
 token. Neither is ever present as a value, not even an obviously fake one.
 
-### 7.4 Statement text is redacted, or split into statement plus parameters
+### 7.4 Statement text is recorded redacted
 
 Verified in the database-error descriptor `ws_objects/pfw.thread.ext.pbl.src/dberrordata.srs`: the
 `sqlsyntax` field at `:L6` structurally carries **the complete generated statement, including interpolated
 literal values**, and the legacy logger performs **no** redaction of it.
 
-A master recording of an error path therefore records that field **redacted, or structurally split into a
-statement and its parameters** — never raw. The generated statement is exactly what byte-exact parity is
-measured on, so the split form is the one that preserves the comparison *and* the control.
-[`docs/SECRETS.md`](../../../docs/SECRETS.md) §6 owns that control and explains why it is not a behavioural
-change.
+A master recording of an error path therefore records that field **redacted** — one field, every literal
+replaced by a placeholder, never raw and never accompanied by the values it carried.
+
+**This section previously offered a second form and recommended it, and that recommendation was wrong.** It
+read "redacted, or structurally split into a statement and its parameters", and argued the split form was
+the one preserving both the comparison and the control. It preserves the comparison and **forfeits the
+control**: splitting writes the literal values into a tracked, committed file, and **a parameter collection
+is itself the sensitive data** — separating a literal from its statement moves the value, it does not
+protect it. The redacted form loses nothing the comparison reads, because byte-exact parity is measured on
+the statement's *shape* and the placeholder preserves that shape exactly.
+
+The split form is additionally **not a shape this system can produce**:
+`shared/PowerFramework.Contracts/Proto/common.v1.proto` declares `sqlsyntax` with **no** `parameters`
+member, and `services/persistence-service/PowerFramework.Persistence/Errors/SqlRedactor.cs` is the one
+component that fills it. `characterization/workflows/workflow.schema.json` no longer admits the split
+treatment at all, so a workflow declaring it now fails validation rather than being taken at its word.
+[`docs/SECRETS.md`](../../../docs/SECRETS.md) §6.3 is the record of the decision and explains why the
+control is not a behavioural change.
 
 ### 7.5 Nothing for a deferred service
 
@@ -645,7 +658,7 @@ Cited, not reproduced — the plan's inventory is the authority for their wordin
 | **C-C** | The legacy tree is read-only, and it is the behavioural oracle | Capture **from** the fixtures only. No edit to any of them, and no vendored copy into this tree — [§7.7](#77-no-edit-to-any-fixture-and-no-vendored-copy-of-one). The root `.gitignore` and `.gitattributes` are equally not edited: [§4.2](#42-trap-one--seven-unanchored-ignore-patterns) and [§4.6](#46-git-does-not-normalize-newlines-here-and-the-mask-must) work around them instead |
 | **C-D** | Nothing is built for the four deferred services, not even a stub | No directory here for any of them — [§7.5](#75-nothing-for-a-deferred-service) — and the standing refusal of the static-map window in [§3.3](#33-one-standing-refusal-the-static-map-window) is that rule applied to a concrete candidate |
 | **C-E** | SQLite only; no database is fabricated, and the two other dialects are pure string transforms | Hence the single volume-rule exemption for the paging rewrites in [§6.3](#63-the-one-exemption-and-it-is-exactly-one), and hence the only DDL a seed phase here ever runs is the fixture's own at `ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469` |
-| **C-F** | No secret value is carried forward; write-only fields are never echoed; statement text is redacted | The whole of [§7.1](#71-no-secret-value-of-any-kind) through [§7.4](#74-statement-text-is-redacted-or-split-into-statement-plus-parameters), including the inline-argument mechanism that makes the crypto workflow the hazard it is |
+| **C-F** | No secret value is carried forward; write-only fields are never echoed; statement text is redacted | The whole of [§7.1](#71-no-secret-value-of-any-kind) through [§7.4](#74-statement-text-is-recorded-redacted), including the inline-argument mechanism that makes the crypto workflow the hazard it is |
 | **C-K** | Every technology- and boundary-specific decision is documented, with its reason | The volume rename and the determinism seams are **cited as owned decisions** in [§8](#8-the-shared-volume-capture-rule-is-cited-here-not-restated) and are not re-argued here |
 | **C-L** | The attached environment's paired-capture rule is preserved verbatim in its owning files | Hence cite-not-restate: [§8](#8-the-shared-volume-capture-rule-is-cited-here-not-restated) names all three owners and adds no fourth copy |
 

@@ -76,11 +76,7 @@
 //          of scope as characterization-fixture and REFERENCE source. It is authoritative where it and the
 //          implementation agree; the IMPLEMENTATION is authoritative where they differ.
 //
-//  RULES POSITION, STATED EXPLICITLY
-//  review_rules reports exactly one line: "No user rules provided." No user-specified rule governs this
-//  file, none was invented to fill the gap, and that absence is not licence to lower the bar. In their
-//  place the AAP 0.7.2 enterprise baseline and the AAP 0.7.3 binding non-rule constraints apply:
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //      C-B   No behaviour improvements and no legacy-defect correction. Both grammars are reproduced
 //            exactly, INCLUDING the asymmetries between them, and no validation the legacy lacks is
 //            added. The two load-bearing asymmetries: an empty namespace is an ERROR when subscribing

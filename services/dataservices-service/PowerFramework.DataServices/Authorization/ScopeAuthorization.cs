@@ -206,9 +206,9 @@ internal sealed class PermittedCallerRequirement : IAuthorizationRequirement;
 /// edit could make stale.
 /// </para>
 /// <para>
-/// AND READ FROM THE CONTAINER RATHER THAN FROM <c>context.Resource</c>. The roster was previously
-/// resolved by casting the authorization resource to an <c>HttpContext</c> and reaching into its request
-/// services, which refuses whenever the resource is of any other shape. That is right for a refusal
+/// AND READ FROM THE CONTAINER RATHER THAN FROM <c>context.Resource</c>. Resolving the roster by
+/// casting the authorization resource to an <c>HttpContext</c> and reaching into its request
+/// services refuses whenever the resource is of any other shape. That is right for a refusal
 /// default but wrong as a dependency: the two gRPC contracts authorize through endpoint routing as well,
 /// and a policy whose correctness depends on the resource's runtime type is one refactor away from
 /// silently refusing everything. An injected monitor cannot be absent.

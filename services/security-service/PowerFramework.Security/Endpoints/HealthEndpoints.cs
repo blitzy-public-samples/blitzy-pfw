@@ -198,6 +198,10 @@
 //     component library is named, no design input exists, and the legacy application disables its own
 //     theming outright at ws_objects/pfw.pbl.src/pfw.sra:L25. This endpoint therefore emits JSON and
 //     problem JSON and nothing else - no HTML, no view, no static asset, no styling.
+//
+//  LOCATOR CONVENTION: every bare `pfw.sra:L...` in this file means ws_objects/pfw.pbl.src/pfw.sra,
+//  the framework application - never the same-named packager object at
+//  ws_objects/pfw.pack.pbl.src/pfw.sra (AAP 0.8.6 R7).
 // =================================================================================================
 
 using System.Net.Mime;

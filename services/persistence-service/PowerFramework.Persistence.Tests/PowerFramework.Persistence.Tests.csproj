@@ -8,25 +8,21 @@
     triple, the two paging rewriters, the SQLite URI grammar and the optimistic-concurrency
     contract are to be held to legacy parity.
 
-    WHAT IS HERE TODAY, AND HOW DEEPLY. Stated because "is where X is held to parity" reads as a
-    claim about existing coverage, so the claim is reported as measured rather than as intended.
-    Every figure below comes from the Cobertura report this project emits, counting the sequence
-    points that report calls lines; an earlier revision of this comment described a much earlier
-    state of the tree and is superseded in every particular.
+    WHAT IS HERE, AND HOW DEEPLY. Stated because "is where X is held to parity" reads as a claim
+    about existing coverage, so the coverage is described rather than assumed. The authority for every
+    coverage statement below is the Cobertura report this project emits, counting the sequence points
+    that report calls lines; the report, not this comment, is what the gate reads.
 
-      BUILD AND TEST STATUS, MEASURED: this project builds in Release with zero warnings and zero
-      errors, and its whole suite passes - 3172 tests across 54 of its 55 files, the fifty-fifth
-      being GlobalUsings.cs, with no failure and no skip. The application project it references
-      carries Program.cs and produces an entry point, so the CS5001 an earlier revision reported is
-      no longer reachable.
+      BUILD AND TEST STATUS: this project builds in Release with zero warnings and zero errors, and
+      its whole suite passes with no failure and no skip. The application project it references
+      carries Program.cs and produces an entry point, so CS5001 is not reachable here.
 
-      COVERAGE, MEASURED: PowerFramework.Persistence sits at 88.89 percent line coverage
-      (12085 of 13595 lines), which clears the 80 percent per-service floor constraint C-H requires.
-      EVERY production type in the application project is now named by at least one test file here,
-      the three EF-generated files under Data/Migrations included, so the "apart from" exception an
-      earlier revision recorded no longer applies. That includes the internal ItemStatusMachine in
-      Buffers/ItemStatus.cs and the internal PagedUniqueIndexColumnValidator in
-      Sql/Paging/IPagingRewriter.cs, neither of which has a file of its own.
+      COVERAGE: PowerFramework.Persistence clears the 80 percent per-service line floor that
+      constraint C-H requires. EVERY production type in the application project is named by at least
+      one test file here, the three EF-generated files under Data/Migrations included. That includes
+      the internal ItemStatusMachine in Buffers/ItemStatus.cs and the internal
+      PagedUniqueIndexColumnValidator in Sql/Paging/IPagingRewriter.cs, neither of which has a file
+      of its own.
 
       DRIVEN THOROUGHLY: the three DataWindow buffers and the item-status machine; both transfer
       codecs, changeset and full state, including their receive and transfer paths; the SELECT
@@ -38,27 +34,25 @@
       with all three task proxies; the Command, Transaction and Update gRPC services; the health
       and ping endpoints; and the composition root.
 
-      BOTH PAGING REWRITERS ARE COVERED, contrary to an earlier revision of this comment.
-      SqlServerPagingRewriterTests.cs carries 27 cases across the three SQL Server strategies and
-      PagingRewriterByteExactTests.cs carries 3 more, together with the dispatcher's
-      DBT_MSSQL / DBT_ORACLE selection and its E_NO_IMPLEMENTATION arm for anything else. These are
-      pure string transforms, so they need no database instance of either kind - which is exactly
-      why docs/PARITY.md section 6.2 treats them as byte-exact matrices.
+      BOTH PAGING REWRITERS ARE COVERED. SqlServerPagingRewriterTests.cs exercises all FOUR arms of
+      the SQL Server 2x2 matrix - unique-index columns present or absent, crossed with the native
+      OFFSET/FETCH switch - and PagingRewriterByteExactTests.cs pins their exact output text, together
+      with the dispatcher's DBT_MSSQL / DBT_ORACLE selection and its E_NO_IMPLEMENTATION arm for
+      anything else. These are pure string transforms, so they need no database instance of either
+      kind - which is exactly why docs/PARITY.md section 6.2 treats them as byte-exact matrices.
 
-      REACHED ONLY SHALLOWLY, WITH THE MEASURED RATE, SO THE NEXT READER KNOWS WHERE TO WORK:
-      Data/SqliteConnectionFactory at 52.4 percent, where the pure URI and option surface is
-      exercised but several of the members that actually open, close or probe a connection are not;
-      Tasks/TaskProxies/SqlTaskProxyBase at 58.4 percent; Grpc/QueryService at 66.1 percent, whose
-      chunked server-streaming members are entered only in part; and
-      Configuration/PersistenceOptions at 70.2 percent, whose unreached remainder is its validation
-      failure arms. Tasks/SqlUpdateTask, which an earlier revision recorded at 24.1 percent, now
-      measures 87.0 percent.
+      REACHED LEAST DEEPLY, SO THE NEXT READER KNOWS WHERE TO WORK - ranked rather than given as a
+      rate, because a rate goes stale and the ranking is the actionable part. Read the current numbers
+      off the Cobertura report. Data/SqliteConnectionFactory is lowest: its pure URI and option
+      surface is exercised, while several of the members that actually open, close or probe a
+      connection are not. Then Tasks/TaskProxies/SqlTaskProxyBase; then Grpc/QueryService, whose
+      chunked server-streaming members are entered only in part; then
+      Configuration/PersistenceOptions, whose unreached remainder is its validation failure arms.
 
-      THE WHOLE SCHEMA SEAM IS NOW EXERCISED, WHERE AN EARLIER REVISION RECORDED IT AS NOT
-      EXERCISED AT ALL. Data/CompanyEntity.cs, Data/PowerFrameworkDbContext.cs - the context AND the
+      THE WHOLE SCHEMA SEAM IS EXERCISED. Data/CompanyEntity.cs, Data/PowerFrameworkDbContext.cs - the context AND the
       design-time factory declared beside it - and all three files under Data/Migrations each measure
-      100 percent, driven by CompanyEntityTests.cs. The claim they replace, that a unit test over the
-      migrations would only assert the EF generator's output, does not hold for what that file
+      100 percent, driven by CompanyEntityTests.cs. The objection that a unit test over the
+      migrations would only assert the EF generator's output does not hold for what that file
       actually asserts: it pins the table name, the six UPPERCASE column names, their exact declared
       types with INT and INTEGER left distinct, their nullability, the single database-generated key,
       the COLUMN ORDER that dw_sqlite.srd's by-position SELECT * binding depends on, the suppression
@@ -71,7 +65,7 @@
       connection and disposes it, so nothing touches the configured data directory and nothing
       recreates or reseeds the persistence-db volume the paired characterization captures depend on.
 
-    THIS PROJECT IS THE MEASURED UNIT FOR THE COVERAGE GATE, AND THE GATE IS NOW ENFORCED.
+    THIS PROJECT IS THE MEASURED UNIT FOR THE COVERAGE GATE, AND THE GATE IS ENFORCED.
     Constraint C-H requires 80 percent line coverage per in-scope service, evaluated per service
     so that one service's coverage cannot mask another's. The Cobertura report this project emits is
     the artifact that gate reads, which is why coverlet.collector below is load bearing and must
@@ -95,7 +89,7 @@
     reported alongside their verdicts rather than hiding them.
 
     HAND-AUTHORED ON PURPOSE, NOT TEMPLATED.
-    `dotnet new xunit3` does not exist in SDK 10.0.302 (it exits 103 and suggests searching
+    `dotnet new xunit3` does not exist in the pinned SDK (it exits 103 and suggests searching
     NuGet.org), and `dotnet new xunit` scaffolds the xunit v2 line with an older test SDK and an
     older coverage collector. Neither can produce this file, so it is written by hand, and its
     shape mirrors the Gateway sibling element for element because the four service test manifests
@@ -124,15 +118,14 @@
 
     NO InternalsVisibleTo HERE EITHER.
     That attribute points the other way: the application project grants this assembly access, so
-    sibling test files CAN drive internal members, and all three uses an earlier revision listed as
-    future are current fact. Tests here drive the internal SelectStatementModel and
+    sibling test files CAN drive internal members, and all three uses below are current fact.
+    Tests here drive the internal SelectStatementModel and
     ItemStatusMachine; SqlServerPagingRewriterTests.cs reaches the internal pfwPagedSQL_Tbl sentinel
     inside SqlServerPagingRewriter; and WebApplicationFactory binds to the implicitly generated
     internal Program class with no `public partial` shim, which is what CompositionRootTests.cs,
     HealthEndpointsTests.cs and PingEndpointsTests.cs each depend on.
-    Data/SqliteConnectionFactory, which an earlier revision recorded as missing from the tree, is
-    present, and its URI and option composition is driven from here; what is not driven is the
-    subset of its members that open a connection.
+    Data/SqliteConnectionFactory's URI and option composition is also driven from here; what is not
+    driven is the subset of its members that open a connection.
 
     Validated command, from AAP section 0.8.3 and the attached environment's setup instructions,
     which must keep working with no extra argument (constraints C-I and C-L). The literal command
@@ -177,7 +170,7 @@
     Central Package Management is switched on at the repository root, so a Version attribute here
     is a build error and the single source of truth stays Directory.Packages.props
     (xunit.v3 3.2.2, xunit.runner.visualstudio 3.1.5, Microsoft.NET.Test.Sdk 18.8.1,
-    coverlet.collector 10.0.1, Microsoft.AspNetCore.Mvc.Testing 10.0.10). Each is load-bearing:
+    coverlet.collector 10.0.1, Microsoft.AspNetCore.Mvc.Testing 10.0.11). Each is load-bearing:
 
       xunit.v3                        the test framework itself.
       xunit.runner.visualstudio       the discovery adapter. Without it the standard test command

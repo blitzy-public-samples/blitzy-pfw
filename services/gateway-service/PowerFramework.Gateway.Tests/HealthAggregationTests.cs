@@ -1288,10 +1288,11 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
     /// <c>Basic</c> scheme the primary one.
     /// </para>
     /// <para>
-    /// This row used to assert that the unmounted case was DEGRADED, which is answered <c>503</c> - so it
-    /// pinned a Gateway that could never report ready under the configuration the orchestration layer
-    /// documents. That is a stack which does not come up rather than a misleading warning, and the test
-    /// froze it. The verdict now follows the contract: a deployment presenting either scheme is ready.
+    /// ASSERTING THE UNMOUNTED CASE IS DEGRADED IS THE TEMPTING ROW, and DEGRADED is answered <c>503</c> -
+    /// so such a row pins a Gateway that can never report ready under the configuration the orchestration
+    /// layer documents. That is a stack which does not come up rather than a misleading warning, and a test
+    /// shaped that way freezes it. The verdict follows the contract instead: a deployment presenting either
+    /// scheme is ready.
     /// </para>
     /// <para>
     /// PRESENTING NEITHER IS NOT A READINESS STATE AT ALL, which is why there is no third row here. The
@@ -1306,11 +1307,11 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
     /// </para>
     /// <para>
     /// THE GENERATED IDENTITY IS OWNED RATHER THAN DELETED AT THE END, and the distinction is the whole of
-    /// this row's cleanup posture. The pair used to be removed by two <c>File.Delete</c> calls placed after
-    /// the last assertion, which means every failing assertion above them - and every exception thrown
-    /// anywhere between the write and the delete - left a live 2048-bit RSA PRIVATE KEY in the system
-    /// temporary directory under a name nothing would later recognise as this suite's. Ownership is now
-    /// expressed in the type system: <see cref="ClientIdentityFiles"/> is disposed by the <c>using</c>
+    /// this row's cleanup posture. Removing the pair with two <c>File.Delete</c> calls placed after
+    /// the last assertion is the obvious arrangement, and it means every failing assertion above them - and
+    /// every exception thrown anywhere between the write and the delete - leaves a live 2048-bit RSA PRIVATE
+    /// KEY in the system temporary directory under a name nothing would later recognise as this suite's.
+    /// Ownership is therefore expressed in the type system: <see cref="ClientIdentityFiles"/> is disposed by the <c>using</c>
     /// declaration on EVERY path out of this method, including a failing one, and its removal failures are
     /// raised rather than swallowed so that a key left behind is a visible failure instead of a silent one.
     /// </para>
@@ -2156,9 +2157,6 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
     /// <summary>
     /// Builds a host whose readiness probe is scripted PER PARTICIPANT NAME.
     /// </summary>
-    /// <param name="persistence">The verdict the Persistence participant answers with.</param>
-    /// <param name="dataServices">The verdict the DataServices participant answers with.</param>
-    /// <param name="security">The verdict the Security participant answers with.</param>
     /// <returns>A fixture the caller owns and must dispose asynchronously.</returns>
     /// <remarks>
     /// <para>

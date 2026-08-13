@@ -122,13 +122,7 @@
 //  assembly already loaded. Repeatability is the hard prerequisite of the Golden-Master approach
 //  this repository adopts (AAP 0.6.7).
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  review_rules returns exactly "No user rules provided.", verified for this file. No user-specified
-//  rule governs it. Absence is not licence: the enterprise-standard baseline of AAP 0.7.2 applies,
-//  so nullable and warnings-as-errors are inherited from Directory.Build.props and never relaxed,
-//  and there is no NoWarn and no #pragma anywhere below.
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  One consequence of that worth stating, because it shaped the code: the legacy identifier
 //  spellings appear ONLY as string literals and in comments, never as C# identifiers. .editorconfig
 //  BAND 3 scopes its CA1707 suppression to the individual files that genuinely declare the
@@ -217,6 +211,18 @@ public sealed class CryptoWeakDefaultAnnotationTests(
 
     /// <summary>Specification extension naming the legacy convenience values of an open numeric domain.</summary>
     private const string LegacyPredefinedVarnamesExtension = "x-legacy-predefined-varnames";
+
+    /// <summary>
+    /// The extension a schema records its legacy domain ceiling in when its own maximum carries a
+    /// service-level cap instead.
+    /// </summary>
+    /// <remarks>
+    /// The convention predates the key-size cap: RandomSize has published its legacy 32-bit domain this
+    /// way while capping its own maximum at 1 MiB. Recording the domain rather than discarding it is what
+    /// keeps the schema a faithful statement of the legacy parameter AND a usable statement of what this
+    /// service will actually do.
+    /// </remarks>
+    private const string LegacyDomainMaximumExtension = "x-legacy-domain-maximum";
 
     // ==============================================================================================
     //  THE VOCABULARY  -  the single auditable place where "is this annotated?" is defined
@@ -1047,10 +1053,20 @@ public sealed class CryptoWeakDefaultAnnotationTests(
     /// <para>
     /// The bound assertion needs its direction stated plainly, because it looks like the hardening it
     /// is designed to catch. readonly uint is PowerBuilder's 16-bit unsigned integer, so the legacy
-    /// parameter's own domain is 0 to 65535 and the schema states exactly that. Asserting the floor is
-    /// still the type's floor is therefore a GUARD AGAINST hardening: it fails if somebody raises the
-    /// minimum to 2048 and thereby removes a key size the legacy accepts. It does not ask for a
-    /// minimum, and it passes unchanged while 1024 stays legal.
+    /// parameter's own domain is 0 to 65535, and the schema now records that domain in
+    /// x-legacy-domain-maximum while its own maximum carries a service-level cap - the same shape
+    /// RandomSize has carried all along, for the same class of reason. Asserting the FLOOR is still the
+    /// type's floor is therefore a GUARD AGAINST hardening: it fails if somebody raises the minimum to
+    /// 2048 and thereby removes a key size the legacy accepts. It does not ask for a minimum, and it
+    /// passes unchanged while 1024 stays legal.
+    /// </para>
+    /// <para>
+    /// AND THE CEILING IS ASSERTED TO BE THE LARGEST PUBLISHED CONVENIENCE VALUE, which is what makes
+    /// the cap a bound on work rather than a narrowing of the vocabulary. Every value the oracle
+    /// declares as first-class stays inside it; only the range above the published set is refused. A
+    /// cap set below 4096 would remove a declared constant from the accepted set and would be exactly
+    /// the hardening the row above forbids, so it is pinned here in the same place and for the same
+    /// reason.
     /// </para>
     /// </remarks>
     [Fact]
@@ -1078,15 +1094,25 @@ public sealed class CryptoWeakDefaultAnnotationTests(
             + "allowed set, and n_crypto.sru:L19-L20 types the parameter as a plain readonly uint "
             + "with no constraint, so closing the set would be a behavioural narrowing (C-B).");
 
-        // The stated bounds are the legacy parameter's own 16-bit unsigned domain, not a policy.
-        // Raising this floor would remove 1024 from the accepted set, which is the hardening C-B
-        // forbids, so pinning it here is a guard against that and not a request for one.
+        // The FLOOR is the legacy parameter's own 16-bit unsigned domain, not a policy. Raising it would
+        // remove 1024 from the accepted set, which is the hardening C-B forbids, so pinning it here is a
+        // guard against that and not a request for one.
         Assert.Equal("0", bits.Minimum);
-        Assert.Equal("65535", bits.Maximum);
+
+        // The CEILING is a service-level cap that narrows the legacy domain - the shape RandomSize
+        // already uses - and it must be the LARGEST PUBLISHED CONVENIENCE VALUE, so that every size the
+        // oracle declares as first-class stays acceptable and only the range above the published set is
+        // refused. The legacy domain itself is published in the extension rather than discarded.
+        Assert.Equal(
+            predefined.Max().ToString(System.Globalization.CultureInfo.InvariantCulture),
+            bits.Maximum);
+        Assert.Equal(
+            (long)ushort.MaxValue,
+            NumberExtension(bits, LegacyDomainMaximumExtension, RsaKeyBitsSchema));
 
         string published = string.Join(", ", predefined);
 
-        Report($"{RsaKeyBitsSchema} publishes [{published}] over the legacy domain {bits.Minimum} to {bits.Maximum} with no closed enum, so 1024 remains legal [enums.sru:L965-L967]");
+        Report($"{RsaKeyBitsSchema} publishes [{published}] with no closed enum so 1024 remains legal [enums.sru:L965-L967], caps generation work at {bits.Maximum} and records the legacy domain ceiling {ushort.MaxValue} in {LegacyDomainMaximumExtension}");
     }
 
     /// <summary>
@@ -1700,6 +1726,31 @@ public sealed class CryptoWeakDefaultAnnotationTests(
     }
 
     /// <summary>
+    /// Reads a specification extension whose value is a single integer.
+    /// </summary>
+    /// <param name="schema">Schema carrying the extension.</param>
+    /// <param name="extensionName">Extension key, for example x-legacy-domain-maximum.</param>
+    /// <param name="schemaName">Name used in failure messages.</param>
+    /// <returns>The integer value.</returns>
+    private static long NumberExtension(
+        IOpenApiSchema schema,
+        string extensionName,
+        string schemaName)
+    {
+        JsonNode node = ExtensionNode(schema, extensionName, schemaName);
+
+        if (!TryReadInteger(node, out long value))
+        {
+            throw BuildFailure(
+                $"Schema '{schemaName}' extension '{extensionName}' is '{node.ToJsonString()}', which is "
+                + "not a JSON integer. It records the legacy parameter's own domain ceiling, so it must be "
+                + "that number.");
+        }
+
+        return value;
+    }
+
+    /// <summary>
     /// Reads a specification extension whose value is a single string.
     /// </summary>
     /// <param name="schema">Schema carrying the extension.</param>
@@ -2040,7 +2091,7 @@ public sealed class CryptoWeakDefaultAnnotationTests(
     /// its own. Nothing about the table-driven shape is lost, because the tables remain the
     /// specification and the key providers project their keys rather than restating them - a row cannot
     /// be added to a table without its case appearing, and a key cannot drift from the row it names.
-    /// The test-case name improves too: it now reads
+    /// The test-case name carries the identifier too, reading
     /// <c>(weaknessId: "W1-ECB-IS-THE-DEFAULT-SYMMETRIC-MODE")</c>.
     /// </para>
     /// </remarks>

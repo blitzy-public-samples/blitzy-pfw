@@ -401,39 +401,39 @@ interface WireUpdateRequest {
 /* ------------------------------------------------------------------------- *
  * THE RESPONSE SIDE — THE FILE'S SECOND EDIT POINT, CANONICAL SPELLINGS ONLY
  *
- * 🔴 THIS TABLE USED TO LIST ALTERNATIVES, AND ON THIS FILE ONE OF THEM WAS
- * ACTIVELY DANGEROUS. `conflictCurrentValues` accepted `columns` alongside
- * `currentValues`, and the two mean DIFFERENT THINGS: on a retrieved row
+ * 🔴 THIS TABLE LISTS NO ALTERNATIVES, AND ON THIS FILE ONE OF THEM WOULD BE
+ * ACTIVELY DANGEROUS. Accepting `columns` alongside `currentValues` in
+ * `conflictCurrentValues` conflates two DIFFERENT THINGS: on a retrieved row
  * `columns` is what the row holds, while on a conflict row `currentValues` is the
  * SERVER-SIDE state a retry must be rebased onto. `ConflictRow` marks both
  * `currentValues` and `originalValues` required and declares
  * `additionalProperties: false`, so a payload carrying `columns` instead is not a
- * spelling variant — it is a different, non-conformant message. Accepting it let
+ * spelling variant — it is a different, non-conformant message. Accepting it lets
  * this suite pass against a `409` body no generated client can read, on the one
  * payload whose whole purpose is to make a retry-or-surface decision possible.
  *
- * ⚠ THE ALTERNATIVES ARE DETECTED, NOT ACCEPTED. This table used to be resolved
- * tolerantly: whichever spelling appeared was returned. The diagnostic reasoning
- * above is sound and is preserved — a boundary that merely serialized a member
- * differently should be told so in those words — but the VERDICT was wrong, and
- * nowhere more so than here: the conflict payload's two value sets ARE the
- * optimistic-concurrency evidence, so a reader that accepted either spelling of
- * `originalValues` could not tell a renamed member from an absent one, and the
- * comment above says in its own words that "missing" is itself a contract
- * violation with real consequences. The canonical spelling is now required, and an
+ * ⚠ THE ALTERNATIVES ARE DETECTED, NOT ACCEPTED. Resolving this table tolerantly —
+ * returning whichever spelling appears — is the natural thing to write. The
+ * diagnostic reasoning above is sound and is preserved: a boundary that merely
+ * serialized a member differently should be told so in those words. What is wrong is
+ * the VERDICT, and nowhere more so than here: the conflict payload's two value sets
+ * ARE the optimistic-concurrency evidence, so a reader accepting either spelling of
+ * `originalValues` cannot tell a renamed member from an absent one, and the comment
+ * above says in its own words that "missing" is itself a contract violation with
+ * real consequences. So the canonical spelling is required, and an
  * alternative found in its place produces that same good diagnostic AS A FAILURE.
  *
  * The same applied less dramatically throughout: `Rows` beside `rows`,
  * `rows_expected` beside `rowsExpected`, an `items`/`result`/`data` envelope
- * beside a body the contract publishes as a bare array. Every entry is now the ONE
+ * beside a body the contract publishes as a bare array. Every entry here is the ONE
  * canonical spelling, lowerCamelCase because that is what protobuf-JSON produces
- * and what `gateway.v1.yaml` declares. The resolver still reports a missing member
- * by name, so the diagnostic survives; only the tolerance is gone.
+ * and what `gateway.v1.yaml` declares. The resolver reports a missing member by
+ * name, so the diagnostic survives without the tolerance.
  *
  * No member is read that the published contract does not declare — the `409` body
  * is `ConflictProblemDetails`, an RFC 9457 problem document whose `conflict`
  * member is the field-for-field mirror of `common.v1.ConflictDetail` — and the
- * detail's and the row's member sets are now asserted EXACTLY, from
+ * detail's and the row's member sets are asserted EXACTLY, from
  * `fixtures/contract-shape.ts`, both schemas setting
  * `additionalProperties: false`. The table remains the one edit point. Spec 05
  * resolves its retrieval payload the same way.
@@ -1062,11 +1062,11 @@ function requestUpdate(
  * envelope message for a stream. Element order is the stream's order and is never
  * re-sorted here.
  *
- * 🔴 AN ENVELOPE IS NO LONGER TOLERATED, for the reason given in the member-name
- * table above: a projection that wrapped the stream satisfied every assertion here
- * while a client generated from the published document received an object where it
- * expected an array. A non-array body yields an empty sequence and the read-back
- * that wanted rows reports the absence.
+ * 🔴 AN ENVELOPE IS NOT TOLERATED, for the reason given in the member-name
+ * table above: a projection that wrapped the stream would satisfy a tolerant read of
+ * every assertion here while a client generated from the published document received
+ * an object where it expected an array. A non-array body yields an empty sequence and
+ * the read-back that wanted rows reports the absence.
  */
 async function readChunks(response: APIResponse): Promise<readonly unknown[]> {
   const body: unknown = await response.json();
@@ -1408,14 +1408,14 @@ const BIRTH_TEXT_PATTERN = new RegExp(`^${BIRTH_FORMAT.replace(/[a-z]/g, '\\d')}
  *     returns, so step 1 RETURNS the created row, step 2 RETURNS the applied
  *     state and step 3 RETURNS the captured response, each bound to a `const` in
  *     the test's own scope. Nothing is assigned after declaration; nothing is
- *     visible outside the test; the five guards are gone because a step cannot
- *     observe a value an earlier step did not produce.
- *   * THE RESULT IS HONEST. One workflow reports as one result. It can no longer
+ *     visible outside the test; no inter-step guard is needed, because a step
+ *     cannot observe a value an earlier step did not produce.
+ *   * THE RESULT IS HONEST. One workflow reports as one result, so it cannot
  *     present as five passes and one failure when what happened is that one
  *     workflow broke at step 3, nor as five skips that a reader has to reconstruct
  *     a story from.
  *
- * `mode: 'serial'` is consequently gone — there is nothing left to order. The
+ * `mode: 'serial'` is consequently unnecessary — there is nothing to order. The
  * `retries: 0` pin stays, and stays deliberately; see the note at the pin.
  * ------------------------------------------------------------------------- */
 
@@ -1466,9 +1466,11 @@ interface CapturedConflict {
 test.describe('Optimistic-concurrency conflict: HTTP 409, and no silent overwrite (C-06 over C-09)', () => {
   // THE TOKEN-ISSUANCE PRECONDITION, and it is the FIRST thing this group does.
   //
-  // `POST /v1/tokens` on Security is authenticated by a client certificate and by
-  // nothing else, on every topology including the local bring-up, so with no
-  // identity provisioned every authenticated assertion below is unrunnable. The
+  // `POST /v1/tokens` on Security is authenticated by a presented caller
+  // credential - an HTTP Basic credential or a trusted client certificate - and
+  // never by a bearer token, on every topology including the local bring-up, so
+  // with no identity provisioned every authenticated assertion below is
+  // unrunnable. The
   // hook fails this group's SETUP in a full acceptance run rather than letting
   // fifteen token calls fail one at a time with transport errors that never say
   // why; a run that has explicitly declared itself partial passes straight
@@ -1543,12 +1545,11 @@ test.describe('Optimistic-concurrency conflict: HTTP 409, and no silent overwrit
     request,
   }, testInfo) => {
     // THE LIVENESS BUDGET IS RESTORED TO WHAT THE SIX TESTS HAD BETWEEN THEM, and
-    // this is bookkeeping rather than a new allowance. Each of the six former tests
-    // carried the runner's per-test budget in full; collapsing them into one test
-    // would have left the whole workflow with a SIXTH of the time it previously
-    // had, so a refactor whose subject is test isolation could have introduced a
-    // timeout that has nothing to do with isolation. Multiplying by the former step
-    // count restores the identical total.
+    // this is bookkeeping rather than a new allowance. Six separate tests would each
+    // carry the runner's per-test budget in full, so expressing the workflow as ONE
+    // test would otherwise leave it with a SIXTH of that total - a timeout arising
+    // from how the workflow is expressed rather than from anything it does.
+    // Multiplying by the step count restores the identical budget.
     //
     // DERIVED, NOT RESTATED: the multiplicand is the runner's configured value read
     // back through `testInfo`, so the two can never disagree, and the multiplier is
@@ -2077,11 +2078,10 @@ test.describe('Optimistic-concurrency conflict: HTTP 409, and no silent overwrit
           `a tolerated shape. Problem type present: ${typeof problemType === 'string'}.`,
       ).toBeDefined();
 
-      // THE DETAIL'S MEMBER SET, EXACTLY. Previously nothing about this object was
-      // asserted beyond the presence of its `rows` member, so a detail that had
-      // dropped `updateTable`, `rowsExpected` or `rowsMatched` — the three members
-      // that tell a caller WHAT was compared and how far the comparison got —
-      // passed unnoticed. `ConflictDetail` marks all four required and sets
+      // THE DETAIL'S MEMBER SET, EXACTLY. Asserting only the presence of its `rows`
+      // member is the cheap read, and it lets a detail that dropped `updateTable`,
+      // `rowsExpected` or `rowsMatched` — the three members that tell a caller WHAT
+      // was compared and how far the comparison got — pass unnoticed. `ConflictDetail` marks all four required and sets
       // `additionalProperties: false`.
       assertMembers(conflict, CONFLICT_DETAIL, 'the conflict detail');
 

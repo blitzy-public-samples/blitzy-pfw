@@ -6,9 +6,9 @@
 //  (C-04's expression session), the model-set provider (C-03's eight headless model operations) and the
 //  event-chain factory (C-03's bidirectional EventChain).
 //
-//  WHAT THEY REPLACED, AND WHY THE REPLACEMENT WAS REQUIRED
-//  All three previously shipped as `Unbound*` implementations returning null. The defence recorded at
-//  those types was that binding a DataWindow needs the DesignSystem ancestry `se_cst_dw` inherits from
+//  WHY THEY BIND REAL IMPLEMENTATIONS RATHER THAN REFUSALS
+//  `Unbound*` implementations returning null are the tempting shape here, defended on the grounds that
+//  binding a DataWindow needs the DesignSystem ancestry `se_cst_dw` inherits from
 //  `se_cst_datawindow` [se_cst_dw.sru:L4, :L10] and that constraint C-D forbids implementing a deferred
 //  service even partially. That reasoning does not survive contact with the AAP:
 //    * AAP 0.2.1.3 Correction 3 resolves that exact inheritance edge by telling DataServices to define
@@ -16,15 +16,15 @@
 //    * AAP 0.3.5 assigns the HEADLESS half of every UI capability to DataServices and defers only the
 //      RENDERING half.
 //  So a bound headless host is the AAP's own instruction rather than a deferred-service implementation,
-//  and returning null made eight C-03 operations plus the whole of C-04 permanently unreachable.
+//  and returning null would make eight C-03 operations plus the whole of C-04 permanently unreachable.
 //
-//  WHAT DID *NOT* CHANGE - THE NEGATIVE IS STILL REACHABLE
-//  A handle no definition matches STILL resolves to nothing, and the surface still answers
+//  THE NEGATIVE IS STILL REACHABLE, WHICH IS WHAT BINDING DOES NOT COST
+//  A handle no definition matches resolves to nothing, and the surface answers
 //  `RetCode.E_INVALID_HANDLE` for it. That negative is published contract rather than a gap, and
-//  `DataWindowCatalogue.TryGet` is where it now comes from. The difference is that a KNOWN handle now
-//  works, which is the whole distinction between a provisioned service and a documented gap.
+//  `DataWindowCatalogue.TryGet` is where it comes from. The distinction that matters is that a KNOWN
+//  handle works, which is the whole difference between a provisioned service and a documented gap.
 //
-//  ALL THREE ARE STILL `TryAdd`-REGISTERED, so a deployment that materialises DataWindows another way
+//  ALL THREE ARE `TryAdd`-REGISTERED, so a deployment that materialises DataWindows another way
 //  substitutes its own implementation without editing this file or the composition root.
 //
 //  LEGACY REFERENCE (read only)

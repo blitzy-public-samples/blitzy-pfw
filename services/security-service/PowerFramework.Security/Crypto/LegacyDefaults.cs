@@ -34,9 +34,9 @@
 //
 //  It holds NO KEY MATERIAL OF ANY KIND - no key, no initialization vector, no passphrase, no
 //  certificate, no PEM block and no credential, whether as a value, as a default argument, as an
-//  example in documentation or as sample data. The single all-zero initialization vector this file
-//  admits to is produced by a computation over a length (see DECISION D3); it is never written
-//  down as a literal. Nothing from any of the repository's known hardcoded-secret sites is
+//  example in documentation or as sample data. No initialization vector is declared here or derived
+//  here: DECISION D3 REFUSES the arms that would need one this file could not supply, so there is no
+//  vector for this file to hold. Nothing from any of the repository's known hardcoded-secret sites is
 //  reproduced here in any form. Those sites are read as reference only, and their remediation
 //  posture is never-replicate-document-and-rotate, never edit-the-legacy-file.
 //
@@ -187,26 +187,25 @@
 //
 //  DECISION D3 - THE UNPROVABLE CELLS ARE BLOCKED, NOT GUESSED: IV-LESS CBC, AND CFB ENTIRELY
 //  --------------------------------------------------------------------------------------------
-//  THIS DECISION REPLACES AN EARLIER ONE THAT GUESSED, AND THE REASONING IS RECORDED BECAUSE THE
-//  REVERSAL IS THE POINT. Two parameters of the symmetric grid are not determined by anything in
-//  this repository, and each was previously supplied by inference:
+//  Two parameters of the symmetric grid are not determined by anything in this repository, and each
+//  could only be supplied by inference:
 //
 //      (a) THE VECTOR FOR THE EIGHT MODE-WITHOUT-VECTOR OVERLOADS. Four SymEncrypt overloads
 //          accept a mode but no vector [n_crypto.sru:L31, L35, L39, L43], mirrored by four
 //          SymDecrypt overloads [:L47, L51, L55, L59] - eight of the thirty-two. CBC requires a
-//          vector, so one had to come from somewhere, and an all-zero buffer of the block length
-//          was chosen as "the conventional legacy behaviour". THAT WAS AN ASSUMPTION, NOT A
-//          MEASUREMENT. The closed binary may equally have used a vector derived from the key, a
-//          fixed non-zero constant, or a refusal.
+//          vector, so one would have to come from somewhere. An all-zero buffer of the block length
+//          is the conventional choice, but choosing it would be AN ASSUMPTION, NOT A MEASUREMENT:
+//          the closed binary may equally use a vector derived from the key, a fixed non-zero
+//          constant, or a refusal.
 //
 //      (b) THE CFB FEEDBACK WIDTH. The legacy publishes ONE unqualified CFB value with no
 //          feedback-size parameter [enums.sru:L945], while this platform requires the width
 //          explicitly. Full-block CFB and 8-bit CFB produce ENTIRELY DIFFERENT CIPHERTEXT of
-//          different lengths. The width was inferred from the framework's OpenSSL attribution
-//          [ws_objects/pfw.demos.pbl.src/w_about.srw:L118], which is a reasoned guess about which
-//          alias a native surface most plausibly exposed - not an observation of the binary.
+//          different lengths. The framework's OpenSSL attribution
+//          [ws_objects/pfw.demos.pbl.src/w_about.srw:L118] would support only a reasoned guess about
+//          which alias a native surface most plausibly exposed - not an observation of the binary.
 //
-//  WHY A GUESS IS WORSE HERE THAN A REFUSAL. Both guesses are UNDETECTABLE by any test this
+//  WHY A GUESS IS WORSE HERE THAN A REFUSAL. Either guess would be UNDETECTABLE by any test this
 //  repository can run, because each round-trips perfectly against itself: encrypt and decrypt
 //  under the same wrong assumption and the plaintext comes back intact. A caller therefore gets
 //  ciphertext that looks correct, passes every check, and CANNOT BE DECRYPTED BY THE LEGACY. That
@@ -229,7 +228,7 @@
 //                               [enums.sru:L946], so every mode-omitting arm stays supported.
 //      CBC    yes               SUPPORTED. Every parameter is caller-supplied; padding is
 //                               settled by DECISION H3.
-//      CBC    no                BLOCKED - the synthesised vector is unprovable, case (a).
+//      CBC    no                BLOCKED - no vector is supplied and none can be proven, case (a).
 //      CFB    either            BLOCKED - the feedback width is unprovable, case (b).
 //
 //  THE BLOCKED SET IS PRECISELY THE SET THE ORACLE NEVER DEMONSTRATES, WHICH IS THE STRONGEST
@@ -795,10 +794,9 @@ public static class LegacyDefaults
     /// <para>
     /// ECB USES NO INITIALIZATION VECTOR AT ALL, so an IV length is meaningful only for CBC and
     /// CFB. This predicate is what lets the cipher provider decide whether it needs one before it
-    /// looks up a length, and it is the guard that keeps DECISION D3 confined to the arms that
-    /// actually require it: an IV supplied to an ECB operation is unused, and the eight
-    /// mode-without-IV overloads only need a synthesised IV when the mode they were handed is one
-    /// of these two.
+    /// looks up a length, and it is the guard that keeps DECISION D3's REFUSAL confined to the arms
+    /// that actually require a vector: an IV supplied to an ECB operation is unused, and a
+    /// mode-without-IV overload is refused only when the mode it was handed is one of these two.
     /// </para>
     /// <para>
     /// An unpublished mode answers <see langword="false"/> rather than throwing, because screening
@@ -819,8 +817,8 @@ public static class LegacyDefaults
     //  The cipher provider has to size key and IV material without embedding any, so the sizes live
     //  here as QUERYABLE DATA rather than as a switch buried inside that provider. Being data, the
     //  whole table can be enumerated and asserted row by row by a test; being here, it is also the
-    //  one place the key-length rule of DECISION D1 and the zero-IV rule of DECISION D3 read their
-    //  lengths from, so the three cannot disagree.
+    //  one place the key-length rule of DECISION D1 and the supplied-vector length check reach for a
+    //  length, so the two cannot disagree.
     //
     //  EVERY NUMBER BELOW IS AN ALGORITHM FACT, NOT A SECRET. A cipher's key length and block
     //  length are published properties of the algorithm; recording them carries no key material and
@@ -1095,14 +1093,14 @@ public static class LegacyDefaults
     /// <remarks>
     /// <para>
     /// THE CIPHER TYPE IS DELIBERATELY NOT A PARAMETER, because neither blocking reason depends on
-    /// it. The feedback width is unprovable for every cipher type, and the synthesised vector is
-    /// unprovable for every cipher type. Accepting a type here would imply the answer varied with
-    /// it and invite a caller to believe some type escapes the block.
+    /// it. The feedback width is unprovable for every cipher type, and the vector a vector-less arm
+    /// would need is unprovable for every cipher type. Accepting a type here would imply the answer
+    /// varied with it and invite a caller to believe some type escapes the block.
     /// </para>
     /// <para>
     /// THE TWO REASONS ARE DISTINGUISHED because they have different futures. A measurement of the
-    /// oracle's feedback width would unblock CFB; a measurement of its synthesised vector would
-    /// unblock the vector-less CBC arms. They are independent findings, and collapsing them into one
+    /// oracle's feedback width would unblock CFB; a measurement of the vector it substitutes on a
+    /// vector-less arm would unblock the vector-less CBC arms. They are independent findings, and collapsing them into one
     /// "unsupported" answer would lose which evidence is missing.
     /// </para>
     /// <para>
@@ -1224,7 +1222,7 @@ public enum SymmetricCellParity
 /// </summary>
 /// <remarks>
 /// <para>
-/// A <see cref="NotSupportedException"/> AND DELIBERATELY NOT A <see cref="CryptographicException"/>.
+/// A <see cref="NotSupportedException"/> AND DELIBERATELY NOT A <c>System.Security.Cryptography.CryptographicException</c>.
 /// The distinction carries real weight: a cryptographic exception on this surface means a refused
 /// key, a mis-sized ciphertext or a failed padding check, and every one of those is a runtime
 /// condition about the DATA. This is a statement about the PORT - the operation is well-formed and

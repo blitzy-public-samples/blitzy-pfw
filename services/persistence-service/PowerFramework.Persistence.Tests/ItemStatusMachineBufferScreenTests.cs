@@ -11,18 +11,17 @@
 //
 //  WHY THIS NARROW SUITE EXISTS, AND WHY IT IS DELIBERATELY NOT A GENERAL ItemStatusMachine SUITE
 //  --------------------------------------------------------------------------------------------
-//  The buffer screen's OBSERVABLE BEHAVIOUR CHANGED when the published DwBuffer domain was corrected
-//  to the three legacy buffers with Primary on zero, and it changed without a single character of its
-//  own condition being edited. Under the earlier contract the zero value was a synthetic
-//  DW_BUFFER_UNSPECIFIED sentinel and the screen REJECTED it; under the corrected contract zero is
-//  Primary and the screen must ACCEPT it. A change of that shape - behaviour moving because a type
-//  underneath moved - is exactly the kind nothing in a build notices, so it is pinned here.
+//  The buffer screen's OBSERVABLE BEHAVIOUR TURNS ENTIRELY ON THE PUBLISHED DwBuffer DOMAIN, without a
+//  single character of its own condition depending on it. With a domain whose zero value is a synthetic
+//  DW_BUFFER_UNSPECIFIED sentinel the screen REJECTS zero; with the three legacy buffers and Primary on
+//  zero - which is what the contract declares - zero is Primary and the screen must ACCEPT it. Behaviour
+//  moving because a type underneath it moved is exactly the kind of change nothing in a build notices, so
+//  it is pinned here.
 //
 //  The scope is held to the screen on purpose. A full suite for the classification predicates, the
-//  delete walk and the modified-row traversal belongs to this project's own ItemStatus test file,
-//  which is a later target and another agent's to author; duplicating it here would create two
-//  places for the same case lists to drift. What is asserted below is only what the contract
-//  correction touched.
+//  delete walk and the modified-row traversal belongs to this project's own ItemStatus test file;
+//  duplicating it here would create two places for the same case lists to drift. What is asserted below
+//  is the buffer screen and nothing else.
 //
 //  C-F SELF-AUDIT: every value in this file is synthetic. No credential, key, token, password,
 //  connection string or certificate appears.

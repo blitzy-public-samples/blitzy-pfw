@@ -225,7 +225,8 @@
 //  The plan is emphatic (section 0.1.4) that the legacy's fail-fast posture must survive as fail
 //  fast and never be softened into graceful degradation. That principle governs the framework's
 //  STRUCTURAL faults, and those belong to the Gateway composition root and to the Diagnostics
-//  assert path - pfw.sra:L111-L144 decodes a seven-field assert payload and then executes
+//  assert path - ws_objects/pfw.pbl.src/pfw.sra:L111-L144, the framework application rather than the
+//  same-named packager object, decodes a seven-field assert payload and then executes
 //  HALT CLOSE. It does NOT license hardening the empty-class-name path here. That path's legacy
 //  behaviour is to RETURN, and returning is what is reproduced. The two must not be conflated:
 //  softening a structural fault would be a behaviour change, and hardening this one would be too.

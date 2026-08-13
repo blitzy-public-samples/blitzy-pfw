@@ -18,10 +18,10 @@
 //
 //    2. THE PATH IS WITHHELD - by construction rather than by care. Every row asserts the absence as a
 //       BOOLEAN rather than with Assert.DoesNotContain, because that overload renders both operands and
-//       would print the mount layout at exactly the moment the defect it guards against was present.
+//       would print the mount layout at exactly the moment the defect it guards against is present.
 //
-//    3. THE FAILURE CLASS IS ESTABLISHED RATHER THAN GUESSED. The old form emitted one sentence - "not
-//       writable by this process" - for all four ways this can fail, which sends an operator to check
+//    3. THE FAILURE CLASS IS ESTABLISHED RATHER THAN GUESSED. One sentence - "not writable by this
+//       process" - for all four ways this can fail sends an operator to check
 //       permissions on a path that is occupied by a file or whose volume was never mounted. The rows
 //       below assert that the four classes are distinguished AND that their sentences differ, since four
 //       names mapping onto one sentence would satisfy a classification test and help nobody.

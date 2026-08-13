@@ -43,11 +43,7 @@
 //  note); of_On("*clicked.myns", ...) is :L251 (the brief says :L254, a default-return-value comment);
 //  and the filter matrix spans :L306-:L339 under a doc block at :L297-:L303 (the brief says :L305-:L345).
 //
-//  RULES POSITION, STATED EXPLICITLY
-//  review_rules reports exactly one line: "No user rules provided." No user-specified rule governs this
-//  file and none was invented to fill the gap. In their place the AAP 0.7.2 enterprise baseline and the
-//  AAP 0.7.3 binding non-rule constraints apply. The four that bear on this suite:
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //      C-B   BEHAVIOUR IS PINNED AS CORRECT, NEVER CORRECTED. Every assertion here asserts the legacy
 //            grammar as RIGHT, and each carries a locator so a later reader cannot mistake a quirk for a
 //            bug and "fix" it. The five quirks this suite pins deliberately:

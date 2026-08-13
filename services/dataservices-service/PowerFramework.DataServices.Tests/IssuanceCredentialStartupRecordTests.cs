@@ -236,7 +236,7 @@ public sealed class IssuanceCredentialStartupRecordTests
     /// THE RECORD REPORTS A BOOLEAN, NOT A VALUE, and this row is what keeps that true as the message
     /// changes. Asserted as a boolean rather than with <c>Assert.DoesNotContain</c> over the message,
     /// because that overload renders both operands and would therefore print the secret at exactly the
-    /// moment the defect it guards against was present.
+    /// moment the defect it guards against is present.
     /// </remarks>
     [Fact]
     public async Task NoStartupRecordCarriesTheIssuanceSecretAsync()

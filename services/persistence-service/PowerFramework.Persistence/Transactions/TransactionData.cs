@@ -37,7 +37,7 @@
 //  COPY-PASTE DEFECT: its export comment describes the structure as the database-ERROR structure
 //  and is BYTE-IDENTICAL to dberrordata.srs:L2. Verified by reading both lines directly. The wrong
 //  description is deliberately NOT propagated into any comment or XML document in this file, and
-//  the published contract refuses to propagate it either [persistence.v1.proto:L1944-L1948]. The
+//  the published contract refuses to propagate it either [persistence.v1.proto:L2541-L2546]. The
 //  defect itself is left exactly where it is, in a read-only file (C-C). It is cosmetic: no
 //  behaviour anywhere depends on an export comment.
 //
@@ -61,7 +61,7 @@
 //
 //  THE ORDER IS A WIRE CONTRACT IN DISGUISE. It is mirrored POSITIONALLY by contract C-08:
 //  persistence.v1.proto declares dbms = 1 through userparm = 9 in exactly this sequence
-//  [persistence.v1.proto:L1988-L2046]. A "tidier" alphabetical or grouped ordering here would be a
+//  [persistence.v1.proto:L2546-L2598]. A "tidier" alphabetical or grouped ordering here would be a
 //  silent breaking change, because the two sides are only checkable against each other - and
 //  against the oracle - while all three read the same way. The three-way field-order audit was
 //  performed and recorded in the FIELD-ORDER AUDIT block further down this file.
@@ -69,7 +69,7 @@
 //  THE TWO CONNECTION FLAGS THAT BELONG CONCEPTUALLY TO DbParm ARE NOT MEMBERS. They are DERIVED
 //  from it by the accessors at the bottom of this file, exactly as the legacy derives them
 //  [n_cst_thread_task_sqlbase.sru:L127-L132], and the contract likewise attaches them one level up
-//  on ConnectionParameterFlags rather than adding a tenth field [persistence.v1.proto:L1804-L1845].
+//  on ConnectionParameterFlags rather than adding a tenth field [persistence.v1.proto:L2371-L2398].
 //  Deriving rather than storing is what keeps the nine-field mirror exact.
 //
 //  ================= LogPass IS WRITE-ONLY. THIS IS THE PRIMARY CONSTRAINT (C-F) ==================
@@ -99,8 +99,8 @@
 //
 //  THE PUBLISHED CONTRACT ENFORCES THE SAME RULE THE SAME WAY, one level up: the request-side
 //  TransactionDescriptor HAS the field, and the response-side TransactionDescriptorView SIMPLY
-//  DOES NOT CONTAIN IT, with its slot permanently `reserved` [persistence.v1.proto:L1965-L1987 and
-//  L2048-L2085]. A response cannot carry the password because there is nowhere on the wire to put
+//  DOES NOT CONTAIN IT, with its slot permanently `reserved` [persistence.v1.proto:L2541-L2599 and
+//  L2644-L2674]. A response cannot carry the password because there is nowhere on the wire to put
 //  it. Grpc/TransactionService.cs therefore treats the field as INBOUND-ONLY when it maps C-08.
 //
 //  THE LEGACY GENUINELY ROUND-TRIPS IT, WHICH IS WHY THIS MATTERS RATHER THAN BEING THEORETICAL,
@@ -115,7 +115,7 @@
 //      connection's password nor destroying the caller's
 //      [WithConnectionFieldsFromExcludingCredential].
 //  The published contract enforces the identical rule independently, its response-side view having
-//  no slot for the field at all [persistence.v1.proto:L1965-L1987], so a port that DID move the
+//  no slot for the field at all [persistence.v1.proto:L2650-L2652], so a port that DID move the
 //  value outbound would be contradicting the contract as well as the plan. This is a narrowing of a
 //  newly created surface rather than a change to an existing wire format, because there was none:
 //  PowerBuilder's move handed a password between two objects inside one process that already held
@@ -174,21 +174,6 @@
 //  the empty string, and every value a deployment actually uses arrives through an options type
 //  bound from the orchestration secret layer.
 //
-//  RULES POSITION
-//  --------------------------------------------------------------------------------------------
-//  review_rules returns exactly one line, "No user rules provided.", so NO user-specified rule
-//  governs this file. That is a finding, not latitude, and nothing is invented or back-filled from
-//  convention in its place. The enterprise-standard baseline applies instead - nullable reference
-//  types on, warnings as errors, no secret in source, deterministic and trivially testable - and
-//  the binding constraints are the refactor plan's own non-rule inventory, of which C-A, C-B, C-C,
-//  C-D, C-E, C-F, C-H and C-K bite on this file and are each discharged at the point they are
-//  cited above.
-//
-//  No performance property is asserted anywhere in this file and no decision here is justified by
-//  one: the repository publishes no latency budget, no throughput target and no availability
-//  commitment, so there is no baseline against which such a claim could be made. The type is a
-//  small readonly value struct because the legacy artifact is a structure, not because a
-//  measurement said so.
 // ==============================================================================================
 
 using System.Diagnostics.CodeAnalysis;
@@ -291,7 +276,7 @@ public delegate long GetTransactionDataHook(ref TransactionData data, ref string
 /// <para>
 /// <b>The nine members are declared in the ORACLE'S OWN ORDER, and that order is contract.</b>
 /// Contract C-08 mirrors it positionally, declaring <c>dbms = 1</c> through <c>userparm = 9</c>
-/// [persistence.v1.proto:L1988-L2046]. Reordering them here - alphabetically, or by grouping the
+/// [persistence.v1.proto:L2546-L2598]. Reordering them here - alphabetically, or by grouping the
 /// credential-bearing members together, or by moving the lone boolean last where a C# author would
 /// naturally put it - would desynchronize this type, the wire contract and the oracle
 /// simultaneously, and nothing in the build would notice.
@@ -474,7 +459,7 @@ public readonly partial record struct TransactionData
     /// containing the word resolves to Oracle; and EVERYTHING ELSE - including SQLite, which is the
     /// only engine this phase actually provisions - classifies as SQL Server, because there is no
     /// third arm. That is why the published <c>DatabaseType</c> enum has exactly two members and no
-    /// SQLite value [persistence.v1.proto:L1732-L1792].
+    /// SQLite value [persistence.v1.proto:L2341-L2346].
     /// </para>
     /// <para>
     /// <b>The resolution itself is deliberately NOT implemented on this type.</b> It belongs to the
@@ -562,7 +547,7 @@ public readonly partial record struct TransactionData
     /// <para>
     /// <b>Credential-adjacent but readable, and that distinction is the contract's, not this file's.</b>
     /// An account name is not a secret, so unlike <see cref="LogPass"/> it appears on the
-    /// response-side view of contract C-08 [persistence.v1.proto:L2001-L2006] and is rendered by
+    /// response-side view of contract C-08 [persistence.v1.proto:L2648] and is rendered by
     /// <see cref="ToString"/>. It is nonetheless CONFIGURATION and never a literal: it reaches a
     /// service through its options type bound from the orchestration layer.
     /// </para>
@@ -619,7 +604,7 @@ public readonly partial record struct TransactionData
     /// diagnostics endpoint, a cached state dump or a message-broker envelope that happens to
     /// serialize a descriptor cannot emit it. <c>Grpc/TransactionService.cs</c> maps the field as
     /// INBOUND-ONLY, matching the contract, whose response-side view does not contain the field at
-    /// all [persistence.v1.proto:L1965-L1987].
+    /// all [persistence.v1.proto:L2650-L2652].
     /// </para>
     /// <para>
     /// <b>Included in equality and in hashing, which is required and is not a leak.</b> The
@@ -717,12 +702,12 @@ public readonly partial record struct TransactionData
     /// own work - it is the only service that holds a storage provider (AAP 0.1.1) - so nothing outside
     /// this assembly has any business reading it. <c>Grpc/TransactionService.cs</c> maps C-08's field as
     /// INBOUND-ONLY, and the response-side view has no slot for it at all
-    /// [<c>persistence.v1.proto:L1965-L1987</c>], so there is nowhere outward for a revealed value to go
+    /// [<c>persistence.v1.proto:L2650-L2652</c>], so there is nowhere outward for a revealed value to go
     /// even inside this assembly.
     /// </para>
     /// <para>
     /// <b>The returned string must not be logged, rendered, stored or echoed</b> - the obligation the
-    /// getter used to carry silently now travels with an explicit name. It is also what the INBOUND fold
+    /// getter would otherwise carry silently travels here with an explicit name. It is also what the INBOUND fold
     /// uses to move the credential onto the connection's own descriptor, which is part of the connect
     /// path and is the one transfer the legacy genuinely performs
     /// [<c>n_cst_thread_trans.sru:L347</c>].
@@ -747,7 +732,7 @@ public readonly partial record struct TransactionData
     /// credential material - a password keyword, an access token, or an entire nested connection
     /// string - and neither the legacy nor this contract constrains what a caller puts here, so the
     /// response-side view of C-08 reserves the slot permanently and carries the typed flag allowlist
-    /// instead [persistence.v1.proto:L2018-L2027, L2054-L2077]. Only the mandatory exclusion of
+    /// instead [persistence.v1.proto:L2654-L2657, L2667-L2673]. Only the mandatory exclusion of
     /// <see cref="LogPass"/> is a hard requirement on this type; extending the same treatment to
     /// this member is the consistent reading of that requirement, and it is recorded here rather
     /// than left implicit.
@@ -793,7 +778,7 @@ public readonly partial record struct TransactionData
     /// Opaque and provider-specific: the legacy imposes no grammar and validates nothing, and
     /// neither does this port. It is the SEVENTH and last of the transferred members
     /// [n_cst_thread_trans.sru:L351, :L416], and it is carried on the response-side view of C-08
-    /// [persistence.v1.proto:L2030-L2031] because an isolation level is not sensitive.
+    /// [persistence.v1.proto:L2659] because an isolation level is not sensitive.
     /// </para>
     /// <para>
     /// Reads as non-null, accepts <see langword="null"/>.
@@ -811,7 +796,7 @@ public readonly partial record struct TransactionData
     //  ----------------------------------------------------------------------------------------
     //  EIGHTH, NOT LAST. The lone boolean sits between two strings, which is the one ordering a C#
     //  author is most likely to "tidy" by moving it to the end. It must not move: contract C-08
-    //  mirrors this position positionally [persistence.v1.proto:L2037].
+    //  mirrors this position positionally [persistence.v1.proto:L2590].
     // ------------------------------------------------------------------------------------------
 
     /// <summary>
@@ -824,7 +809,7 @@ public readonly partial record struct TransactionData
     /// per-statement autocommit mode.</b> The legacy structure field is a <c>boolean</c>, while the
     /// SQL task layer carries a separate three-valued setting for per-statement commit policy. The
     /// published contract rules explicitly that the two are different domains and must not be
-    /// unified [persistence.v1.proto:L1250-L1253], the reason being that the task layer's third
+    /// unified [persistence.v1.proto:L2199-L2207], the reason being that the task layer's third
     /// value has no analogue a boolean could express. Typing this member as that enum would import
     /// a state the structure cannot hold.
     /// </para>
@@ -863,7 +848,7 @@ public readonly partial record struct TransactionData
     /// <b>Free-form by the legacy's own design, and therefore treated as credential-CAPABLE</b> on
     /// exactly the footing recorded for <see cref="DbParm"/>: it can carry whatever a caller chose
     /// to put in it, so the response-side view of C-08 reserves its slot permanently
-    /// [persistence.v1.proto:L2042-L2044, L2061-L2063], and this type excludes it from rendering and
+    /// [persistence.v1.proto:L2662-L2665], and this type excludes it from rendering and
     /// from serialization.
     /// </para>
     /// <para>
@@ -942,7 +927,7 @@ public readonly partial record struct TransactionData
     /// <see cref="WithConnectionFieldsFromExcludingCredential(in TransactionData)"/>. One fold used to
     /// serve both, on the reasoning that the legacy's two accessors move the same seven fields so a
     /// shared fold could not drift - and the legacy DOES move the password outbound
-    /// [<c>n_cst_thread_trans.sru:L414</c>]. The two directions are nonetheless no longer symmetric,
+    /// [<c>n_cst_thread_trans.sru:L414</c>]. The two directions are nonetheless NOT symmetric here,
     /// because AAP 0.4.2.6 makes <see cref="LogPass"/> write-only: never echoed in a response. An
     /// outbound accessor that hands the password back to its caller IS that echo, whatever the caller
     /// then does with it.
@@ -1041,7 +1026,7 @@ public readonly partial record struct TransactionData
     /// disclosure - which is exactly the class of case AAP 0.1.5 governs: narrow with a defined behaviour
     /// rather than widen with a guess. The published contract enforces the same rule independently, its
     /// response-side view having no slot for the field at all
-    /// [<c>persistence.v1.proto:L1965-L1987</c>], so a port that moved the value here would be
+    /// [<c>persistence.v1.proto:L2650-L2652</c>], so a port that moved the value here would be
     /// contradicting the contract as well as the plan.
     /// </para>
     /// <para>
@@ -1458,7 +1443,7 @@ public readonly partial record struct TransactionData
     /// <c>NCharBind</c> ONLY INSIDE the <c>DisableBind=1</c> branch [:L128-L132], so
     /// <c>NCharBind=1</c> on its own has NO EFFECT WHATSOEVER. Sending it alone is legal and inert,
     /// which matches the legacy exactly and is stated the same way in the published contract
-    /// [persistence.v1.proto:L1809-L1817, L1841-L1844].
+    /// [persistence.v1.proto:L2363-L2369, L2394-L2397].
     /// </para>
     /// <para>
     /// <b>The two tests are kept NESTED rather than flattened into a single conjunction.</b> A flat
@@ -1500,7 +1485,7 @@ public readonly partial record struct TransactionData
     /// Exposed alongside the two properties rather than instead of them, because the two shapes serve
     /// different callers: a consumer that needs one flag reads a property, and a consumer that
     /// projects both onto the contract's flag message - where they travel together as one allowlist
-    /// [persistence.v1.proto:L1818-L1845] - takes them both in one call and matches the legacy's
+    /// [persistence.v1.proto:L2371-L2398] - takes them both in one call and matches the legacy's
     /// single-pass evaluation exactly.
     /// </para>
     /// <para>
@@ -1596,7 +1581,7 @@ public readonly partial record struct TransactionData
     //  WHAT IS RENDERED: THE SAME SIX MEMBERS THE RESPONSE-SIDE CONTRACT IS WILLING TO EMIT. That is
     //  the rule, and it is auditable rather than a matter of taste - contract C-08's
     //  TransactionDescriptorView carries six of the nine fields and reserves three slots
-    //  permanently [persistence.v1.proto:L2048-L2085]. Rendered here: Dbms, ServerName, Database,
+    //  permanently [persistence.v1.proto:L2644-L2674]. Rendered here: Dbms, ServerName, Database,
     //  LogId, Lock, AutoCommit. Omitted here: the password, the connection parameter string and the
     //  user parameter string - the same three, for the same reasons, recorded on each member.
     //
@@ -1688,7 +1673,7 @@ public readonly partial record struct TransactionData
         builder.Append(Database);
 
         // An ACCOUNT NAME is not a secret and the response-side contract view carries it
-        // [persistence.v1.proto:L2001-L2006], so it is rendered. Its neighbour is not.
+        // [persistence.v1.proto:L2648], so it is rendered. Its neighbour is not.
         builder.Append(", LogId = ");
         builder.Append(LogId);
 

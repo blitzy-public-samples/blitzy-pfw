@@ -280,7 +280,7 @@ public sealed class SqlCommandTaskProxyTests
     /// <summary>
     /// The generated enum carries the oracle's own numbers
     /// [<c>n_cst_thread_task_sqlcommand.sru:L16-L18</c>], published once at
-    /// [<c>shared/PowerFramework.Contracts/Proto/persistence.v1.proto:L1720-L1727</c>]. Only the
+    /// [<c>shared/PowerFramework.Contracts/Proto/persistence.v1.proto:L1841-L1849</c>]. Only the
     /// declaration site moved; the values did not.
     /// </summary>
     [Fact]

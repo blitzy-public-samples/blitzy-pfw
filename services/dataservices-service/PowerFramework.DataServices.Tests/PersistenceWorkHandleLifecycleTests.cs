@@ -206,10 +206,10 @@ public sealed class PersistenceWorkHandleAcquisitionTests(DataServicesTestHostFa
     /// A negative chunk size REACHES the guard that owns it and is refused as a bad request.
     /// </summary>
     /// <remarks>
-    /// 🔴 <b>THE VALUE USED TO BE DISCARDED BEFORE IT TRAVELLED, SO THIS ROW HAS TWO HALVES AND NEEDS BOTH.</b>
-    /// The projection forwarded a chunk size only when it was positive, so <c>-5</c> was dropped and the
-    /// caller received a successful retrieval at the server's own size, while <c>500</c> - no less
-    /// nonsensical - travelled and was refused. The first assertion is that the size now ARRIVES on the
+    /// 🔴 <b>DISCARDING THE VALUE BEFORE IT TRAVELS IS THE EASY MISS, SO THIS ROW HAS TWO HALVES AND NEEDS BOTH.</b>
+    /// A projection that forwards a chunk size only when it is positive drops <c>-5</c>, so the
+    /// caller receives a successful retrieval at the server's own size, while <c>500</c> - no less
+    /// nonsensical - travels and is refused. The first assertion is that the size ARRIVES on the
     /// create call; the second is that the refusal it provokes reaches the caller as <c>400</c> rather than
     /// as a server fault.
     /// <para>

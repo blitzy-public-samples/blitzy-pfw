@@ -6,13 +6,13 @@
 //  Clients/PersistenceClient.cs, and the fact that Program.ApplyResilience actually installs both
 //  predicates on the four Persistence channels rather than merely being able to.
 //
-//  WHY IT IS WORTH A SUITE OF ITS OWN. The defect this replaces was not a wrong value; it was a
-//  policy that could not see what it was deciding about. Every one of the six outbound clients called
-//  AddStandardResilienceHandler() with no configuration, and an HTTP-level pipeline cannot read a
-//  `grpc-status`: a call the server REFUSED arrives as HTTP 200, so a server-declared Unavailable was
-//  never retried, while a TRANSPORT fault arrived as an exception and was retried on every method
-//  including Update, Exec and Commit - none of which is idempotent. Both halves are invisible in a
-//  passing build, which is exactly why they need assertions.
+//  WHY IT IS WORTH A SUITE OF ITS OWN. The defect it guards is not a wrong value; it is a
+//  policy that cannot see what it is deciding about. Call
+//  AddStandardResilienceHandler() with no configuration on the six outbound clients and an HTTP-level
+//  pipeline cannot read a `grpc-status`: a call the server REFUSED arrives as HTTP 200, so a
+//  server-declared Unavailable is never retried, while a TRANSPORT fault arrives as an exception and is
+//  retried on every method including Update, Exec and Commit - none of which is idempotent. Both halves
+//  are invisible in a passing build, which is exactly why they need assertions.
 //
 //  THE SUITE IS IN THREE PARTS, and the third is the one that matters most:
 //
@@ -141,11 +141,11 @@ public sealed class OutboundCallPolicyTests
     /// omitted a method could not tell a deliberate exclusion from a forgotten one.
     /// </para>
     /// <para>
-    /// 🔴 THE FOUR ROWS THAT CHANGED, AND WHY THEY WERE WRONG. All three task releases and
-    /// <c>AutoCommit</c> were admitted and are not any more.
+    /// 🔴 THE FOUR ROWS MOST EASILY GOT WRONG. All three task releases and
+    /// <c>AutoCommit</c> read as admissible and are excluded.
     /// </para>
     /// <para>
-    /// A RELEASE CONSUMES ITS OWN REGISTRATION. It was admitted on the reading that "a replayed release
+    /// A RELEASE CONSUMES ITS OWN REGISTRATION. Admitting it rests on the reading that "a replayed release
     /// releases nothing twice", which is true of the state and false of the answer: the server removes the
     /// registration and then answers <c>E_INVALID_HANDLE</c> when there is nothing to remove, and the
     /// caller-side cleanup path reads any non-OK answer as evidence of a leak - it records that the server
@@ -155,8 +155,8 @@ public sealed class OutboundCallPolicyTests
     /// <para>
     /// AND <c>AutoCommit</c> IS NOT A SETTINGS READ. Its name suggests one and its behaviour is the ported
     /// <c>of_autocommit</c> checkpoint: it ROLLS BACK on a non-zero statement status and otherwise COMMITS,
-    /// over shared work. It sat beside <c>Commit</c> and <c>Rollback</c> in the excluded list while doing
-    /// the same thing they do.
+    /// over shared work. It belongs beside <c>Commit</c> and <c>Rollback</c> in the excluded list, because
+    /// it does the same thing they do.
     /// </para>
     /// <para>
     /// UNCHANGED AND STILL WORTH READING TWICE: <c>CreateQueryTask</c> is excluded because a replayed
@@ -374,9 +374,9 @@ public sealed class OutboundCallPolicyTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// 🔴 <b>THE WITHDRAWN "IDEMPOTENT TEARDOWN" FAMILY.</b> All three were classified replay-safe on the
+    /// 🔴 <b>THE "IDEMPOTENT TEARDOWN" TRAP.</b> All three invite a replay-safe classification on the
     /// reasoning that releasing an already-released handle is harmless. The reasoning is sound and the
-    /// classification was still wrong, because the contract does not implement it: a release REMOVES the
+    /// classification is still wrong, because the contract does not implement it: a release REMOVES the
     /// handle from the registry, so a second one finds nothing and answers <c>E_INVALID_HANDLE</c>. That is
     /// deliberate and is asserted upstream - Persistence's own
     /// <c>UpdateServiceTests.ReleaseUpdateTaskIsSingleUseAndDisposesExactlyOnce</c>,
@@ -385,7 +385,7 @@ public sealed class OutboundCallPolicyTests
     /// each pin the first release as success and the second as invalid-handle.
     /// </para>
     /// <para>
-    /// WHAT THE MISCLASSIFICATION COST IS A FABRICATED FAILURE, WHICH IS WORSE THAN A LOST RETRY. A replay
+    /// WHAT THE MISCLASSIFICATION COSTS IS A FABRICATED FAILURE, WHICH IS WORSE THAN A LOST RETRY. A replay
     /// whose first attempt actually succeeded returns an error for work that completed, so a caller sees a
     /// teardown fault where there was none - and, having been told the handle is invalid, cannot tell that
     /// apart from a handle it never held.
@@ -676,8 +676,8 @@ public sealed class OutboundCallPolicyTests
     public void The_classification_table_resolves_against_the_shipped_contracts()
     {
         // 6 gRPC operations across the four contracts - the C-05 count and the five C-08 reads - plus 13
-        // Security crypto paths. It was 10 while the three task releases and AutoCommit were admitted, and
-        // C-06 and C-07 now contribute none at all, which is a classification rather than a gap.
+        // Security crypto paths. C-06 and C-07 contribute none at all, which is a classification rather
+        // than a gap: neither declares an operation a replay can repeat without effect.
         Assert.Equal(19, OutboundCallPolicy.Verify());
     }
 
@@ -687,11 +687,11 @@ public sealed class OutboundCallPolicyTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>THE TABLE CLAIMED THE WHOLE SURFACE AND NOTHING CHECKED THE CLAIM.</b> An operation nobody
-    /// classifies inherits "attempted exactly once", which is the safe default and a silent one: a method
-    /// added to the C-05 through C-08 contract set was neither admitted by the policy nor refused by it on the
-    /// record, so a deliberate exclusion and a forgotten one looked identical. That is precisely the
-    /// distinction the table was written to make, so the claim is now enforced against the descriptors.
+    /// <b>THE TABLE CLAIMS THE WHOLE SURFACE, AND THE CLAIM IS CHECKED RATHER THAN TRUSTED.</b> An operation
+    /// nobody classifies inherits "attempted exactly once", which is the safe default and a silent one: a
+    /// method added to the C-05 through C-08 contract set is then neither admitted by the policy nor refused
+    /// by it on the record, so a deliberate exclusion and a forgotten one look identical. That is precisely
+    /// the distinction the table exists to make, so the claim is enforced against the descriptors.
     /// </para>
     /// <para>
     /// STREAMING METHODS ARE INCLUDED IN THE COMPARISON. They can never be replay-safe - the policy's own

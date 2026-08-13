@@ -170,14 +170,6 @@
 //  🔴 NO REVERSE ITERATION IS EVER "CORRECTED". See COLLECT BACKWARD, APPLY FORWARD above.
 //
 //  --------------------------------------------------------------------------------------------
-//  RULES POSITION
-//  --------------------------------------------------------------------------------------------
-//  review_rules returns exactly one line, "No user rules provided." No user-specified rule governs
-//  this file and none is invented in its place. The enterprise baseline of AAP §0.7.2 applies
-//  instead, and the binding constraints are the plan's own non-rule inventory; those bearing on this
-//  file are C-A, C-B, C-C, C-D, C-E, C-F, C-G, C-H, C-I, C-J, C-K and risk R9, each cited inline
-//  where it is discharged.
-//
 // ==================================================================================================
 
 using Microsoft.Extensions.Logging;

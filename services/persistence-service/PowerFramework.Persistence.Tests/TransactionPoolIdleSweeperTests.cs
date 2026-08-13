@@ -31,9 +31,6 @@
 //  EVERY VALUE IN THIS FILE IS SYNTHETIC AND IS INVENTED HERE (C-F). No password, account name, host
 //  name or connection string is copied from the legacy tree or from any catalogued secret site.
 //
-//  RULES POSITION. review_rules returns exactly one line, "No user rules provided.", so the
-//  enterprise-standard baseline applies and the binding constraints are the plan's own non-rule
-//  inventory - C-B, C-E, C-F and C-H bite here and are cited where each applies.
 // ==================================================================================================
 
 using Microsoft.Extensions.Logging.Abstractions;
@@ -254,10 +251,10 @@ public sealed class TransactionPoolIdleSweeperTests
     /// some scheduling orders, so an advance issued immediately afterwards can find nothing to advance.
     /// </para>
     /// <para>
-    /// A SIGNAL, NOT A POLL. This used to be a bounded retry - up to two hundred five-millisecond delays -
-    /// which made the outcome a function of scheduler and host load: under a loaded agent the bound could
-    /// expire while the loop was merely slow to reach its first await, and the test then failed for a
-    /// reason that says nothing about the sweeper. The clock now completes a task the instant it registers
+    /// A SIGNAL, NOT A POLL. A bounded retry - up to two hundred five-millisecond delays - is the tempting
+    /// shape, and it makes the outcome a function of scheduler and host load: under a loaded agent the bound
+    /// expires while the loop is merely slow to reach its first await, and the test then fails for a
+    /// reason that says nothing about the sweeper. The clock completes a task the instant it registers
     /// its first timer, so this awaits the event itself. There is no interval, no attempt count and
     /// nothing to tune. The only bound is the test runner's own timeout, which is the correct owner of a
     /// liveness bound; no timing is asserted anywhere here (AAP 0.8.5).
@@ -285,9 +282,9 @@ public sealed class TransactionPoolIdleSweeperTests
     /// continuation the scheduler has ALREADY been handed, not an event that may or may not occur.
     /// </para>
     /// <para>
-    /// TOKEN-DRIVEN AND UNBOUNDED, WHICH IS THE POINT. This used to be a bounded retry of up to two
-    /// hundred five-millisecond delays, and a bound like that is a timing assumption wearing a
-    /// convenience's clothes: it can expire because the agent is busy, and the failure then accuses the
+    /// TOKEN-DRIVEN AND UNBOUNDED, WHICH IS THE POINT. A bounded retry of up to two
+    /// hundred five-millisecond delays is the tempting shape, and a bound like that is a timing assumption
+    /// wearing a convenience's clothes: it expires because the agent is busy, and the failure then accuses the
     /// sweeper of not sweeping when the truth is that a thread was not scheduled within one second. The
     /// loop now has no attempt count and no delay - it yields until the count appears, and the ONLY thing
     /// that can end it early is the test's own cancellation token. A sweep that genuinely never happens
@@ -633,6 +630,21 @@ public sealed class TransactionPoolIdleSweeperTests
 
         /// <inheritdoc/>
         public bool AutoCommit { get; set; }
+
+        /// <summary>Moves the auto-commit mode and answers success, because this double opens no transaction.</summary>
+        /// <param name="autoCommit">The mode to put in force.</param>
+        /// <returns>Always a succeeded state.</returns>
+        /// <remarks>
+        /// ROUTED THROUGH THE PROPERTY so whatever the property records still records. A double with no
+        /// provider behind it has nothing the transition can fail on, which is the contract's own
+        /// nothing-to-do case.
+        /// </remarks>
+        public SqlState TrySetAutoCommit(bool autoCommit)
+        {
+            AutoCommit = autoCommit;
+
+            return SqlState.Succeeded();
+        }
 
         /// <inheritdoc/>
         public void ApplyConnectionFields(in TransactionData descriptor) => Dbms = descriptor.Dbms;

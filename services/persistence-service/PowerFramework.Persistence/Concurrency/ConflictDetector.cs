@@ -139,8 +139,8 @@
 //  A DIVERGENCE FROM THIS FILE'S OWN BRIEF, RECORDED BECAUSE THE SOURCE WINS. The brief specifies
 //  `ToDbError(this DbErrorData, ISqlRedactor)`. The sibling actually declares
 //  `internal static DbError ToDbError(this in DbErrorData error)` WITH NO REDACTOR PARAMETER, and
-//  says why: an earlier shape did take one, and it was removed because ANY implementation satisfied
-//  it, so the mandatory parameter was not a real control. The projection now owns the policy and
+//  says why: a mandatory `ISqlRedactor` parameter is satisfied by ANY implementation, including one
+//  that redacts nothing, so it is not a real control. The projection owns the policy instead and
 //  applies `SqlRedactor.Instance` unconditionally [Errors/SqlRedactor.cs, the ToDbError remarks].
 //  This file therefore calls the real one-argument extension - which is strictly stronger than the
 //  brief's shape - and still takes an `ISqlRedactor` through its constructor, because that is the
@@ -537,6 +537,7 @@ internal interface IUpdateTarget
     /// THE CARRIER'S STATE AFTERWARDS. Item statuses and the original-value shadow survive the call,
     /// which is what makes a retry, an identity round trip and a conflict report possible at all.
     /// </param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
     /// <returns>
     /// THE DATAWINDOW UPDATE CONTRACT'S OWN VALUE, where <c>1</c> is success and <c>-1</c> is failure.
     /// NOT a return code - see this file's header.
@@ -745,10 +746,10 @@ internal sealed record ConcurrencyEvidence
     /// </para>
     /// <para>
     /// 🔴 <b>IT IS COUNTED SEPARATELY FROM THE TWO ROW COUNTS BECAUSE REPORTING IT AS A SHORTFALL WAS
-    /// WRONG IN THE MOST MISLEADING WAY AVAILABLE.</b> Such a row used to be counted as a generated
-    /// statement and recorded as unmatched, which made
-    /// <see cref="ConflictDetector.IsConcurrencyMismatch"/> answer true and told the caller that another
-    /// writer had changed a row nothing had touched - sending an integrator to look for a concurrency
+    /// WRONG IN THE MOST MISLEADING WAY AVAILABLE.</b> Counting such a row as a generated
+    /// statement and recording it as unmatched makes
+    /// <see cref="ConflictDetector.IsConcurrencyMismatch"/> answer true and tells the caller that another
+    /// writer changed a row nothing had touched - sending an integrator to look for a concurrency
     /// problem that did not exist. A payload that cannot express an update is the caller's own fault and
     /// is answered as one; only a statement that RAN and matched nothing is a concurrency miss.
     /// </para>
@@ -1702,16 +1703,16 @@ internal sealed class ConflictDetector
         // proxy's two callbacks are consumed through the outcome rather than through a captured handle.
         attempt.Target.ClearState();
 
-        // 🔴 AND THE TRANSACTION'S STATE IS CLEARED TOO, WHICH IT WAS NOT.
+        // 🔴 AND THE TRANSACTION'S STATE IS CLEARED TOO, NOT ONLY THE DataWindow TARGET.
         //
         // The oracle's `of_ClearState()` resets the five-value SQL state the rest of this function then
-        // reads - SQLCode, SQLDBCode, SQLNRows, SQLErrText, SQLReturnData - and this port cleared the
-        // DataWindow target only. The consequence was not a stale read: it was that the transaction's
-        // state was never written by ANYTHING in the service, so `transaction.SqlDbCode` and
-        // `transaction.SqlErrText` answered their cleared values on every attempt, and the failure payload
-        // built from them at the else arm below was ALWAYS EMPTY. A caller whose row was refused by the
-        // storage engine therefore received a database error carrying no code and no text - the driver's
-        // own diagnosis reached the wire only by the separate route of the latched error event.
+        // reads - SQLCode, SQLDBCode, SQLNRows, SQLErrText, SQLReturnData. Clearing the
+        // DataWindow target alone is the incomplete reading, and its consequence is not a stale read: it is
+        // that the transaction's state is written by NOTHING in the service, so `transaction.SqlDbCode` and
+        // `transaction.SqlErrText` answer their cleared values on every attempt, and the failure payload
+        // built from them at the else arm below is ALWAYS EMPTY. A caller whose row was refused by the
+        // storage engine then receives a database error carrying no code and no text - the driver's
+        // own diagnosis reaching the wire only by the separate route of the latched error event.
         //
         // CLEARING HERE IS WHAT MAKES STAMPING SAFE. A pooled transaction outlives one update, so without
         // a per-attempt clear a stamp from an earlier attempt would be read as this attempt's evidence.

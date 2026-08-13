@@ -32,9 +32,23 @@
         Directory.Packages.props   inert until this file does so, then supplies every version
 
     TOOLCHAIN THIS CONTRACT IS VALIDATED AGAINST
-        .NET SDK   10.0.302, pinned by global.json at this same repository root
-        Runtimes   Microsoft.NETCore.App 10.0.10 and Microsoft.AspNetCore.App 10.0.10
-        Language   C# 14
+        .NET SDK   whatever global.json at this same repository root pins. The version is NOT repeated
+                   here: this comment carried 10.0.302 after that pin had moved to 10.0.303, which is
+                   the failure mode a second copy of a number always eventually reaches. global.json
+                   is the single authority, and it is two files away.
+        Runtimes   Microsoft.NETCore.App and Microsoft.AspNetCore.App at the version
+                   Directory.Packages.props pins for the framework reference packages, for the same
+                   reason. Read it there.
+        Language   C# 14, which is what net10.0 selects by default and is not set anywhere in this file
+
+    THESE THREE LINES ARE A CLAIM ABOUT THE PRESENT AND ARE KEPT TRUE BY RE MEASUREMENT
+    An earlier revision named SDK 10.0.302 with 10.0.10 runtimes while global.json beside this file
+    pinned a later SDK and Directory.Packages.props pinned later platform packages, so the header
+    contradicted its own repository. Where a comment further down this file says a behaviour was
+    MEASURED on 10.0.302 it is a statement about a past measurement and stays as written; this block
+    is not, so it moves whenever global.json does. The runtime pair is the one a framework dependent
+    net10.0 process actually resolves, not merely one that is installed: a host can carry several
+    patches side by side and roll forward to the newest, which is what a probe on this host reported.
 
     PROVENANCE: THERE IS NO LEGACY SOURCE EQUIVALENT TO TRANSLATE
     The Appeon PowerBuilder 2021 framework this .NET tree is being added to has no build system in

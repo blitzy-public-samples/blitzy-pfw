@@ -21,13 +21,13 @@
 //
 //    * BELOW the pin - 2.0.0 carries NuGet advisory NU1903, high severity. That is the version the
 //      stock web template on net10.0 pulls TRANSITIVELY through `Microsoft.AspNetCore.OpenApi`
-//      10.0.10, so it arrives without anybody asking for it. Restore reports it, and warnings are
+//      10.0.11, so it arrives without anybody asking for it. Restore reports it, and warnings are
 //      errors repository-wide, so it is a build failure rather than a warning.
 //
 //    * ABOVE the pin - the 3.x line BREAKS THE BUILD. 3.9.0 was tested directly during planning and
 //      produces two `error CS0200` diagnostics reporting that a media-type example property cannot be
 //      assigned because it is read-only, raised inside the SDK's OWN generated OpenAPI XML-comment
-//      support file. The cause is not this repository's code: the 10.0.10 OpenAPI source generator is
+//      support file. The cause is not this repository's code: the 10.0.11 OpenAPI source generator is
 //      compiled against the 2.x object model, so nothing in the 3.x line can satisfy it.
 //
 //    * 2.11.0, the highest published 2.x, is therefore the ONLY value that is simultaneously
@@ -128,13 +128,6 @@
 //    `ws_objects/pfw.shared.pbl.src/retcode.sru` for the return-code catalogue - are citations in
 //    comments and nothing more. No file is created, written, moved or deleted by anything here.
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  `review_rules` returns exactly one line: "No user rules provided." Verified. NO user-specified rule
-//  governs this file. That absence is not licence - the enterprise baseline of AAP 0.7.2 applies in
-//  its place: nullable enabled and warnings as errors, both inherited and neither relaxed; no NoWarn
-//  and no #pragma anywhere; no secret in source; and the published contracts as the only cross-service
-//  coupling. The binding constraints are the AAP's own, cited inline where each one bites.
 // ==================================================================================================
 
 using System.Globalization;
@@ -1319,7 +1312,7 @@ public sealed class OpenApiDocumentValidationTests(OpenApiContractDocuments docu
     /// <param name="TargetMissing">Whether the resolved target is absent - the fault a consumer trips over.</param>
     /// <param name="Recognised">
     /// Whether this suite knew how to inspect the holder. False means the object model published a
-    /// reference kind that <see cref="Inspect"/> has no arm for, which is reported rather than skipped.
+    /// reference kind that <c>Inspect</c> has no arm for, which is reported rather than skipped.
     /// </param>
     private readonly record struct ReferenceSite(
         string Pointer,

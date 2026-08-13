@@ -50,10 +50,6 @@
 //  matters in this file specifically, because this type sees whatever a caller is encoding, and the
 //  production type deliberately holds no logger for the same reason.
 //
-//  RULES POSITION: review_rules returns exactly one line, "No user rules provided.", so no
-//  user-specified rule governs this file and none is invented. The enterprise-standard baseline
-//  applies instead: deterministic, no I/O, no clock, no shared mutable state, every test
-//  independent. No performance property is asserted, because the repository publishes none.
 // ==============================================================================================
 
 using System.Reflection;

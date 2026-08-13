@@ -68,7 +68,7 @@
 //     value it is. The repository-root .editorconfig deliberately declines to suppress CA1027
 //     ("Mark enums with FlagsAttribute") for any file, on the stated ground that an enum-shape
 //     finding should reach the author rather than be silenced, so the answer to it is recorded here
-//     rather than suppressed anywhere. Measured on SDK 10.0.302, this file raises CA1027 at neither
+//     rather than suppressed anywhere. Measured on the pinned SDK, this file raises CA1027 at neither
 //     the default analysis mode nor AnalysisMode=All; should a future toolchain raise it, the
 //     finding is a false positive produced by the values merely happening to be 1 and 2, and the
 //     correct resolution is to leave the attribute off - neither adding it nor silencing the rule.

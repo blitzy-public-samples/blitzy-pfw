@@ -272,11 +272,12 @@ internal static class IssuanceFixture
     /// duplicated pair makes the effective permission depend on which row is read first.
     /// </para>
     /// <para>
-    /// THE DEPLOYMENT'S OWN THREE GRANTS ARE LEFT EXACTLY AS THE SETTINGS FILE STATES THEM, and this is
-    /// the correction that matters most. An earlier revision replaced the whole matrix with a blanket
-    /// grant, which made every row that OBSERVES the deployed matrix unable to observe it: a row asking
-    /// whether Gateway is refused an audience the deployment does not grant it saw a host in which Gateway
-    /// was granted everything, so the refusal it exists to prove could not occur. The deployed topology -
+    /// THE DEPLOYMENT'S OWN THREE GRANTS ARE LEFT EXACTLY AS THE SETTINGS FILE STATES THEM, and that is the
+    /// property this accommodation is careful about. Replacing the whole matrix with a blanket grant is the
+    /// simpler harness, and it would make every row that OBSERVES the deployed matrix unable to observe it: a
+    /// row asking whether Gateway is refused an audience the deployment does not grant it would see a host in
+    /// which Gateway was granted everything, so the refusal it exists to prove could not occur. The deployed
+    /// topology -
     /// Gateway to DataServices, DataServices to Persistence, DataServices to Security - is therefore
     /// untouched, and only the identities the deployment does NOT name are blanket-granted. Those are the
     /// harness's own subjects, which is exactly the set that needs the accommodation.
@@ -473,9 +474,9 @@ internal static class IssuanceFixture
 
             // A SUBJECT AND A SECRET KEY NAME, AND NOTHING ELSE. The credential directory carries no
             // permission member: what a caller may request is stated once, in the grant matrix
-            // PermitTestCallers installs above. It used to carry an audience list and a scope list here too,
-            // and they were read by nothing - which is exactly the divergence the production settings then
-            // shipped with.
+            // PermitTestCallers installs above. Adding an audience list and a scope list here would add two
+            // members the issuer reads nothing from, which is how a harness and a deployment come to disagree
+            // about a permission neither of them decides.
             options.Clients.Add(client);
         }
     }
@@ -490,11 +491,12 @@ internal static class IssuanceFixture
     /// <exception cref="ArgumentNullException">An argument is <see langword="null"/>.</exception>
     /// <exception cref="InvalidOperationException">The matrix grants that caller nothing.</exception>
     /// <remarks>
-    /// <b>THE MATRIX IS THE ONLY PLACE THIS CAN BE READ FROM, AND THAT IS THE POINT.</b> Rows used to read
-    /// a permitted audience and scope off the caller's <c>Security:Clients</c> entry, which carried lists
-    /// the issuer never consulted - so a row could construct a request the roster advertised and the matrix
-    /// refused, and the assertion would fail for a reason that had nothing to do with its subject. Those
-    /// lists are gone; this reads the surface that decides.
+    /// <b>THE MATRIX IS THE ONLY PLACE THIS CAN BE READ FROM, AND THAT IS THE POINT.</b> Reading a permitted
+    /// audience and scope off the caller's <c>Security:Clients</c> entry is not an option, because a
+    /// credential-directory entry carries no permission member at all - and were it to carry one, the issuer
+    /// would not consult it, so a row could construct a request the directory advertised and the matrix
+    /// refused and then fail for a reason with nothing to do with its subject. This reads the surface that
+    /// decides.
     /// </remarks>
     internal static (string Audience, string Scope) FirstGrant(SecurityOptions options, string caller)
     {
@@ -527,9 +529,9 @@ internal static class IssuanceFixture
     /// WHY A HELPER EXISTS AT ALL. <c>TokenIssuer</c> folds <c>Security:Callers</c> and
     /// <c>Security:CallerAuthorizations</c> into ONE dictionary and decides from that, so a row asking
     /// "what does this deployment permit" has to ask the same question of both shapes. Reading one of them
-    /// reports a caller as ungranted purely because the deployment expressed its grant in the other -
-    /// which is a statement about the settings file's authoring style rather than about a permission, and
-    /// it is exactly the failure this replaces.
+    /// reports a caller as ungranted purely because the deployment expressed its grant in the other - which
+    /// is a statement about the settings file's authoring style rather than about a permission, and is
+    /// exactly the failure this helper exists to make impossible.
     /// </para>
     /// <para>
     /// IT PROJECTS AND DOES NOT DECIDE, which keeps it honest as a test helper. It does not intersect, does
@@ -635,15 +637,14 @@ internal static class IssuanceFixture
             }
         }
 
-        // THE CREDENTIAL DIRECTORY NEEDS NO PRUNING AND MUST NOT BE PRUNED. It used to be, because its
-        // entries carried audience lists that a narrowed roster could make unservable - and those lists are
-        // gone: a directory entry names a subject and a secret key, neither of which references an audience,
-        // so a row that narrows the audience roster can no longer leave one incoherent. Pruning it here
-        // would now only be able to remove a subject a row is about to authenticate as, which is exactly the
-        // failure this reconciliation exists to prevent.
+        // THE CREDENTIAL DIRECTORY NEEDS NO PRUNING AND MUST NOT BE PRUNED. A directory entry names a
+        // subject and a secret key, neither of which references an audience, so narrowing the audience roster
+        // cannot leave a directory entry incoherent - there is nothing here for a narrowed roster to make
+        // unservable. Pruning it would therefore only be able to remove a subject a row is about to
+        // authenticate as, which is exactly the failure this reconciliation exists to prevent.
         EnsureTestCallersAreRostered(options);
 
-        // AND ONE STEP THE DIRECTORY DOES STILL NEED, because it is now a HOST-REFUSING invariant.
+        // AND ONE STEP THE DIRECTORY DOES NEED, because it is a HOST-REFUSING invariant.
         EnsureEveryGrantedCallerIsCredentialled(options);
     }
 
@@ -770,9 +771,9 @@ internal static class IssuanceFixture
     /// <returns>A certificate issued by this suite's authority, valid now, held only in memory.</returns>
     /// <remarks>
     /// <para>
-    /// ISSUED BY THIS SUITE'S AUTHORITY RATHER THAN SELF-SIGNED, and that changed when the trust decision
-    /// became a behaviour of this service rather than a promise about its transport. A self-signed
-    /// certificate chains to nothing the deployment configured, so the issuance operation now refuses it -
+    /// ISSUED BY THIS SUITE'S AUTHORITY RATHER THAN SELF-SIGNED, because the trust decision is a
+    /// BEHAVIOUR of this service rather than a promise about its transport. A self-signed
+    /// certificate chains to nothing the deployment configured, so the issuance operation refuses it -
     /// correctly - and every row asserting a successful mint needs a certificate that actually establishes
     /// itself.
     /// </para>
@@ -1144,12 +1145,12 @@ internal static class IssuanceFixture
     /// Every scope this fixture's matrix grants each rostered pair.
     /// </summary>
     /// <remarks>
-    /// <b>THE INBOUND SCOPES BELONG HERE, NOT ONLY THE OUTBOUND ONES.</b> This matrix used to grant the two
-    /// DataWindow scopes alone, which was sufficient while the routes this service PUBLISHES were reachable
-    /// by any authenticated caller. They are not: the cryptographic surface and the authenticated probe each
-    /// require their own scope, so a host whose matrix omits them mints a token the host itself then refuses
-    /// - and, because an empty granted set is a refusal rather than an empty success, the refusal happens at
-    /// ISSUANCE, before any row reaches the behaviour it was written to assert.
+    /// <b>THE INBOUND SCOPES BELONG HERE, NOT ONLY THE OUTBOUND ONES.</b> The routes this service PUBLISHES
+    /// are not reachable by any authenticated caller: the cryptographic surface and the authenticated probe
+    /// each require their own scope. So a matrix granting the two DataWindow scopes alone mints a token the
+    /// host itself then refuses - and, because an empty granted set is a refusal rather than an empty
+    /// success, the refusal lands at ISSUANCE, before any row reaches the behaviour it was written to
+    /// assert. All four scopes are granted here for that reason.
     /// </remarks>
     private static readonly string[] RosteredScopes =
     [
@@ -2536,7 +2537,7 @@ public sealed class TokenRegistrationTests
             IssuanceFixture.Body(),
             TestContext.Current.CancellationToken);
 
-        // NOTHING IS MINTED AT THE ADDRESS THE OPERATION NO LONGER OCCUPIES, which is the property that
+        // NOTHING IS MINTED AT THE ADDRESS THE OPERATION DOES NOT OCCUPY, which is the property that
         // matters. The status is deliberately NOT asserted to be the router's not-found: this host
         // installs a default-deny fallback policy, and that policy applies to a request that matched no
         // endpoint as well as to one that matched an endpoint declaring no requirement - so an unmatched

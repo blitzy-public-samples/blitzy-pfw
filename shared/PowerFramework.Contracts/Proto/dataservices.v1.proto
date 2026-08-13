@@ -40,17 +40,7 @@
 //  services in one file keeps them independently versionable while keeping the vocabulary
 //  single-sourced. `service` boundaries, not file boundaries, are what versioning follows.
 //
-//  RULES POSITION
-//  --------------------------------------------------------------------------------------------
-//  review_rules returns exactly "No user rules provided.", so NO user-specified rule governs this
-//  file and none is invented here. The enterprise-standard baseline applies in their place, and
-//  the binding constraints are the refactor plan's own non-rule inventory. Those that govern this
-//  file are cited inline at the point each is discharged: C-A (boundary definition, not a
-//  shared-code back door), C-B (replicate behaviour and defects, never improve), C-C (the legacy
-//  tree is read-only and is the behavioural oracle), C-D (the four deferred services are not
-//  implemented, even partially), C-K (document every technology and boundary decision), C-F (no
-//  secret in any form) and C-G (do not hand-write security surface).
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  C-F SELF-AUDIT: no key, credential, token, password, connection string, certificate or
 //  secret-shaped placeholder appears anywhere in this file, in any field, default, example or
 //  comment. The one field that could carry data lifted from a failing statement is
@@ -250,7 +240,6 @@ enum OrderingDiscipline {
   ORDERING_DISCIPLINE_SYNCHRONOUS = 1;
   // Pattern (a). A monotonic token a consumer MAY use to detect and reorder out-of-order delivery,
   // because these events carry no cross-event state.
-  //
   //
   // WHAT THE SERVER DOES WITH IT ON `EventChain`, STATED SO A CLIENT NEED NOT GUESS. On that stream
   // DataServices is itself the consumer, and it ENFORCES the order rather than repairing it. A token
@@ -500,12 +489,12 @@ message BrokerTopic {
   // The lifetime PROJECTION over the namespace - see the `lifetime` field. It is not the namespace and
   // it is not the filter; both of those are expressed by `namespace` and `negate_namespace`.
   //
-  // THE THIRD MEMBER THIS ENUM USED TO HAVE HAS BEEN REMOVED, DELIBERATELY. It claimed that the bare
-  // `.^persistent` form was a selector for "every persistent subscription", which is the exact inverse
+  // A THIRD MEMBER IS DELIBERATELY ABSENT FROM THIS ENUM. The tempting one reads the bare
+  // `.^persistent` form as a selector for "every persistent subscription", which is the exact inverse
   // of the matcher at [n_cst_eventful.sru:L1040]: the `^` makes it "every subscription whose namespace
-  // is NOT persistent". That state is not a lifetime at all - it is a filter, and a filter is now
-  // expressed by grammar = FILTER with negate_namespace = true and an empty name. The two values that
-  // remain match the in-process authority member for member and value for value
+  // is NOT persistent". That state is not a lifetime at all - it is a filter, and a filter is
+  // expressed by grammar = FILTER with negate_namespace = true and an empty name. The two values
+  // declared here match the in-process authority member for member and value for value
   // [shared/PowerFramework.Shared.Eventful/SubscriptionOptions.cs SubscriptionLifetime].
   enum Lifetime {
     // No lifetime namespace, or any namespace other than "persistent". The subscription is swept away
@@ -852,10 +841,10 @@ message RetrieveRequest {
   // different claim from stating none. EVERY OTHER VALUE TRAVELS, INCLUDING A NEGATIVE ONE, and C-05's
   // guard adjudicates it: -5 and 500 are both refused with E_INVALID_ARGUMENT, which Gateway projects
   // as HTTP 400, while 1001 and above are honoured. This is forwarding, NOT validating - the paragraph
-  // above is the reason. An earlier revision forwarded only a POSITIVE size, so a nonsensical negative
-  // was silently discarded and answered with a successful retrieval at the server's own size while a
-  // nonsensical 500 was refused: two values equally wrong, two different outcomes, and the more
-  // obviously wrong of the two accepted. The layer that owns the rule now answers for both.
+  // above is the reason. Forwarding only a POSITIVE size silently discards a nonsensical negative and
+  // answers with a successful retrieval at the server's own size while refusing a nonsensical 500: two
+  // values equally wrong, two different outcomes, and the more obviously wrong of the two accepted. The
+  // layer that owns the rule answers for both instead.
   int32 chunk_size = 4;
 }
 
@@ -908,20 +897,36 @@ message RetrieveChunk {
 //  se_cst_dw.sru declares exactly 22 events at :L11-L32. The split is precisely 9 SEMANTIC against
 //  13 RAW `pbm_dwn*`, and both halves are carried in full.
 //
-//  EACH RAW EVENT DELEGATES TO A SEMANTIC ONE AND THEN TO THE BROKER, AND BOTH DELEGATIONS ARE
-//  VETOABLE. `ondwnrbuttondown` returns 1 if the semantic handler returns 1 and otherwise consults
-//  the broker [:L115-L117]; `ondwnrbuttonup` consults only the broker [:L120-L121]. The contract
-//  therefore carries all 22 as DISTINCT identities and does NOT collapse a raw event into the
-//  semantic one it delegates to - collapsing them would erase the two-stage veto, and a consumer
-//  could no longer tell which edge stopped the dispatch.
+//  A RAW EVENT HAS UP TO TWO VETOABLE EDGES - A PARTNER CALL AND A BROKER TRIGGER - AND WHICH EDGES
+//  IT HAS, AND IN WHICH ORDER, IS PER EVENT RATHER THAN UNIFORM. `ondwnrbuttondown` is the majority
+//  shape: partner first, broker second, either able to stop it [:L115-L117]. Four classes depart:
 //
-//  WHY THE STREAM IS BIDIRECTIONAL. Nine of the events are the FRAMEWORK ASKING THE APPLICATION a
-//  question - what should happen on this item change, what filter should this drop-down use, what
-//  does this macro evaluate to. In the legacy the application is in the same process. Across this
-//  boundary DataServices holds the DataWindow logic while its client holds the application, so the
-//  chain must run in BOTH directions on ONE stream: the client reports events inbound and answers
-//  handler invocations outbound, on the same ordered conversation. Two unary calls could not do it,
-//  because the outbound question arrives while the inbound call is still open.
+//    * BROKER ONLY, no partner call: `ondwnrbuttonup` [:L120-L122], `ondwnlbuttonup` [:L395-L397].
+//    * BROKER FIRST, PARTNER SECOND: `ondwnkillfocus` [:L387-L393], `ondwnsetfocus` [:L399-L401].
+//    * BROKER ANSWER DISCARDED, so that edge cannot veto: `ondwnrowchange` [:L124-L128], unlike its
+//      `ondwnrowchanging` sibling where the same edge does veto [:L130-L134].
+//    * WORK BEYOND THE TWO EDGES: `ondwnlbuttonclk` repositions the row without moving focus
+//      [:L152-L159]; `ondwnchanging` gates the broker behind `of_IsSubscribed` and then delegates a
+//      THIRD time, to DropdownSearch [:L164-L174].
+//
+//  Note also that the PARTNER is usually a standard DataWindow ancestor event - RButtonDown,
+//  RowFocusChanged, Clicked, EditChanged, LoseFocus, GetFocus and so on - not one of the nine declared
+//  semantic events; only `ondwnitemchange` calls a declared one, `OnDoItemChange` [:L182-L253]. The
+//  contract therefore carries all 22 as DISTINCT identities and collapses nothing: collapsing a pair
+//  would erase a veto edge, and a consumer could no longer tell which edge stopped the dispatch.
+//
+//  WHY THE STREAM IS BIDIRECTIONAL. The nine semantic events are the FRAMEWORK ASKING THE APPLICATION
+//  something - what should happen on this item change, what filter should this drop-down use, what does
+//  this macro evaluate to - and FIVE of the nine are ANSWER-BEARING, so five need a correlated reply:
+//  oninitcontextmenu [:L11], oncontextmenu [:L12] and ondoitemchange [:L24] by return type,
+//  oncolumnexpinvokemethod [:L14] by `any` return, and onddsgetfilter [:L13] through its `ref string`
+//  out-parameter despite declaring no return type at all. The other four - onitemchanged [:L25],
+//  ondoitemchanged [:L26], onddsfiltered [:L28], oncolumnexptrace [:L32] - are void notifications. In
+//  the legacy the application is in the same process. Across this boundary DataServices holds the
+//  DataWindow logic while its client holds the application, so the chain must run in BOTH directions on
+//  ONE stream: the client reports events inbound and answers handler invocations outbound, on the same
+//  ordered conversation. Two unary calls could not do it, because the outbound question arrives while
+//  the inbound call is still open.
 // ==============================================================================================
 
 // EventId - the 22 events, NUMBERED IN SOURCE DECLARATION ORDER (:L11 through :L32).
@@ -990,15 +995,16 @@ message ContextMenuEvent {
 // `onddsgetfilter(long row, dwobject dwo, string data, ref string filter)` [:L13]
 //
 // ============ THE `ref` OUT-PARAMETER IS WHY DROP-DOWN SEARCH MUST BE SYNCHRONOUS ==============
-// This event has NO RETURN TYPE. Its result is produced by MUTATING A REFERENCE PARAMETER, and a
-// `ref` out-parameter HAS NO ASYNCHRONOUS REPRESENTATION: the caller blocks on the produced filter
-// because the filter is the only thing the call exists to obtain. There is no version of this event
-// that can be fired and forgotten.
+// This event has NO RETURN TYPE. Its result is produced by MUTATING A REFERENCE PARAMETER, so the
+// contract has to carry a produced value for an event that returns nothing: it comes back on
+// EventResult.produced_filter, with EXPLICIT PRESENCE so that "the handler set the filter to an empty
+// string" stays distinguishable from "the handler did not touch it" - a distinction a `ref` parameter
+// makes naturally and a plain string field would destroy.
 //
-// On the wire the produced value comes back on EventResult.produced_filter, which uses explicit
-// presence so that "the handler set the filter to an empty string" stays distinguishable from "the
-// handler did not touch it" - a distinction a `ref` parameter makes naturally and a plain string
-// field would destroy.
+// WHAT DOES NOT SURVIVE ASYNCHRONY IS THE SEQUENCING, NOT THE PARAMETER. The filter is the only thing
+// the call exists to obtain, so the caller cannot proceed until it arrives and a reordered or dropped
+// answer has no defined meaning. There is therefore no version of this event that can be fired and
+// forgotten, which is why AAP 0.6.1.4 assigns drop-down search pattern (b).
 // ==============================================================================================
 message DdsGetFilterEvent {
   int64 row = 1;
@@ -1313,15 +1319,33 @@ message DwnItemValidationErrorEvent {
 //
 // ORDERING: it belongs to BOTH groups and that is not a contradiction. As the tail of the item-change
 // chain it is SYNCHRONOUS, because the deferred accept must not be queued while an item change is in
-// flight. As pure focus notification it is SEQUENCED. `SequencingToken.discipline` states which role
-// a given occurrence is playing, which is why the discipline travels on the token rather than being
-// looked up from the event id.
+// flight. As pure focus notification it is SEQUENCED.
+//
+// WHAT THE WIRE TOKEN SAYS, EXACTLY, BECAUSE THE TWO ROLES ARE NOT BOTH VISIBLE ON IT. The discipline
+// stamped on `SequencingToken` is resolved from the EVENT ID ALONE, so for this event it always reads
+// SEQUENCED - which is the correct classification for a bare notification arriving from a client, and
+// the only one the server can reach from the message itself. THE SYNCHRONOUS ROLE IS HONOURED INSIDE
+// THE SERVER, where the item-change chain resolves the discipline with its own re-entrancy state in
+// hand, and it is observable on the wire only INDIRECTLY, through
+// `EventResult.state.deferred_accept_pending`. A consumer must therefore not read this token as
+// reporting which role the occurrence played.
 message DwnKillFocusEvent {
   // No parameters in the legacy - the event takes none. The message exists so the event has an
-  // identity on the stream and so the fields below can report what the handler did.
+  // identity on the stream.
 
-  // Whether the deferred accept-text continuation was queued. FALSE MEANS THE ITEM-CHANGE FLAG WAS
-  // SET, which is a meaningful observation rather than a missing one.
+  // ⚠ THIS FIELD IS IGNORED BY THE SERVER, AND IT IS NOT WHERE THE ANSWER COMES BACK. `EventNotification`
+  // travels CLIENT TO SERVER, so anything declared here is an INPUT - and the queueing decision is not
+  // the client's to make: it is the oracle's, gated on the item-change re-entrancy flag being clear
+  // [:L388-L390], which only the server holds. The server therefore reads nothing from this field and
+  // calls the chain with no argument.
+  //
+  // WHERE TO READ IT INSTEAD: `EventResult.state.deferred_accept_pending`, which reports whether a
+  // continuation is outstanding. FALSE THERE MEANS THE ITEM-CHANGE FLAG WAS SET, which is a meaningful
+  // observation rather than a missing one.
+  //
+  // It is retained rather than removed because removing a declared field from a published message is a
+  // wire-compatibility change, and because a client that sets it is not made wrong by doing so - only
+  // ineffective.
   bool deferred_accept_queued = 1;
 }
 
@@ -1433,11 +1457,14 @@ message OrderedDispatchReport {
 // SERVER TO CLIENT it is the dispatch outcome of a notification the client sent. CLIENT TO SERVER it
 // is the client's answer to a handler invocation the server sent.
 //
-// THE TWO-STAGE VETO IS THE REASON THIS IS NOT A SINGLE RETURN VALUE. A raw event consults the
-// semantic handler and then the broker, and either edge can stop the dispatch [:L115-L117 for both,
-// :L120-L121 for the broker alone]. Reporting one combined verdict would tell a consumer that the
-// dispatch stopped without telling it which edge stopped it - and since the two edges have different
-// subscribers and different remedies, that difference is the diagnostically useful part.
+// THE TWO-STAGE VETO IS THE REASON THIS IS NOT A SINGLE RETURN VALUE. A raw event has up to two edges -
+// a partner call and a broker trigger - and either can stop the dispatch [:L115-L117 for both edges
+// present, :L120-L122 for the broker alone]. Reporting one combined verdict would tell a consumer that
+// the dispatch stopped without telling it which edge stopped it - and since the two edges have different
+// subscribers and different remedies, that difference is the diagnostically useful part. An edge the
+// event in flight does not have reports NO VETO rather than a permit; see Section 5's delegation table
+// for which events have which edges, including the two that trigger the broker FIRST and the one whose
+// broker answer is discarded.
 //
 // SEVERAL FIELDS ARE EVENT-SPECIFIC, and each says which events it applies to. A flat message is
 // preferred over a per-event result union because the veto fields, the report and the sequencing
@@ -1695,12 +1722,12 @@ message UpdateRequest {
   // UNCONDITIONALLY: it accepts the edit text before submitting, and it NEVER resets the
   // modification flags, so THE CALLER OWNS THE BUFFER STATE AFTERWARDS.
   //
-  // WHY THE EARLIER `bool accept_text = 4` AND `bool reset_flags = 5` WERE WRONG, AND WHY REMOVING
-  // THEM IS THE FIX RATHER THAN DOCUMENTING THEM. Both were plain proto3 bools, whose default is
+  // WHY A `bool accept_text = 4` AND A `bool reset_flags = 5` MUST NOT EXIST HERE, AND WHY RESERVING
+  // THE SLOTS BEATS DOCUMENTING THE FIELDS. As plain proto3 bools their default is
   // FALSE, and both failure modes are silent:
-  //   * an OMITTED accept_text read as false, which SKIPS AcceptText - so an edit still sitting in
+  //   * an OMITTED accept_text reads as false, which SKIPS AcceptText - so an edit still sitting in
   //     the edit control would never reach the buffer, and the update would submit stale values while
-  //     reporting success. The legacy cannot do this, and the wrong behaviour was the DEFAULT one.
+  //     reporting success. The legacy cannot do this, and the wrong behaviour would be the DEFAULT one.
   //   * reset_flags = true DESTROYS THE STATE OPTIMISTIC CONCURRENCY IS BUILT ON. Resetting clears
   //     every row and column item status and discards the original-value shadow, and `updatewhere=1`
   //     on the sole updatable fixture compares the key column PLUS the original values of all six
@@ -2015,8 +2042,8 @@ message DropDownSearchState {
 // named and commented at :L1147-L1149. This file therefore models them as a NAMED BITMASK rather than
 // as the opaque integer the plan's wording would have licensed.
 //
-// WHAT REMAINS GENUINELY UNKNOWN is narrower and is unaffected by this correction: the PINYIN LOOKUP
-// TABLE ITSELF lives only inside the closed native binary, so bit-exact match results must still be
+// WHAT REMAINS GENUINELY UNKNOWN is narrower than the flags: the PINYIN LOOKUP
+// TABLE ITSELF lives only inside the closed native binary, so bit-exact match results must be
 // characterized against the behavioural oracle rather than reproduced from a third-party table. The
 // flags are known; the table is not.
 //
@@ -2228,10 +2255,9 @@ message RowSelectState {
 // The alternative - one generic operation with a oneof over four models - was rejected because it would
 // couple four independently-versioned services into one method signature.
 //
-// The C-03 method count therefore goes from eight to sixteen, which departs from the eight this file's
-// service comment previously asserted. That count was written when the models were unreachable; the
-// count that matters is the one docs/CONTRACTS.md must now record, and the RPCs are named below so the
-// two cannot diverge again.
+// The C-03 method count is therefore SIXTEEN rather than the eight a models-are-unreachable reading
+// would give. docs/CONTRACTS.md records the same number, and the RPCs are named below so the two
+// cannot diverge.
 //
 // EVERY ONE OF THESE IS HEADLESS. No request and no response below carries window geometry, a DPI
 // conversion, a font metric, a pixel coordinate, a window handle or IME state - the enumerated
@@ -3151,15 +3177,16 @@ message AddVariableRequest {
 
 message AddVariableResponse {
   // ============ NO INDEX IS RETURNED, BECAUSE THE LEGACY DOES NOT RETURN ONE (C-B) ==============
-  // Field 1 held an `index` and it has been REMOVED and RESERVED. All seven `of_addvar` overloads are
+  // FIELD 1 IS RESERVED BY NUMBER AND BY NAME, so an `index` cannot be reintroduced here without
+  // protoc objecting. All seven `of_addvar` overloads are
   // declared `public function long` [:L153-L159] and every one of them ends in `return RetCode.OK` -
   // the string overload does not even have a body of its own, it delegates to
   // of_AddVarExp(name, "'" + value + "'") [:L154]. Adding a variable yields a return CODE, not a
   // position.
   //
-  // Returning an index here would have invented observable behaviour with no legacy and no AAP
-  // authority, and worse, it would have been believable: variables ARE held in a one-based table and
-  // `vardata.index` does point into it, so a consumer would reasonably have started keying on the
+  // Returning an index here would invent observable behaviour with no legacy and no AAP
+  // authority, and worse, it would be believable: variables ARE held in a one-based table and
+  // `vardata.index` does point into it, so a consumer would reasonably start keying on the
   // returned value. Callers address a variable BY NAME, which is the only handle the legacy gives them.
   // ONLY of_addexp genuinely returns a position - it is declared `public function integer` and returns
   // `nIndex` [:L172, :L1583] - so AddExpressionResponse keeps its index and these three do not.

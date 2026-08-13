@@ -4,7 +4,7 @@
 // ======================================================================================================
 //
 // WHAT THIS FILE IS
-//   The forty routes through which Gateway projects `dataservices.v1.DataWindowService` (C-03)
+//   The thirty-nine routes through which Gateway projects `dataservices.v1.DataWindowService` (C-03)
 //   and `dataservices.v1.ColumnExpressionService` (C-04) onto HTTP. It is a TRANSLATION LAYER AND NOT A
 //   SECOND IMPLEMENTATION: it holds no DataWindow logic, no expression engine and no validator. Every
 //   route maps onto exactly one gRPC method, forwards the request payload, forwards the response
@@ -29,7 +29,9 @@
 //   item-change result is a FOUR-VALUE alphabet `{0,1,2,3}` that is its own vocabulary and not the
 //   return-code algebra [:L182-L253]. Carrying that shape needs compile-time contract enforcement,
 //   bidirectional streaming, and a status model rich enough for a four-value alphabet and a tri-valued
-//   veto. Protobuf over gRPC is the only transport in the mandated stack that carries all three.
+//   veto. Protobuf over gRPC carries all three natively; JSON over REST can encode each by convention
+//   but enforces neither the ordering nor the veto's arity, and cannot carry a server-initiated question
+//   at all.
 //
 //   Gateway is REST because it is the SOLE INGRESS, and an ingress needs three properties:
 //
@@ -154,7 +156,7 @@
 //       contain anything, so it never reaches a response or a log record (C-F).
 //
 //   A8  THE RUNTIME DOCUMENT SUMMARISES EVERY PROJECTED BODY; THE AUTHORED CONTRACT PUBLISHES THEM ALL
-//       CONCRETELY. `gateway.v1.yaml` declares all 120 messages and 15 enums of the projected closure
+//       CONCRETELY. `gateway.v1.yaml` declares all 118 messages and 15 enums of the projected closure
 //       member by member, closed to unknown members, with a `required` list stating what the wire
 //       carries - and the sibling test project cross-checks every one against its compiled descriptor
 //       on each build, so it cannot drift. `/openapi/v1.json`, served from this file's registrations,
@@ -218,13 +220,6 @@
 // service-level agreement, no latency budget, no throughput target and no availability commitment, so
 // none may be asserted. This refactor is explicitly not a performance refactor.
 //
-// RULES POSITION
-//   review_rules returns exactly "No user rules provided.", so NO USER-SPECIFIED RULE governs this
-//   file. The enterprise-standard baseline applies in its place and is honoured above: nullable
-//   reference types and warnings as errors inherited and never relaxed, no secret in source or in any
-//   response body, structured logging with redaction on the one field known to carry interpolated
-//   literals, and explicitly versioned contracts as the only cross-service coupling. The binding
-//   constraints are the Agent Action Plan's C-A through C-L, which the rules facility cannot surface.
 // ======================================================================================================
 
 using System.Diagnostics;
@@ -614,12 +609,15 @@ public static class DataServicesProxyEndpoints
     /// <summary>The detail for an upstream <c>Unimplemented</c>.</summary>
     /// <remarks>
     /// It names no service and carries no reserved marker: this is an upstream reporting that a method its
-    /// own contract publishes is unavailable, which is deployment or version skew.
+    /// own contract publishes is unavailable, which is deployment or version skew. Answered as 500 and never
+    /// 501, because 501 identifies a reserved deferred-capability route and this operation is not one.
     /// </remarks>
     private const string UnimplementedDetail =
         "DataServices reported that this operation's upstream method is not implemented by the "
         + "deployment currently answering. The projected contract publishes it, so this indicates a "
-        + "version skew between Gateway and its upstream rather than a capability boundary.";
+        + "version skew between Gateway and its upstream rather than a capability boundary - which is why "
+        + "it is not answered as 501: that status identifies a reserved deferred-capability route, and this "
+        + "operation is an implemented one.";
 
     /// <summary>The detail for an upstream <c>DeadlineExceeded</c>.</summary>
     private const string DeadlineExceededDetail =
@@ -639,7 +637,7 @@ public static class DataServicesProxyEndpoints
     /// or advances upstream state, <c>Retrieve</c> and <c>Update</c> among them, is attempted EXACTLY ONCE
     /// on purpose. Telling an operator their failed update had exhausted a retry policy sends them looking
     /// for a transient fault behind a call that was tried once; worse, it implies an update may have been
-    /// applied more than once. The text now states both possibilities and which one applies to what.
+    /// applied more than once. The text states both possibilities and which one applies to what.
     /// </remarks>
     private const string UpstreamUnavailableDetail =
         "DataServices could not be reached, or the call to it failed in transit, so no response arrived. "
@@ -848,9 +846,14 @@ public static class DataServicesProxyEndpoints
     /// <para>
     /// IT IS ALSO WHAT KEEPS <c>DataWindowRow.originalValues</c> PRESENT ON EVERY ROW. A repeated field has
     /// no explicit presence, so an empty one is a default value: without this setting an insert-shaped row -
-    /// the one row that legitimately has no prior state - would be serialized without the member, and the
-    /// member is REQUIRED by the schema. The distinction the schema draws is between an empty array and an
-    /// absent one, and only formatting defaults preserves it.
+    /// the one row that legitimately has no prior state - would be serialized without the member at all.
+    /// The distinction that matters is between an EMPTY array and an ABSENT one, and only formatting
+    /// defaults preserves it: an empty list says the row has no prior state, while an absent member says
+    /// nothing and leaves a consumer building the concurrency predicate to guess which was meant. The
+    /// schema deliberately marks nothing <c>required</c> on this shape - it travels in a request as well as
+    /// a response, and the real obligation is conditional on the row's status, which is why it is enforced
+    /// at runtime in <c>Validators/UpdateRowValidator</c> instead - so this setting is the whole of what
+    /// makes the member's presence true of a response.
     /// </para>
     /// </remarks>
     private static readonly JsonFormatter ResponseFormatter =
@@ -885,7 +888,7 @@ public static class DataServicesProxyEndpoints
         + "by DataServices, not by Gateway.";
 
     /// <summary>
-    /// Declares the forty <c>/v1/datawindow</c> operations on the supplied route builder.
+    /// Declares the thirty-nine <c>/v1/datawindow</c> operations on the supplied route builder.
     /// </summary>
     /// <param name="endpoints">The route builder the composition root is populating.</param>
     /// <returns>
@@ -906,7 +909,7 @@ public static class DataServicesProxyEndpoints
     /// <para>
     /// <b>The return type is deliberately the route builder and not a route handler builder or a group.</b>
     /// Handing back either would let a caller append <c>AllowAnonymous</c>, which takes precedence over
-    /// <c>RequireAuthorization</c> in endpoint metadata and would silently open forty authenticated
+    /// <c>RequireAuthorization</c> in endpoint metadata and would silently open thirty-nine authenticated
     /// routes from a different file. Withholding it makes that impossible.
     /// </para>
     /// <para>
@@ -932,8 +935,8 @@ public static class DataServicesProxyEndpoints
         // re-express an internal versioning boundary as an external permission. It gates what it
         // publishes, and the projection presents its own downstream credential.
         //
-        // The parameterless form used to stand here, which meant any token addressed to this service
-        // reached all thirty-nine projected operations whatever it was scoped to.
+        // The parameterless form would stand here otherwise, which means any token addressed to this
+        // service reaches all thirty-nine projected operations whatever it was scoped to.
         RouteGroupBuilder dataWindow = endpoints
             .MapGroup(DataWindowGroupPrefix)
             .RequireAuthorization(GatewayScopes.DataWindow);
@@ -1186,13 +1189,13 @@ public static class DataServicesProxyEndpoints
     }
 
     /// <summary>
-    /// Declares C-04's twenty-five projected operations: the paired expression session, the expression,
+    /// Declares C-04's twenty-four projected operations: the paired expression session, the expression,
     /// variable, foreign-variable, relative-column and flag surface, the four calculation entry points,
     /// the two gates, the two state reads and the event stream.
     /// </summary>
     /// <param name="group">The <c>/v1/datawindow/expression</c> group.</param>
     /// <remarks>
-    /// C-04 declares twenty-seven methods. The two exclusions are <c>InvokeMethodChannel</c> and
+    /// C-04 declares twenty-six methods. The two exclusions are <c>InvokeMethodChannel</c> and
     /// <c>TraceChannel</c>, both of which are bidirectional AND INVERTED - DataServices calls back into its
     /// client, because the legacy expects the application to implement the macro switch. An inverted stream
     /// has no request/response direction to project, so nothing here projects one.
@@ -1500,7 +1503,7 @@ public static class DataServicesProxyEndpoints
     //  Three shapes, and exactly three, because the contract publishes exactly three: a body-bound unary
     //  POST, a session-scoped operation whose only argument is an identifier on the path or the query
     //  string, and a body-bound POST over a server stream. Driving every operation through one of the
-    //  three is what makes the forty impossible to drift apart, and what makes diffing them against
+    //  three is what makes the thirty-nine impossible to drift apart, and what makes diffing them against
     //  the contract a mechanical exercise.
     // ==================================================================================================
 
@@ -1558,23 +1561,22 @@ public static class DataServicesProxyEndpoints
     /// live because a stateless request boundary has nowhere to put them.
     /// </para>
     /// <para>
-    /// <b>⚠ THE PARAMETER IS NULLABLE, AND THE CORRECTION MATTERS MORE THAN IT LOOKS.</b> It used to be
-    /// non-nullable, which made an OMITTED query parameter a PARAMETER-BINDING refusal raised before the
-    /// route ran - a <c>BadHttpRequestException</c> that escaped into the host's exception handler and
-    /// reached the caller as <c>500</c> with <c>UNKNOWN</c>, while the same request with an EMPTY value
-    /// answered <c>400</c> with <c>E_INVALID_ARGUMENT</c>. Two spellings of one mistake, answered as a
+    /// <b>⚠ THE PARAMETER IS NULLABLE, AND THAT MATTERS MORE THAN IT LOOKS.</b> Declaring it
+    /// non-nullable makes an OMITTED query parameter a PARAMETER-BINDING refusal raised before the
+    /// route runs - a <c>BadHttpRequestException</c> that escapes into the host's exception handler and
+    /// reaches the caller as <c>500</c> with <c>UNKNOWN</c>, while the same request with an EMPTY value
+    /// answers <c>400</c> with <c>E_INVALID_ARGUMENT</c>. Two spellings of one mistake, answered as a
     /// server fault and a client error respectively, and the server-fault answer is the wrong one: nothing
     /// failed here except the caller's request. Binding it nullable moves the decision into the route,
     /// where the operation's own declared parameter contract can be applied and one answer produced for
     /// every violation of it.
     /// </para>
     /// <para>
-    /// SO THE <c>400</c> IS NOW A DECLARED RESPONSE OF THESE OPERATIONS, in the authored contract and in
+    /// SO THE <c>400</c> IS A DECLARED RESPONSE OF THESE OPERATIONS, in the authored contract and in
     /// the generated document alike. It has to be: the operation declares <c>required</c>,
     /// <c>minLength</c> and <c>maxLength</c> on the parameter, and a declared constraint with no declared
-    /// response for violating it is a promise a generated client cannot branch on. The earlier note that a
-    /// binding refusal "is not something the route evaluates" was true of the old shape and is exactly what
-    /// changed - the route evaluates it now.
+    /// response for violating it is a promise a generated client cannot branch on. The objection that a
+    /// binding refusal "is not something the route evaluates" does not apply here: this route evaluates it.
     /// </para>
     /// </remarks>
     private static void MapSessionScoped<TRequest, TResponse>(
@@ -1606,6 +1608,7 @@ public static class DataServicesProxyEndpoints
     /// <param name="group">The group the route is declared on.</param>
     /// <param name="operation">The published metadata for the operation.</param>
     /// <param name="invoke">The single typed-client member this route projects.</param>
+    /// <param name="collectWithinWindow">Whether collection is confined to the window.</param>
     /// <remarks>
     /// <para>
     /// A server stream's ordering is the trivial one - the server produces a sequence and the client
@@ -1723,13 +1726,17 @@ public static class DataServicesProxyEndpoints
         // all. 504 is the deadline this service sets on EVERY outbound call elapsing, so its expiry is an
         // ordinary outcome of a slow upstream rather than a hypothetical.
         //
-        // Two statuses the failure map also translates are deliberately NOT declared. AlreadyExists is
+        // One status the failure map also translates is deliberately NOT declared. AlreadyExists is
         // produced by exactly one method in the estate - the macro channel reporting an existing
         // attachment - and that method is bidirectional and unprojected, so no route here can return it.
-        // Unimplemented on a projected method would mean the upstream does not implement a method this
-        // projection publishes, which under explicitly versioned contracts is a deployment defect rather
-        // than an outcome; the 501 that this service does publish belongs to the reserved routes, which
-        // declare it themselves.
+        //
+        // 🔴 AND 501 IS DECLARED BY NO PROJECTED ROUTE BECAUSE NO PROJECTED ROUTE PRODUCES IT, WHICH IS NOW
+        // TRUE. It was not: the failure map sent an upstream Unimplemented, and the in-band pair
+        // E_NO_SUPPORT / E_NO_IMPLEMENTATION, to 501 - a status gateway.v1.yaml declares on the eight
+        // reserved deferred-capability operations and on no projected one (AAP 0.4.4, C-D). Both conditions
+        // now answer the 500 declared immediately below, carrying the originating legacy code on retCode, so
+        // the declared set and the reachable set agree, and 501 goes on meaning exactly one thing at this
+        // ingress: an entire capability area is unbuilt.
         route.ProducesProblem(
             StatusCodes.Status429TooManyRequests,
             MediaTypeNames.Application.ProblemJson);
@@ -1886,6 +1893,7 @@ public static class DataServicesProxyEndpoints
     /// <typeparam name="TResponse">The protobuf message each streamed element carries.</typeparam>
     /// <param name="httpContext">The current request.</param>
     /// <param name="invoke">The typed-client member being projected.</param>
+    /// <param name="collectWithinWindow">Whether collection is confined to the window.</param>
     /// <returns>The projected result.</returns>
     private static Task<IResult> ProjectServerStreamAsync<TRequest, TResponse>(
         HttpContext httpContext,
@@ -1952,7 +1960,7 @@ public static class DataServicesProxyEndpoints
     /// <returns>Either the projected success or the translated failure.</returns>
     /// <remarks>
     /// <para>
-    /// ONE FAILURE PATH FOR ALL FORTY ROUTES, deliberately. A per-route translation would let one
+    /// ONE FAILURE PATH FOR ALL THIRTY-NINE ROUTES, deliberately. A per-route translation would let one
     /// route classify a status differently from its neighbour, and the status map is the substantive part
     /// of this projection - the place where a divergence would be least visible and most damaging.
     /// </para>
@@ -2125,6 +2133,7 @@ public static class DataServicesProxyEndpoints
     /// <summary>
     /// Renders one protobuf message as the canonical JSON mapping of its type.
     /// </summary>
+    /// <param name="httpContext">The request being handled.</param>
     /// <param name="response">The message the upstream produced.</param>
     /// <returns><c>200</c> carrying the rendered message.</returns>
     /// <remarks>
@@ -2135,7 +2144,7 @@ public static class DataServicesProxyEndpoints
     /// </remarks>
     private static IResult Render(HttpContext httpContext, IMessage response)
     {
-        // ============ THE IN-BAND STATUS DECIDES THE HTTP STATUS (F-06) ============================
+        // ============ THE IN-BAND STATUS DECIDES THE HTTP STATUS ===================================
         // An upstream gRPC method can complete SUCCESSFULLY and still answer a failure: the transport says
         // OK and the message body says E_INVALID_ARGUMENT, E_BUSY or E_DB_ERROR. Rendering that as 200
         // because no RpcException was raised is the most misleading thing an ingress can do, and it is
@@ -2162,15 +2171,36 @@ public static class DataServicesProxyEndpoints
     /// Renders an upstream response whose in-band status reports a failure, under the mapped HTTP status.
     /// </summary>
     /// <param name="httpContext">The current request.</param>
-    /// <param name="response">The upstream message, attached unchanged as the problem's payload.</param>
+    /// <param name="response">
+    /// The upstream message. Read for nothing but the fact of the failure; it is NOT attached to the
+    /// response.
+    /// </param>
     /// <param name="failure">The projection the in-band code mapped to.</param>
-    /// <returns>A problem response carrying the mapped status and the upstream body.</returns>
+    /// <returns>A problem response carrying the mapped status and this gateway's own allow-listed body.</returns>
     /// <remarks>
-    /// THE UPSTREAM MESSAGE IS ATTACHED RATHER THAN SUMMARISED, because a caller of a failed operation
-    /// needs the contract's own answer and a paraphrase would force it to choose between the status line
-    /// and the contract. The <c>sqlsyntax</c> field of a relayed <c>db_error</c> is passed through as it
-    /// arrived - it is redacted before it reaches this gateway, nothing here re-interpolates it, and it
-    /// never reaches a log record or the <c>detail</c> member (constraint C-F).
+    /// <para>
+    /// 🔴 THE UPSTREAM MESSAGE IS NO LONGER ATTACHED, AND ITS ATTACHMENT WAS THE DEFECT. An earlier
+    /// revision serialised the WHOLE upstream response into a <c>response</c> problem extension, on the
+    /// reasoning that a caller of a failed operation needs the contract's own answer. The reasoning
+    /// mistakes what this boundary is: Gateway is the system's only external ingress, and a whole
+    /// upstream message is an unbounded, unreviewed payload. A relayed <c>db_error</c> carries
+    /// <c>sqlsyntax</c>, which is the complete generated statement - the legacy interpolates literal
+    /// values into it and its logger performs no redaction at all (AAP 0.6.4) - so the extension was a
+    /// channel through which row data and internal structure could leave the system in a body nobody had
+    /// screened. "It is redacted before it reaches this gateway" was doing all the work in that argument,
+    /// and a disclosure control that depends on another service having got it right is not a control.
+    /// </para>
+    /// <para>
+    /// WHAT A CALLER GETS INSTEAD IS AN ALLOW-LIST, and it is the part a client can actually act on: the
+    /// mapped HTTP status, the numeric <c>retCode</c> from the legacy return-code algebra, and this
+    /// gateway's own fixed detail prose. Those are declared in the published contract; the whole-message
+    /// extension never was, so nothing documented is withdrawn by removing it.
+    /// </para>
+    /// <para>
+    /// THE OPERATOR STILL GETS THE DETAIL, through the structured log record below rather than through
+    /// the caller's response body - which is the right destination for it, and the one the legacy dialog
+    /// (AAP 0.6.1) actually corresponded to.
+    /// </para>
     /// </remarks>
     private static IResult RenderInBandFailure(
         HttpContext httpContext,
@@ -2191,10 +2221,12 @@ public static class DataServicesProxyEndpoints
             DescribeRoute(httpContext),
             ResolveCorrelationId(httpContext));
 
-        ProblemDetails problem = BuildProblem(httpContext, failure);
+        // THE MESSAGE IS DELIBERATELY NOT READ INTO THE RESPONSE. It is a parameter because the caller of
+        // this method holds it and a future revision may need to inspect it here; discarding it explicitly
+        // is what makes the omission legible rather than looking like a dropped line.
+        _ = response;
 
-        problem.Extensions[InBandStatus.ResponseExtensionMember] =
-            JsonNode.Parse(ResponseFormatter.Format(response));
+        ProblemDetails problem = BuildProblem(httpContext, failure);
 
         return TypedResults.Problem(problem);
     }
@@ -2204,15 +2236,19 @@ public static class DataServicesProxyEndpoints
     /// </summary>
     /// <typeparam name="TResponse">The protobuf message each element carries.</typeparam>
     /// <param name="elements">The upstream stream, consumed once.</param>
+    /// <param name="hasFirstElement">Whether the sequence carries a first element.</param>
     /// <param name="maximumElements">The configured bound on how many elements will be forwarded.</param>
+    /// <param name="collectionWindow">How long the collection may run before it gives up.</param>
+    /// <param name="callerToken">The caller's bearer token.</param>
     /// <remarks>
     /// <para>
-    /// <b>NOTHING IS BUFFERED ANY MORE (F-15).</b> The previous implementation drained the entire upstream
-    /// stream into a <see cref="StringBuilder"/>, called <c>ToString</c> - a second complete copy - and
-    /// handed that to a text result, which encoded a third. For a large retrieval that is three
-    /// simultaneous representations of the whole result held in this gateway's memory, and the gateway is
-    /// the process every request in the system passes through. Each element is now formatted and written
-    /// straight to the response writer as it arrives, so one element is live at a time.
+    /// <b>NOTHING IS BUFFERED HERE.</b> Draining the entire upstream
+    /// stream into a <see cref="StringBuilder"/>, calling <c>ToString</c> - a second complete copy - and
+    /// handing that to a text result, which encodes a third, is the obvious implementation. For a large
+    /// retrieval that is three simultaneous representations of the whole result held in this gateway's
+    /// memory, and the gateway is the process every request in the system passes through. Each element is
+    /// instead formatted and written straight to the response writer as it arrives, so one element is live
+    /// at a time.
     /// </para>
     /// <para>
     /// <b>THE GATEWAY CAN STREAM WHERE THE DATASERVICES PROJECTION CANNOT, AND THE ASYMMETRY IS
@@ -2230,12 +2266,12 @@ public static class DataServicesProxyEndpoints
     /// </para>
     /// <para>
     /// <b>⚠ A FAILURE BEFORE THE FIRST ELEMENT DOES BECOME A PROPER PROBLEM RESPONSE - AND IT IS
-    /// <see cref="PrefetchAsync"/> THAT MAKES THAT TRUE RATHER THAN THIS PARAGRAPH.</b> This type used to
-    /// take the sequence itself and pull its first element from inside <see cref="ExecuteAsync"/>, which
-    /// the framework runs AFTER the projection has returned - so the status line and the opening bracket
-    /// were already on the wire and a pre-first-item fault could not reach the shared failure path at all.
-    /// A caller retrieving a DataWindow that did not exist received <c>200</c> and a truncated array
-    /// instead of <c>404</c>, while this remark claimed otherwise. The first element is now pulled by the
+    /// <see cref="PrefetchAsync"/> THAT MAKES THAT TRUE RATHER THAN THIS PARAGRAPH.</b> Taking the
+    /// sequence itself and pulling its first element from inside <see cref="ExecuteAsync"/> - which
+    /// the framework runs AFTER the projection has returned - puts the status line and the opening bracket
+    /// on the wire first, so a pre-first-item fault cannot reach the shared failure path at all.
+    /// A caller retrieving a DataWindow that does not exist then receives <c>200</c> and a truncated array
+    /// instead of <c>404</c>, whatever a remark like this one claims. The first element is pulled by the
     /// factory, inside the projection, and only an instance holding it can be constructed - so the
     /// distinction the paragraph above draws is enforced by the type's shape and not by convention.
     /// </para>
@@ -2272,6 +2308,7 @@ public static class DataServicesProxyEndpoints
         /// </summary>
         /// <param name="elements">The upstream stream, enumerated once.</param>
         /// <param name="maximumElements">The configured bound on how many elements will be forwarded.</param>
+        /// <param name="collectionWindow">How long the collection may run before it gives up.</param>
         /// <param name="cancellationToken">The caller's cancellation, bound into the enumeration.</param>
         /// <returns>The result to answer with.</returns>
         /// <exception cref="ArgumentNullException"><paramref name="elements"/> is <see langword="null"/>.</exception>
@@ -2575,10 +2612,10 @@ public static class DataServicesProxyEndpoints
         /// <remarks>
         /// <para>
         /// <b>THREE THINGS HAPPEN HERE, AND EACH ANSWERS A DIFFERENT AUDIENCE.</b> The log record answers
-        /// the OPERATOR, who previously had a connection-layer stack trace and an access log saying 200.
-        /// The terminal element answers a HUMAN reading the bytes that did arrive, who previously saw a
-        /// chunk indistinguishable from any other. The abnormal termination answers a PROGRAM, which
-        /// detects an interrupted transfer without having to parse anything at all.
+        /// the OPERATOR, whose only other evidence is a connection-layer stack trace beside an access log
+        /// saying 200. The terminal element answers a HUMAN reading the bytes that did arrive, who would
+        /// otherwise see a chunk indistinguishable from any other. The abnormal termination answers a
+        /// PROGRAM, which detects an interrupted transfer without having to parse anything at all.
         /// </para>
         /// <para>
         /// <b>THE TERMINAL ELEMENT IS THE PROBLEM DOCUMENT THE UNARY ROUTE WOULD HAVE SENT</b>, built by
@@ -2789,10 +2826,19 @@ public static class DataServicesProxyEndpoints
                 ConflictWithoutDetailProblemType,
                 ConflictWithoutDetailProblemTitle),
 
-            // Adjudication A3. A plain 501 problem document: no reserved marker, and no deferred service is
-            // named or reachable from this file.
+            // Adjudication A3, CORRECTED: a plain 500 problem document carrying E_NO_IMPLEMENTATION - no
+            // reserved marker, no deferred service named or reachable from this file, and NOT 501.
+            //
+            // 🔴 THIS ARM USED TO ANSWER 501 AND THAT BROKE THE PUBLISHED CONTRACT TWICE OVER. Every
+            // operation projected here is one gateway.v1.yaml publishes as implemented, and 501 is declared
+            // on the eight reserved-route operations and nowhere else - so the status was undeclared on the
+            // very operations that could produce it, leaving a generated client with no branch for it. It
+            // also collapsed the one distinction the reserved routes exist to draw: a caller could not tell
+            // "this whole capability area is unbuilt" (AAP 0.4.4, C-D) from "the upstream answering me does
+            // not implement a method its own contract declares", which is deployment or version skew. The
+            // in-band arm above answers 500 for the same reason and cites the same precedent.
             StatusCode.Unimplemented => new(
-                StatusCodes.Status501NotImplemented,
+                StatusCodes.Status500InternalServerError,
                 RetCode.E_NO_IMPLEMENTATION,
                 UnimplementedDetail,
                 FromUpstream: true),
@@ -3315,8 +3361,10 @@ public static class DataServicesProxyEndpoints
     /// </summary>
     /// <param name="openApiOperation">The operation being described.</param>
     /// <remarks>
-    /// Guarded rather than unconditional: thirty-eight of the forty operations declare no parameter at
-    /// all, and declaring one on them would publish an argument they do not accept.
+    /// Guarded rather than unconditional: only the TWO session-close operations carry a path parameter -
+    /// <c>DELETE /v1/datawindow/sessions/{sessionId}</c> and
+    /// <c>DELETE /v1/datawindow/expression/sessions/{sessionId}</c>. Every other projected operation
+    /// declares none at all, and declaring one on them would publish an argument they do not accept.
     /// </remarks>
     private static void DescribeSessionIdParameter(OpenApiOperation openApiOperation)
     {
@@ -3439,9 +3487,9 @@ public static class DataServicesProxyEndpoints
         /// <remarks>
         /// NO MEMBER CARRIES THIS TODAY, and it is retained rather than deleted because it is the correct
         /// declaration for a future operation that takes neither a body nor a parameter with declared
-        /// constraints. It used to be carried by the two close operations and the event-gate read, on the
+        /// constraints. The two close operations and the event-gate read are the tempting carriers, on the
         /// reasoning that an operation with no request body has nothing for Gateway's own binding to
-        /// reject - which overlooked their session-identifier PARAMETER, whose declared
+        /// reject - which overlooks their session-identifier PARAMETER, whose declared
         /// <c>required</c>/<c>minLength</c>/<c>maxLength</c> constraints Gateway does evaluate. See
         /// <see cref="SessionIdConstraint"/>.
         /// </remarks>
@@ -3535,33 +3583,21 @@ public static class DataServicesProxyEndpoints
             RpcName);
     }
 
-    /// <summary>
-    /// One translated failure: the HTTP status, the legacy return code, the fixed prose, whether an upstream
-    /// produced it, and the problem type and title where a specific one applies.
-    /// </summary>
-    /// <param name="HttpStatus">The HTTP status to answer with.</param>
-    /// <param name="RetCode">
-    /// The legacy return code, consumed as a symbol from the single transcription of the oracle's
-    /// catalogue.
-    /// </param>
-    /// <param name="Detail">
-    /// FIXED PROSE. Never composed from an upstream message, an exception message, a parser diagnostic or
-    /// any part of a request body.
-    /// </param>
-    /// <param name="FromUpstream">
-    /// Whether an upstream produced the failure. The contract requires the <c>upstream</c> member be absent
-    /// when Gateway itself produced the response, so this is a real statement and not a default.
-    /// </param>
-    /// <param name="Type">
-    /// A specific problem type, or <see langword="null"/> for RFC 9457's own default. Only the three
-    /// mutually distinguishable conflict-class outcomes carry one.
-    /// </param>
-    /// <param name="Title">
-    /// A specific title, or <see langword="null"/> to use the status code's reason phrase, which is what
-    /// RFC 9457 recommends alongside its default type.
-    /// </param>
+    // One translated failure: the HTTP status, the legacy return code, the fixed prose, whether an upstream
+    // produced it, and the problem type and title where a specific one applies.
+    // HttpStatus: The HTTP status to answer with.
+    // The legacy return code, consumed as a symbol from the single transcription of the oracle's
+    // catalogue.
+    // FIXED PROSE. Never composed from an upstream message, an exception message, a parser diagnostic or
+    // any part of a request body.
+    // Whether an upstream produced the failure. The contract requires the upstream member be absent
+    // when Gateway itself produced the response, so this is a real statement and not a default.
+    // A specific problem type, or null for RFC 9457's own default. Only the three
+    // mutually distinguishable conflict-class outcomes carry one.
+    // A specific title, or null to use the status code's reason phrase, which is what
+    // RFC 9457 recommends alongside its default type.
     // ==================================================================================================
-    //  THE IN-BAND STATUS MAP - THE OTHER HALF OF THE PROJECTION (F-06)
+    //  THE IN-BAND STATUS MAP - THE OTHER HALF OF THE PROJECTION
     // ==================================================================================================
 
     /// <summary>
@@ -3593,7 +3629,18 @@ public static class DataServicesProxyEndpoints
     /// </remarks>
     internal static class InBandStatus
     {
-        /// <summary>The problem-body member the upstream response is attached under.</summary>
+        /// <summary>
+        /// The problem-body member the upstream response USED to be attached under, retained only so a
+        /// test can assert its absence.
+        /// </summary>
+        /// <remarks>
+        /// NOTHING WRITES THIS ANY MORE. The whole upstream message was serialised into a problem
+        /// extension under this name, which made an unbounded, unscreened upstream payload part of a
+        /// response crossing the system's only external boundary - a relayed <c>db_error</c> carries the
+        /// complete generated statement with interpolated literal values. The constant survives because
+        /// the guarantee worth holding is that the member does NOT appear, and a test asserting absence
+        /// needs the name.
+        /// </remarks>
         internal const string ResponseExtensionMember = "response";
 
         /// <summary>The <c>OperationStatus</c>-shaped field name.</summary>
@@ -3718,8 +3765,14 @@ public static class DataServicesProxyEndpoints
         /// caller would send it into a retry-with-different-input loop that can never succeed.
         /// </para>
         /// <para>
-        /// THE UPSTREAM DIAGNOSTIC IS CARRIED WHEN THERE IS ONE. It is the legacy text and is relayed
-        /// unchanged; the fixed prose is used only when the contract left it empty (constraint C-B).
+        /// 🔴 THE UPSTREAM DIAGNOSTIC IS NEVER RELAYED, AND THE PARAMETER IS ACCEPTED ONLY SO THE CALLER
+        /// NEED NOT KNOW THAT. An earlier revision preferred the upstream's own text whenever it had one,
+        /// which put text this gateway does not control into a body crossing the system's only external
+        /// boundary - and the legacy diagnostics name DataWindow objects, columns and buffer positions,
+        /// while the SQL error path's <c>sqlsyntax</c> carries the whole generated statement with
+        /// interpolated literal values. The detail is now always this gateway's own fixed prose, one
+        /// string per recognised outcome, and the numeric <c>retCode</c> - which is what a client
+        /// branches on - is carried unchanged.
         /// </para>
         /// <para>
         /// 🔴 <b><see langword="internal"/> RATHER THAN <see langword="private"/> SO THE PUBLISHED MAPPING
@@ -3790,8 +3843,33 @@ public static class DataServicesProxyEndpoints
 
                 RetCode.E_TIME_OUT => (StatusCodes.Status504GatewayTimeout, InBandTimeoutDetail),
 
+                // ⚠ THE UNAVAILABLE-CAPABILITY PAIR IS 500 AND MUST NEVER BE 501. Both codes say "this
+                // operation exists and the specific cell it was asked for has no available
+                // implementation" - a pinyin comparison whose lookup table lives only inside the closed
+                // binary [PinyinFirstLetterMatcher], a macro or foreign-variable arm the expression
+                // engine declines [ColumnExpressionEngine], a pinyin flag mask that disagrees with the
+                // configured one [DataWindowService.ApplyDropDownSearch]. Every one of those is reported
+                // by an operation this document PUBLISHES AS IMPLEMENTED.
+                //
+                // 501 IS RESERVED SYSTEM-WIDE for Gateway's four deferred-capability routes, whose whole
+                // purpose is to declare that an entire capability area is unbuilt (AAP 0.4.4, C-D). A 501
+                // here would present an implemented operation as a placeholder and would leave a caller
+                // unable to tell a reserved route from a blocked cell inside a live service, using only
+                // the published contract. It was also UNDECLARED: gateway.v1.yaml carries 501 on the
+                // eight reserved-route operations and on no other, so a generated client had no branch
+                // for the status this arm produced.
+                //
+                // 500 is the declared status every projected operation already publishes, and the legacy
+                // vocabulary carries the distinction the status cannot: the problem document's retCode
+                // member names E_NO_SUPPORT (-2000) or E_NO_IMPLEMENTATION (-2001) exactly as the
+                // upstream reported it. This is the SAME resolution Security applies to its two
+                // symmetric-cipher narrowings, which answer 500 with E_NO_IMPLEMENTATION for the same
+                // reason - see OpenApi/security.v1.yaml, CryptoSymCryptMode, and docs/CONTRACTS.md 14.4.
+                // It is not 400: the request is well formed and the limitation is this port's rather than
+                // the caller's. It is not 502 either: no upstream FAILED - it answered normally and
+                // reported a capability it does not have.
                 RetCode.E_NO_SUPPORT or RetCode.E_NO_IMPLEMENTATION =>
-                    (StatusCodes.Status501NotImplemented, InBandNotImplementedDetail),
+                    (StatusCodes.Status500InternalServerError, InBandNotImplementedDetail),
 
                 RetCode.E_DB_ERROR or RetCode.E_INVALID_TRANSACTION =>
                     (StatusCodes.Status502BadGateway, InBandDataPathDetail),
@@ -3815,16 +3893,42 @@ public static class DataServicesProxyEndpoints
                 _ => (StatusCodes.Status500InternalServerError, InBandUnclassifiedDetail),
             };
 
+            // ⚠ THE DETAIL IS ALWAYS THIS GATEWAY'S OWN FIXED PROSE. THE UPSTREAM TEXT IS NEVER RELAYED.
+            //
+            // This used to read `IsNullOrWhiteSpace(errorText) ? mapped.Detail : errorText`, preferring the
+            // upstream's own diagnostic whenever it had one. That put text this gateway does not control
+            // into a response body crossing the system's only external boundary, and the legacy diagnostics
+            // it carries are not written for that audience: they are internal operator messages that name
+            // DataWindow objects, column identifiers and buffer positions, and the SQL error path's own
+            // `sqlsyntax` field carries the complete generated statement including interpolated literal
+            // VALUES with no redaction anywhere in the legacy logger (AAP 0.6.4). Relaying them
+            // discloses the upstream's internal structure to an external caller and makes the response
+            // body an exfiltration channel for row data that never had to cross this boundary.
+            //
+            // THE NUMERIC CODE IS STILL CARRIED, WHICH IS WHAT A CALLER ACTUALLY BRANCHES ON. `retCode` is
+            // the legacy return-code algebra's own value and it is published in the contract, so a client
+            // loses no ability to distinguish outcomes - it loses only prose it could not parse. The fixed
+            // detail per arm is the allow-list: a closed set of strings this gateway authored, one per
+            // recognised outcome.
+            //
+            // THIS IS NOT A BEHAVIOUR CHANGE THE LEGACY WOULD HAVE NOTICED (C-B). The legacy had no
+            // process boundary and no external caller at all - these diagnostics went to a MessageBox on
+            // the operator's own screen [AAP 0.6.1, the dialog call sites]. Choosing not to forward an
+            // internal operator message to an anonymous network caller preserves nothing and discloses
+            // nothing; the diagnostic still reaches an operator through this gateway's own structured log,
+            // which is where the equivalent of that dialog now lives.
+            _ = errorText;
+
             return new StatusProjection(
                 mapped.HttpStatus,
                 retCode,
-                string.IsNullOrWhiteSpace(errorText) ? mapped.Detail : errorText,
+                mapped.Detail,
                 FromUpstream: true);
         }
     }
 
     // --------------------------------------------------------------------------------------------------
-    //  IN-BAND FAILURE PROSE - used ONLY when the upstream left its own diagnostic empty
+    //  IN-BAND FAILURE PROSE - the allow-list, and the ONLY detail an in-band failure ever carries
     // --------------------------------------------------------------------------------------------------
 
     /// <summary>Fallback prose for a rejected argument reported in band.</summary>
@@ -3894,8 +3998,19 @@ public static class DataServicesProxyEndpoints
         "The upstream operation did not complete within its budget.";
 
     /// <summary>Fallback prose for an unsupported or unimplemented outcome reported in band.</summary>
+    /// <remarks>
+    /// 500 rather than 501, and the sentence says so, because a caller reading only this response has to be
+    /// able to tell this apart from a reserved deferred-capability route. 501 belongs to those four routes
+    /// alone (AAP 0.4.4, C-D); an implemented operation reporting that one cell of its surface has no
+    /// available implementation is a different statement, and the <c>retCode</c> member carries which of the
+    /// two legacy codes was reported.
+    /// </remarks>
     private const string InBandNotImplementedDetail =
-        "The upstream operation is not supported for the arguments supplied.";
+        "The upstream operation is implemented but reported that the specific capability this request "
+        + "asked for has no available implementation, so it was not performed. Re-sending the same request "
+        + "produces the same answer. This is NOT a reserved deferred-capability route - those are the only "
+        + "routes in this system that answer 501, and this operation is implemented and answering. The "
+        + "retCode member carries the upstream's own code.";
 
     /// <summary>Fallback prose for a data-path failure reported in band.</summary>
     /// <remarks>
@@ -3929,7 +4044,7 @@ public static class DataServicesProxyEndpoints
 /// <b>⚠ THIS TYPE IS A SUMMARY, AND THE PUBLISHED CONTRACT IS NOT.</b> The document served from
 /// <c>/openapi/v1.json</c> is a convenience mirror for whoever is holding this service; the CONTRACT a
 /// consumer is given is the authored <c>gateway.v1.yaml</c> in <c>PowerFramework.Contracts</c>. That
-/// document publishes all 120 messages and 15 enums of the projected closure CONCRETELY - every member,
+/// document publishes all 118 messages and 15 enums of the projected closure CONCRETELY - every member,
 /// its canonical JSON name, its canonical scalar encoding, <c>additionalProperties: false</c>, and a
 /// <c>required</c> list stating what the wire actually carries - and the sibling test project compares
 /// every schema against its compiled descriptor on each build, so it cannot drift from the protocol
@@ -3938,18 +4053,18 @@ public static class DataServicesProxyEndpoints
 /// <para>
 /// <b>WHAT A CONSUMER MUST NOT INFER FROM THE OPEN SHAPE BELOW.</b> The extension-data member makes this
 /// an open object in the generated document, and that openness describes THIS DOCUMENT'S SILENCE about
-/// the members - never a permissiveness in the projection. <see cref="RequestParser"/> is
+/// the members - never a permissiveness in the projection. <c>RequestParser</c> is
 /// <c>JsonParser.Default</c>, whose <c>IgnoreUnknownFields</c> is false, so a member the target message
-/// does not declare is answered with <c>400</c> rather than discarded - adjudication A7. The authored
-/// contract carried the same open shape until it was replaced by the concrete tier, and there it WAS a
-/// defect, because a contract's audience has nothing else to read.
+/// does not declare is answered with <c>400</c> rather than discarded - adjudication A7. The same open
+/// shape in the AUTHORED contract would be a defect rather than a convenience, because a contract's
+/// audience has nothing else to read - which is why that document publishes the concrete tier.
 /// </para>
 /// <para>
 /// <b>Why the summary remains here rather than being generated too.</b> Building the concrete schemas at
 /// runtime would put a third derivation of the same descriptors in a third place, and constraint C-A
 /// leaves no shared home for one: a service may not reach into another service's code, and
-/// <c>PowerFramework.Contracts</c> carries no behaviour. Adjudication A8's mechanical obstacle also still
-/// stands for the five MIRRORED response shapes - they are built on the legacy's preserved
+/// <c>PowerFramework.Contracts</c> carries no behaviour. Adjudication A8's mechanical obstacle also
+/// applies to the five MIRRORED response shapes - they are built on the legacy's preserved
 /// <c>SCREAMING_SNAKE</c> value sets, and declaring those identifiers in a Gateway file is a build error
 /// under the repository-root analyzer configuration.
 /// </para>

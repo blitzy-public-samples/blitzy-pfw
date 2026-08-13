@@ -345,7 +345,7 @@ namespace PowerFramework.Persistence.Tasks.TaskProxies
     /// datastore failure value [<c>n_cst_threading_task_sqlquery.sru:L110, :L123, :L135</c>]. That is why
     /// the two are separate seams even though they take the same arguments, and this resolver
     /// deliberately applies the same declaration test as
-    /// <see cref="QueryDataWindowRuntime.TryGetChild"/> so the two cannot disagree about WHETHER a child
+    /// <c>QueryDataWindowRuntime.TryGetChild</c> so the two cannot disagree about WHETHER a child
     /// exists while disagreeing about what to do when it does not.
     /// </remarks>
     internal sealed class QueryChildResolver : IQueryChildResolver

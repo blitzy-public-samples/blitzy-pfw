@@ -114,7 +114,7 @@
       leaving the REST half of its own contract undeclared.
 
       Microsoft.OpenApi is the MANDATORY companion, and the reason is a security one rather than a
-      compile one (AAP 0.5.2). Microsoft.AspNetCore.OpenApi 10.0.10 pulls Microsoft.OpenApi 2.0.0
+      compile one (AAP 0.5.2). Microsoft.AspNetCore.OpenApi 10.0.11 pulls Microsoft.OpenApi 2.0.0
       transitively, and 2.0.0 carries the high-severity advisory NU1903; warnings are errors
       repository-wide, so restore fails outright. A DIRECT reference is the mechanism by which
       central package management substitutes the 2.11.0 pin for that transitive version. Advancing to
@@ -124,8 +124,8 @@
       only value that is simultaneously non-vulnerable and compatible. Never suppress NU1903 and
       never move this reference to a floating range.
 
-      WHAT THE PAIR DOES NOT DO, stated because an earlier revision of this file removed them over
-      it. Both flow onward to the four services that reach this project by ProjectReference,
+      WHAT THE PAIR DOES NOT DO, stated because it is the argument for removing them.
+      Both flow onward to the four services that reach this project by ProjectReference,
       including Persistence, which is gRPC-only and publishes no OpenAPI document. Nothing there
       leans on the inherited reference: Gateway, Security and DataServices each declare
       Microsoft.AspNetCore.OpenApi and Microsoft.OpenApi DIRECTLY, because the package ships
@@ -158,7 +158,7 @@
       and never "Proto/common.v1.proto". Grpc.Tools' own _Protobuf_SetProtoRoot target defaults
       the root to the project directory when the metadata is absent, in which case every import
       would need a Proto/ prefix; the mismatch surfaces as a confusing protoc "file not found".
-      Verified empirically on SDK 10.0.302 with a bare-file-name import across two proto files.
+      Verified empirically on the pinned SDK with a bare-file-name import across two proto files.
 
       GrpcServices="Both" is required, not merely convenient: this single project serves the
       generated SERVER base classes to DataServices (C-03, C-04) and Persistence (C-05 through
@@ -195,7 +195,7 @@
       Logical resource names are the SDK default and therefore deterministic: RootNamespace plus
       the relative directory with separators replaced by dots. OpenApi/gateway.v1.yaml is read as
       "PowerFramework.Contracts.OpenApi.gateway.v1.yaml", and Assembly.GetManifestResourceNames
-      on this assembly enumerates the full set. Verified on SDK 10.0.302 by a downstream project
+      on this assembly enumerates the full set. Verified on the pinned SDK by a downstream project
       reading the document back through GetManifestResourceStream.
 
       The None Remove is what leaves each document carrying exactly one build action. The SDK's

@@ -447,7 +447,7 @@ public sealed class QueryServiceLeaseTests
     [Fact]
     public async Task TheRequestsOwnTokenIsWhatTheRetrievalRunnerReceives()
     {
-        // F-11 for this contract. The retrieval is the ONE provider call on this service whose whole call
+        // THE CANCELLATION CONTRACT, FOR THIS CONTRACT. The retrieval is the ONE provider call on this service whose whole call
         // chain is already asynchronous, so its token genuinely stops a multi-row walk between rows; what
         // is asserted here is only that the token which arrives is the REQUEST's, not None and not a fresh
         // one, because everything below depends on that.
@@ -952,7 +952,7 @@ public sealed class QueryServiceLeaseTests
 
         internal Fixture()
         {
-            // The two tables now carry a handle ceiling and an idle window, so both take the bound
+            // The two tables carry a handle ceiling and an idle window, so both take the bound
             // settings and the real clock. The shipped defaults are used deliberately: this suite is
             // about the LEASE a query holds, not about the quota, so the ceiling must not be the thing
             // a case trips over.

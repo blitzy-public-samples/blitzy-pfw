@@ -26,12 +26,7 @@
 //                       public function long    of_disableevent    (readonly long evt)         [:L110]
 //                       public function integer of_enableevent     (readonly long evt)         [:L111]
 //
-//  RULES POSITION   review_rules returns "No user rules provided.", verified for this file. NO USER
-//                   RULE GOVERNS IT, and none is invented. The enterprise baseline of AAP 0.7.2
-//                   applies in their place - nullable enabled with warnings as errors, plain xunit
-//                   assertions with no mocking or fluent-assertion package, and no secret of any kind
-//                   anywhere in the file. The constraints that DO govern it are AAP 0.7.3's:
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //                     C-B / G2  Preserve behaviour exactly. The three constant values, the mask
 //                               combinability, the return-type asymmetry and the item-change to
 //                               column-expression coupling are all LEGACY behaviour and are asserted

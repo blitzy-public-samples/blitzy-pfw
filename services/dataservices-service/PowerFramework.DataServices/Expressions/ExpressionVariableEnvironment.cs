@@ -65,7 +65,7 @@
 //  typed value therefore travels as a separate ExpressionVariableValue, paired with a variable by
 //  the engine - which is precisely what the published contract does when it adds `value` as a
 //  wire-only fifth field on LocalVarData [shared/PowerFramework.Contracts/Proto/
-//  dataservices.v1.proto:L2520-L2527].
+//  dataservices.v1.proto:L2669-L2676].
 //
 //  DECISION 3 - NO RENDERING LIVES HERE, BECAUSE IT ALREADY LIVES SOMEWHERE ELSE.
 //  The per-type literal forms the legacy emits are, verbatim from the oracle:
@@ -136,7 +136,7 @@ namespace PowerFramework.DataServices.Expressions;
 /// <para>
 /// THE NUMBERING IS NOT ARBITRARY. Values 1 through 7 are deliberately identical to the field
 /// numbers of the <c>VarValue</c> oneof arms on contract C-04
-/// [shared/PowerFramework.Contracts/Proto/dataservices.v1.proto:L2714-L2745], so the domain
+/// [shared/PowerFramework.Contracts/Proto/dataservices.v1.proto:L2864-L2892], so the domain
 /// discriminator and the wire discriminator can be audited against one another by value as well as
 /// by name.
 /// </para>
@@ -233,7 +233,7 @@ public enum ExpressionVariableKind
 /// the variable environment is "A DISCRIMINATED UNION OVER EXACTLY SEVEN TYPES ... NEVER A
 /// STRINGLY-TYPED MAP", because collapsing the seven to their string renderings discards exactly
 /// the type information the legacy coercion dispatches on
-/// [shared/PowerFramework.Contracts/Proto/dataservices.v1.proto:L2690-L2703]. An
+/// [shared/PowerFramework.Contracts/Proto/dataservices.v1.proto:L2839-L2841]. An
 /// <c>object?</c> payload would be no better: it re-opens a closed set and forces every consumer to
 /// unbox and re-test.
 /// </para>
@@ -771,7 +771,7 @@ public sealed record FunctionReference
 /// <para>
 /// <see cref="Exp"/> IS THE UNEXPANDED SOURCE TEXT. Contract C-04 requires that the payload transmit
 /// the unexpanded expression, the bind-time snapshot AND the live environment
-/// [dataservices.v1.proto:L2624-L2639], because an already-expanded string makes a static binding
+/// [dataservices.v1.proto:L2984-L3000], because an already-expanded string makes a static binding
 /// indistinguishable from a literal and strips a dynamic binding of its resolution environment. This
 /// field is the first of those three.
 /// </para>
@@ -1086,7 +1086,7 @@ public sealed record GlobalVariable
 //  It is modelled as its own bit and never folded into the mode, because it selects the RESOLUTION
 //  SCOPE while the mode selects the EXPANSION TIMING, and the two are independent - the contract
 //  makes the same point where it declines to add a sixth mode
-//  [shared/PowerFramework.Contracts/Proto/dataservices.v1.proto:L2655-L2658].
+//  [shared/PowerFramework.Contracts/Proto/dataservices.v1.proto:L2806-L2807].
 //
 //  SIX REACHABLE FORMS OUT OF EIGHT BIT PATTERNS, WITH THE PROOF
 //  A dynamic bit cannot occur without a macro bit, and that is provable from the source rather than
@@ -1458,7 +1458,7 @@ public readonly record struct ExpansionSigils(
 /// <para>
 /// WHY IMMUTABLE, WHEN THE LEGACY ARRAY IS MUTABLE INSTANCE STATE. Contract C-04 requires the payload
 /// to carry a BIND-TIME SNAPSHOT and a LIVE ENVIRONMENT as two separate things
-/// [shared/PowerFramework.Contracts/Proto/dataservices.v1.proto:L2624-L2629], which is only meaningful
+/// [shared/PowerFramework.Contracts/Proto/dataservices.v1.proto:L2988-L3000], which is only meaningful
 /// if a snapshot cannot change after it is taken. An immutable snapshot also makes this type safe to
 /// share across the concurrent gRPC calls a service handles, and gives value equality that a
 /// characterization recording can compare directly. Mutation is expressed as

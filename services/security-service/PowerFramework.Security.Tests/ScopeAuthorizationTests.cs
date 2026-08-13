@@ -21,12 +21,17 @@
 //  WHAT IS DELIBERATELY NOT SCOPE-GATED
 //  `/health` and the two `/.well-known/` publications are anonymous, so they reach no scope check
 //  because they reach no authentication - and a row below asserts that adding the scope gate did not
-//  accidentally close them, which would break the readiness chain three services wait on. `/v1/ping`
-//  is authenticated and carries NO scope requirement: it performs no work and reaches no capability, so
-//  a scope for it would be a permission over nothing, and the published document declares no 403 on it.
-//  `POST /v1/tokens` is authenticated by mutual TLS and carries no bearer token, so it has no scope
-//  claim to check; its authorization is the caller-and-audience matrix, exercised in
-//  CallerAuthorizationTests.cs.
+//  accidentally close them, which would break the readiness chain three services wait on. Those three
+//  are also the ONLY operations security.v1.yaml declares without a 403; every operation that reaches
+//  authentication declares one.
+//  `POST /v1/tokens` carries no bearer token - it is authenticated by a presented Basic credential or a
+//  trusted client certificate - so it has no scope claim to check; its authorization is the
+//  caller-and-audience matrix, exercised in CallerAuthorizationTests.cs.
+//
+//  AND `/v1/ping` IS SCOPE-GATED, WHICH IS EASY TO ASSUME IT IS NOT. It performs no work and reaches no
+//  capability, so a permission over it reads like a permission over nothing - but Endpoints/PingEndpoints.cs
+//  names a scope policy on the route rather than taking the parameterless requirement, and the published
+//  document declares the matching 403. An unscoped token reaches it with 403, not 200.
 //
 //  RULES
 //  review_rules reports that no user rules were provided, so no user-specified rule governs this file.
@@ -315,16 +320,15 @@ public sealed class ScopeAuthorizationTests
     /// <returns>A task representing the assertion.</returns>
     /// <remarks>
     /// <para>
-    /// A DECISION ASSERTED, NOT AN OMISSION LEFT UNTESTED - AND THE DECISION CHANGED, WHICH IS WHY THE
-    /// SUPERSEDED READING IS RECORDED HERE RATHER THAN DELETED. An earlier revision of this row asserted
-    /// the opposite: that the probe requires NO scope, on the ground that it performs no work and reaches
-    /// no capability, so a scope for it would be a permission over nothing - and, decisively, that the
-    /// published document declared no 403 on it, so requiring one would have made the service answer a
-    /// status its own contract did not describe.
+    /// A DECISION ASSERTED, NOT AN OMISSION LEFT UNTESTED - AND THE OPPOSING ARGUMENT IS RECORDED BECAUSE
+    /// IT IS A GOOD ONE. It runs: the probe requires NO scope, because it performs no work and reaches no
+    /// capability, so a scope for it is a permission over nothing - and, decisively, if the published
+    /// document declared no 403 on it then requiring one would make the service answer a status its own
+    /// contract did not describe.
     /// </para>
     /// <para>
-    /// THAT LAST PREMISE NO LONGER HOLDS, AND THE DOCUMENT IS THE ARBITER FOR ANYTHING ON THE WIRE.
-    /// <c>shared/PowerFramework.Contracts/OpenApi/security.v1.yaml</c> now declares
+    /// THAT LAST PREMISE DOES NOT HOLD HERE, AND THE DOCUMENT IS THE ARBITER FOR ANYTHING ON THE WIRE.
+    /// <c>shared/PowerFramework.Contracts/OpenApi/security.v1.yaml</c> declares
     /// <c>403 ScopeForbidden</c> on <c>GET /v1/ping</c> alongside its 200 and 401, the shipped issuance
     /// roster grants each caller that is expected to prove a boundary the <c>ping</c> scope, and
     /// <c>orchestration/.env.example</c> grants it to the end-to-end suite. A probe left scopeless while

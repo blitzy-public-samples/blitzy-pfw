@@ -411,7 +411,7 @@ namespace PowerFramework.Shared.Kernel;
 /// proper-ancestor-only.
 /// </para>
 /// <para>
-/// Comparison is on the UNQUALIFIED <see cref="System.Type.Name"/>, ordinally, never on
+/// Comparison is on the UNQUALIFIED <see cref="System.Reflection.MemberInfo.Name"/>, ordinally, never on
 /// <see cref="System.Type.FullName"/>. PowerBuilder has one flat global namespace and every legacy
 /// call site passes a bare class name, so a qualified comparison would answer
 /// <see langword="false"/> everywhere. The consequence of an unqualified comparison in a tree that
@@ -460,7 +460,7 @@ public static class Ancestry
     /// </param>
     /// <param name="parentClass">
     /// The unqualified class name to look for. Compared ordinally against
-    /// <see cref="System.Type.Name"/>.
+    /// <see cref="System.Reflection.MemberInfo.Name"/>.
     /// </param>
     /// <returns>
     /// <see langword="true"/> when <paramref name="value"/>'s runtime type or any of its base types
@@ -509,7 +509,7 @@ public static class Ancestry
     /// </param>
     /// <param name="parentClass">
     /// The unqualified class name to look for. Compared ordinally against
-    /// <see cref="System.Type.Name"/>.
+    /// <see cref="System.Reflection.MemberInfo.Name"/>.
     /// </param>
     /// <returns>
     /// <see langword="true"/> when the resolved class or any of its base types is named
@@ -564,7 +564,7 @@ public static class Ancestry
     /// </param>
     /// <param name="parentClass">
     /// The unqualified class name to look for. Compared ordinally against
-    /// <see cref="System.Type.Name"/>.
+    /// <see cref="System.Reflection.MemberInfo.Name"/>.
     /// </param>
     /// <returns>
     /// <see langword="true"/> when <paramref name="value"/>'s runtime type or any of its base types
@@ -637,7 +637,7 @@ public static class Ancestry
     /// </param>
     /// <param name="parentClass">
     /// The unqualified class name to look for. Compared ordinally against
-    /// <see cref="System.Type.Name"/>.
+    /// <see cref="System.Reflection.MemberInfo.Name"/>.
     /// </param>
     /// <returns>
     /// <see langword="true"/> when the resolved class or any of its base types is named
@@ -675,7 +675,7 @@ public static class Ancestry
     /// <c>typeof(ISomething).BaseType</c> is <see langword="null"/>. So
     /// <c>IsAncestorByClass("IDisposable", "IDisposable")</c> is <see langword="true"/> while
     /// <c>IsAncestorByClass("IDisposable", "Object")</c> is <see langword="false"/>. For a
-    /// constructed generic type <see cref="System.Type.Name"/> carries the runtime's arity suffix,
+    /// constructed generic type <see cref="System.Reflection.MemberInfo.Name"/> carries the runtime's arity suffix,
     /// so the name to pass is of the form <c>List`1</c>; the legacy had no generics and so no
     /// behaviour to compare against.
     /// </para>
@@ -730,7 +730,7 @@ public static class Ancestry
     /// The unqualified class name to look for. Guaranteed non-empty by both callers.
     /// </param>
     /// <returns>
-    /// <see langword="true"/> on the first link whose <see cref="System.Type.Name"/> equals
+    /// <see langword="true"/> on the first link whose <see cref="System.Reflection.MemberInfo.Name"/> equals
     /// <paramref name="parentClass"/> ordinally; otherwise <see langword="false"/>.
     /// </returns>
     private static bool ChainContainsName(Type? startType, string parentClass)

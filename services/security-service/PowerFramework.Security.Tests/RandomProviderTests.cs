@@ -56,10 +56,6 @@
 //  can establish - the production seam draws from the operating system's generator and the
 //  substituted one deliberately does not.
 //
-//  RULES POSITION: review_rules returns exactly one line, "No user rules provided.", so no
-//  user-specified rule governs this file and none is invented. The enterprise-standard baseline
-//  applies instead: deterministic, no I/O, no clock, no shared mutable state, every test
-//  independent. No performance property is asserted, because the repository publishes none.
 // ==============================================================================================
 
 using System.Reflection;

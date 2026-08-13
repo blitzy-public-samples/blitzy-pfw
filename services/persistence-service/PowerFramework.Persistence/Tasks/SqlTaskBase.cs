@@ -78,14 +78,7 @@
 //         lifetime is part of the same contract.
 //
 // -------------------------------------------------------------------------------------------------
-//  RULES POSITION, AND THE CONSTRAINTS THAT STAND IN THEIR PLACE
-// -------------------------------------------------------------------------------------------------
-//  NO USER RULES WERE PROVIDED. `review_rules` returns exactly one line saying so, and that line is
-//  the complete document. Nothing here is inferred or back-filled from convention, and no file
-//  enters scope because of a rule. The binding constraints are the enterprise-standard baseline
-//  (AAP §0.7.2) plus the twelve named non-rule constraints C-A..C-L (AAP §0.7.3). Their application
-//  to THIS file:
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  C-A  Only the shared projects this service references (Contracts, Shared.Kernel,
 //       Shared.Diagnostics, Shared.Containers, Shared.Eventful) plus siblings in this service. THIS
 //       FILE uses the first four and NOT Shared.Eventful: the notification surface that consumes the
@@ -1750,8 +1743,8 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
         // the value that would not convert, and a syntax error echoes the surrounding text. Those are the
         // interpolated literals arriving by a second route, so the same rule applies.
         //
-        // 🔴 BUT THROUGH THE PROVIDER-ENVELOPE RULE, NOT THE STRICT SCAN, AND THE CLAIM THAT USED TO STAND
-        //    HERE - "the code, the constraint name and the column name are not literals and survive" - WAS
+        // 🔴 BUT THROUGH THE PROVIDER-ENVELOPE RULE, NOT THE STRICT SCAN. THE TEMPTING CLAIM -
+        //    "the code, the constraint name and the column name are not literals and survive" - IS
         //    MEASURABLY FALSE. Microsoft.Data.Sqlite does not hand back a bare diagnostic: it wraps one as
         //    `SQLite Error 19: '<message>'.`, so the strict scan read the result code as a numeric literal
         //    and the entire diagnosis as a quoted string and masked both. Every constraint failure was
@@ -3234,7 +3227,7 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
         int argCount = OneBasedIndex.UpperBound(placeholders);
 
         // ==========================================================================================
-        //  THE TOLERANCE IS PRESERVED, AND IT IS NO LONGER SILENT
+        //  THE TOLERANCE IS PRESERVED, AND IT IS REPORTED RATHER THAN SILENT
         //  ------------------------------------------------------------------------------------------
         //  The guard above stays commented out, because the oracle's author commented it out and
         //  constraint C-B forbids reviving a decision the legacy made. It is also LOAD-BEARING here and
@@ -3244,10 +3237,11 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
         //  so a retrieval whose DataWindow declares three arguments and whose SQL mentions two is a
         //  legitimate shape that an active guard would refuse.
         //
-        //  WHAT IS FIXED IS THE SILENCE, NOT THE OUTCOME. A caller that supplies more parameters than the
-        //  statement has placeholders had no way to learn that the surplus matched nothing: the answer was
-        //  a plain success. The condition is now recorded, so the mismatch is diagnosable from the service
-        //  log while the accepted outcome is exactly what it was.
+        //  WHAT IS ADDRESSED IS THE SILENCE, NOT THE OUTCOME. A caller that supplies more parameters than
+        //  the statement has placeholders has no way to learn from the ANSWER that the surplus matched
+        //  nothing - the answer is a plain success, and the oracle's is too. The condition is recorded on
+        //  the operator channel instead, so the mismatch is diagnosable while the accepted outcome is
+        //  unchanged.
         //
         //  C-F: COUNTS ONLY. No parameter value, no parameter name and no statement text appears in this
         //  record - a surplus parameter's VALUE is precisely the kind of live data the redaction policy
@@ -3865,6 +3859,7 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
     /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L597-L705</c>].
     /// </summary>
     /// <param name="data">The store to retrieve into. The legacy parameter is <c>readonly datastore</c>.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
     /// <returns>
     /// The retrieved row count, or a negative value on failure - the DataWindow convention, not the
     /// return-code algebra.
@@ -4480,7 +4475,7 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
     /// <para>
     /// <b>Per DISPATCH, not per task.</b> The oracle's prepare event fires once for every run of the
     /// task body, and its body resets the commit signal [<c>:L725-L727</c>] so that an
-    /// <see cref="SqlTaskProxyBase.IsCommitted"/> reading cannot survive from one dispatch into the
+    /// <c>SqlTaskProxyBase.IsCommitted</c> reading cannot survive from one dispatch into the
     /// next. A caller therefore raises this immediately BEFORE each execution, never once per lifetime.
     /// </para>
     /// </remarks>
@@ -4591,7 +4586,7 @@ internal abstract class SqlTaskBase : ICarrierParentTask, IDisposable
     /// </para>
     /// <para>
     /// <see cref="_transactionPool"/>, <see cref="_dataStoreFactory"/>, <see cref="_hookActivator"/> and
-    /// <see cref="_timeProvider"/> are shared, container-owned collaborators and are likewise not
+    /// <c>_timeProvider</c> are shared, container-owned collaborators and are likewise not
     /// disposed: disposing an injected singleton from a transient consumer would break every other
     /// consumer of it.
     /// </para>

@@ -24,8 +24,9 @@
 //  The transport was chosen per service from the shape of the interface being replaced, and
 //  DataServices' interface is the reason this one is gRPC while Gateway's own ingress is REST.
 //  se_cst_dw.sru declares exactly 22 events at :L11-L32 - 9 semantic and 13 raw `pbm_dwn*` - as ONE
-//  ordered chain in which a raw event delegates to a semantic one and then to the event broker, so
-//  both edges can veto. Three properties of that surface decide the transport:
+//  ordered chain in which a raw event has up to two vetoable edges, a partner call and an event-broker
+//  trigger, with which edges exist and in which order VARYING BY EVENT [:L115-L180, :L387-L401]. Three
+//  properties of that surface decide the transport:
 //
 //    1. AN ORDERED, STATEFUL CHAIN. The validation-error event READS AND CLEARS the item-change
 //       result the preceding event stashed (the four cross-event fields at se_cst_dw.sru:L89-L96),
@@ -43,11 +44,12 @@
 //
 //  Add the TRI-VALUED veto (continue / prevent-once / prevent-deep) and the FOUR-VALUE item-change
 //  alphabet {0,1,2,3}, and the transport has to carry compile-time contract enforcement,
-//  bidirectional streaming and a status model rich enough for both alphabets. Protobuf over gRPC is
-//  the only transport in the mandated stack that carries all three. JSON over REST would lose the
-//  ordering and would collapse the typed veto to a boolean the moment it was flattened - which
-//  silently converts a deep prevention into a shallow one and lets the events the caller meant to
-//  stop fire anyway.
+//  bidirectional streaming and a status model rich enough for both alphabets. Protobuf over gRPC
+//  carries all three NATIVELY. JSON over REST can encode each by CONVENTION, but nothing in the format
+//  ENFORCES the ordering or the veto's arity, so a consumer that flattens the veto to a boolean is
+//  producing valid JSON while silently converting a deep prevention into a shallow one and letting the
+//  events the caller meant to stop fire anyway. And a request/response projection cannot carry a
+//  server-initiated question at all, which is what the answer-bearing semantic events are.
 //
 //  ------------------------------------------------------------------------------------------------
 //  (b) RESILIENCE: WHY THE DEPENDENCY EXISTS, AND THE ONE STATUS THAT MUST NEVER BE RETRIED
@@ -147,12 +149,6 @@
 //      files the repository-root .editorconfig names, and no Gateway file is among them; wire
 //      constants are consumed from the generated protobuf enums instead.
 //
-//  RULES POSITION
-//  review_rules returns exactly "No user rules provided." - that single line is the complete
-//  document, so no user-specified rule governs this file. The enterprise-standard baseline applies
-//  in its place and is honoured above and below: warnings as errors inherited and never relaxed,
-//  precise nullable annotations, no unused using or field, structured logging with redaction, no
-//  secret in source, and the published contracts project as the ONLY cross-service coupling.
 // ==================================================================================================
 
 using System.Globalization;
@@ -499,10 +495,12 @@ public sealed class DataServicesEventOrderingException : Exception
 /// </para>
 /// <para>
 /// ALL TWENTY-TWO EVENTS TRAVEL AS DISTINCT IDENTITIES - the 9 semantic and the 13 raw
-/// <c>pbm_dwn*</c> - because each raw event delegates to a semantic one AND THEN to the broker, and
-/// both delegations are vetoable. Collapsing a raw event into the semantic one it delegates to would
-/// erase the two-stage veto and leave a consumer unable to tell which edge stopped the dispatch. This
-/// wrapper collapses nothing: every response is yielded exactly as received.
+/// <c>pbm_dwn*</c> - because a raw event has up to two independently vetoable edges, a partner call and
+/// a broker trigger, and WHICH edges it has and in which order VARIES BY EVENT: two consult only the
+/// broker, two trigger the broker before the partner, and one discards the broker's answer entirely
+/// [<c>se_cst_dw.sru:L120-L122</c>, <c>:L387-L401</c>, <c>:L124-L128</c>]. Collapsing a pair would erase
+/// a veto edge and leave a consumer unable to tell which one stopped the dispatch. This wrapper
+/// collapses nothing: every response is yielded exactly as received.
 /// </para>
 /// <para>
 /// ORDERING IS CHECKED, NEVER CORRECTED. Under
@@ -920,8 +918,8 @@ public sealed class DataWindowEventChannel : IAsyncDisposable
 /// SO A CLOSE THAT DID NOT HAPPEN IS ALWAYS DISTINGUISHABLE FROM ONE THAT DID.
 /// <see cref="CloseResult"/> is non-null exactly when the upstream answered, and
 /// <see cref="CloseFailure"/> is non-null exactly when the attempt failed; both are null only before
-/// any attempt has been made. Reading a null result as "closed cleanly" was previously possible and is
-/// now not, which matters because the whole point of this type is that a session cannot be left behind
+/// any attempt has been made. Reading a null result as "closed cleanly" is therefore impossible,
+/// which matters because the whole point of this type is that a session cannot be left behind
 /// silently.
 /// </para>
 /// </remarks>
@@ -1307,18 +1305,44 @@ public sealed class DataServicesClient
     private const string UpdateMethodName = "Update";
 
     /// <summary>
-    /// The token request Gateway makes for this upstream. Built once because
-    /// <see cref="ServiceTokenRequest"/> validates on construction and copies its scope set
-    /// defensively, which makes the instance immutable and safe to share.
+    /// The token request Gateway makes for calls on the C-03 DataWindow surface.
     /// </summary>
     /// <remarks>
-    /// Both scopes are requested together, in one request, because a single credential is attached to
-    /// every call this client makes. The GRANTED set may be narrower than the requested one, and a
-    /// narrowing is a SUCCESSFUL outcome rather than a failure, so it is read and reported and never
-    /// asserted on.
+    /// <para>
+    /// ONE SCOPE PER CREDENTIAL, AND THE SPLIT IS THE POINT. A single request carrying BOTH scopes used
+    /// to serve every call this client makes, so the credential attached to a column-expression call also
+    /// authorized the DataWindow surface and vice versa. That is a least-privilege failure with a real
+    /// consequence rather than a theoretical one: a token captured from any single call - a log that
+    /// recorded a header, a compromised upstream, an operator's packet capture - carried the whole of
+    /// this client's authority rather than the authority of the call it was taken from. The two surfaces
+    /// are separate contracts precisely so they can version and be authorized independently (AAP 0.4.3,
+    /// C-04 "kept separate from C-03 so the expansion engine can version independently").
+    /// </para>
+    /// <para>
+    /// TWO REQUESTS COST NOTHING EXTRA IN PRACTICE. The token provider's cache key is built from the
+    /// subject, the audience and the SORTED SCOPE SET, so these two requests occupy distinct cache
+    /// entries and each is minted once per lifetime rather than once per call. The steady state is two
+    /// held credentials instead of one, each narrower than the one it replaced.
+    /// </para>
+    /// <para>
+    /// Built once because <see cref="ServiceTokenRequest"/> validates on construction and copies its
+    /// scope set defensively, which makes the instance immutable and safe to share. The GRANTED set may
+    /// still be narrower than the requested one, and a narrowing is a SUCCESSFUL outcome rather than a
+    /// failure, so it is read and reported and never asserted on.
+    /// </para>
     /// </remarks>
-    private static readonly ServiceTokenRequest OutboundTokenRequest =
-        new(TokenSubject, DataServicesAudience, [DataWindowScope, ColumnExpressionScope]);
+    private static readonly ServiceTokenRequest DataWindowTokenRequest =
+        new(TokenSubject, DataServicesAudience, [DataWindowScope]);
+
+    /// <summary>
+    /// The token request Gateway makes for calls on the C-04 column-expression surface.
+    /// </summary>
+    /// <remarks>
+    /// The sibling of <see cref="DataWindowTokenRequest"/>; the reasoning for the split is recorded
+    /// there.
+    /// </remarks>
+    private static readonly ServiceTokenRequest ColumnExpressionTokenRequest =
+        new(TokenSubject, DataServicesAudience, [ColumnExpressionScope]);
 
     /// <summary>
     /// The rich-error binding declared on C-03's <c>Update</c>, read from the generated descriptor.
@@ -1444,6 +1468,7 @@ public sealed class DataServicesClient
         ArgumentNullException.ThrowIfNull(request);
 
         CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                OutboundSurface.DataWindow,
                 OutboundCallClass.Stream,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -1478,7 +1503,9 @@ public sealed class DataServicesClient
     public Task<OpenValidationSessionResponse> OpenValidationSessionAsync(
         OpenValidationSessionRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_dataWindow.OpenValidationSessionAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.DataWindow,
+            _dataWindow.OpenValidationSessionAsync, request, cancellationToken);
 
     /// <summary>
     /// Opens a validation session inside a scope that closes it on every exit path.
@@ -1537,7 +1564,9 @@ public sealed class DataServicesClient
     public Task<CloseValidationSessionResponse> CloseValidationSessionAsync(
         CloseValidationSessionRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_dataWindow.CloseValidationSessionAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.DataWindow,
+            _dataWindow.CloseValidationSessionAsync, request, cancellationToken);
 
     /// <summary>
     /// Opens the bidirectional event chain: all 13 raw and all 9 semantic events in one ordered
@@ -1566,6 +1595,7 @@ public sealed class DataServicesClient
     public async Task<DataWindowEventChannel> OpenEventChainAsync(CancellationToken cancellationToken)
     {
         CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                OutboundSurface.DataWindow,
                 OutboundCallClass.Stream,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -1631,6 +1661,7 @@ public sealed class DataServicesClient
         ArgumentNullException.ThrowIfNull(request);
 
         CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                OutboundSurface.DataWindow,
                 OutboundCallClass.Unary,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -1748,7 +1779,9 @@ public sealed class DataServicesClient
     public Task<GetEventGateResponse> GetEventGateAsync(
         GetEventGateRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_dataWindow.GetEventGateAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.DataWindow,
+            _dataWindow.GetEventGateAsync, request, cancellationToken);
 
     /// <summary>
     /// Disables one or more events by setting their bits in the gate mask.
@@ -1777,7 +1810,9 @@ public sealed class DataServicesClient
     public Task<DisableEventResponse> DisableEventAsync(
         DisableEventRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_dataWindow.DisableEventAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.DataWindow,
+            _dataWindow.DisableEventAsync, request, cancellationToken);
 
     /// <summary>
     /// Re-enables one or more events by clearing their bits in the gate mask.
@@ -1800,7 +1835,9 @@ public sealed class DataServicesClient
     public Task<EnableEventResponse> EnableEventAsync(
         EnableEventRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_dataWindow.EnableEventAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.DataWindow,
+            _dataWindow.EnableEventAsync, request, cancellationToken);
 
     // ---- The four headless models. Read and apply, and headless WITHOUT EXCEPTION: no geometry, no
     // ---- DPI conversion, no font metric, no pixel coordinate, no window handle, no input-method
@@ -1825,7 +1862,9 @@ public sealed class DataServicesClient
     public Task<GetDropDownSearchStateResponse> GetDropDownSearchStateAsync(
         GetDropDownSearchStateRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_dataWindow.GetDropDownSearchStateAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.DataWindow,
+            _dataWindow.GetDropDownSearchStateAsync, request, cancellationToken);
 
     /// <summary>
     /// Applies or clears a drop-down search filter.
@@ -1848,7 +1887,9 @@ public sealed class DataServicesClient
     public Task<ApplyDropDownSearchResponse> ApplyDropDownSearchAsync(
         ApplyDropDownSearchRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_dataWindow.ApplyDropDownSearchAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.DataWindow,
+            _dataWindow.ApplyDropDownSearchAsync, request, cancellationToken);
 
     /// <summary>
     /// Reads the column-sort state and the generated sort-property string.
@@ -1866,7 +1907,9 @@ public sealed class DataServicesClient
     public Task<GetColumnSortStateResponse> GetColumnSortStateAsync(
         GetColumnSortStateRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_dataWindow.GetColumnSortStateAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.DataWindow,
+            _dataWindow.GetColumnSortStateAsync, request, cancellationToken);
 
     /// <summary>
     /// Applies an ordered multi-column sort.
@@ -1884,7 +1927,9 @@ public sealed class DataServicesClient
     public Task<ApplyColumnSortResponse> ApplyColumnSortAsync(
         ApplyColumnSortRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_dataWindow.ApplyColumnSortAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.DataWindow,
+            _dataWindow.ApplyColumnSortAsync, request, cancellationToken);
 
     /// <summary>
     /// Reads the context-menu ITEM MODEL for a row and column: labels, identifiers, enabled and split
@@ -1904,7 +1949,9 @@ public sealed class DataServicesClient
     public Task<GetContextMenuModelResponse> GetContextMenuModelAsync(
         GetContextMenuModelRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_dataWindow.GetContextMenuModelAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.DataWindow,
+            _dataWindow.GetContextMenuModelAsync, request, cancellationToken);
 
     /// <summary>
     /// Applies a context-menu item model: items, separators and the five built-in toggles.
@@ -1924,7 +1971,9 @@ public sealed class DataServicesClient
     public Task<ApplyContextMenuModelResponse> ApplyContextMenuModelAsync(
         ApplyContextMenuModelRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_dataWindow.ApplyContextMenuModelAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.DataWindow,
+            _dataWindow.ApplyContextMenuModelAsync, request, cancellationToken);
 
     /// <summary>
     /// Reads the row-selection state: the style, the selected rows, the current row, and the two
@@ -1944,7 +1993,9 @@ public sealed class DataServicesClient
     public Task<GetRowSelectStateResponse> GetRowSelectStateAsync(
         GetRowSelectStateRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_dataWindow.GetRowSelectStateAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.DataWindow,
+            _dataWindow.GetRowSelectStateAsync, request, cancellationToken);
 
     /// <summary>
     /// Applies a row-selection style and the selection changes that follow from it.
@@ -1965,7 +2016,9 @@ public sealed class DataServicesClient
     public Task<ApplyRowSelectStyleResponse> ApplyRowSelectStyleAsync(
         ApplyRowSelectStyleRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_dataWindow.ApplyRowSelectStyleAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.DataWindow,
+            _dataWindow.ApplyRowSelectStyleAsync, request, cancellationToken);
 
     // ==============================================================================================
     //  CONTRACT C-04 - dataservices.v1.ColumnExpressionService
@@ -2015,7 +2068,9 @@ public sealed class DataServicesClient
     public Task<OpenExpressionSessionResponse> OpenExpressionSessionAsync(
         OpenExpressionSessionRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.OpenExpressionSessionAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.OpenExpressionSessionAsync, request, cancellationToken);
 
     /// <summary>
     /// Closes an expression session.
@@ -2037,7 +2092,9 @@ public sealed class DataServicesClient
     public Task<CloseExpressionSessionResponse> CloseExpressionSessionAsync(
         CloseExpressionSessionRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.CloseExpressionSessionAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.CloseExpressionSessionAsync, request, cancellationToken);
 
     /// <summary>
     /// Binds a new expression to a column.
@@ -2064,7 +2121,9 @@ public sealed class DataServicesClient
     public Task<AddExpressionResponse> AddExpressionAsync(
         AddExpressionRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.AddExpressionAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.AddExpressionAsync, request, cancellationToken);
 
     /// <summary>
     /// Replaces the expression bound to a column, addressed by index or by name.
@@ -2083,7 +2142,9 @@ public sealed class DataServicesClient
     public Task<SetExpressionResponse> SetExpressionAsync(
         SetExpressionRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.SetExpressionAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.SetExpressionAsync, request, cancellationToken);
 
     /// <summary>
     /// Reads the expression bound to a column, together with its three-part binding.
@@ -2105,7 +2166,9 @@ public sealed class DataServicesClient
     public Task<GetExpressionResponse> GetExpressionAsync(
         GetExpressionRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.GetExpressionAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.GetExpressionAsync, request, cancellationToken);
 
     /// <summary>
     /// Removes the expression bound to a column, addressed by index or by name.
@@ -2120,7 +2183,9 @@ public sealed class DataServicesClient
     public Task<RemoveExpressionResponse> RemoveExpressionAsync(
         RemoveExpressionRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.RemoveExpressionAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.RemoveExpressionAsync, request, cancellationToken);
 
     /// <summary>
     /// Removes every expression bound on a DataWindow.
@@ -2135,7 +2200,9 @@ public sealed class DataServicesClient
     public Task<RemoveAllExpressionsResponse> RemoveAllExpressionsAsync(
         RemoveAllExpressionsRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.RemoveAllExpressionsAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.RemoveAllExpressionsAsync, request, cancellationToken);
 
     /// <summary>
     /// Declares a typed expression variable.
@@ -2155,7 +2222,9 @@ public sealed class DataServicesClient
     public Task<AddVariableResponse> AddVariableAsync(
         AddVariableRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.AddVariableAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.AddVariableAsync, request, cancellationToken);
 
     /// <summary>
     /// Assigns a new value to an expression variable.
@@ -2176,7 +2245,9 @@ public sealed class DataServicesClient
     public Task<SetVariableResponse> SetVariableAsync(
         SetVariableRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.SetVariableAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.SetVariableAsync, request, cancellationToken);
 
     /// <summary>
     /// Declares a variable whose value is itself an expression.
@@ -2196,7 +2267,9 @@ public sealed class DataServicesClient
     public Task<AddVariableExpressionResponse> AddVariableExpressionAsync(
         AddVariableExpressionRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.AddVariableExpressionAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.AddVariableExpressionAsync, request, cancellationToken);
 
     /// <summary>
     /// Replaces the expression behind an expression variable.
@@ -2211,7 +2284,9 @@ public sealed class DataServicesClient
     public Task<SetVariableExpressionResponse> SetVariableExpressionAsync(
         SetVariableExpressionRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.SetVariableExpressionAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.SetVariableExpressionAsync, request, cancellationToken);
 
     /// <summary>
     /// Reads the expression behind an expression variable, with its local variable data.
@@ -2226,7 +2301,9 @@ public sealed class DataServicesClient
     public Task<GetVariableExpressionResponse> GetVariableExpressionAsync(
         GetVariableExpressionRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.GetVariableExpressionAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.GetVariableExpressionAsync, request, cancellationToken);
 
     /// <summary>
     /// Declares a variable that reads from ANOTHER DataWindow in the same expression session.
@@ -2264,7 +2341,9 @@ public sealed class DataServicesClient
     public Task<AddForeignVariableResponse> AddForeignVariableAsync(
         AddForeignVariableRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.AddForeignVariableAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.AddForeignVariableAsync, request, cancellationToken);
 
     /// <summary>
     /// Sets the columns an expression depends on, in either the change-triggered or the INPUT-triggered
@@ -2285,7 +2364,9 @@ public sealed class DataServicesClient
     public Task<SetRelativeColumnsResponse> SetRelativeColumnsAsync(
         SetRelativeColumnsRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.SetRelativeColumnsAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.SetRelativeColumnsAsync, request, cancellationToken);
 
     /// <summary>
     /// Sets one per-expression flag: always-calculate, recursive, trigger-event or cacheable.
@@ -2305,7 +2386,9 @@ public sealed class DataServicesClient
     public Task<SetExpressionFlagResponse> SetExpressionFlagAsync(
         SetExpressionFlagRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.SetExpressionFlagAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.SetExpressionFlagAsync, request, cancellationToken);
 
     /// <summary>
     /// Calculates one expression for one row.
@@ -2324,7 +2407,9 @@ public sealed class DataServicesClient
     /// <para>RETRY SAFETY: SAFE in itself, but a calculation can raise events and invoke macros, so a caller's macro handler must tolerate being asked twice.</para>
     /// </remarks>
     public Task<CalcResponse> CalcAsync(CalcRequest request, CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.CalcAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.CalcAsync, request, cancellationToken);
 
     /// <summary>
     /// Calculates every bound expression across every row.
@@ -2339,7 +2424,9 @@ public sealed class DataServicesClient
     public Task<CalcAllResponse> CalcAllAsync(
         CalcAllRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.CalcAllAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.CalcAllAsync, request, cancellationToken);
 
     /// <summary>
     /// Calculates the expressions whose inputs are empty, optionally for a single row.
@@ -2357,7 +2444,9 @@ public sealed class DataServicesClient
     public Task<CalcEmptyResponse> CalcEmptyAsync(
         CalcEmptyRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.CalcEmptyAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.CalcEmptyAsync, request, cancellationToken);
 
     /// <summary>
     /// Calculates a single item by expression index.
@@ -2382,7 +2471,9 @@ public sealed class DataServicesClient
     public Task<CalcItemResponse> CalcItemAsync(
         CalcItemRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.CalcItemAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.CalcItemAsync, request, cancellationToken);
 
     /// <summary>
     /// Enables or disables the column-expression service, which is a VETOABLE change.
@@ -2411,7 +2502,9 @@ public sealed class DataServicesClient
     public Task<SetEnabledResponse> SetEnabledAsync(
         SetEnabledRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.SetEnabledAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.SetEnabledAsync, request, cancellationToken);
 
     /// <summary>
     /// Turns expression tracing on or off. Unlike the enable setter, this one is NOT vetoable.
@@ -2430,7 +2523,9 @@ public sealed class DataServicesClient
     public Task<SetTraceResponse> SetTraceAsync(
         SetTraceRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.SetTraceAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.SetTraceAsync, request, cancellationToken);
 
     /// <summary>
     /// Reads whether the column-expression service is enabled and whether tracing is on.
@@ -2445,7 +2540,9 @@ public sealed class DataServicesClient
     public Task<GetServiceStateResponse> GetServiceStateAsync(
         GetServiceStateRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.GetServiceStateAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.GetServiceStateAsync, request, cancellationToken);
 
     /// <summary>
     /// Reads the engine-state snapshot: the expression table, the REVERSE DEPENDENCY INDEX, the grammar
@@ -2467,7 +2564,9 @@ public sealed class DataServicesClient
     public Task<GetExpressionStateResponse> GetExpressionStateAsync(
         GetExpressionStateRequest request,
         CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.GetExpressionStateAsync, request, cancellationToken);
+        InvokeAsync(
+            OutboundSurface.ColumnExpression,
+            _columnExpression.GetExpressionStateAsync, request, cancellationToken);
 
     /// <summary>
     /// Streams the three events the expression engine declares on ITSELF: item-changed,
@@ -2496,6 +2595,7 @@ public sealed class DataServicesClient
         ArgumentNullException.ThrowIfNull(request);
 
         CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                OutboundSurface.ColumnExpression,
                 OutboundCallClass.Stream,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -2566,6 +2666,7 @@ public sealed class DataServicesClient
         ArgumentNullException.ThrowIfNull(handler);
 
         CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                OutboundSurface.ColumnExpression,
                 OutboundCallClass.Stream,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -2657,6 +2758,7 @@ public sealed class DataServicesClient
         ArgumentNullException.ThrowIfNull(request);
 
         CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                OutboundSurface.ColumnExpression,
                 OutboundCallClass.Stream,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -2706,15 +2808,15 @@ public sealed class DataServicesClient
     /// </returns>
     /// <remarks>
     /// <para>
-    /// THE DEADLINE COMES FROM THE COMPOSITION ROOT, WHICH IS WHAT MAKES IT LEGITIMATE. This file
-    /// previously set none, on the reasoning that a duration invented here would have no derivation and
-    /// that the policy belonged where the resilience pipeline is configured. Both halves of that were
-    /// right; what was missing was the policy. It now exists as <c>Gateway:Outbound</c>, the unary bound
-    /// is the same setting that configures the pipeline's total request timeout, and the stream bound is
-    /// derived from the upstream's own session idle lifetime - so no duration originates here.
+    /// THE DEADLINE COMES FROM THE COMPOSITION ROOT, WHICH IS WHAT MAKES IT LEGITIMATE. Setting none here,
+    /// on the reasoning that a duration invented in this file would have no derivation and
+    /// that the policy belongs where the resilience pipeline is configured, is right in both halves and
+    /// wrong as a conclusion: what it leaves missing is the policy. That policy is <c>Gateway:Outbound</c>,
+    /// the unary bound is the same setting that configures the pipeline's total request timeout, and the
+    /// stream bound is derived from the upstream's own session idle lifetime - so no duration originates here.
     /// </para>
     /// <para>
-    /// WHY CANCELLATION ALONE WAS NOT ENOUGH, since it was already threaded through every member. A
+    /// WHY CANCELLATION ALONE IS NOT ENOUGH, even though it is threaded through every member. A
     /// cancellation token bounds THIS process's willingness to wait; it tells the upstream nothing. When
     /// the caller goes away in a way the transport has not yet noticed - a half-open connection, a
     /// container killed mid-request - the upstream keeps working and keeps the server-held session or
@@ -2723,13 +2825,28 @@ public sealed class DataServicesClient
     /// </para>
     /// </remarks>
     private async Task<CallOptions> CreateAuthenticatedCallOptionsAsync(
+        OutboundSurface surface,
         OutboundCallClass callClass,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
+        // THE CREDENTIAL IS SCOPED TO THE SURFACE BEING CALLED, not to everything this client can reach.
+        ServiceTokenRequest tokenRequest = surface switch
+        {
+            OutboundSurface.DataWindow => DataWindowTokenRequest,
+            OutboundSurface.ColumnExpression => ColumnExpressionTokenRequest,
+
+            // An unrecognised surface is a programming error in this file rather than a runtime condition,
+            // and refusing is what stops it silently acquiring whichever credential happened to be first.
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(surface),
+                surface,
+                "No token request is declared for this outbound surface."),
+        };
+
         ServiceToken token = await _tokenProvider
-            .GetTokenAsync(OutboundTokenRequest, cancellationToken)
+            .GetTokenAsync(tokenRequest, cancellationToken)
             .ConfigureAwait(false);
 
         // A NARROWER GRANT IS A SUCCESSFUL OUTCOME, not a failure, so it is READ - which the token
@@ -2738,17 +2855,18 @@ public sealed class DataServicesClient
         // Read UNCONDITIONALLY - the contract obliges a caller to read the granted set rather than
         // assume its request was honoured in full - and only the reporting of it is level-guarded.
         int grantedScopeCount = token.GrantedScopes.Count;
-        int requestedScopeCount = OutboundTokenRequest.Scopes.Count;
+        int requestedScopeCount = tokenRequest.Scopes.Count;
         bool narrowed = grantedScopeCount < requestedScopeCount;
 
         if (_logger.IsEnabled(LogLevel.Debug) && narrowed)
         {
             _logger.LogDebug(
                 "Security granted {GrantedScopeCount} of {RequestedScopeCount} requested scope(s) for "
-                + "the DataServices audience. A narrowing is a successful outcome, so the call proceeds "
-                + "and the upstream decides what the credential permits.",
+                + "the DataServices audience on the {Surface} surface. A narrowing is a successful "
+                + "outcome, so the call proceeds and the upstream decides what the credential permits.",
                 grantedScopeCount,
-                requestedScopeCount);
+                requestedScopeCount,
+                surface);
         }
 
         Metadata headers = new()
@@ -2775,12 +2893,14 @@ public sealed class DataServicesClient
     /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
     /// <remarks>
     /// This helper exists so that credential attachment and argument validation are written once
-    /// rather than forty times, which is the only way to be sure every member really does attach one.
+    /// rather than once per unary member, which is the only way to be sure every member really does
+    /// attach one.
     /// It adds no behaviour of its own: no status is caught here, no payload is inspected, and no
     /// response is transformed. Members that must translate a failure do so in their own bodies, where
     /// the translation is visible.
     /// </remarks>
     private async Task<TResponse> InvokeAsync<TRequest, TResponse>(
+        OutboundSurface surface,
         Func<TRequest, CallOptions, AsyncUnaryCall<TResponse>> operation,
         TRequest request,
         CancellationToken cancellationToken)
@@ -2789,6 +2909,7 @@ public sealed class DataServicesClient
         ArgumentNullException.ThrowIfNull(request);
 
         CallOptions options = await CreateAuthenticatedCallOptionsAsync(
+                surface,
                 OutboundCallClass.Unary,
                 cancellationToken)
             .ConfigureAwait(false);

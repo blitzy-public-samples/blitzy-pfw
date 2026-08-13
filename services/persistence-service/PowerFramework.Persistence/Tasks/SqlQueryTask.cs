@@ -25,14 +25,6 @@
 //  opened and read rather than copied forward.
 //
 // -------------------------------------------------------------------------------------------------
-//  RULES POSITION (constraint C-K)
-// -------------------------------------------------------------------------------------------------
-//  review_rules returns exactly one line - "No user rules provided." - and that is the whole
-//  document. No rule is invented, inferred or back-filled from convention here. The binding
-//  constraints in their place are the enterprise-standard baseline of AAP §0.7.2 plus the named
-//  non-rule constraints C-A through C-L of AAP §0.7.3, and each non-obvious decision below cites the
-//  constraint that drives it.
-//
 // -------------------------------------------------------------------------------------------------
 //  OWNERSHIP CROSS-CHECK - WHAT THIS FILE DELIBERATELY DOES NOT IMPLEMENT (constraint C-A)
 // -------------------------------------------------------------------------------------------------

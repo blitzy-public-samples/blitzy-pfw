@@ -131,10 +131,7 @@
 //  produce an EMPTY connection string, which is the mechanical form of "no literal in source": a
 //  factory that had one embedded would fail that case rather than merely being reviewed.
 //
-//  RULES POSITION: review_rules returns exactly one line, "No user rules provided.", so no
-//  user-specified rule governs this file and none is invented. The enterprise-standard baseline of
-//  AAP 0.7.2 applies in their place, and this file is held to it in these specific terms:
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //    * DETERMINISTIC. No clock is read, no random value is drawn, no ambient culture is relied on,
 //      and no case depends on another or on the order the runner picks. Two consecutive runs were
 //      compared and produced identical outcomes for all forty-four cases.

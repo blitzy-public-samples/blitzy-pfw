@@ -583,10 +583,10 @@ public sealed class CompositionRootTests
     /// </summary>
     /// <returns>A task representing the assertion.</returns>
     /// <remarks>
-    /// THE FAILURE MODE THIS CLOSES WAS SILENT AND STRICTLY WORSE THAN A LOST LOG RECORD. With the
-    /// termination request placed after the log write, a provider that throws carried the fault out of the
-    /// mapping and left the process serving requests in a state its own invariants had already declared
-    /// impossible - and the only trace of it was the write failure the caller never saw. The write is now
+    /// THE FAILURE MODE THIS CLOSES IS SILENT AND STRICTLY WORSE THAN A LOST LOG RECORD. Place the
+    /// termination request AFTER the log write and a provider that throws carries the fault out of the
+    /// mapping, leaving the process serving requests in a state its own invariants have already declared
+    /// impossible - with the only trace being a write failure the caller never sees. The write is
     /// best effort and the termination is not, so the log fault still propagates to the caller as a fault
     /// while the process still ends.
     /// </remarks>
@@ -769,10 +769,10 @@ public sealed class CompositionRootTests
     /// chain is redacted before it is recorded and the wire receives a constant.
     /// </para>
     /// <para>
-    /// THIS ASSERTION USED TO PASS WHILE THE LITERAL WAS PUBLISHED IN FULL, and both reasons are fixed here.
-    /// The record was formatted from a redacted message and the exception was attached beside it, so a
-    /// provider rendered the unredacted original through <c>ToString()</c> - and the recorder captured only
-    /// the formatted text, so nothing could see it. The exception is now recorded as well and asserted
+    /// AN ASSERTION LIKE THIS CAN PASS WHILE THE LITERAL IS PUBLISHED IN FULL, and both reasons are
+    /// closed here. Format the record from a redacted message and attach the exception beside it, and a
+    /// provider renders the unredacted original through <c>ToString()</c> - while a recorder capturing only
+    /// the formatted text sees none of it. So the exception is recorded as well and asserted
     /// absent.
     /// </para>
     /// <para>
@@ -980,10 +980,10 @@ public sealed class CompositionRootTests
     /// </para>
     /// <para>
     /// <b>THE DIAGNOSTIC IS ASSERTED AS WELL AS THE TERMINATION, AND THE ASSERTION CHANGED.</b> This case
-    /// used to require the single sentence "not writable by this process", which the gate emitted for every
+    /// deliberately does not require the single sentence "not writable by this process", which covers every
     /// one of the four ways this can fail - including this one, where the problem is not permissions at all
-    /// but a file standing where the parent directory should be. It also required nothing about the
-    /// CONFIGURATION KEY, which the record omitted entirely while quoting the configured PATH, and the
+    /// but a file standing where the parent directory should be. It also requires the
+    /// CONFIGURATION KEY, which a record quoting only the configured PATH omits entirely, and the
     /// attached file-system exception republished that path in its own message. Measured on a running host
     /// the path appeared four times and the key none. The record now names the key, states the established
     /// failure class, describes the cause by type, and withholds the path - the rule
@@ -1399,35 +1399,34 @@ public sealed class CompositionRootTests
     //  5. THE PROVISIONED SEAMS AND THE NEGATIVES THAT REMAIN REACHABLE
     // ==============================================================================================
     //
-    //  WHAT THIS SECTION USED TO ASSERT, AND WHY IT NO LONGER DOES. Six seams of this service once
-    //  shipped as refusals - an engine that failed every write, two factories answering
-    //  E_NO_IMPLEMENTATION, and three runtimes returning the datastore failure value - and the cases
-    //  here pinned those refusals as intended behaviour. They are not. The AAP requires this service to
-    //  be the one that generates and executes SQL and the only one holding a storage provider
+    //  WHAT THIS SECTION DELIBERATELY DOES NOT ASSERT, AND WHY. Six seams of this service could ship as
+    //  refusals - an engine that fails every write, two factories answering
+    //  E_NO_IMPLEMENTATION, and three runtimes returning the datastore failure value - and a suite
+    //  here could pin those refusals as intended behaviour. They are not intended. The AAP requires this
+    //  service to be the one that generates and executes SQL and the only one holding a storage provider
     //  [AAP 0.1.1], its own file schema requires a conflict mismatch to surface as gRPC Aborted with a
     //  populated ConflictDetail and a database error's statement text to be provably redacted, and
-    //  neither is reachable through a seam that refuses before it reads anything. The refusals were
-    //  therefore replaced by the provisioned implementations, and these cases now assert what those
-    //  implementations do.
+    //  neither is reachable through a seam that refuses before it reads anything. So the seams are
+    //  provisioned implementations, and these cases assert what those implementations do.
     //
-    //  THE NEGATIVES DID NOT DISAPPEAR - THEY MOVED TO THE INPUTS THAT GENUINELY EARN THEM. An unknown
+    //  THE NEGATIVES ARE NOT ABSENT - THEY SIT ON THE INPUTS THAT GENUINELY EARN THEM. An unknown
     //  data-object name still resolves to nothing, because PowerBuilder leaves a datastore whose data
     //  object failed to load in exactly that state and the retrieval task detects it. An unknown session
     //  handle still refuses, with the transaction contract's own code rather than a not-implemented one.
-    //  A malformed grid syntax still fails with a diagnostic. What changed is that a WELL-FORMED request
-    //  against a LIVE session now succeeds, which is the whole difference between a provisioned service
-    //  and a documented gap.
+    //  A malformed grid syntax still fails with a diagnostic. What a provisioned seam adds on top of those
+    //  refusals is that a WELL-FORMED request against a LIVE session succeeds, which is the whole
+    //  difference between a provisioned service and a documented gap.
     // ==============================================================================================
     /// <summary>
     /// The SQLite engine echoes the caller's dialect, refuses before it is connected, and then performs
     /// a real connect, execute, commit and rollback.
     /// </summary>
     /// <remarks>
-    /// THE DIALECT ASSERTION IS THE LOAD-BEARING ONE AND IS UNCHANGED FROM THE REFUSING ENGINE. The
+    /// THE DIALECT ASSERTION IS THE LOAD-BEARING ONE, AND A REAL CONNECTION DOES NOT SOFTEN IT. The
     /// paging dispatcher classifies this string with two arms and a not-implemented else
-    /// [AAP 0.6.4], and provisioning a real connection must not alter what a caller is told about its
+    /// [AAP 0.6.4], and holding a real connection must not alter what a caller is told about its
     /// own dialect - the string is echoed back exactly as supplied, with no SQLite arm invented for it.
-    /// The refuse-before-connect assertions preserve the property the old case was really protecting: a
+    /// The refuse-before-connect assertions guard the property that matters alongside it: a
     /// commit that reported success without a connection would tell a caller data had been written that
     /// never was.
     /// </remarks>
@@ -2098,6 +2097,7 @@ public sealed class CompositionRootTests
     /// the graph is composed but not producible - the closest a container can come to a seam whose
     /// registration is present and broken.
     /// </param>
+    /// <param name="applyMigrationsOnStartup">Whether the host applies pending migrations as it starts.</param>
     /// <returns>A provider the gate can be run against.</returns>
     /// <remarks>
     /// THE OMISSION IS EXPRESSED AS A THROWING FACTORY RATHER THAN A MISSING REGISTRATION, because every
@@ -2199,7 +2199,7 @@ public sealed class CompositionRootTests
     /// <summary>
     /// Removes a directory a case created, tolerating one that was never created at all.
     /// </summary>
-    /// <param name="directory">The directory to remove.</param>
+    /// <param name="dataDirectory">The directory the database file lives in.</param>
     /// <remarks>
     /// SCOPED TO A PATH THIS CASE ITSELF CHOSE UNDER THE TEMPORARY ROOT, and never to a configured
     /// storage directory: the persistence volume's state is what the paired characterization captures
@@ -2287,6 +2287,21 @@ public sealed class CompositionRootTests
 
         /// <inheritdoc/>
         public bool AutoCommit { get; set; }
+
+        /// <summary>Moves the auto-commit mode and answers success, because this double opens no transaction.</summary>
+        /// <param name="autoCommit">The mode to put in force.</param>
+        /// <returns>Always a succeeded state.</returns>
+        /// <remarks>
+        /// ROUTED THROUGH THE PROPERTY so whatever the property records still records. A double with no
+        /// provider behind it has nothing the transition can fail on, which is the contract's own
+        /// nothing-to-do case.
+        /// </remarks>
+        public SqlState TrySetAutoCommit(bool autoCommit)
+        {
+            AutoCommit = autoCommit;
+
+            return SqlState.Succeeded();
+        }
 
         /// <inheritdoc/>
         public void ApplyConnectionFields(in TransactionData transData) => Dbms = transData.Dbms;
@@ -2582,8 +2597,8 @@ public sealed class CompositionRootTests
     /// <remarks>
     /// EVALUATED THROUGH THE CONTAINER'S OWN <see cref="IAuthorizationService"/>, so what is under test is
     /// the policy AS REGISTERED - the assertion and the authenticated-user requirement together - rather
-    /// than a re-statement of it. Authentication alone previously satisfied every contract, which is the
-    /// least-privilege failure this closes.
+    /// than a re-statement of it. Authentication alone satisfying every contract is the
+    /// least-privilege failure this rules out.
     /// </remarks>
     [Theory]
     [InlineData("persistence.read", "persistence.read", true)]
@@ -2788,10 +2803,10 @@ internal sealed class CompositionHost : WebApplicationFactory<Program>
     /// </summary>
     /// <remarks>
     /// <para>
-    /// PER INSTANCE, AND THAT REPLACED A FIXED NAME. Every host in this file used to be configured with
-    /// one constant path under the system temporary directory, which produced three failures that have
-    /// nothing to do with the composition root. Residue from an earlier run made a host observe a
-    /// database it did not create - and because readiness VERIFIES THE SCHEMA, a run could pass on a
+    /// PER INSTANCE RATHER THAN A FIXED NAME. Configuring every host in this file with
+    /// one constant path under the system temporary directory produces three failures that have
+    /// nothing to do with the composition root. Residue from an earlier run makes a host observe a
+    /// database it did not create - and because readiness VERIFIES THE SCHEMA, a run can pass on a
     /// schema a previous run had left behind rather than on one it provisioned itself. Two concurrent
     /// runs of this suite on one agent, which is routine under a parallel batch, shared a directory and a
     /// SQLite file. And the readiness case's own provisioning was observable by every other case in the
@@ -2799,7 +2814,7 @@ internal sealed class CompositionHost : WebApplicationFactory<Program>
     /// </para>
     /// <para>
     /// NOTHING NEEDS TO PRE-CREATE IT. The service creates its own data directory during startup
-    /// [<c>Program.cs:L1658</c>, <c>Data/SqliteConnectionFactory.cs:L2644</c>], which is the one
+    /// [<c>Program.cs:L1750</c>, <c>Data/SqliteConnectionFactory.cs:L2638</c>], which is the one
     /// filesystem mutation it permits itself, so a host pointed at a path that does not yet exist is the
     /// ORDINARY case rather than a fault - and it is the case a deployment on fresh storage presents.
     /// The rows that assert a data-directory FAULT compose their own paths and are unaffected.
@@ -2984,7 +2999,7 @@ internal sealed class CompositionHost : WebApplicationFactory<Program>
         builder.UseSetting("Jwt:Audience", TrustedAudience);
         builder.UseSetting("Jwt:RequireHttpsMetadata", "true");
 
-        // THE PERMITTED-CALLER ROSTER, SUPPLIED BECAUSE THE HOST NOW REFUSES WITHOUT ONE. Authentication
+        // THE PERMITTED-CALLER ROSTER, SUPPLIED BECAUSE THE HOST REFUSES WITHOUT ONE. Authentication
         // is not authorization: the four gRPC contracts require the operation's scope AND a caller
         // identity this service serves, so an empty roster refuses every caller and the options contract
         // requires at least one entry. It carries the subject THIS host's own forged token claims, so

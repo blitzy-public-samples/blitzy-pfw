@@ -19,9 +19,9 @@
 //    1. NOTHING FROM THE EXCEPTION IS ON THE WIRE - not the type name, not the message, in either field.
 //    2. THE FAULT IS STILL IDENTIFIABLE, joined to the payload by the same id. A "fix" that merely deleted
 //       everything would pass property 1 and leave an operator with an unactionable failure.
-//    3. THE EXCEPTION OBJECT REACHES NEITHER CHANNEL. It used to be attached to the log record, which every
-//       provider renders by calling ToString() - message chain and stack together - so the message the wire
-//       was carefully denied was published in full one layer over. A log record is a different trust domain
+//    3. THE EXCEPTION OBJECT REACHES NEITHER CHANNEL. Attaching it to the log record is the obvious thing
+//       to do, and every provider renders that by calling ToString() - message chain and stack together -
+//       so the message the wire is carefully denied gets published in full one layer over. A log record is a different trust domain
 //       from this process, and a host holds this expression's variable values, so its message is caller data
 //       wherever it came from.
 //
@@ -115,7 +115,7 @@ public sealed class ExpressionSessionHostFaultTests
         // PROPERTY 2: THE DIAGNOSTIC SURVIVES, IN ITS ALLOWLISTED FORM. One error record naming the
         // exception's TYPE CHAIN, and NO exception object.
         //
-        // THIS ASSERTION USED TO REQUIRE THE OPPOSITE, AND THAT WAS THE DEFECT IT FROZE. It demanded the
+        // REQUIRING THE OPPOSITE HERE WOULD FREEZE A DEFECT. That assertion demands the
         // exception object be attached "so a configured provider writes type, message and stack in full" -
         // which is precisely the leak: a host holds this expression's variable values, so its message is
         // caller data wherever it came from, and a log record is a different trust domain from this process.

@@ -518,6 +518,7 @@ internal sealed class CommandTaskRegistry
     /// </summary>
     /// <param name="session">The session the task runs against.</param>
     /// <param name="components">The initialized proxy pair.</param>
+    /// <param name="diagnostic">Receives the diagnostic text when the call refuses; empty on success.</param>
     /// <returns>The registered record, carrying the handle callers must quote thereafter.</returns>
     /// <exception cref="ArgumentNullException">Either argument is <see langword="null"/>.</exception>
     /// <remarks>
@@ -597,6 +598,21 @@ internal sealed class CommandTaskRegistry
             return false;
         }
 
+        // 🔴 A FOREIGN HANDLE JOINS THE SAME ONE OUTCOME, AND THE ENTROPY OF THE HANDLE IS NOT A SUBSTITUTE
+        // FOR THIS CHECK. Unguessable bounds DISCOVERY, not USE: a handle that leaks through a log, a proxy
+        // trace or a caller's own bug would otherwise let another authenticated caller execute statements
+        // through a task bound to a third party's transaction - inside that transaction, and therefore
+        // inside its writes. Compared against HandlePrincipalResolver.IsCaller, the same identity the quota
+        // attributed the task to, and collapsed into not-found so the difference is unobservable. The test
+        // precedes the activity stamp so a leaked handle cannot be used to keep another caller's task from
+        // being reclaimed.
+        if (!_principals.IsCaller(task.Principal))
+        {
+            task = null;
+
+            return false;
+        }
+
         // A HANDLE IN USE IS NOT AN ABANDONED HANDLE: refreshed on every call that names this task.
         Volatile.Write(ref task.LastActivityTicks, _time.GetUtcNow().UtcTicks);
 
@@ -613,6 +629,15 @@ internal sealed class CommandTaskRegistry
     /// the same task therefore produce exactly one removal - and therefore exactly one disposal - and
     /// the loser sees the same unknown-handle outcome as any other stale handle.
     /// </returns>
+    /// <remarks>
+    /// <b>THIS MEMBER TESTS NO OWNERSHIP, AND ITS PARAMETER IS AN IDENTITY RATHER THAN A HANDLE TO SAY
+    /// SO.</b> Its callers are the reclaim pass, the shutdown drain and the release path - the first two
+    /// running on the service's behalf where no request identity exists, and the third passing the identity
+    /// of a task it has ALREADY resolved through
+    /// <see cref="TryResolve(TaskHandle?, out CommandTask?)"/>, which is where the ownership test lives. An
+    /// ownership test here would additionally break the maintenance paths, which would resolve every stored
+    /// principal against the unattributed sentinel and collect nothing.
+    /// </remarks>
     internal bool TryRemove(string taskId, out CommandTask? task)
     {
         if (!_tasks.TryRemove(taskId, out task) || task is null)
@@ -1068,7 +1093,7 @@ internal sealed class CommandService : GeneratedCommandServiceBase
     }
 
     /// <summary>
-    /// Whether a statement is present but blank - see <see cref="BlankStatementDiagnostic"/>.
+    /// Whether a statement is present but blank - see <c>BlankStatementDiagnostic</c>.
     /// </summary>
     /// <param name="sql">The statement as sent.</param>
     /// <returns>
@@ -1360,15 +1385,15 @@ internal sealed class CommandService : GeneratedCommandServiceBase
             };
         }
 
-        // ONE DISPOSAL PATH FOR EVERY ARM THAT DOES NOT PUBLISH, replacing the two separate explicit
-        // discards this handler used to carry. The pair is torn down through a throwaway CommandTask because
+        // ONE DISPOSAL PATH FOR EVERY ARM THAT DOES NOT PUBLISH, rather than two separate explicit
+        // discards. The pair is torn down through a throwaway CommandTask because
         // the record's own disposal is what guarantees the order - PROXY BEFORE WORKER, since the proxy
         // borrows the worker's commit signal [n_cst_threading_task_sqlbase.sru:L218] - and the worker's
         // disposal is what returns its pool reference [n_cst_thread_task_sqlbase.sru:L160]. Exactly one
         // throwaway is ever constructed, so the components are never disposed twice.
         //
-        // The gate wait below is cancellable, so a caller that goes away while queued is now one of those
-        // arms - and it is precisely the arm a per-branch drop would have missed.
+        // The gate wait below is cancellable, so a caller that goes away while queued is one of those
+        // arms - and it is precisely the arm a per-branch drop would miss.
         bool published = false;
 
         try
@@ -1476,10 +1501,15 @@ internal sealed class CommandService : GeneratedCommandServiceBase
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        string? taskId = request.Task?.TaskId;
-
-        if (string.IsNullOrEmpty(taskId)
-            || !_tasks.TryRemove(taskId, out CommandTask? task)
+        // 🔴 RESOLVED BEFORE IT IS REMOVED, AND THE EXTRA STEP IS THE OWNERSHIP TEST. Removing straight from
+        // the wire handle - which is what this method used to do - reached the table by identity alone, so a
+        // caller holding a handle it did not own could dispose another principal's task: no ability to read
+        // anything, and a denial of service that needs only a leaked value. The resolve is where ownership
+        // is compared, and it does NOT remove, so the removal below still races exactly as before and
+        // exactly one of two concurrent releases wins it.
+        if (!_tasks.TryResolve(request.Task, out CommandTask? resolved)
+            || resolved is null
+            || !_tasks.TryRemove(resolved.TaskId, out CommandTask? task)
             || task is null)
         {
             return Task.FromResult(new ReleaseCommandTaskResponse
@@ -1488,7 +1518,7 @@ internal sealed class CommandService : GeneratedCommandServiceBase
             });
         }
 
-        // ⚠ NOT AN UNCONDITIONAL TEARDOWN ANY MORE. Disposing here regardless would release both halves of
+        // ⚠ DELIBERATELY NOT AN UNCONDITIONAL TEARDOWN. Disposing here regardless would release both halves of
         // the proxy pair underneath an Exec still inside the worker's body - a teardown with work pending,
         // which the legacy's own threading notes name as a memory fault [docs/PB多线程绕坑提示.md, hazard 1].
         // The release records itself and disposes only when nothing is in flight; otherwise the duty passes
@@ -1498,7 +1528,7 @@ internal sealed class CommandService : GeneratedCommandServiceBase
             task.Dispose();
         }
 
-        _logger?.LogDebug("Command task {TaskId} released.", taskId);
+        _logger?.LogDebug("Command task {TaskId} released.", task.TaskId);
 
         return Task.FromResult(new ReleaseCommandTaskResponse
         {
@@ -1709,8 +1739,8 @@ internal sealed class CommandService : GeneratedCommandServiceBase
     /// not here.</b> There the remainder names a DataWindow object rather than SQL -
     /// <c>if Left(sql,1) = "@" then ds.DataObject = Mid(sql,2)</c>
     /// [<c>n_cst_thread_trans.sru:L309-L310</c>] - and its managed translation is C-05's separate
-    /// <c>data_object</c> field. An earlier revision of this remark named that meaning as though it were
-    /// this verb's, which is how the mode came to be documented as absent from a service that carries it.
+    /// <c>data_object</c> field. Attributing that meaning to THIS verb is the mistake to avoid: it is how
+    /// the caching mode gets documented as absent from a service that in fact carries it.
     /// </para>
     /// <para>
     /// <b>MULTI-STATEMENT BATCH EXECUTION is likewise carried in this one string</b> and is likewise the
@@ -1741,10 +1771,10 @@ internal sealed class CommandService : GeneratedCommandServiceBase
         // OVERSIGHT (constraint C-B, AAP G2). The oracle's guard is an EMPTINESS test - `if sql = "" then
         // return RetCode.E_INVALID_SQL` [n_cst_threading_task_sqlbase.sru:L45], repeated in the task body
         // [n_cst_thread_task_sqlbase.sru:L65-L68] - so a run of spaces is ACCEPTED, stored and submitted,
-        // and whatever the provider answers for it is the answer. A boundary test for blankness was added
-        // here and has been withdrawn: it refused a statement the legacy accepts, which makes this port
-        // STRICTER than its oracle, and being stricter is a behaviour change in exactly the same way being
-        // laxer would be. A caller that submits whitespace still gets what the legacy gave it.
+        // and whatever the provider answers for it is the answer. A BOUNDARY TEST FOR BLANKNESS IS THE
+        // TEMPTING ADDITION and is not available: it refuses a statement the legacy accepts, which makes
+        // this port STRICTER than its oracle, and being stricter is a behaviour change in exactly the same
+        // way being laxer would be. A caller that submits whitespace gets what the legacy gives it.
         if (!TryLease(task, out OperationStatus refusal))
         {
             return Task.FromResult(new SetCommandSqlResponse { Status = refusal });

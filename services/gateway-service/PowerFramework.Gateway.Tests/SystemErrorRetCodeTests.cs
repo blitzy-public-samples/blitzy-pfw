@@ -13,9 +13,9 @@
 //                              retcode.sru:L42], and CANCELLED is excluded from IsFailed, so a
 //                              cancellation is NEITHER [isfailed.srf:L11-L13]. Payload field 1 is
 //                              arbitrary wire text and the legacy long conversion maps anything
-//                              unparseable to ZERO [pfw.sra:L117], so the assert path could publish
-//                              retCode 0 or 1 in a 500 body that had just terminated the process.
-//                              ResolveRetCode now applies the kernel's own IsFailed predicate, which
+//                              unparseable to ZERO [pfw.sra:L117], so an unguarded assert path can
+//                              publish retCode 0 or 1 in a 500 body that has just terminated the process.
+//                              ResolveRetCode applies the kernel's own IsFailed predicate, which
 //                              is the same guard the four Program.cs ClassifyFailure methods apply.
 //
 //                           2. A DECODE THAT DISCARDS FIELDS SAYS SO. Two legacy behaviours discard
@@ -44,6 +44,10 @@
 //  function covered by the decode-protocol rows elsewhere, and the last two belong to
 //  SystemErrorObservabilityTests, whose RecordingLogger, RecordedLogEntry and
 //  StubHostApplicationLifetime this file reuses rather than duplicating.
+//
+//  LOCATOR CONVENTION: every bare `pfw.sra:L...` in this file means ws_objects/pfw.pbl.src/pfw.sra,
+//  the framework application - never the same-named packager object at
+//  ws_objects/pfw.pack.pbl.src/pfw.sra (AAP 0.8.6 R7).
 // ==================================================================================================
 
 using Microsoft.AspNetCore.Http;
@@ -383,7 +387,7 @@ public sealed class SystemErrorRetCodeTests
 
     /// <summary>
     /// The observation reaches the operator record, which is the whole point of computing it: a
-    /// terminal fault whose payload lost four fields is now diagnosable as such.
+    /// terminal fault whose payload lost four fields is diagnosable as such.
     /// </summary>
     [Fact]
     public async Task TheOperatorRecordReportsThatFourFieldsWereDiscarded()

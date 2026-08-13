@@ -3,19 +3,19 @@
 //  ------------------------------------------------------------------------------------------------
 //  WHAT THIS FILE GUARDS, AND WHY A GUARD IS NEEDED AT ALL
 //
-//  This service used to read the four inbound token-validation checks - issuer, audience, lifetime and
-//  signature - out of configuration and hand whatever it found to the bearer handler. A settings file
-//  could therefore turn any of them off while the host reported healthy, and each one removes a whole
-//  class of forgery: without issuer validation a credential from any issuer is accepted, so Security
+//  READING the four inbound token-validation checks - issuer, audience, lifetime and
+//  signature - out of configuration and handing whatever is found to the bearer handler is the obvious
+//  shape, and it lets a settings file turn any of them off while the host reports healthy. Each one
+//  removes a whole class of forgery: without issuer validation a credential from any issuer is accepted, so Security
 //  stops being the sole authority this boundary trusts; without audience validation a credential minted
 //  for Gateway, Persistence or Security is replayable here, which is precisely what the
 //  one-audience-per-token rule of contract C-01 exists to prevent; without lifetime validation the short
 //  lifetimes Security mints bound nothing; without signature validation any well-formed token is
 //  accepted.
 //
-//  The remedy has two halves, and BOTH need a test or the pair is only half true:
+//  The discipline has two halves, and BOTH need a test or the pair is only half true:
 //
-//    1. The composition root now assigns all four LITERALLY, so a configured value cannot reach the
+//    1. The composition root assigns all four LITERALLY, so a configured value cannot reach the
 //       handler.
 //    2. Because the assignment is literal, a configured `false` would be SILENTLY IGNORED - which is
 //       the more dangerous failure of the two, since an operator would believe it applied. So the

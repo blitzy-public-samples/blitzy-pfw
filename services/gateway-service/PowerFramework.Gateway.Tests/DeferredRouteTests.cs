@@ -548,9 +548,17 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
                 RetCode.E_INVALID_ARGUMENT,
                 AlreadyExistsProblemType
             },
+            // 🔴 500, NOT 501, AND THIS ROW SITTING IN THIS FILE IS WHY THE DEFECT SURVIVED SO LONG. The
+            // reserved deferred-capability routes are this suite's subject and they answer 501; this table is
+            // about the PROJECTED routes, every one of which is implemented. An upstream reporting a method
+            // its own contract publishes as unimplemented is deployment or version skew, and answering it
+            // with the reserved routes' status made the two indistinguishable to a caller reading only the
+            // published contract - while gateway.v1.yaml declares 501 on the eight reserved operations and on
+            // no projected one, so the status was undeclared as well (AAP 0.4.4, C-D). The legacy code is
+            // unchanged and is what names the condition.
             {
                 StatusCode.Unimplemented,
-                HttpStatusCode.NotImplemented,
+                HttpStatusCode.InternalServerError,
                 RetCode.E_NO_IMPLEMENTATION,
                 null
             },
@@ -1026,9 +1034,9 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
     /// <c>shared/PowerFramework.Contracts.Tests/ReservedRouteMetadataTests.cs</c> PINS ON THE AUTHORED
     /// DOCUMENT. Pinning both is the point: the authored YAML and the runtime-generated description are
     /// two artifacts a consumer may fetch, and if they disagree about a response set then which contract
-    /// a client obeys depends on where it was generated from. An earlier revision of the runtime declared
-    /// <c>501</c> alone while the authored document declared both, and that divergence is exactly what
-    /// this exactness detects. <c>501</c> remains the only outcome any handler computes; <c>401</c> is the
+    /// a client obeys depends on where it was generated from. A runtime that declared <c>501</c> alone
+    /// while the authored document declared both is exactly the divergence this exactness detects.
+    /// <c>501</c> is the only outcome any handler computes; <c>401</c> is the
     /// pre-handler refusal the bearer requirement guarantees, and declaring it says nothing about the
     /// route evaluating anything.
     /// </para>
@@ -1107,10 +1115,10 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
             Assert.True(responses.TryGetProperty("501", out _));
 
             // THE REFUSAL THAT PRECEDES THE 501 IS DECLARED TOO. gateway.v1.yaml gives each of these eight
-            // operations exactly two responses, and the runtime metadata used to declare only one of them -
-            // so a caller reading the generated document saw a route that could only ever answer 501, while
-            // an untokened request actually got 401. Asserting it here is what keeps the projection and the
-            // authored contract from drifting apart again.
+            // operations exactly two responses, and runtime metadata that declares only one of them leaves
+            // a caller reading the generated document seeing a route that can only ever answer 501, while
+            // an untokened request actually gets 401. Asserting it here is what keeps the projection and the
+            // authored contract from drifting apart.
             Assert.True(
                 responses.TryGetProperty("401", out _),
                 "A reserved route is authenticated, so its declared response set includes the challenge.");
@@ -1460,12 +1468,9 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
     /// Every upstream status translates exactly as the ingress contract fixes it.
     /// </summary>
     /// <param name="upstreamStatus">The gRPC status the upstream answered with.</param>
+    /// <param name="synthesizedByTheTransport">Whether the transport synthesized the value rather than the caller supplying it.</param>
     /// <param name="expectedHttpStatus">The HTTP status the projection must publish.</param>
     /// <param name="expectedRetCode">The legacy return code the projection must publish.</param>
-    /// <param name="expectedProblemType">
-    /// The problem type the contract fixes for this status, or <see langword="null"/> where RFC 9457's own
-    /// default applies.
-    /// </param>
     /// <remarks>
     /// <para>
     /// THE TABLE IS THE CONTRACT. All thirty-nine projected operations share ONE failure translation, so an
@@ -1485,14 +1490,15 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
     /// </summary>
     /// <remarks>
     /// <para>
-    /// 🔴 THE HALF OF ADJUDICATION A2 THAT WAS MISSING. <c>Unavailable</c> was already told apart by the
-    /// transport exception on its status: a status the CLIENT synthesized from a failed transport carries
-    /// one, a status the SERVER answered does not. <c>Internal</c> was not, and it needed to be - a stalled
+    /// 🔴 THE HALF OF ADJUDICATION A2 MOST EASILY LEFT OUT. <c>Unavailable</c> is the obvious status to tell
+    /// apart by the transport exception on it: a status the CLIENT synthesized from a failed transport carries
+    /// one, a status the SERVER answered does not. <c>Internal</c> needs the same treatment - a stalled
     /// TLS or HTTP/2 HANDSHAKE, which is what an upstream process that is running but no longer reading its
     /// socket produces, is reported by Grpc.Net as <c>Internal</c> rather than <c>Unavailable</c>, because
-    /// the failure happened while the connection was still being established. So a call that never reached
-    /// the upstream at all was answered <c>500 E_INTERNAL_ERROR</c>: it blamed this service for an upstream
-    /// that had frozen, sent an operator to the wrong logs, and told the caller nothing was worth retrying.
+    /// the failure happens while the connection is still being established. Without it a call that never
+    /// reached the upstream at all is answered <c>500 E_INTERNAL_ERROR</c>: blaming this service for an
+    /// upstream that has frozen, sending an operator to the wrong logs, and telling the caller nothing is
+    /// worth retrying.
     /// </para>
     /// <para>
     /// BOTH DIRECTIONS ARE ASSERTED, which is the point. The two server-answered rows are what stop this

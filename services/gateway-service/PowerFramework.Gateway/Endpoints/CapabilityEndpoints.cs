@@ -4,14 +4,14 @@
 //  CONTRACT      shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml is AUTHORITATIVE FOR THE WIRE,
 //                and every wire fact below was taken from it rather than from prose:
 //
-//                    path                /v1/capabilities                        [gateway.v1.yaml:L446]
-//                    method              GET, and only GET                       [gateway.v1.yaml:L447]
-//                    operationId         getCapabilities                         [gateway.v1.yaml:L448]
-//                    contract            C-09                                    [gateway.v1.yaml:L449]
-//                    tag                 Capabilities                            [gateway.v1.yaml:L450]
-//                    200                 CapabilityReport                        [gateway.v1.yaml:L509-L513]
-//                    401                 responses/Unauthorized, problem+json    [gateway.v1.yaml:L514-L515]
-//                    authorization       the DOCUMENT level bearer requirement   [gateway.v1.yaml:L347-L348]
+//                    path                /v1/capabilities                        [gateway.v1.yaml:L584]
+//                    method              GET, and only GET                       [gateway.v1.yaml:L585]
+//                    operationId         getCapabilities                         [gateway.v1.yaml:L586]
+//                    contract            C-09                                    [gateway.v1.yaml:L587]
+//                    tag                 Capabilities                            [gateway.v1.yaml:L589]
+//                    200                 CapabilityReport                        [gateway.v1.yaml:L640-L645]
+//                    401                 responses/Unauthorized, problem+json    [gateway.v1.yaml:L646-L647]
+//                    authorization       the DOCUMENT level bearer requirement   [gateway.v1.yaml:L471-L472]
 //
 //  LEGACY ORACLE ws_objects/pfw.shared.pbl.src/enums.sru:L40-L49    the eight bits and the composite
 //                ws_objects/pfw.pbl.src/pfw.sra:L91, :L108          the mask's only legacy call site,
@@ -157,7 +157,7 @@
 //  ONE RECONCILIATION, STATED OPENLY BECAUSE IT LOOKS LIKE A CONFLICT
 //  ----------------------------------------------------------------------------------------------------
 //  gateway.v1.yaml makes `phaseOneDestination` a REQUIRED member of every capability entry
-//  [gateway.v1.yaml:L4457] and closes its value set to four tokens [gateway.v1.yaml:L4508-L4510], one of
+//  [gateway.v1.yaml:L5691] and closes its value set to four tokens [gateway.v1.yaml:L5749-L5750], one of
 //  which names the service that owns storage. Emitting that token is therefore a wire obligation, and
 //  omitting the member would break the schema's own required list.
 //
@@ -203,7 +203,7 @@ public static class CapabilityEndpoints
     /// The route the published contract declares for the capability projection.
     /// </summary>
     /// <remarks>
-    /// Spelled exactly as <c>shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml:L446</c> spells it.
+    /// Spelled exactly as <c>shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml:L584</c> spells it.
     /// The contract declares one verb for it, <c>GET</c>, and no sub-resource.
     /// </remarks>
     private const string CapabilitiesRoute = "/v1/capabilities";
@@ -229,7 +229,7 @@ public static class CapabilityEndpoints
 
     /// <summary>
     /// The published operation identifier, <c>getCapabilities</c>
-    /// [<c>gateway.v1.yaml:L448</c>].
+    /// [<c>gateway.v1.yaml:L586</c>].
     /// </summary>
     /// <remarks>
     /// Applied through <c>WithName</c> so that the document this service generates carries the same
@@ -238,12 +238,12 @@ public static class CapabilityEndpoints
     private const string GetCapabilitiesOperationId = "getCapabilities";
 
     /// <summary>
-    /// The published tag, <c>Capabilities</c> [<c>gateway.v1.yaml:L450</c>], whose contract is C-09.
+    /// The published tag, <c>Capabilities</c> [<c>gateway.v1.yaml:L589</c>], whose contract is C-09.
     /// </summary>
     private const string CapabilitiesTag = "Capabilities";
 
     /// <summary>
-    /// The published operation summary, carried verbatim from <c>gateway.v1.yaml:L451</c>.
+    /// The published operation summary, carried verbatim from <c>gateway.v1.yaml:L590</c>.
     /// </summary>
     private const string GetCapabilitiesSummary =
         "Project the framework's eight-bit capability gate. Token required.";
@@ -252,7 +252,7 @@ public static class CapabilityEndpoints
     /// The operation description surfaced in the generated OpenAPI document.
     /// </summary>
     /// <remarks>
-    /// A condensed restatement of <c>gateway.v1.yaml:L452-L508</c>. The hand-authored contract carries
+    /// A condensed restatement of <c>gateway.v1.yaml:L591-L638</c>. The hand-authored contract carries
     /// the full narrative and remains authoritative; this text exists so the generated document is
     /// self-describing without duplicating several screens of prose into a string literal, where it
     /// could drift from the contract unnoticed.
@@ -283,7 +283,7 @@ public static class CapabilityEndpoints
     /// </para>
     /// <para>
     /// <b>Authorization is taken from the contract and not guessed.</b>
-    /// <c>gateway.v1.yaml:L347-L348</c> declares a document-level bearer requirement, and
+    /// <c>gateway.v1.yaml:L471-L472</c> declares a document-level bearer requirement, and
     /// <c>GET /health</c> is the only operation in the whole document that overrides it. This operation
     /// does not override it, so a token is required and the response without one is <c>401</c>. There is
     /// deliberately no environment-conditional variant of that posture: an anonymous variant "for
@@ -302,7 +302,7 @@ public static class CapabilityEndpoints
                  .WithDescription(GetCapabilitiesDescription)
                  .ProducesProblem(StatusCodes.Status401Unauthorized)
 
-                 // The 403 this route can now answer, declared where a reviewer diffing against the
+                 // The 403 this route can answer, declared where a reviewer diffing against the
                  // published contract will look for it. The scope policy below is what produces it: a
                  // valid token that does not carry `capabilities` is refused as INSUFFICIENT rather than
                  // as absent, which is the distinction the contract's own two statuses exist to make.
@@ -394,7 +394,7 @@ public static class CapabilityEndpoints
         IReadOnlyList<string> declaredNames = CapabilityFlags.KnownCapabilityNames;
 
         // FAIL FAST ON A VOCABULARY CHANGE, because the published array is closed at exactly eight
-        // [gateway.v1.yaml:L4444-L4445, minItems and maxItems both 8]. A ninth or a seventh capability in
+        // [gateway.v1.yaml:L5678-L5679, minItems and maxItems both 8]. A ninth or a seventh capability in
         // the shared catalogue is a change to the PUBLISHED CONTRACT, so it must break loudly here rather
         // than quietly emit an array of the wrong length that a schema validator would reject downstream.
         // This mirrors the framework's own posture: a structural fault stops the process rather than
@@ -468,10 +468,11 @@ public static class CapabilityEndpoints
             //  which genuinely is 3855 - exists for an entirely different purpose and must never be used
             //  here.
             //
-            //  Widened from uint to long because the wire member is declared `format: int64` with the
-            //  unsigned 32-bit domain [gateway.v1.yaml:L4416-L4418]. The contract additionally declares
-            //  it `const: 3847`, which the C# type system cannot express; consuming the single ported
-            //  constant is what keeps that promise, and the parity test asserts it.
+            //  Widened from uint to long because the wire member is declared `format: int64` so that the
+            //  unsigned 32-bit domain fits without a negative projection [gateway.v1.yaml:L5648-L5651,
+            //  the `allMask` member]. The contract additionally declares it `const: 3847`, which the C#
+            //  type system cannot express; consuming the single ported constant is what keeps that
+            //  promise, and the parity test asserts it.
             // ==========================================================================================
             AllMask = CapabilityFlags.AllCapabilitiesMask,
 
@@ -479,7 +480,7 @@ public static class CapabilityEndpoints
             // through 7 - values 16, 32, 64 and 128 - are unassigned in the legacy declaration, which
             // runs 1, 2, 4, 8 and then jumps to 256, and anything above 2048 is unclaimed as well. The
             // legacy accepts such a mask silently, so a configuration carrying a future or mistaken bit
-            // starts and says so here instead of failing [gateway.v1.yaml:L4437-L4441]. No entry is
+            // starts and says so here instead of failing [gateway.v1.yaml:L5667-L5675]. No entry is
             // published for any of those positions, because no INIT_FLAG_ENABLE_ constant names one.
             UnrecognizedBits = gate.UnrecognizedBits,
 
@@ -514,7 +515,7 @@ public static class CapabilityEndpoints
     /// </para>
     /// <para>
     /// The destinations are the Phase-1 mapping of <c>docs/ARCHITECTURE.md</c> §6.1, restated in the
-    /// contract at <c>gateway.v1.yaml:L465-L474</c>. Exactly one of the eight resolves to a service that
+    /// contract at <c>gateway.v1.yaml:L5747-L5756</c>. Exactly one of the eight resolves to a service that
     /// exists in this phase; the other seven name capability areas outside it, which is what tells a
     /// caller that enabling one of those bits reports configuration and has no runtime effect here. Each
     /// of those seven is a NAME in a payload and nothing else: no client, no handler, no interface, no
@@ -601,7 +602,7 @@ public static class CapabilityEndpoints
 /// </para>
 /// <para>
 /// Required-ness follows the contract exactly. <c>effectiveMask</c>, <c>allMask</c> and
-/// <c>capabilities</c> are required [<c>gateway.v1.yaml:L4405</c>]; <c>unrecognizedBits</c> is not, and
+/// <c>capabilities</c> are required [<c>gateway.v1.yaml:L5633</c>]; <c>unrecognizedBits</c> is not, and
 /// is therefore declared without <see langword="required"/> so the generated document agrees with the
 /// hand-authored one. The handler populates it on every response regardless, because an optional member
 /// that is always present is a superset of the contract and a required member that is sometimes absent
@@ -617,7 +618,7 @@ public sealed record CapabilityReport
     /// The full unsigned 32-bit range is representable and none of it is rejected: the configured value
     /// is projected with an unchecked conversion, so a negative configured value wraps rather than
     /// failing. That reproduces the legacy signed-to-unsigned handover, which performs no check either
-    /// [<c>gateway.v1.yaml:L4406-L4415</c>].
+    /// [<c>gateway.v1.yaml:L5635-L5646</c>].
     /// </remarks>
     [JsonPropertyName("effectiveMask")]
     public required long EffectiveMask { get; init; }
@@ -629,7 +630,7 @@ public sealed record CapabilityReport
     /// <para>
     /// Fixed by the legacy declaration at <c>ws_objects/pfw.shared.pbl.src/enums.sru:L49</c> rather than
     /// by this deployment, which is why the contract declares it <c>const</c>
-    /// [<c>gateway.v1.yaml:L4419-L4420</c>]. It is a <b>seven-term</b> sum that deliberately omits
+    /// [<c>gateway.v1.yaml:L5648-L5651</c>]. It is a <b>seven-term</b> sum that deliberately omits
     /// <c>INIT_FLAG_ENABLE_BLINKFAST</c> (8), so it is <b>not</b> the bitwise union of the eight declared
     /// bits - that union would be <c>3855</c>, and a consumer computing it that way disagrees with the
     /// framework by exactly the <c>BLINKFAST</c> bit.
@@ -648,7 +649,7 @@ public sealed record CapabilityReport
     /// </summary>
     /// <remarks>
     /// Reported rather than rejected, so a configuration carrying a future or mistaken bit starts and
-    /// says so [<c>gateway.v1.yaml:L4437-L4441</c>]. Zero when every set bit is a declared capability.
+    /// says so [<c>gateway.v1.yaml:L5667-L5675</c>]. Zero when every set bit is a declared capability.
     /// The unassigned positions are values 16, 32, 64 and 128, which sit in the legacy's own gap between
     /// <c>INIT_FLAG_ENABLE_BLINKFAST</c> (8) and <c>INIT_FLAG_ENABLE_ORCA</c> (256), plus everything
     /// above <c>INIT_FLAG_ENABLE_WEBVIEW</c> (2048). No capability entry is published for any of them,
@@ -662,7 +663,7 @@ public sealed record CapabilityReport
     /// <c>ws_objects/pfw.shared.pbl.src/enums.sru:L41-L48</c> declaration order.
     /// </summary>
     /// <remarks>
-    /// Exactly eight, always [<c>gateway.v1.yaml:L4443-L4445</c>]: the set is closed because the legacy
+    /// Exactly eight, always [<c>gateway.v1.yaml:L5676-L5679</c>]: the set is closed because the legacy
     /// declaration is closed, so a ninth capability would be a change to the published contract rather
     /// than a value this member could carry. Declaration order is preserved so that the sparse bit layout
     /// is legible in any payload and so that a given mask's output is byte-for-byte reproducible, which
@@ -677,7 +678,7 @@ public sealed record CapabilityReport
 /// </summary>
 /// <remarks>
 /// All four members are required by the published contract
-/// [<c>shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml:L4457</c>] and are declared
+/// [<c>shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml:L5691</c>] and are declared
 /// <see langword="required"/> here so the generated document says the same.
 /// </remarks>
 public sealed record Capability
@@ -713,7 +714,7 @@ public sealed record Capability
     /// </summary>
     /// <remarks>
     /// One of <c>1</c>, <c>2</c>, <c>4</c>, <c>8</c>, <c>256</c>, <c>512</c>, <c>1024</c> or <c>2048</c>
-    /// [<c>gateway.v1.yaml:L4497</c>]. The eight are sparse rather than the first eight powers of two,
+    /// [<c>gateway.v1.yaml:L5719-L5743</c>]. The eight are sparse rather than the first eight powers of two,
     /// and the gap between <c>8</c> and <c>256</c> is the legacy's own: bits 16, 32, 64 and 128 are
     /// simply not declared, and nothing here invents a name or an entry for them. Widened from the
     /// in-process <see cref="uint"/> for the contract's <c>format: int64</c>.
@@ -739,7 +740,7 @@ public sealed record Capability
     /// <remarks>
     /// Exactly one of the eight capabilities resolves to a service that exists in this phase; the
     /// remaining seven name capability areas outside it, so a client can see from this member that
-    /// enabling such a bit has no runtime effect here [<c>gateway.v1.yaml:L4511-L4520</c>]. The value is a
+    /// enabling such a bit has no runtime effect here [<c>gateway.v1.yaml:L5751-L5756</c>]. The value is a
     /// destination name and nothing more - no client, handler, interface, configuration entry or
     /// dependency-injection registration exists behind any of these names, and this service calls none of
     /// them.
@@ -754,7 +755,7 @@ public sealed record Capability
 /// <remarks>
 /// <para>
 /// The closed value set of the contract's <c>phaseOneDestination</c> member, in the order the contract
-/// declares it [<c>shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml:L4508-L4510</c>]. It is
+/// declares it [<c>shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml:L5749-L5750</c>]. It is
 /// serialized as its NAME rather than as an ordinal, enforced by the converter attribute on the type
 /// itself rather than by a serializer option, so the wire form cannot be changed by host configuration
 /// and the generated document carries a string enumeration matching the hand-authored one.

@@ -559,7 +559,7 @@ public sealed class ExpressionSessionTests
     }
 
     /// <summary>
-    /// <see cref="Touch"/> is the explicit activity seam, and it is a no-op once the session has gone -
+    /// <c>Touch</c> is the explicit activity seam, and it is a no-op once the session has gone -
     /// so a late touch cannot resurrect a closed session's last-accessed stamp.
     /// </summary>
     [Fact]

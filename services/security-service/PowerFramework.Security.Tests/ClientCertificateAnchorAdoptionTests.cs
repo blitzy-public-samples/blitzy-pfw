@@ -20,10 +20,11 @@
 //  still wins, that neither-configured stays fail-closed, and that a white-space issuance path is still
 //  refused by name rather than silently repaired.
 //
-//  The second half of this file pins the WORDING of the fail-closed startup record. It used to say token
-//  issuance "will refuse every request", which is false: C-01 accepts either an HTTP Basic credential from
+//  The second half of this file pins the WORDING of the fail-closed startup record. A record saying token
+//  issuance "will refuse every request" would be false: C-01 accepts either an HTTP Basic credential from
 //  the roster or a client certificate, and the Basic half is untouched by a missing anchor. An operator
-//  reading the old record would go looking for a total outage that was not happening.
+//  reading an unqualified outage sentence would go looking for a total outage that is not happening, so the
+//  record must name the credential it actually affects.
 //
 //  ASSERTED ON THE REAL HOST rather than on a restatement of it, because the adoption lives in the
 //  composition root: a test that called the PostConfigure itself would pass while the host was wired

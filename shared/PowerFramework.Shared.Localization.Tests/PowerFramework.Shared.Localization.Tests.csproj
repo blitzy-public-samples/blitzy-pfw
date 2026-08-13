@@ -23,7 +23,7 @@
       pfw.i18n.xml                                                the translation resource table
 
     HAND AUTHORED, DELIBERATELY. No template can produce this project: `dotnet new xunit3` does not
-    exist in SDK 10.0.302, and `dotnet new xunit` scaffolds the xunit v2 line with older test SDK
+    exist in the pinned SDK, and `dotnet new xunit` scaffolds the xunit v2 line with older test SDK
     and coverage packages. Do not regenerate this file from a template and patch it.
 
     INHERITED, NEVER RESTATED. TargetFramework (net10.0), LangVersion, Nullable, ImplicitUsings,

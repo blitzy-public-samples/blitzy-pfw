@@ -476,7 +476,7 @@ public sealed class DataServicesStreamLifetimeTests
     /// an unknown state.
     /// </summary>
     /// <remarks>
-    /// Before the fix this member accepted no token at all, so this scenario had no exit: the returned
+    /// A member that accepted no token at all would leave this scenario with no exit: the returned
     /// task simply never completed and the request holding it hung indefinitely.
     /// </remarks>
     [Fact]
@@ -691,8 +691,8 @@ public sealed class DataServicesStreamLifetimeTests
     /// <remarks>
     /// This test waits out <see cref="ValidationSessionScope.CloseTimeout"/> on purpose. The property is
     /// that the bound fires; asserting the token's shape instead would prove only that a bound was
-    /// configured, and "disposal can hang" is the defect itself. Before the fix the close ran on
-    /// <c>CancellationToken.None</c> and this scenario never returned.
+    /// configured, and "disposal can hang" is the defect itself. A close issued on
+    /// <c>CancellationToken.None</c> never returns in this scenario.
     /// </remarks>
     [Fact]
     public async Task DisposalTerminatesEvenWhenTheCloseNeverAnswers()

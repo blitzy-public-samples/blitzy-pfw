@@ -710,17 +710,17 @@ public sealed class DataServicesTestHostFactory : WebApplicationFactory<Program>
     /// </summary>
     /// <remarks>
     /// <para>
-    /// OFF BY DEFAULT MEANS "USE THE DEPLOYED WIRING", AND THAT WIRING IS NO LONGER A REFUSAL. The
+    /// OFF BY DEFAULT MEANS "USE THE DEPLOYED WIRING", AND THAT WIRING IS NOT A REFUSAL. The
     /// composition root binds a real headless host, model set and event chain over the transcribed
     /// definitions in <c>Domain/DataWindowCatalogue.cs</c>, which is what AAP 0.2.1.3 Correction 3 and
     /// AAP 0.3.5 require of DataServices: Correction 3 tells it to define its own host contract and
     /// IMPLEMENT AGAINST IT, recording <c>se_cst_datawindow</c> as REFERENCE-only, and 0.3.5 assigns the
-    /// HEADLESS half of every UI capability here while deferring only the RENDERING half. An earlier
-    /// revision registered three <c>Unbound*</c> implementations and cited constraint C-D against
-    /// binding; that reading was wrong, and this switch's prose said so along with it.
+    /// HEADLESS half of every UI capability here while deferring only the RENDERING half. Registering
+    /// three <c>Unbound*</c> implementations and citing constraint C-D against binding is the tempting
+    /// reading of the deferral, and it is wrong.
     /// </para>
     /// <para>
-    /// SO WITH THIS OFF, A DEPLOYED HANDLE NAME NOW RESOLVES. <c>dw_sqlite</c> and
+    /// SO WITH THIS OFF, A DEPLOYED HANDLE NAME RESOLVES. <c>dw_sqlite</c> and
     /// <c>dw_test_dwsvc</c> bind against the production catalogue, and any other name - including
     /// <see cref="UnboundDataWindowName"/> - still answers the published negative,
     /// <c>RetCode.E_INVALID_HANDLE</c> for a model or chain request and a failed open for an expression
@@ -2699,9 +2699,8 @@ internal sealed class ScriptedPersistenceClient : PersistenceClient
 //  Domain/DataWindowCatalogue.cs. That is what AAP 0.2.1.3 Correction 3 requires - DataServices declares
 //  its own abstract host contract and IMPLEMENTS AGAINST IT, recording `se_cst_datawindow` as
 //  REFERENCE-only - and what AAP 0.3.5 requires, which assigns the HEADLESS half of every UI capability to
-//  DataServices and defers only the RENDERING half. An earlier revision registered three `Unbound*`
-//  implementations here and cited constraint C-D against binding at all; that reading was wrong, and the
-//  prose in this file repeated it.
+//  DataServices and defers only the RENDERING half. Registering three `Unbound*` implementations here and
+//  citing constraint C-D against binding at all is the misreading those two sections exist to close.
 //
 //  WHAT THESE TWO ARE, THEN: test doubles over `FakeDataWindowFixtures`, reachable only from this test
 //  assembly and shipped nowhere, present so a suite can SCRIPT host behaviour - a describe override, a

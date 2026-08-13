@@ -961,12 +961,13 @@ public sealed class SigningKeyProviderTests
     /// GENERATED RATHER THAN WRITTEN DOWN. No key literal appears in this file, and nothing is copied
     /// from any hardcoded-secret site in the repository. Generating also proves more than a fixture
     /// would: the provider must read what it is handed rather than recognise a known value. 2048 bits
-    /// because that is the size at and above which the provider stops remarking on the modulus
-    /// (SecurityOptions.LegacyWeakSigningKeySizeBits), so these cases run with no weak-key warning in
-    /// the way; the minting library's separate asymmetric minimum is satisfied by the same value. NO
-    /// SIZE IS REFUSED: the legacy allowance of 1024 bits
-    /// [ws_objects/pfw.shared.pbl.src/enums.sru:L965] holds for the issuer identity as well as for
-    /// C-02's key-GENERATION surface, and SigningKeyPolicyTests pins the two together.
+    /// because that is the SMALLEST SIZE THE PROVIDER ACCEPTS for the issuer identity
+    /// (SecurityOptions.MinimumSigningKeySizeBits), so these cases run on the ordinary path; the minting
+    /// library's separate asymmetric minimum is satisfied by the same value. A SHORTER KEY IS REFUSED:
+    /// the legacy 1024-bit allowance [ws_objects/pfw.shared.pbl.src/enums.sru:L965] belongs to C-02's
+    /// key-GENERATION surface, which the oracle published, and not to this service's own signing
+    /// identity, which the legacy has no analogue for at all. SigningKeyPolicyTests pins the two
+    /// surfaces APART.
     /// </remarks>
     private sealed class GeneratedKeyMaterial
     {

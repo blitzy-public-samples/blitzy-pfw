@@ -968,6 +968,7 @@ internal sealed class SelectStatementModel
     /// <param name="sql">The statement text.</param>
     /// <param name="clauses">Receives the clause introducers, in source order.</param>
     /// <param name="setOperators">Receives the set operators, in source order.</param>
+    /// <param name="terminators">Receives the offsets of the statement terminators the scan found.</param>
     /// <returns>
     /// <see langword="true"/> when the text scanned cleanly; <see langword="false"/> when the
     /// parentheses are unbalanced or a literal, quoted identifier or block comment is unterminated.
@@ -1614,9 +1615,8 @@ internal sealed class SelectStatementModel
     /// the paging arms that depend on it could never have worked. Thirteen lines later
     /// <c>:L350</c> appends <c>INNER JOIN (...)</c> to the TABLE clause, where a comma would produce
     /// <c>FROM COMPANY , INNER JOIN (...)</c> - equally invalid. Both are the same native entry point
-    /// with the same style constant, so the native MUST be clause-kind aware. The separator was
-    /// previously a single space for all six kinds, which is why the append at <c>:L341</c> emitted an
-    /// invalid ORDER BY list.
+    /// with the same style constant, so the native MUST be clause-kind aware. A single space for all six
+    /// kinds is the shape that makes the append at <c>:L341</c> emit an invalid ORDER BY list.
     /// </para>
     /// <para>
     /// A COMMA CARRIES NO TRAILING SPACE, which matters because parity here is byte-exact: the legacy

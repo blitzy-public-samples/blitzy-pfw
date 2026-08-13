@@ -8,10 +8,10 @@
 //  `Buffers/DataWindowBuffers.cs` and is neither reimplemented nor second-guessed here.
 //
 //  WHY THIS EXISTS, STATED AGAINST THE CONSTRAINT IT COULD BE MISREAD AS BREAKING (C-D)
-//  An earlier revision shipped three implementations that materialised nothing, on the argument that
+//  MATERIALISING NOTHING HERE IS THE TEMPTING READING OF C-D, on the argument that
 //  the legacy result carrier IS a DataWindow - `n_cst_thread_task_sqlbase_ds` is declared
 //  `from datastore` [n_cst_thread_task_sqlbase_ds.sru:L4] - so materialising one requires a live
-//  DataWindow engine, and that engine belongs to the deferred DesignSystem capability. The premise is
+//  DataWindow engine, and that engine belongs to the deferred DesignSystem capability. That premise is
 //  right about the legacy and wrong about what it implies here, and the distinction is the one the
 //  migration draws everywhere else: what DesignSystem owns is the RENDERING half - window geometry,
 //  DPI conversion, font measurement, painting. The DATA half - rows, columns, buffers, item statuses,
@@ -687,7 +687,6 @@ namespace PowerFramework.Persistence.Data
         /// <summary>
         /// Reads the column list back out of a grid syntax.
         /// </summary>
-        /// <param name="syntax">The syntax text.</param>
         /// <returns>The column names in declaration order; empty when the text declares none.</returns>
         /// <remarks>
         /// Tolerant by design, and that is the legacy behaviour rather than laxity: PowerBuilder's
@@ -1159,6 +1158,8 @@ namespace PowerFramework.Persistence.Data
         /// <param name="statement">The retrieval statement.</param>
         /// <param name="parameters">The matched retrieval arguments, in one-based legacy order.</param>
         /// <param name="columns">The column names, in one-based column order.</param>
+        /// <param name="declared">The declared column set the fill is projected onto.</param>
+        /// <param name="cancellationToken">Cancels the operation.</param>
         /// <returns>The retrieved row count, or the datastore failure value.</returns>
         private static async ValueTask<long> FillAsync(
             ISqlDataStore data,
@@ -1229,9 +1230,6 @@ namespace PowerFramework.Persistence.Data
         /// <summary>
         /// Builds a command over the transaction's connection with the arguments bound positionally.
         /// </summary>
-        /// <param name="commands">The command source the attached transaction exposed.</param>
-        /// <param name="statement">The statement text.</param>
-        /// <param name="parameters">The matched retrieval arguments, in one-based legacy order.</param>
         /// <returns>The command, which the caller owns and disposes.</returns>
         /// <remarks>
         /// POSITIONAL BINDING, PRESERVED AS POSITIONAL. The legacy's retrieval arguments and its command
@@ -1305,7 +1303,7 @@ namespace PowerFramework.Persistence.Data
             //  and that no round trip could reproduce. A caller reading a row back through this
             //  service therefore received a DIFFERENT value from the one storage held, silently, with
             //  no error anywhere. Whether such text should have been stored at all is a separate
-            //  question and is now refused on the write path; this arm is about what a retrieval
+            //  question and is refused on the write path; this arm is about what a retrieval
             //  answers for the rows that already exist.
             //
             //  THE ANSWER IS THE DOCUMENTED FALLBACK, NOT A NEW ONE. The stored value is returned

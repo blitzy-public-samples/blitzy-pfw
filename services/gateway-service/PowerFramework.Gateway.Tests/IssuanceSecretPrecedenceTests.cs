@@ -12,20 +12,20 @@
 //    * ordinary section binding, because the property is a public settable leaf of the bound `Gateway`
 //      section - so `Gateway__SecurityClientSecret` in the environment does reach it.
 //
-//  THE DEFECT THESE ROWS PIN CLOSED. The composition root's post-configure step assigned the flat key
-//  UNCONDITIONALLY, with `?? string.Empty`. An absent flat key therefore did not leave the property
-//  alone - it OVERWROTE whatever binding had put there with empty. A deployment supplying the credential
-//  through the section watched the binder accept it and was then refused at startup for presenting
-//  nothing, with a message naming a key it had deliberately not used. A silently discarded input is
-//  worse than a rejected one, because there is nothing anywhere that says the value was dropped.
+//  THE DEFECT THESE ROWS PIN CLOSED. A composition-root post-configure step that assigns the flat key
+//  UNCONDITIONALLY, with `?? string.Empty`, does not leave the property
+//  alone when the flat key is absent - it OVERWRITES whatever binding put there with empty. A deployment
+//  supplying the credential through the section then watches the binder accept it and is refused at startup
+//  for presenting nothing, with a message naming a key it had deliberately not used. A silently discarded
+//  input is worse than a rejected one, because there is nothing anywhere that says the value was dropped.
 //
-//  AND ONE IDEA HAD THREE BEHAVIOURS ACROSS THREE SERVICES, which is the part that makes this more than
+//  AND THE SAME IDEA CAN CARRY THREE BEHAVIOURS ACROSS THREE SERVICES, which is what makes this more than
 //  a local bug. Security's signing-key step states the rule normatively - when the key is absent the step
 //  assigns nothing, so material that reached the options instance through another legitimate ingress
-//  survives - and DataServices' ApplyIssuanceSecret is the same shape. Gateway was the outlier.
+//  survives - and DataServices' ApplyIssuanceSecret is the same shape. Gateway's step matches both.
 //
 //  WHAT IS ASSERTED. The four cells of the precedence table, one row each, so a failure names the cell
-//  that changed rather than reporting that "the secret resolution changed":
+//  it broke rather than reporting that "the secret resolution changed":
 //
 //    | flat key | section value | expected                                                |
 //    | set      | set           | starts, flat wins                                       |

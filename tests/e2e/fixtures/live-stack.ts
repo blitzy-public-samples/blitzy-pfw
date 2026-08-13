@@ -1,15 +1,13 @@
 /**
  * Live-stack detection for the cross-service specs.
  *
- * SCOPE NOTE - THIS MODULE NO LONGER ACQUIRES TOKENS
- * --------------------------------------------------
- * It once carried a second half that minted a service token, and that half was a
- * DUPLICATE: `./auth` owns token acquisition for this suite and is the path the
- * six canonical specs use. The duplicate existed only to serve an earlier,
- * superseded spec generation which has since been removed, so it was removed with
- * it rather than left as a second way to do one thing. What remains is the one
- * capability nothing else provides: telling an absent stack apart from a broken
- * one.
+ * SCOPE NOTE - THIS MODULE ACQUIRES NO TOKENS
+ * -------------------------------------------
+ * It deliberately does NOT mint a service token. `./auth` owns token acquisition
+ * for this suite and is the path all six specs use, so a second minting half here
+ * would be a duplicate - a second way to do one thing, and one of the two free to
+ * drift. This module carries the one capability nothing else provides: telling an
+ * absent stack apart from a broken one.
  *
  * WHY THIS MODULE EXISTS
  * ----------------------
@@ -43,7 +41,7 @@
  * verification, and a run that verified none of it must not be reportable as
  * having verified it.
  *
- * So there are now two modes and no third, exactly as `token-issuance.ts` already
+ * So there are two modes and no third, exactly as `token-issuance.ts` already
  * treats the other precondition this suite has:
  *
  * - **A FULL ACCEPTANCE RUN — the default — FAILS.** {@link requireLiveStack}

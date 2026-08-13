@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  F-15 - INCREMENTAL STREAMING AND THE ELEMENT BOUND AT THE INGRESS
+//  INCREMENTAL STREAMING AND THE ELEMENT BOUND AT THE INGRESS
 // =====================================================================================================
 //
 //  WHY THE GATEWAY STREAMS WHERE THE DATASERVICES PROJECTION COLLECTS. Both answer a server-streaming gRPC
@@ -266,7 +266,7 @@ public sealed class DataServicesProxyStreamingTests
     }
 
     // ==============================================================================================
-    //  F-18 - A FAILURE BEFORE THE FIRST ELEMENT MUST STILL REACH THE SHARED FAILURE PATH
+    //  A FAILURE BEFORE THE FIRST ELEMENT MUST STILL REACH THE SHARED FAILURE PATH
     //  --------------------------------------------------------------------------------------------
     //  The result writes 200 and `[` as its FIRST act, and the framework executes it only after the
     //  projection has returned. So while the first element was pulled from inside ExecuteAsync, a stream
@@ -344,13 +344,13 @@ public sealed class DataServicesProxyStreamingTests
     /// either behave like the other would be a silent regression in opposite directions.
     /// </para>
     /// <para>
-    /// <b>WHAT CHANGED, AND WHY THIS TEST NO LONGER EXPECTS A THROW.</b> It used to assert that the fault
-    /// ESCAPED <c>ExecuteAsync</c>, which is what the projection did - and escaping is not a behaviour, it
-    /// is the absence of one. The escaped exception reached Kestrel's connection handler as an unhandled
-    /// application exception while the access log recorded the request as a 200, so the operator's only
-    /// evidence of a failed retrieval was a stack trace attributed to the connection. The fault is handled
-    /// now; the two properties this test was protecting - two real elements delivered, and no closing
-    /// bracket - are asserted unchanged, which is the point of keeping it rather than replacing it.
+    /// <b>WHY THIS TEST DOES NOT EXPECT A THROW.</b> Asserting that the fault
+    /// ESCAPES <c>ExecuteAsync</c> is the tempting row, and escaping is not a behaviour - it
+    /// is the absence of one. An escaped exception reaches Kestrel's connection handler as an unhandled
+    /// application exception while the access log records the request as a 200, so the operator's only
+    /// evidence of a failed retrieval is a stack trace attributed to the connection. The fault is handled
+    /// instead, and the two properties that matter - two real elements delivered, and no closing
+    /// bracket - are asserted directly.
     /// </para>
     /// </remarks>
     [Fact]
@@ -387,7 +387,7 @@ public sealed class DataServicesProxyStreamingTests
     }
 
     // ==============================================================================================
-    //  F-11 - A MID-STREAM FAULT MUST BE HANDLED, SELF-DESCRIBING, AND ABNORMALLY TERMINATED
+    //  A MID-STREAM FAULT MUST BE HANDLED, SELF-DESCRIBING, AND ABNORMALLY TERMINATED
     //  --------------------------------------------------------------------------------------------
     //  Reproduced at runtime before it was fixed: killing DataServices two seconds into a
     //  fifty-thousand-row retrieval delivered eighteen megabytes and then stopped, and the last bytes on
@@ -481,8 +481,8 @@ public sealed class DataServicesProxyStreamingTests
     /// correlation identifier.
     /// </summary>
     /// <remarks>
-    /// THE RECORD IS THE OPERATOR'S ONLY EVIDENCE, and before the fix the only evidence was a stack trace
-    /// logged by the connection layer against a request the access log called a 200. Asserted at
+    /// THE RECORD IS THE OPERATOR'S ONLY EVIDENCE. Without it the sole trace of the fault is a stack
+    /// dump from the connection layer against a request the access log calls a 200. Asserted at
     /// <see cref="LogLevel.Error"/> rather than a warning because a retrieval that could not be completed
     /// is a failed request, and asserted on the message's own arguments so the record cannot lose the
     /// status or the count while still being emitted.
@@ -618,11 +618,11 @@ public sealed class DataServicesProxyStreamingTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>THIS IS THE ROW THAT WOULD HAVE FAILED BEFORE THE FIX.</b> The upstream refuses with
-    /// <see cref="StatusCode.NotFound"/> - the retrieval of a DataWindow that does not exist - and the
-    /// published map assigns that 404. Before the first element was pulled inside the projection, this same
-    /// request answered <c>200</c> with the two bytes <c>[</c> and nothing else, because the status line was
-    /// written before the fault was raised.
+    /// <b>THIS IS THE ROW THAT DISCRIMINATES A PREFETCHED PROJECTION FROM A NAIVE ONE.</b> The upstream
+    /// refuses with <see cref="StatusCode.NotFound"/> - the retrieval of a DataWindow that does not exist -
+    /// and the published map assigns that 404. Unless the first element is pulled INSIDE the projection,
+    /// this same request answers <c>200</c> with the two bytes <c>[</c> and nothing else, because the
+    /// status line is written before the fault is raised.
     /// </para>
     /// <para>
     /// Driven through the deployed host and the real generated stubs, with only the TRANSPORT substituted,
@@ -835,6 +835,7 @@ public sealed class DataServicesProxyStreamingTests
     /// <summary>A lazy producer that records how many elements it was asked for.</summary>
     /// <param name="count">How many it will offer.</param>
     /// <param name="onPull">Called once per element produced.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
     /// <returns>The sequence.</returns>
     /// <remarks>
     /// LAZY BY CONSTRUCTION, WHICH IS WHAT MAKES THE PULL COUNT MEANINGFUL. An eager collection would report

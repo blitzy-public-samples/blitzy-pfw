@@ -64,18 +64,7 @@
 //  precision QUIETLY - the value still looks plausible, so no unit test flags it, and the damage
 //  surfaces only as a byte-exact characterization comparison that can no longer be made.
 //
-//  RULES POSITION
-//  --------------------------------------------------------------------------------------------
-//  review_rules returns exactly "No user rules provided.", so NO user-specified rule governs this
-//  file, and none is invented here. The enterprise-standard baseline applies in their place, and
-//  the binding constraints are the refactor plan's own non-rule inventory. Those that govern this
-//  file are cited inline at the point each is discharged: C-A (boundary definition, not a
-//  shared-code back door), C-B (replicate behaviour and defects, never improve), C-C (the legacy
-//  tree is read-only and is the behavioural oracle), C-D (the four deferred services are not
-//  implemented, even partially), C-E (no fabricated database), C-F (nothing hardcoded, no secret
-//  in any form), C-G (every new boundary authenticated, by framework code) and C-K (document every
-//  technology and boundary decision).
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  C-C SELF-AUDIT: the ten oracle objects cited throughout - n_cst_thread_task_sqlquery.sru,
 //  _sqlupdate.sru, _sqlcommand.sru, _sqlbase.sru, n_cst_thread_trans.sru,
 //  n_cst_thread_trans_pool.sru, transactiondata.srs, dberrordata.srs, enums.sru and n_sqlite.sru -
@@ -585,16 +574,16 @@ message SqlClauseSpec {
 // ==============================================================================================
 //  SECTION 2b - CarrierState : THE DataWindow CARRIER, TYPED RATHER THAN OPAQUE
 //  --------------------------------------------------------------------------------------------
-//  WHAT THIS REPLACED AND WHY, stated first because the previous shape looked defensible.
-//  C-05's query chunks and C-06's update input used to carry the carrier as a `bytes` field whose
-//  format was declared "opaque - the codecs' concern on both sides". That is unimplementable across
+//  WHY NOT AN OPAQUE BLOB, stated first because the opaque shape looks defensible.
+//  Carrying the carrier on C-05's query chunks and C-06's update input as a `bytes` field whose
+//  format is declared "opaque - the codecs' concern on both sides" is unimplementable across
 //  this boundary: DataServices references ONLY the published contracts project (C-A), so an opaque
 //  format owned privately by Persistence leaves the consumer two options, both forbidden - duplicate
 //  the private encoder from its source, or take a project reference on Persistence internals. A
 //  boundary a consumer cannot implement from the generated stubs alone is not a boundary.
 //
-//  So the carrier crosses as TYPED MESSAGES, and everything the codecs used to hide inside the blob
-//  is now a named field: the buffer a row belongs to, its ONE-BASED row ordinal, its own item status,
+//  So the carrier crosses as TYPED MESSAGES, and everything a blob would hide inside itself
+//  is a named field here: the buffer a row belongs to, its ONE-BASED row ordinal, its own item status,
 //  each column's value, each column's own item status, and THE ORIGINAL-VALUE SHADOW that
 //  updatewhere=1 compares against. AAP 0.3.4 asks for exactly this - an anti-corruption layer that
 //  "translates between the legacy Primary!/Delete!/Filter! buffers plus the DataModified!/
@@ -1154,13 +1143,13 @@ message QueryRowCount {
 message QueryDataChunk {
   // The carrier state this chunk carries, TYPED. Legacy `ref blob blbdata`.
   //
-  // THIS FIELD USED TO BE `bytes` AND THE CHANGE IS THE POINT (C-A). An opaque byte format owned
+  // THIS FIELD IS A MESSAGE AND NOT `bytes`, AND THAT IS THE POINT (C-A). An opaque byte format owned
   // privately by Persistence cannot be consumed by DataServices, which references only the published
-  // contracts project, so the blob made this boundary unimplementable without either duplicating a
+  // contracts project, so a blob makes this boundary unimplementable without either duplicating a
   // private encoder or reaching into another service's internals. Section 2b records the full
   // reasoning and the three-segment obligation a receiver must enforce before applying anything.
   //
-  // The chunk arithmetic, the full_state selector and the three preserved defects below are unchanged
+  // The chunk arithmetic, the full_state selector and the three preserved defects below are untouched
   // by the typing: they are properties of the CHUNKING, not of the encoding.
   //
   // AN ABSENT state IS THE LEGACY'S ZERO-LENGTH BLOB, AND THE MAPPING IS EXACT RATHER THAN A
@@ -1548,7 +1537,7 @@ message UpdateRequest {
   // and it carries, per row, the current values, the ORIGINAL-VALUE SHADOW that updatewhere=1 needs,
   // the row's item status and each column's item status.
   //
-  // IT USED TO BE `bytes` DESCRIBED AS "the codecs' concern on both sides", AND THAT WAS THE DEFECT.
+  // `bytes` DESCRIBED AS "the codecs' concern on both sides" IS THE SHAPE TO REFUSE HERE.
   // Every one of those four things is load-bearing on THIS path in particular - the where clause the
   // update generates is built from the original-value shadow - and a consumer that cannot decode the
   // payload cannot produce one either. Section 2b records the reasoning and the three-segment
@@ -1945,12 +1934,13 @@ message SetCommandSqlRequest {
   // common.v1.RetCode.Value.OK, while the EMPTY string answers E_INVALID_SQL with NO diagnostic, which is
   // the legacy setter's own message-free arm.
   //
-  // A BOUNDARY BLANKNESS REFUSAL WAS PUBLISHED HERE AND HAS BEEN WITHDRAWN (C-B). It answered
-  // E_INVALID_SQL with a diagnostic of its own on the reasoning that a whitespace-only statement submits
-  // nothing and would be reported as a success that changed no rows. That reasoning is a judgement about
-  // the legacy's design rather than a statement about its behaviour, and acting on it made this boundary
-  // STRICTER than the oracle it preserves - which is a behaviour change in exactly the way being laxer
-  // would be. See ExecRequest.sql for the same note on the other entry point.
+  // A BOUNDARY BLANKNESS REFUSAL IS NOT PUBLISHED HERE, AND ITS ABSENCE IS DELIBERATE (C-B). Such a
+  // refusal would answer E_INVALID_SQL with a diagnostic of its own, on the reasoning that a
+  // whitespace-only statement submits nothing and would be reported as a success that changed no rows.
+  // That reasoning is a judgement about the legacy's design rather than a statement about its behaviour,
+  // and acting on it makes this boundary STRICTER than the oracle it preserves - which is a behaviour
+  // change in exactly the way being laxer would be. See ExecRequest.sql for the same note on the other
+  // entry point.
   // ==========================================================================================
   string sql = 2;
 }
@@ -2007,9 +1997,9 @@ message ExecRequest {
   // installed, submitted, and answered with whatever the storage engine answers - measured against the
   // shipped provider that is a row count of -1 with nothing raised, i.e. a SUCCESS THAT DID NOTHING.
   //
-  // THAT OUTCOME IS PRESERVED RATHER THAN CORRECTED (C-B), AND A REFUSAL THAT CORRECTED IT HAS BEEN
-  // WITHDRAWN. This boundary published a blankness refusal - E_INVALID_SQL with its own diagnostic,
-  // nothing executed - on the reasoning that telling a caller their statement succeeded when it never ran
+  // THAT OUTCOME IS PRESERVED RATHER THAN CORRECTED (C-B), AND A REFUSAL THAT CORRECTED IT IS NOT
+  // AVAILABLE. Such a refusal - E_INVALID_SQL with its own diagnostic, nothing executed - rests on the
+  // reasoning that telling a caller their statement succeeded when it never ran
   // is not worth preserving. However reasonable, that is a judgement about the legacy's DESIGN, while what
   // this contract owes its callers is the legacy's BEHAVIOUR: a port that refuses input its oracle accepts
   // has diverged just as far as one that accepts input its oracle refuses. The three cases are therefore:
@@ -2249,8 +2239,8 @@ service CommandService {
   //
   // ============ THE LEADING-`@` MODE IS ON THIS RPC. SEE ExecRequest.sql FOR THE GRAMMAR. ==========
   // The `@` prefix carries TWO UNRELATED MEANINGS in the legacy, in two different objects, and telling
-  // them apart is the whole subtlety - conflating them is how an earlier revision of this comment came
-  // to declare the mode absent:
+  // them apart is the whole subtlety - conflating them is how the mode comes to be declared absent from
+  // a service that carries it:
   //   1. A DATAWINDOW-OBJECT SELECTOR, on the RETRIEVE verb -
   //      `if Left(sql,1) = "@" then ds.DataObject = Mid(sql,2)` [n_cst_thread_trans.sru:L309]. The rest
   //      of the string is an object NAME, not SQL. That verb is C-05's, and its managed translation is
@@ -2265,7 +2255,7 @@ service CommandService {
   // driver accessors ExecResponse publishes are n_sqlite's [n_sqlite.sru:L26-L29] and so is the recorded
   // eleven-argument ceiling [:L33-L43]. C-07 is therefore the UNION of the two command surfaces - the
   // transaction object's `of_Exec` [n_cst_thread_trans.sru:L219-L238] and the SQLite binding's `Exec` -
-  // and reading only the first half is what previously produced the claim that the mode "is not on this
+  // and reading only the first half is what produces the claim that the mode "is not on this
   // verb". A producer sending the documented prefix has its statement RUN, not refused.
   //
   // WHAT A SERVER DOES WITH IT, EXACTLY: the selector is removed - ONE character, the oracle's own
@@ -3082,6 +3072,15 @@ service TransactionService {
   // `from transaction`; read at :L185, :L240, :L371, :L376]. A net-new operation the boundary requires,
   // because an in-process property assignment has no wire representation - NOT a projection of
   // of_settransdata, which does not carry the flag. A plain boolean, not C-07's three-valued mode.
+  //
+  // IT CAN FAIL, AND THAT IS NOT A LEGACY ARM. Moving OUT of autocommit obliges the server to open an
+  // explicit transaction, because .NET has no implicit one after connecting the way PowerBuilder does,
+  // and moving INTO autocommit commits the accumulated work. Either statement can be refused by the
+  // provider, so the status can be E_DB_ERROR carrying the driver code and text in db_error - the mode a
+  // caller asked for is recorded, but a caller that ignores this status must not assume the transactional
+  // promise was kept. OK means the mode is in force AND, for the non-autocommit mode, a transaction is
+  // open. The server never executes a statement outside the transaction this mode promises: while the
+  // transaction is unavailable, every subsequent statement is refused rather than applied immediately.
   rpc SetAutoCommit(SetTransactionAutoCommitRequest) returns (SetTransactionAutoCommitResponse);
 
   // of_autocommit [:L88, :L370-L380]. Commit-or-rollback by statement status. A DIFFERENT operation

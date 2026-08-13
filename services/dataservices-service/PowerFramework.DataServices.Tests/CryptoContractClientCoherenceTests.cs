@@ -3,7 +3,7 @@
 //  One question, asked in both directions: does DataServices' typed crypto client reach EVERY operation
 //  contract C-02 publishes, and does it publish NOTHING C-02 does not?
 //  ------------------------------------------------------------------------------------------------
-//  WHY THIS SUITE EXISTS, STATED AS THE DEFECT IT WOULD HAVE CAUGHT
+//  WHY THIS SUITE EXISTS, STATED AS THE DEFECT IT CATCHES
 //    shared/PowerFramework.Contracts/OpenApi/security.v1.yaml published eighteen C-02 operations while
 //    Clients/SecurityClient.cs implemented seventeen. The missing one was DELETE
 //    /v1/crypto/rsa/keys/{keyRef} - the release for a generated private key - so a key obtained through

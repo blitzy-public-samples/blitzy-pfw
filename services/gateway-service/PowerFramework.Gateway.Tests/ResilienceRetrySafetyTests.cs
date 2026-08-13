@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  F-12 - RETRY SAFETY ON GATEWAY'S THREE OUTBOUND EDGES
+//  RETRY SAFETY ON GATEWAY'S THREE OUTBOUND EDGES
 // =====================================================================================================
 //
 //  WHY REPLAYING IS A CORRECTNESS PROBLEM HERE. A transport failure does not reveal whether the server

@@ -265,14 +265,14 @@ const RESERVED_ROUTE_PROBE_SEGMENT = '/status';
  * where the marker text is written.
  *
  * Tolerant by design on the two things that carry no meaning — letter case and
- * 🔴 IT USED TO BE A TOLERANT PATTERN AND THAT WAS THE SAME DEFECT THE FOUR
- * CITED SPECS CARRIED. `/reserved[\s-]+for[\s-]+phase[\s-]*2/i`, matched against
- * the serialized body, accepted `phase-2`, `Phase2` and `PHASE 2` on the
- * reasoning that separators and casing are not what the assertion is about.
+ * 🔴 A TOLERANT PATTERN HERE IS THE SAME DEFECT, IN THE PLACE IT COSTS MOST.
+ * `/reserved[\s-]+for[\s-]+phase[\s-]*2/i` matched against the serialized body
+ * accepts `phase-2`, `Phase2` and `PHASE 2`, on the reasoning that separators and
+ * casing are not what the assertion is about.
  * `ReservedRouteBody.marker` is a schema `const` — the exact string below — and a
  * client branching on a reserved route compares it ORDINALLY. A Gateway emitting
- * `phase-2` therefore satisfied this assertion and failed every generated client,
- * which is precisely what a contract test must not permit.
+ * `phase-2` would therefore satisfy such an assertion and fail every generated
+ * client, which is precisely what a contract test must not permit.
  *
  * So the constant is stated once, exactly as the schema fixes it, and the member
  * is read by name off the parsed body rather than searched for in its text.
@@ -426,9 +426,11 @@ function jsonShapeOf(text: string): 'object' | 'array' | 'primitive' | 'unparsea
 test.describe('Reserved deferred-capability routes (constraint C-D)', () => {
   // THE TOKEN-ISSUANCE PRECONDITION, and it is the FIRST thing this group does.
   //
-  // `POST /v1/tokens` on Security is authenticated by a client certificate and by
-  // nothing else, on every topology including the local bring-up, so with no
-  // identity provisioned every authenticated assertion below is unrunnable. The
+  // `POST /v1/tokens` on Security is authenticated by a presented caller
+  // credential - an HTTP Basic credential or a trusted client certificate - and
+  // never by a bearer token, on every topology including the local bring-up, so
+  // with no identity provisioned every authenticated assertion below is
+  // unrunnable. The
   // hook fails this group's SETUP in a full acceptance run rather than letting
   // fifteen token calls fail one at a time with transport errors that never say
   // why; a run that has explicitly declared itself partial passes straight
@@ -536,8 +538,8 @@ test.describe('Reserved deferred-capability routes (constraint C-D)', () => {
           `something exists behind a route that is only declared.`,
       ).toBe(false);
 
-      // Machine-readable begins with the media type, and it is now asserted
-      // EXACTLY. This was `contentType.toLowerCase().includes('json')`, chosen
+      // Machine-readable begins with the media type, and it is asserted
+      // EXACTLY. `contentType.toLowerCase().includes('json')` is the tempting form, chosen
       // "so that a JSON-family type is accepted while HTML and plain text are
       // not" — but a `text/html` page whose type parameter mentioned json
       // satisfied it, and a family match cannot tell a problem document from a
@@ -576,12 +578,11 @@ test.describe('Reserved deferred-capability routes (constraint C-D)', () => {
           `this message.`,
       ).toBe('object');
 
-      // THE BODY'S MEMBER SET, EXACTLY, WHICH WAS NEVER ASSERTED AT ALL. Every
-      // assertion in this test used to be made against the SERIALIZED TEXT: the
-      // destination "named" by a case-insensitive substring anywhere in it, the
-      // marker matched by a tolerant pattern, the status inferred from the
-      // response line. So a body of `{"message":"DesignSystem is reserved for
-      // Phase 2"}` passed every one of them — prose in a JSON wrapper, which is
+      // THE BODY'S MEMBER SET, EXACTLY, WHICH ASSERTING AGAINST THE SERIALIZED TEXT
+      // LEAVES ENTIRELY OPEN: the destination "named" by a case-insensitive substring
+      // anywhere in it, the marker matched by a tolerant pattern, the status inferred
+      // from the response line. A body of `{"message":"DesignSystem is reserved for
+      // Phase 2"}` satisfies every one of those — prose in a JSON wrapper, which is
       // exactly what "machine-readable" is supposed to rule out.
       //
       // `ReservedRouteBody` declares six required members and sets
@@ -593,7 +594,7 @@ test.describe('Reserved deferred-capability routes (constraint C-D)', () => {
         `the 501 body for ${probePath}`,
       );
 
-      // The declaration names its own destination, and the name is now read from
+      // The declaration names its own destination, and the name is read from
       // the member that carries it and checked against the closed enumeration —
       // not looked for anywhere in the text. `deferredService` is the member the
       // contract declares for this, so a body that mentioned the area only in a
@@ -700,15 +701,15 @@ test.describe('Reserved deferred-capability routes (constraint C-D)', () => {
         ).toBe(false);
       }
 
-      // THE TEXT-PRESENCE COROLLARY IS RETAINED, AND IT IS NO LONGER TOLERANT. The
+      // THE TEXT-PRESENCE COROLLARY IS KEPT, AND IT IS NOT TOLERANT. The
       // exact equality against `marker` above is the acceptance criterion; this is a
       // corroboration that the exact constant appears in the serialized body at all,
       // which catches the one case equality cannot: a projection that had moved the
       // marker into a different member would fail the exact check with "missing
       // member" while this one shows the text is present, and the two messages
       // together name the drift precisely. It searches ORDINALLY for the constant the
-      // schema fixes, not for a pattern — the form this line used to carry,
-      // `/reserved[\s-]+for[\s-]+phase[\s-]*2/i`, accepted `phase-2` and `Phase2`,
+      // schema fixes, not for a pattern — the tolerant form,
+      // `/reserved[\s-]+for[\s-]+phase[\s-]*2/i`, accepts `phase-2` and `Phase2`,
       // and a separator or casing variant is a different message that no generated
       // client branching on a schema `const` can read, not a spelling of this one. It
       // is deliberately the weaker of the two checks and would be worthless alone.

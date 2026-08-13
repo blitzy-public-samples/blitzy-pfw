@@ -2011,7 +2011,7 @@ public sealed class ParseErrorStructuredResultTests
     /// </summary>
     /// <remarks>
     /// The expected numbers are the protocol definition's own literals -
-    /// <c>shared/PowerFramework.Contracts/Proto/dataservices.v1.proto:L527-L533</c> for the severity and
+    /// <c>shared/PowerFramework.Contracts/Proto/dataservices.v1.proto:L542-L549</c> for the severity and
     /// <c>:L3618-L3646</c> for the category. They are asserted as literals rather than against the
     /// generated types because the unit under test deliberately does NOT reference the generated
     /// contract classes: its folder's error foundation depends on the shared kernel and the base class
@@ -2020,7 +2020,7 @@ public sealed class ParseErrorStructuredResultTests
     [Fact]
     public void SeverityAndCategoryValues_MirrorThePublishedContractNumberForNumber()
     {
-        // dataservices.v1.Severity [dataservices.v1.proto:L527-L533]
+        // dataservices.v1.Severity [dataservices.v1.proto:L542-L549]
         Assert.Equal(0, (int)ExpressionErrorSeverity.Unspecified);
         Assert.Equal(1, (int)ExpressionErrorSeverity.None);
         Assert.Equal(2, (int)ExpressionErrorSeverity.Information);
@@ -2028,7 +2028,7 @@ public sealed class ParseErrorStructuredResultTests
         Assert.Equal(4, (int)ExpressionErrorSeverity.Exclamation);
         Assert.Equal(5, (int)ExpressionErrorSeverity.StopSign);
 
-        // dataservices.v1.ExpressionError.Category [dataservices.v1.proto:L3618-L3646]
+        // dataservices.v1.ExpressionError.Category [dataservices.v1.proto:L3777-L3795]
         Assert.Equal(0, (int)ExpressionErrorCategory.Unspecified);
         Assert.Equal(1, (int)ExpressionErrorCategory.CacheCreation);
         Assert.Equal(2, (int)ExpressionErrorCategory.CacheError);

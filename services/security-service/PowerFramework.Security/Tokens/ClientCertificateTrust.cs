@@ -131,6 +131,20 @@ internal sealed class ClientCertificateTrust : IDisposable
 
     private readonly X509Certificate2Collection _anchors;
     private readonly X509RevocationMode _revocationMode;
+
+    /// <summary>
+    /// The longest declared validity window a caller certificate may carry, or <see langword="null"/>
+    /// when revocation is being checked and the ceiling therefore does not apply.
+    /// </summary>
+    /// <remarks>
+    /// NULL IS THE "NOT APPLICABLE" STATE RATHER THAN AN UNLIMITED ONE, and the distinction is worth the
+    /// nullable: a deployment that selected a real revocation posture has a PKI that can withdraw a
+    /// certificate, so the ceiling has nothing left to compensate for and enforcing it there would be a
+    /// lifetime policy invented in this file. Resolved once at construction so the two settings are read
+    /// together exactly once.
+    /// </remarks>
+    private readonly TimeSpan? _maximumLifetime;
+
     private readonly TimeProvider _clock;
     private readonly ILogger<ClientCertificateTrust> _logger;
 
@@ -174,22 +188,31 @@ internal sealed class ClientCertificateTrust : IDisposable
         _clock = clock;
         _logger = logger;
         _revocationMode = ResolveRevocationMode(configured.ClientCertificateRevocationMode);
+
+        // THE COMPENSATING CONTROL, ARMED ONLY WHEN IT COMPENSATES FOR SOMETHING. With no revocation
+        // check there is no way to withdraw a certificate, so its declared validity window is the only
+        // bound on a stolen one and the configured ceiling is enforced; with a check in place the
+        // deployment can withdraw one, and imposing a lifetime rule would be this file inventing policy.
+        _maximumLifetime = _revocationMode == X509RevocationMode.NoCheck
+            ? TimeSpan.FromDays(configured.MaxCallerCertificateLifetimeDays)
+            : null;
+
         _anchors = LoadAnchors(configured.ClientCertificateAuthorityPath);
 
         if (_anchors.Count == 0)
         {
-            // 🔴 QUALIFIED TO THE CREDENTIAL IT ACTUALLY AFFECTS. This record used to say that issuance
-            // "will refuse every request", which is false and was measured to be false: contract C-01
-            // accepts EITHER of two caller credentials on POST /v1/tokens - an HTTP Basic secret from the
-            // roster, or a client certificate - and the Basic half is untouched by a missing anchor and
-            // kept minting successfully throughout. An operator reading the old wording would go looking
-            // for a total outage that was not happening, and might restart or roll back a service whose
-            // primary credential path was working.
+            // 🔴 QUALIFIED TO THE CREDENTIAL IT ACTUALLY AFFECTS, WHICH IS ONE OF TWO. Saying that issuance
+            // "will refuse every request" here would be false, and measurably so: contract C-01 accepts
+            // EITHER of two caller credentials on POST /v1/tokens - an HTTP Basic secret from the roster, or
+            // a client certificate - and the Basic half is untouched by a missing anchor and keeps minting
+            // throughout. An operator reading an unqualified outage sentence would go looking for a total
+            // outage that is not happening, and might restart or roll back a service whose primary
+            // credential path is working.
             //
-            // BOTH CONFIGURATION KEYS ARE NAMED, because either one now supplies this anchor: the
+            // BOTH CONFIGURATION KEYS ARE NAMED, because either one may supply this anchor: the
             // issuance key is authoritative when set, and the composition root adopts the listener's
-            // published variable when it is not. Naming only one would send an operator to the key that
-            // is not the one their deployment uses.
+            // published variable when it is not. Naming only one would send an operator to the key that is
+            // not the one their deployment uses.
             _logger.LogWarning(
                 "No client-certificate trust anchor is configured, so no caller certificate can "
                 + "establish an identity and CERTIFICATE-BASED token issuance is unavailable. Issuance "
@@ -258,6 +281,30 @@ internal sealed class ClientCertificateTrust : IDisposable
             _logger.LogWarning(
                 "A caller certificate was refused because its declared extended key usage does not "
                 + "permit client authentication. No part of the certificate is recorded.");
+
+            return ClientCertificateTrustState.Untrusted;
+        }
+
+        // THE LIFETIME CEILING, CHECKED BEFORE THE CHAIN IS BUILT. Ordered here for the reason the usage
+        // check above is ordered where it is: a certificate this deployment will not accept on its own
+        // terms should be refused before any work is spent verifying who issued it, and before any
+        // network lookup a stricter revocation mode might perform. It measures the DECLARED window -
+        // NotAfter minus NotBefore - which is a fixed property of the certificate, so a caller cannot
+        // wait the check out; expiry itself is a different question and chain building already answers it.
+        // Spelled exactly as the validity-window check above spells it, so the two cannot read the
+        // certificate's dates two different ways.
+        TimeSpan declaredLifetime =
+            certificate.NotAfter.ToUniversalTime() - certificate.NotBefore.ToUniversalTime();
+
+        if (_maximumLifetime is { } ceiling && declaredLifetime > ceiling)
+        {
+            _logger.LogWarning(
+                "A caller certificate was refused because the validity window it declares is longer "
+                + "than this deployment permits while revocation is not being checked. With no way to "
+                + "withdraw a certificate, its lifetime is the only bound on a compromised one. Raise "
+                + "Security:MaxCallerCertificateLifetimeDays, or re-issue the caller certificate with a "
+                + "shorter window, or configure a revocation posture other than NoCheck - in which case "
+                + "this ceiling no longer applies. No part of the certificate is recorded.");
 
             return ClientCertificateTrustState.Untrusted;
         }

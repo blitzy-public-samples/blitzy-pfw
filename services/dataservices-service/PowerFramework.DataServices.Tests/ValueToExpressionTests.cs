@@ -3092,7 +3092,7 @@ public sealed class ValueToExpressionTests
     /// same spelling. Note this can only ever prove VALUE agreement - a <c>const string</c> is
     /// inlined at compile time and equal literals are interned, so no identity check could tell a
     /// referenced constant from a duplicated literal. That claim is asserted against the SOURCE TEXT
-    /// by <see cref="TheSentinelsAreSingleSourcedFromTheOwningValidators"/> instead.
+    /// by <c>TheSentinelsAreSingleSourcedFromTheOwningValidators</c> instead.
     /// </remarks>
     private static string OwningSentinelConstant(string typeKey) => typeKey switch
     {

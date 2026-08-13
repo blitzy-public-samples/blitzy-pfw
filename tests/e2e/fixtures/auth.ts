@@ -168,8 +168,10 @@ export interface TokenRequest {
    * The caller identity to request a token for.
    *
    * This is a **claim, not a credential**. The identity actually honoured is
-   * the one the presented client certificate establishes, and a mismatch
-   * between the two is refused with `403` rather than quietly downgraded.
+   * the one the presented credential establishes — the user name of an accepted
+   * HTTP Basic credential, or the common name of a trusted client certificate —
+   * and a mismatch between the two is refused with `403` rather than quietly
+   * downgraded.
    */
   readonly subject?: string;
 
@@ -200,12 +202,14 @@ export interface TokenRequest {
  * non-secret name for "the end-to-end suite", it authenticates nothing on its
  * own, and it is safe in a log line. No credential of any kind appears anywhere
  * in this module — no shared secret, no client credential and nothing
- * resembling either — because the issuance edge authenticates its caller by
- * client certificate and the request body carries none.
+ * resembling either — because the issuance edge authenticates its caller from a
+ * presented HTTP Basic credential or a trusted client certificate, and the
+ * request body carries neither.
  *
- * Because the honoured identity is the one the certificate establishes, a
- * deployment whose certificate maps to some other name will refuse this value
- * with `403`. That is the contract behaving correctly.
+ * Because the honoured identity is the one that presented credential
+ * establishes, a deployment whose Basic user name or certificate common name
+ * maps to some other value will refuse this one with `403`. That is the contract
+ * behaving correctly.
  *
  * ⚠ SO IT IS READ FROM THE ENVIRONMENT, AND ONLY DEFAULTS TO THIS NAME ⚠
  *
@@ -224,7 +228,8 @@ export interface TokenRequest {
  * reading the schema violation back off the wire.
  *
  * It remains an **identifier, not a credential**, however it is supplied: it
- * authenticates nothing on its own, and the certificate is what does.
+ * authenticates nothing on its own — the Basic password or the client
+ * certificate is what does.
  */
 export const E2E_TOKEN_SUBJECT: string = ((): string => {
   const configured: string | undefined = process.env['E2E_TOKEN_SUBJECT'];

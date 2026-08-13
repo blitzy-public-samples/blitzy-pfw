@@ -80,8 +80,9 @@
 //           DELIBERATE LEGACY where it is asserted.
 //      C-C  ws_objects/** is read only and is the specification. Four legacy paths were read as the
 //           behavioural source for this file and none was modified, moved or reformatted:
-//           pfw.pbl.src/pfw.sra, common.pbl.src/assert.srf, common.pbl.src/assertionfailed.sru and
-//           tests.pbl.src/w_test_assert.srw. Nothing here reads a path under ws_objects at build
+//           ws_objects/pfw.pbl.src/pfw.sra, ws_objects/pfw.common.pbl.src/assert.srf,
+//           ws_objects/pfw.common.pbl.src/assertionfailed.sru and
+//           ws_objects/pfw.tests.pbl.src/w_test_assert.srw. Nothing here reads a path under ws_objects at build
 //           time or at run time; every fixture is constructed in code.
 //      C-H  80 percent line coverage per project, measured from the Cobertura report. Warnings are
 //           errors here by inheritance and there is no NoWarn, so this file is warning clean.
@@ -124,6 +125,10 @@
 //        precisely so this suite can run them on their own.
 //      * It asserts no performance objective of any kind. AAP 0.8.5 forbids one, because the
 //        repository publishes no latency, throughput or availability commitment anywhere.
+//
+//  LOCATOR CONVENTION: every bare `pfw.sra:L...` in this file means ws_objects/pfw.pbl.src/pfw.sra,
+//  the framework application - never the same-named packager object at
+//  ws_objects/pfw.pack.pbl.src/pfw.sra (AAP 0.8.6 R7).
 // ==================================================================================================
 
 using System;

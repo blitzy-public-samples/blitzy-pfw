@@ -2820,10 +2820,10 @@ public enum PinyinClosedInput
 /// </summary>
 /// <remarks>
 /// <para>
-/// WHY AN ALWAYS-ACTIVE TRACKING MATRIX RATHER THAN A SKIPPED ONE. This matrix used to be skipped until a
-/// legacy recording appeared, which meant that on the shipped state of this refactor - no recording - its
-/// four rows executed nothing at all and protected nothing at all. A skip that never fires is a test that
-/// does not exist. The rows now assert the EQUIVALENCE between two observable facts rather than one side of
+/// WHY AN ALWAYS-ACTIVE TRACKING MATRIX RATHER THAN A SKIPPED ONE. Skipping this matrix until a
+/// legacy recording appears means that on the shipped state of this refactor - no recording - its
+/// four rows execute nothing at all and protect nothing at all. A skip that never fires is a test that
+/// does not exist. The rows therefore assert the EQUIVALENCE between two observable facts rather than one side of
 /// it: for each closed input, <b>the input is characterized exactly when a paired oracle recording exists
 /// for the workflow</b>. That single form is correct in both worlds and executable in both, and it is what
 /// makes each direction a real guard:

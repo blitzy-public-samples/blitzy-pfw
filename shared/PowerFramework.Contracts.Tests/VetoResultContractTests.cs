@@ -117,12 +117,6 @@
 //
 //  No secret of any kind appears here, and nothing in this subject needs one (constraint C-F).
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  review_rules returns exactly "No user rules provided.", so NO user-specified rule governs this
-//  file. Its absence is not licence: the enterprise-standard baseline of AAP 0.7.2 applies in its
-//  place - nullable enabled and warnings as errors inherited from Directory.Build.props and never
-//  relaxed, no NoWarn, no #pragma, and no per-project analyser suppression.
 // ==================================================================================================
 
 using System.Reflection;

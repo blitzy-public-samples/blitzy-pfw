@@ -3,8 +3,8 @@
 //  ------------------------------------------------------------------------------------------------
 //  WHAT THIS FILE GUARDS
 //
-//  The generated OpenAPI document used to be mapped with an explicit anonymous exemption, in every
-//  environment, on the argument that a description of a surface is not part of the surface. That
+//  Mapping the generated OpenAPI document with an explicit anonymous exemption, in every
+//  environment, is defensible on the argument that a description of a surface is not part of the surface. That
 //  argument does not survive the Agent Action Plan, which ENUMERATES the anonymous exceptions rather
 //  than describing a principle: `/health` on all four services under contract C-10, and Security's key
 //  set and discovery document under contract C-01. The generated document is not among them, so an

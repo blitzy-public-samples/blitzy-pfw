@@ -30,14 +30,6 @@
 //                 operation, which is why every emitted fragment below carries the :L reference it
 //                 was measured at.
 //
-//  RULES POSITION No user rules were provided for this repository. The rules document contains
-//                 exactly one line saying so, and it was read to its end; re-reading it returns the
-//                 same. Nothing is invented or back-filled from convention in their place, and the
-//                 absence is not treated as licence to lower the bar. The binding constraints are
-//                 the enterprise-standard baseline together with the named non-rule constraints,
-//                 and every non-obvious decision below cites the constraint that drives it, as C-K
-//                 requires.
-//
 //  --------------------------------------------------------------------------------------------
 //  CORRECTION 1 - THIS IS A 2x2 MATRIX, NOT "THREE STRATEGIES" (C-K)
 //  --------------------------------------------------------------------------------------------
@@ -246,16 +238,13 @@
 //  * No test IN THIS FILE. Tests belong in PowerFramework.Persistence.Tests, which the application
 //    project already grants internal access to; every member below is reachable from a table-driven
 //    theory whose entire fixture is strings (C-H).
-//    STATE, STATED PLAINLY RATHER THAN IMPLIED: THAT THEORY IS PLANNED AND DOES NOT EXIST. No test in
-//    PowerFramework.Persistence.Tests references this class, the Oracle sibling or
-//    PagingRewriteDispatcher, and that project does not currently build in any case because the
-//    application project it references has no entry point. So NOTHING BELOW IS PINNED BY A TEST yet -
-//    not one sentinel, not one of the four forms, not the count wrapper. An earlier revision of this
-//    header read as though the tests existed; that reading is withdrawn.
-//    docs/PARITY.md section 6.2 enumerates the eleven rows the matrix must carry, and states the rule
-//    that decides whether it is worth anything: every expectation must be derived from the LEGACY
-//    generator at n_cst_thread_task_sqlquery.sru:L320-L399 and :L830-L834, never from reading this
-//    file. A matrix asserted against this implementation would pass and prove nothing.
+//    WHERE THEY LIVE: SqlServerPagingRewriterTests.cs holds the arm-by-arm matrix, and
+//    PagingRewriterByteExactTests.cs and PagingDispatcherAndCountTests.cs cover the dispatcher and the
+//    count wrapper. Every sentinel, all four forms and the count wrapper are pinned there.
+//    docs/PARITY.md section 6.2 states the rule that decides whether such a matrix is worth anything:
+//    every expectation must be derived from the LEGACY generator at
+//    n_cst_thread_task_sqlquery.sru:L320-L399 and :L830-L834, never from reading this file. A matrix
+//    asserted against this implementation would pass and prove nothing.
 // ==============================================================================================
 
 using System.Globalization;
@@ -906,13 +895,12 @@ internal sealed class SqlServerPagingRewriter : IPagingRewriter
     /// reproduced byte for byte.
     /// </para>
     /// <para>
-    /// WHAT CHANGED IS WHERE THE VALUES COME FROM. This method still validates nothing and is still
+    /// THE ENFORCEMENT LIVES ONE LAYER UP, DELIBERATELY. This method validates nothing and is
     /// callable directly with anything - it is the faithful port of the arm, and a method that filtered
-    /// its input would no longer be that. The enforcement lives at the one place every request passes
-    /// through: <see cref="PagingRewriteDispatcher.Rewrite"/> runs
+    /// its input would not be that. Every request instead passes through the one place that can refuse: <see cref="PagingRewriteDispatcher.Rewrite"/> runs
     /// <see cref="PagedUniqueIndexColumnValidator"/> over the collection and answers
     /// <see cref="PagingRewriteResult.InvalidPagedUniqueIndexColumn"/> before this arm is reached, gated on
-    /// <see cref="ConsumesPagedUniqueIndexColumns"/>. So "callers must supply trusted names" is no longer
+    /// <see cref="ConsumesPagedUniqueIndexColumns"/>. So "callers must supply trusted names" is not
     /// guidance a caller can ignore on the dispatched path (CWE-89, AAP 0.6.4); a caller reaching this
     /// method DIRECTLY - which is to say a test - is on its own, deliberately, because that is what makes
     /// the unvalidated legacy behaviour still observable and assertable.
@@ -1404,8 +1392,8 @@ internal sealed class SqlServerPagingRewriter : IPagingRewriter
     /// <para>
     /// <b>Width, and why the products above are CHECKED.</b> The legacy fields are PowerScript
     /// <c>long</c>, which is 32-bit signed <c>[:L36-L37]</c>; the request surfaces them as
-    /// <see langword="long"/>, which is 64-bit. This file previously left every product unchecked on
-    /// the reasoning that the oracle leaves them unchecked too, and a review found that reasoning
+    /// <see langword="long"/>, which is 64-bit. Leaving every product unchecked is defensible on
+    /// the reasoning that the oracle leaves them unchecked too, and that reasoning is
     /// wrong. An unchecked product does not preserve legacy behaviour, it invents behaviour: it wraps
     /// to a NEGATIVE number, and <c>TOP -N</c>, <c>OFFSET -N</c> and <c>BETWEEN</c> over negative
     /// bounds are statements that silently match nothing rather than faults that report. Nor is the

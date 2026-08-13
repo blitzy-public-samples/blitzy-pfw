@@ -7,9 +7,9 @@
 //    1. ATOMIC ACQUISITION, on both server-held session types. Validating that a session may be used
 //       and recording the activity happen under ONE acquisition of the session's gate. Asking "is it
 //       open", then "has it expired", then "record activity" as three separate calls takes the gate
-//       three times, and a close landing in either interval produced an outcome no single state of the
-//       session justified: both checks passed, the touch silently did nothing because the session was
-//       already closed, and the caller received a CLOSED session together with a success code.
+//       three times, and a close landing in either interval produces an outcome no single state of the
+//       session justifies: both checks pass, the touch silently does nothing because the session is
+//       already closed, and the caller receives a CLOSED session together with a success code.
 //
 //       On the expression session the consequence is sharper than a stale read. Closing there clears
 //       every host registration and every calculation stack, so a caller handed a closed session
@@ -22,8 +22,8 @@
 //
 //    3. A LOST TRACE RECORD IS COUNTED. The expression trace is fire-and-forget and a failing
 //       diagnostic sink must not break the calculation it observes - so the exception is still
-//       absorbed. What is no longer done is DISCARDING it: a sink that throws on every record loses
-//       every trace, and nothing anywhere reported that the diagnostic channel had stopped working. An
+//       absorbed. What must not happen is DISCARDING it: a sink that throws on every record loses
+//       every trace, and nothing anywhere would report that the diagnostic channel had stopped working. An
 //       invisibly failing diagnostic is worse than a disabled one, because it looks enabled.
 //
 //  WHY THERE IS NO WALL-CLOCK RACE TEST
@@ -391,7 +391,7 @@ public sealed class SessionAcquisitionTests
         ExpressionTraceDeliveryReport report = session.TraceDelivery;
 
         // AND THE LOSS IS VISIBLE. Two records were handed over, neither arrived, and the report says so
-        // - which previously nothing anywhere did.
+        // - which nothing else in the system would.
         Assert.Equal(2, report.Attempted);
         Assert.Equal(0, report.Delivered);
         Assert.Equal(2, report.Failed);

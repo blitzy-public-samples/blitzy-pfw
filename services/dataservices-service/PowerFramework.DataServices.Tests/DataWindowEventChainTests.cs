@@ -1057,9 +1057,9 @@ public sealed class DataWindowEventChainTests
     /// <list type="bullet">
     ///   <item><description>
     ///   <c>onddsgetfilter</c> [<c>:L13</c>] produces its result through a <b><c>ref string</c>
-    ///   out-parameter</b> and returns nothing. A <c>ref</c> result has no asynchronous representation -
-    ///   the caller blocks on the produced filter - so the drop-down search pair is irreducibly
-    ///   request/response.
+    ///   out-parameter</b> and returns nothing. The parameter itself projects onto a wire field with
+    ///   explicit presence; what has no fire-and-forget form is the SEQUENCING, because the caller blocks
+    ///   on the produced filter - so the drop-down search pair is irreducibly request/response.
     ///   </description></item>
     ///   <item><description>
     ///   <c>oncolumnexpinvokemethod</c> [<c>:L14</c>] returns <c>any</c> over a <c>string args[]</c>.
@@ -1441,8 +1441,8 @@ public sealed class DataWindowEventChainTests
     public void OnDdsGetFilterProducesItsResultThroughARefStringAndReturnsNothing()
     {
         // :L13. The `ref` out-parameter is the reason the drop-down search pair is irreducibly
-        // request/response: a `ref` result has no asynchronous representation at all, so the caller
-        // BLOCKS on the produced filter. (Which ordering PATTERN that fact earns the area is
+        // request/response: the caller BLOCKS on the produced filter, so the answer has no fire-and-forget
+        // form even though the parameter itself projects onto a wire field. (Which ordering PATTERN that fact earns the area is
         // EventOrderingPatternTests.cs's call; this file asserts the fact itself.)
         System.Reflection.MethodInfo member =
             typeof(DataWindowEventChain).GetMethod(nameof(DataWindowEventChain.OnDdsGetFilter))!;
@@ -3845,7 +3845,7 @@ public sealed class DataWindowEventChainTests
     [InlineData(false)]
     public void ClickAndDoubleClick_ABrokerVetoIsHonoured(bool doubleClick)
     {
-        // :L139-L141 and :L148-L150.
+        // :L138-L140 and :L147-L149.
         ChainFixture fixture = NewFixture();
         fixture.Host.AddRow("second");
         fixture.Host.CurrentRow = 1L;

@@ -102,14 +102,14 @@
 
     <!--
       Required AS A DIRECT REFERENCE, and it is not redundant. Microsoft.AspNetCore.OpenApi
-      10.0.10 pulls Microsoft.OpenApi 2.0.0 transitively, which raises the high severity NuGet
+      10.0.11 pulls Microsoft.OpenApi 2.0.0 transitively, which raises the high severity NuGet
       audit advisory NU1903 (GHSA-v5pm-xwqc-g5wc); the direct reference is what allows the root
       Directory.Packages.props pin of 2.11.0 to take effect and clear the audit. VERIFIED BY
       REMOVING IT: with this line deleted, `dotnet restore` does not merely warn, it FAILS, because
       the inherited warnings as errors setting promotes NU1903 to an error. Restoring the line
       returns the restore to zero NuGet warnings. Do NOT modernise this to the 3.x line: 3.9.0 was
       tested and produces two CS0200 errors inside the SDK's own generated OpenAPI XML comment
-      support file, because the 10.0.10 source generator is compiled against the 2.x object model.
+      support file, because the 10.0.11 source generator is compiled against the 2.x object model.
       2.11.0 is the only value that is simultaneously non vulnerable and compatible.
     -->
     <PackageReference Include="Microsoft.OpenApi" />
@@ -185,8 +185,8 @@
     PowerFramework.Contracts ProjectReference above; there is nothing to compile locally.
 
     VERIFIED BY DOING IT WRONG ON PURPOSE. Adding a Protobuf item here that points at the same
-    Proto directory produced 244 diagnostics, every one of them CS0436, each reporting that a
-    locally generated type "conflicts with the imported type of the same name in
+    Proto directory raises CS0436 once per double-generated contract type - hundreds of them - each
+    reporting that a locally generated type "conflicts with the imported type of the same name in
     PowerFramework.Contracts". Note WHICH diagnostic that is: CS0436 is normally a WARNING, and it
     is only fatal here because warnings are promoted to errors repository wide. Without that
     promotion the build would SUCCEED while silently preferring this assembly's private copy of
@@ -206,7 +206,7 @@
       discovering that (a) does not currently bite.
 
       (a) Microsoft.AspNetCore.Mvc.Testing's WebApplicationFactory<Program> must reach the Program
-          type that top level statements produce. VERIFIED ON SDK 10.0.302: it can do so WITHOUT
+          type that top level statements produce. VERIFIED ON THE PINNED SDK: it can do so WITHOUT
           this item, because ASP.NET Core ships the source generator
           Microsoft.AspNetCore.SourceGenerators.PublicProgramSourceGenerator, which emits
           `public partial class Program { }` for every top level statement app under

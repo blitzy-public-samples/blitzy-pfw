@@ -128,11 +128,11 @@ public sealed class ServiceConfigurationCoherenceTests
     /// <remarks>
     /// <para>
     /// Transcribed from AAP 0.3.2.2 and docs/ARCHITECTURE.md 4.1. ALL FOUR services declare a Kestrel
-    /// endpoint, Gateway included, and Gateway's inclusion is a correction rather than a detail: an
-    /// earlier revision left its address to the orchestration layer, and since no manifest exists and the
-    /// orchestration template's roster carries no <c>ASPNETCORE_URLS</c>, nothing in this repository bound
-    /// 5105 - a plain run bound Kestrel's own default of 5000, leaving the composition root's documented
-    /// access URL reachable by no means the repository provided. <see cref="ServiceProfile.DeclaresListener"/>
+    /// endpoint, Gateway included, and Gateway's inclusion is load-bearing rather than a detail: leaving
+    /// its address to the orchestration layer is the tempting shape, and because the orchestration
+    /// template's roster carries no <c>ASPNETCORE_URLS</c>, nothing in this repository would then bind
+    /// 5105 - a plain run binds Kestrel's own default of 5000, leaving the composition root's documented
+    /// access URL reachable by no means the repository provides. <see cref="ServiceProfile.DeclaresListener"/>
     /// is therefore <see langword="true"/> for every service.
     /// </para>
     /// <para>
@@ -150,14 +150,14 @@ public sealed class ServiceConfigurationCoherenceTests
     /// <see langword="true"/> for exactly the two services that publish a gRPC contract.
     /// </para>
     /// <para>
-    /// A SECOND ENDPOINT PER PROTOCOL VERSION WAS WITHDRAWN, AND THE REASON IS THE PORT MAP RATHER THAN
-    /// THE TRANSPORT. An earlier revision gave Persistence a second listener on 5111 and DataServices one
-    /// on 5112, both <c>Http2</c>-only, so that a listener accepted only what it was for. AAP 0.3.2.2
+    /// A SECOND ENDPOINT PER PROTOCOL VERSION IS RULED OUT BY THE PORT MAP RATHER THAN BY THE TRANSPORT.
+    /// Giving Persistence a second listener on 5111 and DataServices one on 5112, both <c>Http2</c>-only,
+    /// so that a listener accepts only what it is for, is the tempting shape. AAP 0.3.2.2
     /// assigns contracts C-05..C-08 to port 5101 and C-03/C-04 to port 5102, so a gRPC contract answering
-    /// on 5111 or 5112 answered on a port the AAP never names while the port it does name carried only
+    /// on 5111 or 5112 answers on a port the AAP never names while the port it does name carries only
     /// the probe - the assignment, not the diagnostic convenience of one-version-per-port, is what governs.
     /// The band assertion below therefore admits ONE port per service and nothing else, and 5103 stays
-    /// unallocated (constraint C-D) because nothing was moved into it.
+    /// unallocated (constraint C-D) because nothing moves into it.
     /// </para>
     /// </remarks>
     private static readonly ServiceProfile[] Services =
@@ -258,8 +258,8 @@ public sealed class ServiceConfigurationCoherenceTests
     ];
 
     /// <summary>
-    /// The complete authoritative leaf set of the <c>Security</c> section - twenty entries, no
-    /// twenty-first.
+    /// The complete authoritative leaf set of the <c>Security</c> section - twenty-one entries, no
+    /// twenty-second.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -282,18 +282,20 @@ public sealed class ServiceConfigurationCoherenceTests
     /// THE COUNT IS PART OF THE ASSERTION, so it moves only when the option graph genuinely moves. It
     /// grew from twelve when authorization stopped being implicit: the grant matrix makes issuance an
     /// allowlist decision rather than a trust decision, and the two client-certificate leaves make the
-    /// mutual-TLS fallback's trust anchor and revocation strictness configurable instead of assumed. All
-    /// of them are read by the options type and documented in the orchestration template, which is what
-    /// qualifies a leaf as authoritative.
+    /// mutual-TLS fallback's trust anchor and revocation strictness configurable instead of assumed. It
+    /// grew once more, to twenty-one, when signing-key ROLLOVER became expressible: replacing the one
+    /// signing key in the estate without publishing the outgoing one alongside it refuses every token
+    /// already in flight, so the retiring key's identifier is a leaf. All of them are read by the options
+    /// type and documented in the orchestration template, which is what qualifies a leaf as authoritative.
     /// </para>
     /// <para>
-    /// IT ALSO SHRANK, FROM TWENTY-TWO, AND THAT DIRECTION IS THE MORE INTERESTING ONE. The roster
-    /// entries once carried <c>Audiences</c> and <c>Scopes</c> members of their own, so the same
-    /// permission was declarable in two places: the grant matrix, which the issuer consults on every
-    /// request, and the roster entry, which NOTHING read once the matrix existed. A settings file
-    /// declaring both invites an operator to tighten the half that decides nothing. Both members were
-    /// therefore removed from the options type outright rather than cross-checked, and their leaves left
-    /// this list with them - which is exactly the ORPHANED direction of this assertion working as
+    /// THE SHRINKING DIRECTION IS THE MORE INTERESTING ONE. Giving the roster entries
+    /// <c>Audiences</c> and <c>Scopes</c> members of their own makes the same
+    /// permission declarable in two places: the grant matrix, which the issuer consults on every
+    /// request, and the roster entry, which NOTHING would read once the matrix exists. A settings file
+    /// declaring both invites an operator to tighten the half that decides nothing. Neither member is
+    /// therefore on the options type at all rather than cross-checked, so neither has a leaf in
+    /// this list - which is exactly the ORPHANED direction of this assertion working as
     /// intended, since a key no options type binds is a key an operator cannot discover is inert.
     /// </para>
     /// </remarks>
@@ -321,16 +323,28 @@ public sealed class ServiceConfigurationCoherenceTests
         // SecurityOptionsValidator's signing-material check, so a deployment naming a format this service
         // cannot import fails the BRING-UP rather than the first issuance.
         //
-        // THERE IS DELIBERATELY NO SigningKeyMinimumSizeBits LEAF TO DECLARE. An intermediate revision
-        // carried one, defaulted it to 2048 and refused a shorter modulus at startup. AAP 0.6.6.4 keeps
-        // 1024-bit RSA a legal size across this estate and C-B forbids correcting a weak legacy default
-        // rather than annotating it, so the setting, its bounds and its rejection are withdrawn: the
-        // modulus is measured in Tokens/SigningKeyProvider, published on SigningKeySizeBits, compared
-        // against the CONSTANT SecurityOptions.LegacyWeakSigningKeySizeBits for the annotation alone, and
-        // never refused. A constant is not a configuration leaf, so nothing belongs in this list for it.
+        // THERE IS DELIBERATELY NO SigningKeyMinimumSizeBits LEAF TO DECLARE, AND THAT IS NOT BECAUSE
+        // THERE IS NO FLOOR. A modulus below SecurityOptions.MinimumSigningKeySizeBits fails startup, in
+        // SecurityOptionsValidator and again in Tokens/SigningKeyProvider. The floor is a CONSTANT rather
+        // than a setting, because a floor an operator can lower is not a floor - and the operator most
+        // likely to lower it is one whose deployment already holds a short key. A constant is not a
+        // configuration leaf, so nothing belongs in this list for it.
         "Security:SigningKeyFormat",
 
         "Security:SigningKeyId",
+
+        // THE RETIRING KEY'S IDENTIFIER, AND IT IS AUTHORITATIVE BY THE SAME ENFORCEMENT TEST AS EVERY
+        // OTHER LEAF HERE. It is EMPTY as shipped, which is the steady state - no rollover in progress -
+        // and the validator refuses a half-configured pair: an identifier with no material publishes
+        // nothing while reading as a rollover under way, material with no identifier cannot be published
+        // at all because a key set entry has to carry a `kid`, and an identifier repeating the active one
+        // is an ambiguous key set rather than a rollover. Declared here EMPTY rather than omitted because
+        // this file is meant to be the complete picture of the section: the retiring MATERIAL is
+        // environment-only for the usual reason, but its identifier is not secret - a `kid` is published
+        // anonymously in the key set by design - and a member an operator cannot discover is a member
+        // whose rollover procedure they cannot find either.
+        "Security:RetiringSigningKeyId",
+
         "Security:TokenEndpointPath",
         "Security:JwksPath",
         "Security:OpenIdConfigurationPath",
@@ -347,6 +361,11 @@ public sealed class ServiceConfigurationCoherenceTests
         // an operator cannot discover.
         "Security:ClientCertificateAuthorityPath",
         "Security:ClientCertificateRevocationMode",
+
+        // THE COMPENSATING CONTROL FOR THE REVOCATION MODE ABOVE. Declared beside it because the two are
+        // read together - the ceiling applies only while revocation is not checked - and an operator who
+        // strengthens one needs to see the other in the same place.
+        "Security:MaxCallerCertificateLifetimeDays",
 
         "Security:KeyStore:ConfigurationKeyPrefix",
         "Security:KeyStore:PermittedKeyRefs",
@@ -368,10 +387,10 @@ public sealed class ServiceConfigurationCoherenceTests
         // is what keeps the roster declarable in a settings file at all (constraint C-F).
         // THE CREDENTIAL DIRECTORY, AND EXACTLY TWO MEMBERS OF IT. `Security:Clients` answers who may
         // AUTHENTICATE at the issuance edge and under which secret key name; what an authenticated identity
-        // may REQUEST is stated once, in the grant matrix above. The `:Audiences` and `:Scopes` members that
-        // used to be listed here were bound, frozen onto the resolved roster entry, and consulted by
-        // NOTHING - so they advertised permissions the matrix withholds, and an operator editing them
-        // changed nothing at all. Their absence from this list is now enforced twice over: a settings file
+        // may REQUEST is stated once, in the grant matrix above. Listing `:Audiences` and `:Scopes` here
+        // as well binds them, freezes them onto the resolved roster entry, and leaves them consulted by
+        // NOTHING - so they advertise permissions the matrix withholds, and an operator editing them
+        // changes nothing at all. Their absence from this list is enforced twice over: a settings file
         // declaring either fails this row, and a host started with either present in configuration refuses
         // to start by name (IssuanceRosterAuthority).
         "Security:Clients:*:Subject",
@@ -408,7 +427,7 @@ public sealed class ServiceConfigurationCoherenceTests
     /// <c>DbError</c> was masked or not masked according to configuration. That made a security
     /// property deployment-dependent: a stack brought up with the switch off would put the complete
     /// generated statement, interpolated literals and all, onto the network and into the log - which
-    /// is precisely the exposure <c>Errors/SqlRedactor.cs</c> exists to close. Redaction is now
+    /// is precisely the exposure <c>Errors/SqlRedactor.cs</c> exists to close. Redaction is
     /// UNCONDITIONAL and has no configuration surface at all, so a leaf here would name a key nothing
     /// binds and invite an operator to turn off something that cannot be turned off.
     /// </para>
@@ -498,6 +517,36 @@ public sealed class ServiceConfigurationCoherenceTests
         // so without this leaf the handler cannot fetch the key set and every inbound token is refused
         // for want of a key rather than on its merits.
         "InternalTls:TrustedCaPath",
+
+        // REVOCATION IS A SETTING, WHICH IS THE POINT - IT USED TO BE A HARDCODED `NoCheck` WITH A
+        // COMMENT EXPLAINING IT. Declared here, with its shipped value, so an operator can see the
+        // posture the service actually runs under rather than having to read Program.cs to discover
+        // that revocation was never checked. The value is a measurement, not a preference: the local
+        // certificate authority the operational docs tell an operator to build publishes neither a CRL
+        // distribution point nor an OCSP responder, and both strict modes were observed to fail the
+        // chain with RevocationStatusUnknown | OfflineRevocation - so a strict default would refuse
+        // every internal peer on a clean bring-up. An unrecognised value refuses startup rather than
+        // falling back, and the compensating control (a bounded certificate lifetime) is enforced on
+        // the Security side rather than asserted in a comment.
+        "InternalTls:RevocationMode",
+
+        // THE ELEVEN INGRESS BOUNDS. Declared in the settings file for the reason the handle ceilings
+        // above are: decomposition created this service's first-ever listening socket, so there is no
+        // legacy value to inherit and every bound is a deployment decision - one too low refuses correct
+        // callers and one too high delays the discovery of an abuse, and neither is auditable from
+        // anywhere but that file. The two message ceilings are gRPC-specific because gRPC is this
+        // service's primary transport; the rest bound the listener and the request layer.
+        "Ingress:MaxRequestBodyBytes",
+        "Ingress:MaxRequestHeadersTotalBytes",
+        "Ingress:MaxConcurrentConnections",
+        "Ingress:MaxHttp2StreamsPerConnection",
+        "Ingress:RequestHeadersTimeoutSeconds",
+        "Ingress:MaxConcurrentRequests",
+        "Ingress:RateLimitPermitsPerWindow",
+        "Ingress:RateLimitWindowSeconds",
+        "Ingress:RateLimitQueueLimit",
+        "Ingress:MaxReceiveMessageBytes",
+        "Ingress:MaxSendMessageBytes",
 
         // THE SCHEMA-PROVISIONING SWITCH, DECLARED HERE AND FALSE, WHICH IS THE OPPOSITE OF WHAT THE
         // ORCHESTRATION TEMPLATE SETS. That divergence is the design and not a drift: the CODE default is
@@ -859,14 +908,14 @@ public sealed class ServiceConfigurationCoherenceTests
     /// alone cannot see.
     /// </para>
     /// <para>
-    /// IT IS ALSO WHAT FORBIDS THE WITHDRAWN SECOND LISTENER FROM RETURNING. A revision before this one
-    /// gave the two gRPC-serving services an extra <c>Http2</c>-only endpoint on 5111 and 5112, chosen to
-    /// sit outside the band so that neither collided with a documented address nor consumed the reserved
-    /// slot. It was withdrawn because AAP 0.3.2.2 assigns C-05..C-08 to 5101 and C-03/C-04 to 5102, and a
-    /// contract answering on a port the AAP does not name is not on the port the AAP assigns it. With the
-    /// two surfaces collapsed onto one <c>Http1AndHttp2</c> endpoint each, "the service's documented port"
+    /// IT IS ALSO WHAT KEEPS A SECOND LISTENER OUT. Giving the two gRPC-serving services an extra
+    /// <c>Http2</c>-only endpoint on 5111 and 5112, chosen to sit outside the band so that neither
+    /// collides with a documented address nor consumes the reserved slot, is the tempting shape. It is not
+    /// available because AAP 0.3.2.2 assigns C-05..C-08 to 5101 and C-03/C-04 to 5102, and a
+    /// contract answering on a port the AAP does not name is not on the port the AAP assigns it. With both
+    /// surfaces on one <c>Http1AndHttp2</c> endpoint each, "the service's documented port"
     /// is the ONLY admissible port, every documented address stays exactly where the environment put it
-    /// (constraint C-L), and 5103 remains unallocated (constraint C-D) because nothing moved into it.
+    /// (constraint C-L), and 5103 stays unallocated (constraint C-D) because nothing moves into it.
     /// </para>
     /// </remarks>
     [Fact]
@@ -1490,16 +1539,16 @@ public sealed class ServiceConfigurationCoherenceTests
     //  requested scopes with the grant and reports the overlap, and a NARROWING IS A SUCCESS, so nothing
     //  refuses at provisioning time: the whole cost lands at the boundary, three layers from the cause.
     //
-    //  THE GRANT IS STATED IN EXACTLY ONE ARTIFACT, AND THAT IS THE FIX RATHER THAN A GAP. It used to be
-    //  stated in three - Security's Development overlay, the orchestration template and the Compose
-    //  manifest - and the manifest's injection was withdrawn for three reasons its own comment records:
-    //  in Development it duplicated the overlay, which already ships the grant AND the credential entry
-    //  the caller needs to authenticate for it; in Production it granted a permission no credential
-    //  could exercise; and it made the literal index 3 load-bearing across two files, so a fourth row
-    //  legitimately added to the settings file would have been merged INTO the injected one rather than
-    //  appended, because the configuration provider merges an array BY INDEX. What follows asserts the
-    //  single statement is correct, that neither of the other two artifacts restates it, and that both
-    //  say where it lives - so the guidance cannot go stale again silently.
+    //  THE GRANT IS STATED IN EXACTLY ONE ARTIFACT, AND THAT IS DELIBERATE RATHER THAN A GAP. Stating it in
+    //  three - Security's Development overlay, the orchestration template and the Compose manifest - is
+    //  the tempting belt-and-braces, and the manifest's injection is excluded for three reasons its own
+    //  comment records: in Development it duplicates the overlay, which already ships the grant AND the
+    //  credential entry the caller needs to authenticate for it; in Production it grants a permission no
+    //  credential can exercise; and it makes the literal index 3 load-bearing across two files, so a
+    //  fourth row legitimately added to the settings file would be merged INTO the injected one rather
+    //  than appended, because the configuration provider merges an array BY INDEX. What follows asserts
+    //  the single statement is correct, that neither of the other two artifacts restates it, and that both
+    //  say where it lives - so the guidance cannot go stale silently.
     // ==============================================================================================
 
     /// <summary>The one external caller the repository provisions a grant for.</summary>
@@ -1530,7 +1579,7 @@ public sealed class ServiceConfigurationCoherenceTests
     /// </para>
     /// <para>
     /// THE NEGATIVE HALF READS DECLARATIONS AND NOT MENTIONS. Both the template and the manifest discuss
-    /// the withdrawn keys at length, which is the documentation this test wants to keep; what neither may
+    /// the excluded keys at length, which is the documentation this test wants to keep; what neither may
     /// carry is a LIVE declaration of them. So the template is read line by line for an uncommented
     /// assignment and the manifest for an uncommented mapping key.
     /// </para>
@@ -2057,8 +2106,6 @@ public sealed class ServiceConfigurationCoherenceTests
     /// <summary>
     /// Enumerates a settings object as configuration leaf paths, treating an array as a single leaf.
     /// </summary>
-    /// <param name="owner">The object to flatten.</param>
-    /// <param name="prefix">Path prefix, empty for the settings root.</param>
     /// <returns>One entry per leaf, in declaration order.</returns>
     /// <remarks>
     /// An array counts as ONE leaf because that is how it is authored and how an options type exposes

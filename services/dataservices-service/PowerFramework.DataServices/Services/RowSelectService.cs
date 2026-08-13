@@ -343,7 +343,7 @@ public sealed record RowSelectRejectionError
 /// <para>
 /// IT IMPLEMENTS <see cref="IDataWindowRowSelectService"/>, WHICH IS ONE OF THE EVENT CHAIN'S FIVE
 /// ATTACHED-SERVICE CONTRACT. It adds one member beyond the two every attached service has -
-/// OnFiltered, the port of `RowSelect.Event OnFiltered()` [n_cst_dwsvc_rowselect.sru:L408-L409] -
+/// OnFiltered, the port of `RowSelect.Event OnFiltered()` [se_cst_dw.sru:L408-L409] -
 /// and this class already declares it public for exactly that raise, so satisfying the interface
 /// costs nothing and declaring it removes the need for an adapter between this model and an event
 /// chain.
@@ -394,7 +394,8 @@ public sealed class RowSelectService : DataWindowServiceBase, IDataWindowRowSele
     /// <remarks>
     /// A BARE LINE FEED, NOT A CARRIAGE-RETURN PAIR. PowerScript spells a carriage return
     /// <c>~r</c> and a line feed <c>~n</c> separately, and <c>:L239</c> uses only <c>~n</c> - unlike
-    /// the assert payload protocol at <c>pfw.sra:L114</c>, which splits on <c>~r~n</c>. Emitting
+    /// the assert payload protocol at <c>ws_objects/pfw.pbl.src/pfw.sra:L114</c> - the framework
+    /// application, not the same-named packager object - which splits on <c>~r~n</c>. Emitting
     /// <c>Environment.NewLine</c> here would make the composed text platform-dependent and would
     /// differ from the oracle on Windows, so the literal is fixed.
     /// </remarks>

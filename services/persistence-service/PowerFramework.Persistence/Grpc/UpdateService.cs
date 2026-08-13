@@ -654,6 +654,7 @@ internal interface IUpdateTaskSurface : IDisposable
     /// </remarks>
     long SetUpdateData(CarrierState? updateData, long updateRows);
 
+
     /// <summary>
     /// Whether the task currently holds one of the two mutually exclusive update sources - a data object
     /// name or a SQL syntax string.
@@ -1053,6 +1054,7 @@ internal sealed class UpdateTaskRegistry
     /// </summary>
     /// <param name="sessionId">The session the task was created against.</param>
     /// <param name="task">The created task.</param>
+    /// <param name="diagnostic">Receives the diagnostic text when the call refuses; empty on success.</param>
     /// <returns>The registered entry, whose identity is the handle to return to the caller.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="task"/> is <see langword="null"/>.</exception>
     /// <remarks>
@@ -1112,6 +1114,22 @@ internal sealed class UpdateTaskRegistry
     /// </param>
     /// <param name="entry">The resolved entry, or <see langword="null"/> when unresolved.</param>
     /// <returns><see langword="true"/> when <paramref name="handle"/> names a live task.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>A FOREIGN HANDLE IS ONE OF THE UNRESOLVED OUTCOMES, NOT A RESOLVED ONE.</b> A handle this
+    /// service mints is unguessable, which bounds DISCOVERY and not USE: one that leaks through a log, a
+    /// proxy trace or a caller's own bug would otherwise let another authenticated caller drive an update
+    /// task holding a third party's buffered rows - and read its conflict detail, which carries live table
+    /// values. The comparison is <see cref="HandlePrincipalResolver.IsCaller"/>, the same identity the
+    /// quota attributed the task to.
+    /// </para>
+    /// <para>
+    /// THE OUTCOME IS COLLAPSED INTO NOT-FOUND, out-parameter and all, so a caller cannot distinguish a
+    /// handle it does not own from one that never existed - and the ownership test sits ABOVE the activity
+    /// stamp, so a caller holding a leaked handle cannot keep another principal's task from being
+    /// reclaimed.
+    /// </para>
+    /// </remarks>
     internal bool TryResolve(TaskHandle? handle, out UpdateTaskEntry? entry)
     {
         string? taskId = handle?.TaskId;
@@ -1125,6 +1143,13 @@ internal sealed class UpdateTaskRegistry
 
         if (!_tasks.TryGetValue(taskId, out entry))
         {
+            return false;
+        }
+
+        if (!_principals.IsCaller(entry.Principal))
+        {
+            entry = null;
+
             return false;
         }
 
@@ -1144,6 +1169,15 @@ internal sealed class UpdateTaskRegistry
     /// same handle therefore produce exactly one removal, and the loser sees the same unknown-handle
     /// outcome as any other stale handle - which is what stops one task being disposed twice.
     /// </returns>
+    /// <remarks>
+    /// <b>THIS MEMBER TESTS NO OWNERSHIP, AND THAT IS DELIBERATE ON BOTH OF ITS TWO PATHS.</b> It takes an
+    /// IDENTITY rather than a wire handle precisely because its callers are not callers of the contract:
+    /// the reclaim pass, the shutdown drain and the session purge act on the service's behalf from a
+    /// background thread or during shutdown, where no request identity exists and an ownership test would
+    /// collect nothing. The one contract path that reaches it - <c>ReleaseUpdateTask</c> - passes the
+    /// identity of an entry it has ALREADY resolved through <see cref="TryResolve(TaskHandle?, out UpdateTaskEntry?)"/>,
+    /// which is where the ownership test lives, so a foreign caller never obtains an identity to release.
+    /// </remarks>
     internal bool TryRemove(string taskId, out UpdateTaskEntry? entry)
     {
         if (!_tasks.TryRemove(taskId, out entry) || entry is null)
@@ -1188,7 +1222,7 @@ internal sealed class UpdateTaskRegistry
             }
 
             // THE RELEASE/DISPOSAL HANDOFF, NOT A DIRECT TEARDOWN. Reaching straight for the worker's
-            // Dispose - which is what this loop used to do - tears the task down even while an operation
+            // Dispose - the obvious shape for this loop - tears the task down even while an operation
             // owns it, and destroying an object with work still pending against it is hazard 1
             // [docs/PB多线程绕坑提示.md]. RequestRelease records the release and answers whether
             // disposal is THIS caller's duty: false while an operation is in flight, in which case that
@@ -1257,7 +1291,7 @@ internal sealed class UpdateTaskRegistry
             }
 
             // THE RELEASE/DISPOSAL HANDOFF, NOT A DIRECT TEARDOWN. Reaching straight for the worker's
-            // Dispose - which is what this loop used to do - tears the task down even while an operation
+            // Dispose - the obvious shape for this loop - tears the task down even while an operation
             // owns it, and destroying an object with work still pending against it is hazard 1
             // [docs/PB多线程绕坑提示.md]. RequestRelease records the release and answers whether
             // disposal is THIS caller's duty: false while an operation is in flight, in which case that
@@ -1293,7 +1327,7 @@ internal sealed class UpdateTaskRegistry
             }
 
             // THE RELEASE/DISPOSAL HANDOFF, NOT A DIRECT TEARDOWN. Reaching straight for the worker's
-            // Dispose - which is what this loop used to do - tears the task down even while an operation
+            // Dispose - the obvious shape for this loop - tears the task down even while an operation
             // owns it, and destroying an object with work still pending against it is hazard 1
             // [docs/PB多线程绕坑提示.md]. RequestRelease records the release and answers whether
             // disposal is THIS caller's duty: false while an operation is in flight, in which case that
@@ -1443,6 +1477,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
     /// worker/proxy pair needs and resolves the session; this service only calls into it.
     /// </param>
     /// <param name="tasks">The handle-to-task table. Must be the process singleton.</param>
+    /// <param name="definitions">The catalogue of declared data-object definitions.</param>
     /// <param name="logger">
     /// Optional structured logger. Optional rather than required so a unit test can construct the service
     /// with nothing but its behavioural collaborators.
@@ -1476,7 +1511,6 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
     /// <summary>
     /// Projects one run's outcome onto the wire status, mapping the classification EXHAUSTIVELY.
     /// </summary>
-    /// <param name="result">The run's result.</param>
     /// <returns>The status to report.</returns>
     /// <exception cref="InvalidOperationException">
     /// The classification carries a kind this mapping does not recognise - a structural fault, never a
@@ -1842,8 +1876,8 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             // metadata rather than row data, and the redactor's provider-envelope rule is what lets it
             // survive masking while a value quoted inside the message does not.
             //
-            // This arm used to be UpdateOutcomeKind.DatabaseError, which publishes as HTTP 502 - so a
-            // caller who omitted a required column was told the DATABASE had failed. The classifier's own
+            // Classifying this arm as UpdateOutcomeKind.DatabaseError publishes it as HTTP 502 - so a
+            // caller who omitted a required column would be told the DATABASE had failed. The classifier's own
             // predicate decides membership; only constraints a corrected payload can satisfy arrive here.
             UpdateOutcomeKind.ConstraintViolation =>
                 UpdateWireCodes.Status(result.Code, errorText, dbError),
@@ -1963,8 +1997,8 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
         // drops. Nothing else in the process can reach an unpublished task, so failing to dispose it would
         // pin its pool reference for the life of the process
         // [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L174]. The gate wait below is
-        // cancellable, so a caller that goes away while queued is now one of those arms - and it is
-        // precisely the arm an explicit per-branch drop would have missed.
+        // cancellable, so a caller that goes away while queued is one of those arms - and it is
+        // precisely the arm an explicit per-branch drop would miss.
         bool published = false;
 
         try
@@ -2077,10 +2111,10 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             });
         }
 
-        // ⚠ THE TEARDOWN IS NOT UNCONDITIONAL ANY MORE, AND THAT IS THE FIX. Disposing here regardless is
+        // ⚠ THE TEARDOWN IS DELIBERATELY NOT UNCONDITIONAL. Disposing here regardless is
         // exactly the teardown-with-work-still-pending the legacy's own threading notes warn about
-        // [docs/PB多线程绕坑提示.md, hazard 1]: an update running through this task would have had its
-        // surface disposed underneath it mid-statement. The release now RECORDS itself and disposes only
+        // [docs/PB多线程绕坑提示.md, hazard 1]: an update running through this task would have its
+        // surface disposed underneath it mid-statement. The release RECORDS itself and disposes only
         // when nothing is in flight; otherwise the duty passes to the operation that is, which performs it
         // as it exits. Exactly one of the two disposes, on every interleaving.
         if (removed.RequestRelease())
@@ -2398,6 +2432,67 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
                         RetCode.E_INVALID_DATAOBJECT,
                         // Qualified rather than imported: this file deliberately holds no using for the
                         // task namespace, so that nothing in Grpc/ reaches a worker type by accident.
+                        Tasks.SqlUpdateTask.InvalidDataObjectMessage),
+                });
+            }
+
+            // ==========================================================================================
+            //  🔴 THE SAME REFUSAL, COMPUTED ON A STATE THE ARM ABOVE CANNOT SEE - AND THE ONE THAT KEEPS
+            //  CALLER INPUT OUT OF A STRUCTURAL FAIL-FAST.
+            //
+            //  A SOURCE FIELD THAT IS PRESENT AND EMPTY LEAVES THE TASK WITH NO SOURCE, WHICHEVER FIELD IT
+            //  IS. Both setters assign as given and CLEAR THE SIBLING SOURCE
+            //  [n_cst_thread_task_sqlupdate.sru:L259-L260, :L270-L271], so an empty value cannot install a
+            //  source and can only destroy the one the task already had. There is therefore no request in
+            //  which a present-but-empty source field is meaningful, and the state it leaves is exactly the
+            //  state the arm above refuses: the update would take the oracle's own no-source arm and answer
+            //  E_INVALID_DATAOBJECT with 无效的数据源对象! [:L326-L330]. The SAME code and the SAME verbatim
+            //  message are answered here, for the same reason that arm gives - a success the caller cannot
+            //  act on is worse than a refusal it can.
+            //
+            //  ⚠️ AND IT IS ALSO A SECURITY BOUNDARY, WHICH IS WHY IT IS NOT MERELY TIDINESS. The caller-side
+            //  proxy's data-object setter carries the oracle's UN-GATED assertion
+            //  [Tasks/TaskProxies/SqlUpdateTaskProxy.cs:1077, oracle :L101] - un-gated is the preserved
+            //  inconsistency (C-B) and stays exactly as it is. In process that assertion guards an
+            //  invariant against the ONE caller that shares the address space, and a violation is that
+            //  caller's own bug. Across this boundary the caller is remote, authenticated and untrusted, and
+            //  the assertion's failure is a structural fault this host answers by SHUTTING DOWN
+            //  [Program.cs, the assertion arm of the interceptor] - so without this screen an authenticated
+            //  caller holding the write scope could terminate the whole service, and with it every open
+            //  session, task and transaction in the instance, by sending one empty string
+            //  (CWE-20, CWE-617, CWE-248). The sibling syntax setter's assertion is DEBUG-gated
+            //  [:1134, oracle :L113-L115], so the same input reaches the same fail-fast in a debug build;
+            //  both fields are screened here so neither configuration is reachable from the wire.
+            //
+            //  THE ASSERTION IS NOT WEAKENED, MOVED OR GATED. It still fires for an in-process caller that
+            //  violates the invariant, which is what it is for, and this screen is what stops REMOTE input
+            //  ever reaching it - the narrowing-with-a-defined-error the plan prescribes for a legacy
+            //  behaviour that cannot survive a network boundary (AAP 0.1.5), and the reason the fail-fast
+            //  posture stays reserved for genuine structural faults (AAP 0.6.7).
+            //
+            //  AHEAD OF THE CLEAR, so a refusal changes nothing - the same atomicity every arm above has.
+            // ==========================================================================================
+            bool emptyDataObject = request.HasDataObject && request.DataObject.Length == 0;
+            bool emptySqlSyntax = request.HasSqlSyntax && request.SqlSyntax.Length == 0;
+
+            if (emptyDataObject || emptySqlSyntax)
+            {
+                // The FIELD is named because a caller may have sent both and needs to know which it must
+                // correct; no value is quoted, because the offending value is the empty string and the
+                // request's other fields are none of a log record's business (constraint C-F).
+                _logger?.LogWarning(
+                    "PrepareUpdate refused on task {TaskId}: the request states an EMPTY {Field}, which "
+                    + "installs no source and clears the other one, so no update could ever run against "
+                    + "the task. Nothing was cleared and no descriptor was recorded.",
+                    LogSafeText.Render(entry.TaskId),
+                    emptyDataObject && emptySqlSyntax
+                        ? "data object and an empty SQL syntax"
+                        : emptyDataObject ? "data object" : "SQL syntax");
+
+                return Task.FromResult(new PrepareUpdateResponse
+                {
+                    Status = UpdateWireCodes.Status(
+                        RetCode.E_INVALID_DATAOBJECT,
                         Tasks.SqlUpdateTask.InvalidDataObjectMessage),
                 });
             }
@@ -2725,6 +2820,21 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             // with the payload because it is load-bearing: a rejected changeset with a ZERO count is the
             // oracle's SUCCESS arm [:L339-L342] while a non-zero count is E_INVALID_DATA [:L343-L345]. An unset
             // payload is the oracle's zero-length blob and is passed through as null rather than substituted.
+            // THE CARRIER WORK BOUND, SCREENED BEFORE THE TASK IS TOUCHED. It sits here rather than inside
+            // the codec for the reason the empty-source screen above sits at this boundary: a refusal must
+            // be atomic, and the setter it guards ASSIGNS the payload before anything decodes it, so a
+            // carrier refused further in would already have replaced the payload the task held. The oracle
+            // bounds neither rows nor columns and was right not to - its blob came from a DataWindow the
+            // same process owned - which is why this is a boundary-created bound and not a legacy rule.
+            // See UpdateCarrierBounds for the full argument and for why there are two bounds and not one.
+            if (!UpdateCarrierBounds.IsWithinBounds(request.UpdateData, out string? carrierDiagnostic))
+            {
+                return Task.FromResult(new UpdateResponse
+                {
+                    Status = UpdateWireCodes.Status(RetCode.E_OUT_OF_RANGE, carrierDiagnostic!),
+                });
+            }
+
             long payload = entry.Task.SetUpdateData(request.UpdateData, request.UpdateRows);
 
             if (payload != RetCode.OK)
@@ -2805,5 +2915,113 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
         {
             ReleaseLease(entry);
         }
+    }
+}
+
+
+/// <summary>
+/// The bounds this boundary places on a caller-submitted update carrier.
+/// </summary>
+/// <remarks>
+/// <para>
+/// 🔴 <b>A WORK BOUND CREATED BY THE DECOMPOSITION, NOT A LEGACY RULE (constraint C-B).</b> The oracle's
+/// setter takes a blob and a row count [<c>n_cst_thread_task_sqlupdate.sru:L44, :L74-L77</c>] and bounds
+/// neither, and it was right not to: the blob was produced by the SAME PROCESS a moment earlier by a
+/// DataWindow the application itself owned, so its size was a property of that application's own data.
+/// Across a network boundary the carrier is caller-submitted, and the only thing bounding it was the
+/// transport's message ceiling - which a caller can fill with millions of one-column rows just as easily
+/// as with a few wide ones. Every row is decoded, its buffer tag reconciled, its item status read and its
+/// column values walked twice - current and original - before a single statement is generated, so item
+/// COUNT and payload SIZE are different quantities and only one of them was bounded.
+/// </para>
+/// <para>
+/// TWO BOUNDS RATHER THAN ONE PRODUCT, because the two failures are different and a product would hide
+/// both. A million single-column rows and a thousand rows of a thousand columns have similar products and
+/// entirely different costs: the first is a million iterations of the row loop, the second is a schema no
+/// DataWindow in the estate declares. The row ceiling is generous - two orders of magnitude above the
+/// largest changeset any documented workflow produces - because it exists to refuse the abusive carrier
+/// rather than to police a large legitimate one. The column ceiling is sized against the DataWindow
+/// engine's own practical limit and is far above the six columns the primary fixture declares.
+/// </para>
+/// <para>
+/// THIS NARROWS THE CONTRACT, AND THAT IS THE DELIBERATE CHOICE THE PLAN PRESCRIBES: where a legacy
+/// behaviour cannot be carried across a network boundary unchanged, the contract is narrowed with a
+/// DEFINED error rather than widened with a guess [AAP 0.1.5]. The refusal is
+/// <see cref="RetCode.E_OUT_OF_RANGE"/> and it names the bound, because a published ceiling is not a fact
+/// about this deployment's state or its other callers.
+/// </para>
+/// </remarks>
+internal static class UpdateCarrierBounds
+{
+    /// <summary>The largest number of rows one submitted carrier may carry, across all three buffers.</summary>
+    internal const int MaximumRows = 100_000;
+
+    /// <summary>The largest number of column values one row may carry, in either value set.</summary>
+    internal const int MaximumValuesPerRow = 1_024;
+
+    /// <summary>Diagnostic for a carrier carrying more rows than the boundary admits.</summary>
+    internal const string TooManyRowsDiagnostic =
+        "The submitted update carrier holds more rows than this boundary admits. The ceiling is a work "
+        + "bound on a caller-submitted payload rather than a limit of the update protocol: every row is "
+        + "decoded, reconciled against its buffer segment and walked twice - current and original values - "
+        + "before any statement is generated. Submit the change set in smaller carriers. No statement was "
+        + "generated and the task's own payload was left untouched.";
+
+    /// <summary>Diagnostic for a row carrying more column values than the boundary admits.</summary>
+    internal const string TooManyValuesDiagnostic =
+        "A row in the submitted update carrier holds more column values than this boundary admits, in "
+        + "either its current or its original value set. The ceiling is a work bound on a caller-submitted "
+        + "payload. No statement was generated and the task's own payload was left untouched.";
+
+    /// <summary>
+    /// Screens a submitted carrier against both bounds.
+    /// </summary>
+    /// <param name="carrier">The submitted carrier, which may be absent.</param>
+    /// <param name="diagnostic">
+    /// The diagnostic to answer with when the carrier is refused; otherwise <see langword="null"/>.
+    /// </param>
+    /// <returns><see langword="true"/> when the carrier is within both bounds.</returns>
+    /// <remarks>
+    /// AN ABSENT CARRIER PASSES. The oracle's zero-length blob is a legal submission whose meaning is
+    /// decided further in - a rejected change set with a zero row count is the oracle's SUCCESS arm
+    /// [<c>:L339-L342</c>] - so screening it here would convert a documented success into a refusal.
+    /// </remarks>
+    internal static bool IsWithinBounds(CarrierState? carrier, out string? diagnostic)
+    {
+        diagnostic = null;
+
+        if (carrier is null)
+        {
+            return true;
+        }
+
+        long rows = 0;
+
+        foreach (CarrierBufferSegment segment in carrier.Segments)
+        {
+            rows += segment.Rows.Count;
+
+            if (rows > MaximumRows)
+            {
+                diagnostic = TooManyRowsDiagnostic;
+
+                return false;
+            }
+
+            foreach (Contracts.Common.V1.DataWindowRow row in segment.Rows)
+            {
+                if (row.Columns.Count <= MaximumValuesPerRow
+                    && row.OriginalValues.Count <= MaximumValuesPerRow)
+                {
+                    continue;
+                }
+
+                diagnostic = TooManyValuesDiagnostic;
+
+                return false;
+            }
+        }
+
+        return true;
     }
 }

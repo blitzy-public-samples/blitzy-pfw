@@ -169,8 +169,8 @@
 //     `Convert` renders exactly what `dwvaluetoexp.srf` renders, DEFECT 7 included, and that text
 //     is COMPATIBILITY AND DIAGNOSTIC DATA: it is what a characterization recording compares, what
 //     a legacy-shaped payload carries and what a trace shows. It is NOT a safe thing to splice into
-//     an expression and evaluate, and the reason is DEFECT 7 read carefully. The comment on the
-//     string overload used to say a quote merely produces a MALFORMED expression. That is true of
+//     an expression and evaluate, and the reason is DEFECT 7 read carefully. Reading the string
+//     overload as though a quote merely produces a MALFORMED expression is the mistake. That is true of
 //     an unbalanced quote and false of a balanced one: `O'Brien` breaks, but a value such as
 //     `x' or 1=1 or 'y` closes the literal, contributes its own predicate and reopens a literal, so
 //     the expression stays well formed and MEANS SOMETHING ELSE. Concatenating a caller-supplied

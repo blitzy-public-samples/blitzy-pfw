@@ -266,9 +266,9 @@ citation resolves to exactly one file from the repository root on any platform.
 checkout**: a POSIX-absolute path, a UNC path, any leading dot including a `./` prefix, any `..` segment
 anywhere, a backslash, whitespace, a leading `~` a shell would expand to a home directory, and **any colon**
 — which is what rules out the Windows drive-absolute and drive-relative forms `C:/Windows/System32/…` and
-`C:…`, and the NTFS alternate-data-stream syntax `file.srd:stream`. An earlier revision of the pattern
-rejected the POSIX forms and **accepted the drive-absolute one**, which read as protection while providing
-none on the platform the oracle itself runs on. A colon has no legitimate use in any path in this
+`C:…`, and the NTFS alternate-data-stream syntax `file.srd:stream`. A pattern that rejects the POSIX forms
+while **accepting the drive-absolute one** is the easy half-measure, and it reads as protection while
+providing none on the platform the oracle itself runs on. A colon has no legitimate use in any path in this
 repository, so the exclusion costs nothing; **non-ASCII characters are legitimate and are accepted**,
 because one cited specification is `docs/PB多线程绕坑提示.md`.
 

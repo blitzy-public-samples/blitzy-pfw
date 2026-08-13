@@ -536,12 +536,12 @@ internal sealed class TaskNotificationDispatcher
     /// legacy removal engine answers <see cref="RetCode.OK"/> unconditionally - its only failure is an
     /// invalid filter [<c>ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1021-L1023,
     /// :L1089</c>] - so it does not distinguish "removed something" from "matched nothing", and neither
-    /// does this. An earlier revision of this surface DID distinguish them, from its own index, on the
+    /// does this. DISTINGUISHING THEM FROM THIS SURFACE'S OWN INDEX IS THE TEMPTING REFINEMENT, on the
     /// reasoning that a more informative answer costs nothing. It costs the one thing this refactor may
     /// not spend: the answer is observable through the published contract, so a caller written against
     /// the oracle's algebra would read a removal that matched nothing as a failure that never happened.
-    /// The index is still maintained - <see cref="IsSubscribed"/> is how a caller asks whether anything
-    /// is listening - it simply no longer changes the return code.
+    /// The index is maintained for a different purpose - <see cref="IsSubscribed"/> is how a caller asks
+    /// whether anything is listening - and it deliberately does not reach the return code.
     /// </para>
     /// </remarks>
     internal long Off(string? name, TaskNotificationHandler? handler)
@@ -3092,7 +3092,7 @@ internal abstract class SqlTaskProxyBase : ISqlTaskProxy, IDisposable
     /// </param>
     /// <remarks>
     /// <para>
-    /// <b>C-F-SAFE BY CONSTRUCTION WAS AN ASSUMPTION ABOUT SUBSCRIBERS, AND IT IS NO LONGER RELIED ON.</b>
+    /// <b>C-F-SAFE BY CONSTRUCTION IS AN ASSUMPTION ABOUT SUBSCRIBERS, AND IT IS NOT RELIED ON HERE.</b>
     /// A subscriber is code registered against this proxy's notification broker, so its message is whatever
     /// that code chose - and on this service the code near a notification is the SQL task layer, whose
     /// faults carry generated statements. The fault is therefore DESCRIBED rather than attached: attaching

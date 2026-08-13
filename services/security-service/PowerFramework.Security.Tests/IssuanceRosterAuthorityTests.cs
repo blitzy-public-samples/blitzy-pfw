@@ -2,21 +2,20 @@
 //  ONE AUTHORITATIVE PERMISSION MODEL, AND A HOST THAT REFUSES TO START CARRYING A SECOND ONE.
 //
 //  The issuance decision is taken entirely against the deployment-wide audience roster and the grant matrix
-//  folded from Security:Callers and Security:CallerAuthorizations. There used to be a SECOND surface
-//  describing the same decision - Security:Clients[n]:Audiences and :Scopes - which was bound, frozen onto
-//  RegisteredIssuanceClient, and consulted by NOTHING. It could neither grant nor withhold anything, and the
-//  shipped settings had already drifted away from the matrix: the Gateway caller advertised the audience
-//  powerframework-security and the scope ping and was granted neither. An operator reading the roster would
+//  folded from Security:Callers and Security:CallerAuthorizations. A SECOND surface describing the same
+//  decision - Security:Clients[n]:Audiences and :Scopes - is the shape this file exists to keep out. Bound
+//  and frozen onto RegisteredIssuanceClient it would be consulted by NOTHING, able neither to grant nor to
+//  withhold, while reading to an operator as a permission: a directory advertising the audience
+//  powerframework-security and the scope ping for a caller the matrix grants neither would have that operator
 //  conclude a caller may address audiences it will in fact be refused for, and editing those lists to fix an
 //  authorization problem would change nothing at all (CWE-16, CWE-863).
 //
-//  THE SURFACE IS GONE, NOT ENFORCED. Enforcing it would have created a second permission gate able to
-//  refuse what the matrix grants, which is the divided authority TokenIssuer.cs rejects in terms. And its
-//  RETURN IS FATAL: a binder silently drops a key no property matches, so a settings file carrying either
-//  member forward from an older revision would read as working authorization configuration and do nothing -
-//  the removed defect in a new dress, invisible from the bound instance because the value never arrives.
-//  That is the whole fatal contract, and it is deliberately no wider: a duplicated REPRESENTATION of the
-//  permission model refuses the host.
+//  SO IT IS REFUSED, NOT ENFORCED. Enforcing it would create a second permission gate able to refuse what
+//  the matrix grants, which is the divided authority TokenIssuer.cs rejects in terms. And its PRESENCE IS
+//  FATAL: a binder silently drops a key no property matches, so a settings file carrying either member would
+//  read as working authorization configuration and do nothing - invisible from the bound instance, because
+//  the value never arrives. That is the whole fatal contract, and it is deliberately no wider: a duplicated
+//  REPRESENTATION of the permission model refuses the host.
 //
 //  THE ROSTER/MATRIX CROSS-REFERENCE IS A DIFFERENT QUESTION AND IS REPORTED, NOT REFUSED. Security:Clients
 //  says who may authenticate BY SHARED SECRET; the matrix says what an authenticated identity may REQUEST.
@@ -163,8 +162,8 @@ public sealed class IssuanceRosterAuthorityTests
     /// subject claim verbatim, and <c>IssuanceClientRegistry</c> keys the roster on it under an ordinal
     /// comparer - while the matrix is keyed on the trimmed identity. So a directory entry carrying a leading
     /// space and a grant naming the trimmed form describe two different callers to the issuer, and this
-    /// check must say so rather than reporting agreement authentication will not honour. An earlier revision
-    /// trimmed both sides and reported the pair as agreeing, which is the one reading it must never produce.
+    /// check must say so rather than reporting agreement authentication will not honour. Trimming BOTH sides
+    /// would report the pair as agreeing, which is the one reading it must never produce.
     /// </remarks>
     [Fact]
     public void ASubjectIsComparedAsTheEnforcementPointComparesIt()
@@ -297,15 +296,15 @@ public sealed class IssuanceRosterAuthorityTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THE ROW THAT CANNOT BE FAKED, AND THE ONE THAT RECORDS THE FIX. Before this checkpoint the shipped
-    /// settings genuinely diverged - the Gateway caller advertised an audience and a scope the matrix
-    /// withheld - and the composition root logged a warning and started anyway. Booting the real host on the
-    /// service's own files now proves three things at once: the settings state their permissions in ONE
-    /// place, the retired keys are gone from them, and the startup gate that would refuse a host carrying
-    /// either is actually wired in.
+    /// THE ROW THAT CANNOT BE FAKED. Divergence between a credential directory advertising an audience and a
+    /// scope and a matrix withholding both is the failure this whole file is about, and a composition root
+    /// that merely logged a warning and started anyway would leave it in place. Booting the real host on the
+    /// service's own files proves three things at once: the settings state their permissions in ONE place,
+    /// they carry neither permission key on a directory entry, and the startup gate that would refuse a host
+    /// carrying either is actually wired in.
     /// </para>
     /// <para>
-    /// A HOST THAT FAILED THE GATE WOULD NOT START, so resolving the options at all is itself half the
+    /// A HOST FAILING THE GATE WOULD NOT START, so resolving the options at all is itself half the
     /// evidence; the recorded log is the other half, because a report that is silenced is indistinguishable
     /// from one that found nothing to say.
     /// </para>

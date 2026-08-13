@@ -1318,10 +1318,10 @@ public sealed class PersistenceOptionsTests
     /// </para>
     /// <para>
     /// THE <c>Jwks</c> MARKER IS THE ABSENCE OF A KEY-SET PATH, AND THAT ABSENCE IS A DECISION RATHER THAN
-    /// AN OVERSIGHT. An earlier revision declared and validated a key-set path as though this service
-    /// composed its own address beneath the authority. It never did: the stock bearer handler resolves the
-    /// key set by fetching the authority's discovery document and following the address that document
-    /// publishes, so nothing read the setting - and an operator who overrode it changed nothing while
+    /// AN OVERSIGHT. Declaring and validating a key-set path reads as though this service composed its
+    /// own address beneath the authority. It does not: the stock bearer handler resolves the key set by
+    /// fetching the authority's discovery document and following the address that document publishes, so
+    /// no code path would read such a setting - and an operator who overrode it would change nothing while
     /// believing a key-set address had moved, which is strictly worse than having no setting at all. One
     /// metadata flow is advertised and it is the live one.
     /// </para>

@@ -317,9 +317,7 @@ internal sealed class TransactionSession
     /// Creates a session record.
     /// </summary>
     /// <param name="sessionId">The opaque, server-issued wire identity.</param>
-    /// <param name="referenceIndex">
-    /// The ONE-BASED pool reference index returned by <c>AddRef</c>. Stored verbatim.
-    /// </param>
+    /// <param name="lease">The pool lease the session holds for the lifetime of the transaction.</param>
     /// <param name="descriptor">
     /// The nine-field descriptor this session was opened with. It carries the credential and is
     /// therefore never rendered, never logged and never projected onto a response - see the
@@ -727,9 +725,10 @@ internal sealed class TransactionSessionRegistry
     /// <summary>
     /// Issues a handle for a freshly acquired pool reference and records the session under it.
     /// </summary>
-    /// <param name="referenceIndex">The ONE-BASED pool reference index, stored verbatim.</param>
+    /// <param name="lease">The pool lease the session holds for the lifetime of the transaction.</param>
     /// <param name="descriptor">The descriptor the session was opened with.</param>
     /// <param name="transaction">The borrowed pooled transaction.</param>
+    /// <param name="diagnostic">Receives the diagnostic text when the call refuses; empty on success.</param>
     /// <returns>The registered session, whose identity is the handle to return to the caller.</returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="transaction"/> is <see langword="null"/>.
@@ -850,6 +849,28 @@ internal sealed class TransactionSessionRegistry
             return false;
         }
 
+        // 🔴 A FOREIGN SESSION IS THE SAME ONE OUTCOME, AND THIS IS THE MOST CONSEQUENTIAL OF THE FOUR
+        // HANDLE KINDS. A session carries an OPEN TRANSACTION: a caller reaching another principal's session
+        // could commit or roll back writes that are not its own, and could create query, update and command
+        // tasks that execute inside them - so the exposure is not reading a resource, it is acting as
+        // another caller inside a unit of work it cannot see. The handle is unguessable, which bounds
+        // discovery and not use, so ownership is compared against HandlePrincipalResolver.IsCaller - the
+        // same identity the quota attributed the session to - and collapsed into the not-found answer.
+        //
+        // BOTH OVERLOADS ARE COVERED BECAUSE THIS ONE IS THE LOOKUP. The handle overload unwraps onto it,
+        // and so do the composition root's task-creation and publication paths, which take a session
+        // identity a CALLER supplied on a task request - the route by which a foreign session would
+        // otherwise be reached without ever touching a C-08 operation.
+        //
+        // THE TEST PRECEDES THE STAMP so a leaked handle cannot be used to keep another caller's session,
+        // and the pooled transaction it pins, alive past the idle window.
+        if (!_principals.IsCaller(session.Principal))
+        {
+            session = null;
+
+            return false;
+        }
+
         // A HANDLE IN USE IS NOT AN ABANDONED HANDLE. The stamp is refreshed on every resolve, which is
         // every call that names this session, so the reclaim pass measures time since the caller was last
         // heard from rather than time since the session was opened.
@@ -867,6 +888,16 @@ internal sealed class TransactionSessionRegistry
     /// same session therefore produce exactly one removal, and the loser sees the same unknown-session
     /// outcome as any other stale handle.
     /// </returns>
+    /// <remarks>
+    /// <b>THIS MEMBER TESTS NO OWNERSHIP, AND ITS PARAMETER IS AN IDENTITY RATHER THAN A HANDLE TO SAY
+    /// SO.</b> Its callers are the reclaim pass, the shutdown drain and <c>EndSession</c> - the first two
+    /// acting on the service's behalf where no request identity exists, and the third passing the identity
+    /// of a session it has ALREADY resolved through
+    /// <see cref="TryResolve(SessionHandle?, out TransactionSession?)"/>, which is where the ownership test
+    /// lives. An ownership test here would break the maintenance paths, which would compare every stored
+    /// principal against the unattributed sentinel and collect nothing - converting the abandoned-handle
+    /// ceiling into a leak of pooled transactions.
+    /// </remarks>
     internal bool TryRemove(string sessionId)
     {
         if (!_sessions.TryRemove(sessionId, out TransactionSession? removed) || removed is null)
@@ -927,7 +958,7 @@ internal sealed class TransactionSessionRegistry
         ArgumentNullException.ThrowIfNull(session);
 
         // THE LEASE IS TESTED, NOT AN ORDINAL, AND THAT IS THE POINT OF THE HANDLE. The pool COMPACTS its
-        // array on removal [<c>:L101-L114</c>] - a preserved legacy hazard - so an ordinal captured when the
+        // array on removal [:L101-L114] - a preserved legacy hazard - so an ordinal captured when the
         // session opened may by now name ANOTHER session's transaction. A lease is never reused, so an
         // outlived handle resolves nothing rather than resolving a stranger, and this guard reports the
         // contract's out-of-bound code for a handle that no longer names an entry.
@@ -1132,6 +1163,9 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// is the choice that keeps a single implementation of a single legacy member.
     /// </para>
     /// </param>
+    /// <param name="queryTasks">The registry of live query tasks.</param>
+    /// <param name="updateTasks">The registry of live update tasks.</param>
+    /// <param name="commandTasks">The registry of live command tasks.</param>
     /// <param name="logger">
     /// Optional structured logger. Optional rather than required so a unit test can construct the
     /// service with nothing but its behavioural collaborators.
@@ -1464,7 +1498,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// Checks a stored reference index against the pool's current bounds, reproducing the guard the
     /// oracle repeats at every pool entry point.
     /// </summary>
-    /// <param name="referenceIndex">The ONE-BASED index held by the session.</param>
+    /// <param name="lease">The pool lease the session holds for the lifetime of the transaction.</param>
     /// <returns>
     /// <c>RetCode.OK</c> when the index is in range, otherwise <c>RetCode.E_OUT_OF_BOUND</c>.
     /// </returns>
@@ -1628,7 +1662,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         }
 
         // ==========================================================================================
-        //  THE EXPIRY IS ACCEPTED, INCLUDING A NEGATIVE ONE - AND IT IS NO LONGER SILENT
+        //  THE EXPIRY IS ACCEPTED, INCLUDING A NEGATIVE ONE - AND IT IS REPORTED RATHER THAN SILENT
         //  ------------------------------------------------------------------------------------------
         //  A non-positive expiry means "use the default", verbatim from the oracle:
         //  `_nKeepAliveExpireTime = ...GetDataDouble(...) * 1000` then
@@ -1637,15 +1671,15 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         //  [:L53]. The field's own contract text records both halves. So a NEGATIVE value is NOT an
         //  out-of-domain value the way an undeclared enumerator is - it is an in-domain value with a
         //  defined meaning, and refusing it would contradict the oracle, the published field description
-        //  and constraint C-B alike. It is therefore accepted, exactly as it is accepted today.
+        //  and constraint C-B alike. It is therefore accepted.
         //
-        //  WHAT WAS WRONG WAS THE SILENCE, and there are two separate silences:
+        //  ACCEPTANCE MUST NOT BE SILENT, AND THERE ARE TWO SEPARATE SILENCES TO BREAK:
         //    * with keep-alive OFF the whole block below is skipped - the oracle reads the expiry only
         //      inside `if ...KeepAlive then` [:L76-L83] - so the value a caller sent is not consulted at
-        //      all, and the caller was told nothing;
+        //      all, and left unrecorded the caller is told nothing;
         //    * with keep-alive ON a non-positive value is folded to the built-in default, so the number
-        //      the caller sent is not used as a duration, and the caller was told nothing there either.
-        //  Both are now recorded. Neither changes an outcome.
+        //      the caller sent is not used as a duration, and again the caller is told nothing.
+        //  Both are recorded on the operator channel. Neither changes an outcome.
         //
         //  C-F: a pool setting is not a credential, so the requested value is safe to state; nothing
         //  else about the request appears.
@@ -1939,7 +1973,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         //  it, the first caller connects and the second observes a live connection and correctly does
         //  NOT reconnect - which is exactly [:L173]'s intent, now actually honoured under concurrency.
         //  There is also no safe optimistic read to hoist out: IsConnected may itself EXECUTE a liveness
-        //  probe against the connection [TransactionPool.cs:L2216], so calling it beside an in-flight
+        //  probe against the connection [TransactionPool.cs:L2275], so calling it beside an in-flight
         //  connect is the same hazard in miniature.
         //
         //  ASYNC RATHER THAN A BLOCKING WAIT, so a queued acquisition parks its continuation instead of
@@ -2191,7 +2225,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     ///   <item><description>
     ///   a create that publishes BEFORE the mark is seen by the purge below, and a create that reaches the
     ///   gate AFTER the mark refuses - so no task can be published into a registry the purge has already
-    ///   walked. Marking AFTER the purge, which is what this handler used to do, left exactly that gap.
+    ///   walked. Marking AFTER the purge - the obvious ordering - leaves exactly that gap.
     ///   </description></item>
     /// </list>
     /// <para>
@@ -2455,8 +2489,20 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// written at
     /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlcommand.sru:L89</c>, <c>:L96</c>,
     /// <c>:L106</c>] as one arm toggles it around a statement. A property assignment has no wire
-    /// representation, so the setter has to become an RPC. There is consequently no legacy return code
-    /// to reproduce, and <c>OK</c> is the only honest answer once the assignment has been made.
+    /// representation, so the setter has to become an RPC. There is consequently no legacy return code to
+    /// reproduce - but that is not the same as having nothing to report.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>IT ANSWERED <c>OK</c> UNCONDITIONALLY, AND THAT WAS THE DEFECT.</b> Moving OUT of auto-commit
+    /// obliges the engine to open an explicit transaction, because .NET has no implicit one the way
+    /// PowerBuilder does; when that begin failed the outcome was dropped on the floor and this handler still
+    /// reported success. The caller was then holding a session it believed was transactional while every
+    /// subsequent write applied itself immediately, a later rollback undid nothing, and no response said so.
+    /// The mode transition now travels through <c>IPooledTransaction.TrySetAutoCommit</c>, which answers
+    /// <c>E_DB_ERROR</c> with the provider's code and text stamped on the statement state, and this handler
+    /// projects that answer through the same <see cref="RunAndProject"/> helper the commit and rollback
+    /// handlers use - so the driver payload is attached exactly where the oracle would have reported at the
+    /// driver level, and nowhere else.
     /// </para>
     /// <para>
     /// <b>TWO THINGS THIS IS DELIBERATELY NOT.</b> It is NOT <c>of_settransdata</c>, which carries seven
@@ -2487,31 +2533,13 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
             });
         }
 
-        bool closing;
-
-        using (session.Gate.Enter())
-        {
-            closing = session.IsUnusable;
-
-            if (!closing)
-            {
-                session.Transaction.AutoCommit = request.Autocommit;
-            }
-        }
-
-        if (closing)
-        {
-            return Task.FromResult(new SetTransactionAutoCommitResponse
-            {
-                Status = TransactionWireCodes.Status(
-                    RetCode.E_INVALID_TRANSACTION,
-                    UnknownSessionDiagnostic),
-            });
-        }
-
         return Task.FromResult(new SetTransactionAutoCommitResponse
         {
-            Status = TransactionWireCodes.Status(RetCode.OK),
+            // The shared helper carries the retiring-session refusal, the gate, the driver capture for
+            // E_DB_ERROR alone and the projection - so this handler states the operation and nothing else.
+            Status = RunAndProject(
+                session,
+                transaction => transaction.TrySetAutoCommit(request.Autocommit)),
         });
     }
 
@@ -2725,7 +2753,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L136-L146</c>, <c>:L158-L172</c>],
     /// and the framework's own worker base says so outright when it walks the commit signal down over every
     /// preceding task [<c>n_cst_thread_task_sqlbase.sru:L100-L111</c>]. That semantic is preserved exactly
-    /// (constraint C-B); what this member adds is that it is no longer SILENT. Every other operation on a
+    /// (constraint C-B); what this member adds is that it is not SILENT. Every other operation on a
     /// transaction is scoped to the caller that issued it, which is why they keep the plain projection.
     /// </para>
     /// <para>
@@ -3150,7 +3178,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
                 // NOT A LEGACY FIELD, AND THE ONLY MEMBER HERE THAT IS NOT. The pool shares one transaction
                 // between every session whose descriptor compares equal, so a commit or a rollback covers
-                // every holder's work - preserved behaviour a caller previously had no way to detect. Read
+                // every holder's work - preserved oracle behaviour that a legacy caller had no way to detect. Read
                 // inside this gate so it describes the population as it stands. One means sole holder. See
                 // SessionHandle for the mechanism and the consequences.
                 SharingSessionCount = _sessions.CountSharingSessions(session),

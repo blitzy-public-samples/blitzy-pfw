@@ -85,6 +85,10 @@
 //  Every `:Lnnn` locator in this file points into `ws_objects/` or `docs/`, which are the behavioural
 //  oracle: read as specification, never edited, moved or reformatted. Every line number below was
 //  verified against the file on disk rather than copied forward from another document.
+//
+//  LOCATOR CONVENTION: every bare `pfw.sra:L...` in this file means ws_objects/pfw.pbl.src/pfw.sra,
+//  the framework application - never the same-named packager object at
+//  ws_objects/pfw.pack.pbl.src/pfw.sra (AAP 0.8.6 R7).
 // ==================================================================================================
 
 using System.Collections.Immutable;
@@ -2070,7 +2074,7 @@ internal sealed class ScriptedMacroChannel : IMacroInvocationChannel
 /// oracle raises it on the DataWindow itself -
 /// <c>#DataWindow.Event OnColumnExpTrace(row,dwo,sCallStack,sExp,value)</c> at
 /// <c>n_cst_dwsvc_columnexp.sru:L758</c> - and the live consumer at
-/// <c>ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L317-L320</c> simply appends it to a
+/// <c>ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw:L315-L316</c> simply appends it to a
 /// multi-line edit, which is what makes it fire-and-forget diagnostics rather than control flow. AAP
 /// 0.6.1.4 assigns it the sequencing-token discipline for exactly that reason, so this sink records the
 /// sequence number and never re-orders.
@@ -2743,7 +2747,7 @@ internal static class ScriptedPersistenceResponses
     /// <b>BOTH ROW SHAPES, BECAUSE THE CONTRACT DISTINGUISHES THEM AND ONLY THEM.</b> A retrieved row
     /// carries one original per column and each original EQUALS its current value, because a retrieval is
     /// what establishes the baseline. An insert-shaped row carries NO originals, because it has no prior
-    /// state - and that is now the only meaning an empty <c>original_values</c> has. The pair is what makes
+    /// state - and that is the only meaning an empty <c>original_values</c> has. The pair is what makes
     /// "empty" and "absent" different claims rather than two spellings of one.
     /// </para>
     /// <para>

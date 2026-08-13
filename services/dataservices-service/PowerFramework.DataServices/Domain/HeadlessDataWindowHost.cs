@@ -8,7 +8,7 @@
 //  initialised against.
 //
 //  WHY THIS EXISTS, STATED AGAINST THE CONSTRAINT IT COULD BE MISREAD AS BREAKING (C-D)
-//  An earlier revision registered three `Unbound*` implementations that returned null, arguing that
+//  REGISTERING THREE `Unbound*` IMPLEMENTATIONS THAT RETURN NULL IS THE TEMPTING READING, arguing that
 //  binding a DataWindow needs the DesignSystem ancestry `se_cst_dw` inherits from `se_cst_datawindow`
 //  [se_cst_dw.sru:L4, :L10] and that C-D forbids implementing a deferred service even partially. The
 //  first clause is a real fact about the LEGACY inheritance graph; the conclusion does not follow, and
@@ -16,8 +16,7 @@
 //    * AAP 0.2.1.3 Correction 3 resolves that very inheritance edge by instructing DataServices to
 //      "define its own abstract host contract carrying only the members se_cst_dw actually consumes
 //      from its parent, implement against that, and record se_cst_datawindow as REFERENCE-only". The
-//      contract is `Domain/DataWindowServiceHost.cs`; this file is the "implement against that" half
-//      that was missing.
+//      contract is `Domain/DataWindowServiceHost.cs`; this file is the "implement against that" half.
 //    * AAP 0.3.5 splits every UI capability into "a headless half that SHIPS IN DATASERVICES and a
 //      rendering half that does not". A row and column model with buffers and item statuses is the
 //      headless half by definition.
@@ -83,7 +82,7 @@ public sealed class HeadlessDataWindowHost : DataWindowServiceHost
 {
     /// <summary>The value a DataWindow method answers on success.</summary>
     /// <remarks>
-    /// ONE, NOT <see cref="RetCode.OK"/>. See this file's header: a caller testing <c>&lt;&gt; 1</c> is
+    /// ONE, NOT <c>RetCode.OK</c>. See this file's header: a caller testing <c>&lt;&gt; 1</c> is
     /// testing for failure, so answering zero would read as a failure at every such site.
     /// </remarks>
     public const int Success = 1;

@@ -1012,7 +1012,7 @@ public abstract class DataWindowServiceHost
     /// </value>
     /// <remarks>
     /// Exposed as a validity-bearing handle rather than as a boolean so that
-    /// <see cref="DataWindowServiceBase.GetDataWindowObject(string)"/> can reproduce
+    /// <c>DataWindowServiceBase.GetDataWindowObject(string)</c> can reproduce
     /// <c>if Not IsValidObject(#DataWindow.Object)</c> [<c>:L119</c>] through the ported predicate
     /// <c>Predicates.IsValidObject</c> itself, rather than through a paraphrase of it. The predicate
     /// is <c>isvalidobject.srf:L11-L17</c>, <c>if IsNull(object) then return false / return
@@ -1741,19 +1741,19 @@ public abstract class DataWindowServiceHost
     //  se_cst_dw's coercion table, which genuinely holds `Long(dwo.ID)` [se_cst_dw.sru:L233-L243].
     //  Both calling conventions exist in the legacy and both are therefore carried.
     //
-    //  ALL SIX TYPES ARE CONSUMED, AND THE COUNT WAS REVISED ON MEASURED EVIDENCE. This banner
-    //  originally read "only the three types actually consumed" because the only source measured for
-    //  it was n_cst_dwsvc_rowselect.sru, whose type switch [:L203-L222, :L230-L237, :L246-L253] has
+    //  ALL SIX TYPES ARE CONSUMED, AND THE COUNT RESTS ON MEASURED EVIDENCE FROM MORE THAN ONE SOURCE.
+    //  Measuring only n_cst_dwsvc_rowselect.sru supports the narrower reading "only the three types
+    //  actually consumed", because its type switch [:L203-L222, :L230-L237, :L246-L253] has
     //  exactly three arms - COL_TYPE_DECIMAL, COL_TYPE_INTEGER and a default that reads text. A
-    //  FOURTH in-scope source contradicts that: n_cst_dwsvc_contextmenu.sru's paste-into-column
-    //  protocol switches on ALL SEVEN COL_TYPE_* values and reads
+    //  FOURTH in-scope source contradicts that narrower reading: n_cst_dwsvc_contextmenu.sru's
+    //  paste-into-column protocol switches on ALL SEVEN COL_TYPE_* values and reads
     //  `#DataWindow.GetItemDateTime` [:L1036], `GetItemDate` [:L1042] and `GetItemTime` [:L1048]
     //  BY NAME, then writes `SetItem(nRow,colName,DateTime(sVal))` [:L1067],
     //  `SetItem(nRow,colName,Date(sVal))` [:L1069] and `SetItem(nRow,colName,Time(sVal))` [:L1071]
     //  BY NAME. So the three temporal members below are consumed surface, not fabricated surface,
-    //  and the by-name family is now the same six types IDataWindowChild already declares - which
-    //  is the shape it should always have had, since a column read is a column read whether the
-    //  buffer is the DataWindow's or its child's.
+    //  and the by-name family spans the same six types IDataWindowChild declares - which is the only
+    //  coherent shape, since a column read is a column read whether the buffer is the DataWindow's
+    //  or its child's.
     // ==========================================================================================
 
     /// <summary>
@@ -2618,8 +2618,8 @@ public abstract class DataWindowServiceHost
     /// <para>
     /// STRICTLY SYNCHRONOUS, AND THE <c>ref</c> IS THE REASON. AAP 0.6.1.4 assigns the drop-down
     /// search capability area pattern (b) - synchronous request and response with NO reordering
-    /// permitted - specifically because a <c>ref string</c> result has no asynchronous
-    /// representation: the caller blocks on the produced filter and cannot proceed without it. This
+    /// permitted - specifically because the caller blocks on the produced filter and cannot proceed
+    /// without it, so the answer has no fire-and-forget form however it is projected onto the wire. This
     /// member must therefore never be made fire-and-forget and must never carry a sequencing token as
     /// though its delivery were reorderable.
     /// </para>

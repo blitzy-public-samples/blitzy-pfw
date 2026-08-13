@@ -189,6 +189,7 @@ using System.Security.Cryptography;
 
 using Microsoft.Extensions.Options;
 
+using PowerFramework.DataServices.Authorization;
 using PowerFramework.DataServices.Configuration;
 using PowerFramework.Shared.Kernel;
 using PowerFramework.Shared.Localization;
@@ -900,21 +901,31 @@ internal sealed class ValidationSession : IItemChangeSessionState
     /// substitute a deterministic double, because non-deterministic values must be masked from BOTH the
     /// master and the candidate recording (AAP 0.6.7).
     /// </param>
+    /// <param name="owner">
+    /// The authenticated caller this session belongs to, from
+    /// <see cref="SessionPrincipalResolver.Resolve"/>. Defaulted to
+    /// <see cref="SessionPrincipalResolver.Unattributed"/> so direct construction outside a host yields a
+    /// session owned by unattributed callers - a coherent owner rather than a wildcard. NEVER a
+    /// credential and never reaching the wire: it is compared, not published.
+    /// </param>
     internal ValidationSession(
         string sessionId,
         string dataWindowHandle = "",
         uint initialDisabledEventMask = 0u,
         SessionLifetimeOptions? lifetime = null,
         I18n? i18n = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        string owner = SessionPrincipalResolver.Unattributed)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
         ArgumentNullException.ThrowIfNull(dataWindowHandle);
+        ArgumentNullException.ThrowIfNull(owner);
 
         SessionLifetimeOptions effectiveLifetime = lifetime ?? new SessionLifetimeOptions();
 
         SessionId = sessionId;
         DataWindowHandle = dataWindowHandle;
+        Owner = owner.Length == 0 ? SessionPrincipalResolver.Unattributed : owner;
         IdleTimeout = effectiveLifetime.IdleTimeout;
 
         // The mask is the ONE legacy field a caller may seed, because the oracle's own
@@ -934,6 +945,19 @@ internal sealed class ValidationSession : IItemChangeSessionState
 
     /// <summary>The DataWindow this session is bound to, or the empty string when none was named.</summary>
     internal string DataWindowHandle { get; }
+
+    /// <summary>
+    /// The authenticated caller this session belongs to, and the only caller its registry will resolve or
+    /// close it for.
+    /// </summary>
+    /// <remarks>
+    /// READ ONLY BY THE REGISTRY, AND NEVER RENDERED. The correlation identifier is unguessable, which
+    /// bounds discovery of a session but not use of one: an identifier that leaks is otherwise a bearer
+    /// credential for another caller's item-change stash and validation-error result. This field is what
+    /// the registry compares so possession alone is not authorization (CWE-639, CWE-863). It is not on the
+    /// contract, is not part of any snapshot, and appears in no response.
+    /// </remarks>
+    internal string Owner { get; }
 
     /// <summary>
     /// The configured idle timeout. A non-positive value means this session never expires, which
@@ -1797,8 +1821,9 @@ internal sealed class ValidationSession : IItemChangeSessionState
     /// </summary>
     /// <returns>
     /// <see langword="true"/> when the continuation was queued. <see langword="false"/> MEANS THE
-    /// ITEM-CHANGE FLAG WAS SET, which is a meaningful observation rather than a missing one - it is
-    /// what <c>DwnKillFocusEvent.deferred_accept_queued</c> reports.
+    /// ITEM-CHANGE FLAG WAS SET, which is a meaningful observation rather than a missing one. It reaches a
+    /// consumer through <c>EventResult.state.deferred_accept_pending</c> - NOT through
+    /// <c>DwnKillFocusEvent.deferred_accept_queued</c>, which is an inbound field the server ignores.
     /// </returns>
     /// <remarks>
     /// <para>
@@ -2122,6 +2147,11 @@ internal sealed class ValidationSessionRegistry
 
     private readonly TimeProvider _timeProvider;
 
+    /// <summary>
+    /// Who a session is attributed to at open, and who a later call is compared against.
+    /// </summary>
+    private readonly SessionPrincipalResolver _principals;
+
     private int _openCount;
 
     /// <summary>
@@ -2137,11 +2167,17 @@ internal sealed class ValidationSessionRegistry
     /// with no provider installed, which is the SILENT PASSTHROUGH state the oracle itself describes.
     /// </param>
     /// <param name="timeProvider">The clock seam.</param>
+    /// <param name="principals">
+    /// Who each session is attributed to. Optional and trailing so a registry remains constructible
+    /// without a host; without one every session is
+    /// <see cref="SessionPrincipalResolver.Unattributed"/> and every unattributed caller is its owner.
+    /// </param>
     internal ValidationSessionRegistry(
         IOptions<DataServicesOptions> options,
         I18n? i18n = null,
-        TimeProvider? timeProvider = null)
-        : this(GetValue(options), i18n, timeProvider)
+        TimeProvider? timeProvider = null,
+        SessionPrincipalResolver? principals = null)
+        : this(GetValue(options), i18n, timeProvider, principals)
     {
     }
 
@@ -2152,16 +2188,19 @@ internal sealed class ValidationSessionRegistry
     /// <param name="options">The options.</param>
     /// <param name="i18n">The localization facade.</param>
     /// <param name="timeProvider">The clock seam.</param>
+    /// <param name="principals">Who each session is attributed to.</param>
     internal ValidationSessionRegistry(
         DataServicesOptions options,
         I18n? i18n = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        SessionPrincipalResolver? principals = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
         _lifetime = options.Sessions?.ValidationSession ?? new SessionLifetimeOptions();
         _i18n = i18n ?? new I18n();
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _principals = principals ?? new SessionPrincipalResolver();
     }
 
     /// <summary>The configured idle timeout every session this registry opens is given.</summary>
@@ -2280,13 +2319,17 @@ internal sealed class ValidationSessionRegistry
             }
         }
 
+        // ATTRIBUTED AT OPEN, because there is no later moment at which the opening caller is still
+        // knowable. Everything downstream - resolution and close - compares against this value, so the
+        // stamp and the comparison read the same source and cannot disagree about who a caller is.
         ValidationSession session = new(
             sessionId,
             dataWindowHandle,
             initialDisabledEventMask,
             _lifetime,
             _i18n,
-            _timeProvider);
+            _timeProvider,
+            _principals.Resolve());
 
         if (!_sessions.TryAdd(sessionId, session))
         {
@@ -2313,11 +2356,23 @@ internal sealed class ValidationSessionRegistry
     /// <para>
     /// THE VALIDATION IS ONE ATOMIC STEP, not three. <see cref="ValidationSession.Acquire"/> tests open
     /// state, tests expiry and records activity under a SINGLE acquisition of the session's gate. Asking
-    /// the three questions separately took the gate three times, and a close landing in either interval
-    /// returned a CLOSED session together with <see cref="RetCode.OK"/> - the touch quietly did nothing,
-    /// so nothing reported the contradiction and the caller went on to work against state the close was
-    /// supposed to have released. There is now no interval for a close to land in: it either precedes the
-    /// acquisition, which is refused, or follows it, and the next acquisition is refused.
+    /// the three questions separately takes the gate three times, and a close landing in either interval
+    /// returns a CLOSED session together with <see cref="RetCode.OK"/> - the touch quietly does nothing,
+    /// so nothing reports the contradiction and the caller goes on to work against state the close was
+    /// supposed to have released. One atomic step leaves no interval for a close to land in: it either
+    /// precedes the acquisition, which is refused, or follows it, and the next acquisition is refused.
+    /// </para>
+    /// <para>
+    /// <b>A FOREIGN SESSION IS ANSWERED AS AN UNKNOWN ONE, AND THE ORDER OF THE TWO CHECKS MATTERS.</b>
+    /// The identifier is unguessable, which bounds discovery and not use: one that leaks through a log, a
+    /// proxy trace or the caller's own bug would otherwise be a bearer credential for another caller's
+    /// item-change stash and stashed validation result (CWE-639, CWE-863). So the caller of this call is
+    /// compared against the session's owner, and a mismatch answers
+    /// <see cref="RetCode.E_INVALID_HANDLE"/> - the SAME code an identifier this service never issued
+    /// answers, because a distinct code would make this member an oracle for which sessions exist. The
+    /// comparison sits ABOVE <see cref="ValidationSession.Acquire"/> on purpose: acquisition RECORDS
+    /// ACTIVITY, so checking afterwards would let a leaked identifier keep another caller's session alive
+    /// past its idle window even though every call using it was refused.
     /// </para>
     /// </remarks>
     internal ValidationSessionResolution Resolve(string? sessionId)
@@ -2332,12 +2387,22 @@ internal sealed class ValidationSessionRegistry
             return new ValidationSessionResolution(null, RetCode.E_INVALID_HANDLE);
         }
 
+        if (!_principals.IsCaller(found.Owner))
+        {
+            // Not this caller's session. Answered exactly as an unknown identifier is, and WITHOUT
+            // touching the session: nothing about it is disclosed, nothing about it is renewed, and its
+            // owner's own idle window is unaffected by a foreign attempt.
+            return new ValidationSessionResolution(null, RetCode.E_INVALID_HANDLE);
+        }
+
         if (found.Acquire() != ValidationSessionAcquisition.Acquired)
         {
             // Closed, or expired-and-now-closed. Either way the registry drops it and gives the slot
             // back; the close is idempotent, so doing it for an already-closed session is safe and is
-            // what keeps a closed entry from lingering in the map.
-            Close(sessionId);
+            // what keeps a closed entry from lingering in the map. Reached through the UNCHECKED close
+            // because ownership has already been established one line above - and because this close is
+            // the registry's own housekeeping rather than a caller's request.
+            CloseUnchecked(sessionId);
 
             return new ValidationSessionResolution(null, RetCode.E_NOT_EXISTS);
         }
@@ -2371,7 +2436,55 @@ internal sealed class ValidationSessionRegistry
     /// identifier yields <see cref="RetCode.E_INVALID_ARGUMENT"/>, because that is a malformed request
     /// rather than an already-closed session.
     /// </returns>
+    /// <remarks>
+    /// <b>OWNER-CHECKED, AND A FOREIGN CLOSE IS ANSWERED AS AN ALREADY-CLOSED ONE.</b> Closing is the more
+    /// damaging half of the pair a leaked identifier enables: it detaches a live event chain from the
+    /// stash it is mid-way through reading, so a foreign close is a denial of service against the owning
+    /// caller and not merely a disclosure (CWE-862). The refusal is spelled as the idempotent
+    /// already-closed answer - <see cref="RetCode.OK"/> with <c>WasOpen</c> false - because that is what an
+    /// identifier this service never issued answers, and a distinct answer would tell an unauthorised
+    /// caller that the session exists. The session is NOT removed and NOT touched.
+    /// </remarks>
     internal ValidationSessionCloseResult Close(string? sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return new ValidationSessionCloseResult(
+                RetCode.E_INVALID_ARGUMENT,
+                WasOpen: false,
+                FinalState: default);
+        }
+
+        if (_sessions.TryGetValue(sessionId, out ValidationSession? existing)
+            && !_principals.IsCaller(existing.Owner))
+        {
+            return new ValidationSessionCloseResult(RetCode.OK, WasOpen: false, FinalState: default);
+        }
+
+        return CloseUnchecked(sessionId);
+    }
+
+    /// <summary>
+    /// Closes a session without comparing its owner - the registry's own maintenance path.
+    /// </summary>
+    /// <param name="sessionId">The correlation identifier.</param>
+    /// <returns>The close result, in the same shape <see cref="Close"/> returns.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>NAMED SO ITS ABSENCE OF A CHECK IS AUDITABLE.</b> The three callers - the expired-session drop
+    /// inside <see cref="Resolve"/>, the idle <see cref="SweepExpired"/> and the shutdown
+    /// <see cref="CloseAll"/> - run on the SERVICE's behalf inside no request, so there is no caller to
+    /// compare against.
+    /// </para>
+    /// <para>
+    /// <b>CHECKING HERE WOULD CONVERT THE CEILING INTO A LEAK.</b> Outside a request the resolver reports
+    /// the unattributed sentinel, so an ownership test would refuse every session opened by a real caller
+    /// and the sweep would collect nothing - leaving abandoned sessions pinned for the life of the process
+    /// and the concurrent-session ceiling permanently reached. That is the denial of service the ceiling
+    /// exists to prevent, arriving by the one route that looks like extra safety.
+    /// </para>
+    /// </remarks>
+    private ValidationSessionCloseResult CloseUnchecked(string? sessionId)
     {
         if (string.IsNullOrWhiteSpace(sessionId))
         {
@@ -2414,7 +2527,7 @@ internal sealed class ValidationSessionRegistry
 
         foreach (KeyValuePair<string, ValidationSession> entry in _sessions)
         {
-            if (entry.Value.HasExpired() && Close(entry.Key).WasOpen)
+            if (entry.Value.HasExpired() && CloseUnchecked(entry.Key).WasOpen)
             {
                 closed++;
             }
@@ -2427,13 +2540,18 @@ internal sealed class ValidationSessionRegistry
     /// Closes every session, expired or not - for host shutdown.
     /// </summary>
     /// <returns>How many sessions were closed.</returns>
+    /// <remarks>
+    /// UNCHECKED, for the reason <see cref="CloseUnchecked"/> records: shutdown runs inside no request, and
+    /// an ownership test here would leave every session belonging to a real caller open while the host
+    /// tore down around it - releasing nothing and reporting that it had released nothing.
+    /// </remarks>
     internal int CloseAll()
     {
         int closed = 0;
 
         foreach (KeyValuePair<string, ValidationSession> entry in _sessions)
         {
-            if (Close(entry.Key).WasOpen)
+            if (CloseUnchecked(entry.Key).WasOpen)
             {
                 closed++;
             }

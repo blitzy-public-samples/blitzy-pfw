@@ -74,6 +74,34 @@ using ContractDescriptor = Google.Protobuf.Reflection.ServiceDescriptor;
 namespace PowerFramework.Gateway.Clients;
 
 /// <summary>
+/// Which published DataServices contract a call belongs to, and therefore which single scope the
+/// credential attached to it is requested for.
+/// </summary>
+/// <remarks>
+/// <para>
+/// THIS EXISTS TO KEEP A CREDENTIAL AS NARROW AS THE CALL IT IS ATTACHED TO. Gateway used to obtain ONE
+/// token carrying both DataServices scopes and attach it to every outbound call, so the credential on a
+/// column-expression call also authorized the DataWindow surface and the other way round. A token
+/// captured from any single call therefore carried the whole of this client's authority rather than the
+/// authority of the call it was taken from.
+/// </para>
+/// <para>
+/// The two values are the two contracts AAP 0.4.3 declares separately - C-03 <c>DataWindowService</c> and
+/// C-04 <c>ColumnExpressionService</c>, kept apart precisely so the expansion engine can version
+/// independently - so this enum adds no taxonomy of its own; it names a distinction the published
+/// contracts already make.
+/// </para>
+/// </remarks>
+public enum OutboundSurface
+{
+    /// <summary>Contract C-03, the DataWindow service.</summary>
+    DataWindow,
+
+    /// <summary>Contract C-04, the column-expression service.</summary>
+    ColumnExpression,
+}
+
+/// <summary>
 /// Which class of call a set of <see cref="global::Grpc.Core.CallOptions"/> is being built for, and therefore
 /// which deadline bounds it.
 /// </summary>
@@ -383,7 +411,7 @@ internal static class OutboundCallPolicy
     /// THAT IS A STATEMENT ABOUT THE PACKAGE AND NOT ABOUT THE OPERATOR-FACING SETTING, which is a
     /// distinction worth keeping: <c>Gateway:Outbound:MaxRetryAttempts</c> DOES accept zero, and the
     /// composition root branches on it - installing no gRPC service configuration at all and pairing this
-    /// predicate with <see cref="GatewayOptions.OutboundCallOptions.DisabledRetryPlaceholderAttempts"/>,
+    /// predicate with <c>GatewayOptions.OutboundCallOptions.DisabledRetryPlaceholderAttempts</c>,
     /// the smallest count the package's range permits. So this method serves two callers: the gRPC
     /// channels always, because retry there belongs to the gRPC layer, and every pipeline when retrying is
     /// configured off.
@@ -457,7 +485,7 @@ internal static class OutboundCallPolicy
     /// <summary>
     /// Answers whether the operation behind this attempt may be replayed.
     /// </summary>
-    /// <param name="context">The resilience context the pipeline is executing under.</param>
+    /// <param name="request">The inbound request.</param>
     /// <returns><see langword="true"/> when the operation is classified replay-safe.</returns>
     /// <remarks>
     /// <para>
@@ -643,8 +671,8 @@ internal static class OutboundCallPolicy
     /// THE C-04 ENTRIES. Four pure reads.
     /// </para>
     /// <para>
-    /// 🔴 <b>THE TWO SESSION CLOSES WERE HERE AND ARE NOT ANY MORE, AND THE REASON IS THAT AN IDEMPOTENT
-    /// END STATE IS NOT REPLAY SAFETY.</b> They were admitted on the reading that closing twice leaves the
+    /// 🔴 <b>THE TWO SESSION CLOSES ARE DELIBERATELY ABSENT, BECAUSE AN IDEMPOTENT
+    /// END STATE IS NOT REPLAY SAFETY.</b> Admitting them rests on the reading that closing twice leaves the
     /// server in the same place, which is true and is beside the point: a close is DESTRUCTIVE OF THE
     /// INFORMATION ITS OWN RESPONSE CARRIES. <c>CloseValidationSession</c> answers <c>was_open</c> plus the
     /// session's <c>final_state</c>, captured from the session immediately before it is removed
@@ -654,7 +682,7 @@ internal static class OutboundCallPolicy
     /// indistinguishable from "there was never such a session". The outstanding continuation or set
     /// re-entrancy guard that the real answer reported - the whole reason the response carries a final
     /// state - is gone, silently. <c>CloseExpressionSession</c> has the same shape on <c>was_open</c>.
-    /// Neither is retried now, so a lost close response surfaces as the transport fault it is and the
+    /// Neither is retried, so a lost close response surfaces as the transport fault it is and the
     /// caller decides; the idle sweeper is what stops an unclosed session outliving its client, which is
     /// what the retry was informally standing in for.
     /// </para>

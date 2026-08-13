@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  F-15 - THE STREAMED-ELEMENT BOUND ON THE REST PROJECTION
+//  THE STREAMED-ELEMENT BOUND ON THE REST PROJECTION
 // =====================================================================================================
 //
 //  WHAT THIS PROJECTION IS DOING AND WHY IT NEEDS A BOUND. A server-streaming gRPC method has no single

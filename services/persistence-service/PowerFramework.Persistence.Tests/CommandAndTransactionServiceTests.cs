@@ -238,6 +238,21 @@ public sealed class CommandAndTransactionServiceTests
             }
         }
 
+        /// <summary>Moves the auto-commit mode and answers success, because this double opens no transaction.</summary>
+        /// <param name="autoCommit">The mode to put in force.</param>
+        /// <returns>Always a succeeded state.</returns>
+        /// <remarks>
+        /// ROUTED THROUGH THE PROPERTY so whatever the property records still records. A double with no
+        /// provider behind it has nothing the transition can fail on, which is the contract's own
+        /// nothing-to-do case.
+        /// </remarks>
+        public SqlState TrySetAutoCommit(bool autoCommit)
+        {
+            AutoCommit = autoCommit;
+
+            return SqlState.Succeeded();
+        }
+
         public void ApplyConnectionFields(in TransactionData descriptor)
         {
             ApplyCalls++;
@@ -887,14 +902,14 @@ public sealed class CommandAndTransactionServiceTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// 🔴 <b>A BOUNDARY BLANKNESS REFUSAL EXISTED HERE AND HAS BEEN WITHDRAWN, AND THIS ROW IS THE
-    /// REGRESSION GUARD FOR ITS ABSENCE (constraint C-B, AAP G2).</b> It answered <c>E_INVALID_SQL</c> with
-    /// its own diagnostic for a whitespace-only statement, on the reasoning that submitting one produces a
-    /// success that changed no rows and that an actionable refusal serves a caller better. That is a
-    /// judgement about the legacy's DESIGN rather than a statement about its BEHAVIOUR, and the oracle's
-    /// guard compares against the empty string only [<c>:L45</c>, <c>:L65-L68</c>]. A port that refuses
-    /// input its oracle accepts has changed behaviour just as much as one that accepts input its oracle
-    /// refuses, so the boundary is now silent on blankness and the whole rule is the setter's.
+    /// 🔴 <b>A BOUNDARY BLANKNESS REFUSAL IS THE TEMPTING ADDITION HERE, AND THIS ROW IS THE
+    /// REGRESSION GUARD FOR ITS ABSENCE (constraint C-B, AAP G2).</b> It would answer <c>E_INVALID_SQL</c>
+    /// with its own diagnostic for a whitespace-only statement, on the reasoning that submitting one
+    /// produces a success that changed no rows and that an actionable refusal serves a caller better. That
+    /// is a judgement about the legacy's DESIGN rather than a statement about its BEHAVIOUR, and the
+    /// oracle's guard compares against the empty string only [<c>:L45</c>, <c>:L65-L68</c>]. A port that
+    /// refuses input its oracle accepts has changed behaviour just as much as one that accepts input its
+    /// oracle refuses, so the boundary stays silent on blankness and the whole rule is the setter's.
     /// </para>
     /// <para>
     /// THE PAIR IS ASSERTED TOGETHER BECAUSE THE TWO CASES LOOK ALIKE AND DIFFER. Blank is accepted and

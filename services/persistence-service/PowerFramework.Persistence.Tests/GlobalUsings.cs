@@ -69,14 +69,6 @@
 //      Integration or ScriptBridge (constraint C-D). None exists, and inventing a speculative
 //      import for one would be a stub of a target this phase forbids implementing.
 //
-//  RULES POSITION
-//  No user rules were provided for this project: the rules document contains exactly one line
-//  saying so, and re-reading it returns the same. Nothing is invented or back-filled from
-//  convention in their place. The binding constraints are therefore the enterprise-standard
-//  baseline - warnings as errors in test code too, no secret in source, no unused coupling - plus
-//  the named non-rule constraints C-A, C-B, C-D and C-K, each cited above and below at the point
-//  it applies, as C-K requires.
-//
 //  LEGACY PROVENANCE
 //  This file ports no behaviour, so it has no legacy counterpart to translate: PowerBuilder has no
 //  namespaces and no import statements at all, resolving one flat global namespace by the ordering
@@ -97,14 +89,13 @@
 //     ItemStatusMachineBufferScreenTests and DataWindowBuffersTests (the ItemStatus and DwBuffer
 //     enums), the three ChangesetCodec suites, FullStateCodecTests and IdentityColumnResolverTests.
 //
-//     Persistence.V1 IS NOW CONSUMED, which retires the departure this note used to record. When
-//     this file was written no sibling referenced it and it was declared anyway - the one place the
-//     file departed from "declare only what is already consumed" - on the grounds that it carries
-//     contracts C-05 Query, C-06 Update, C-07 Command and C-08 Transaction and that the planned
-//     service suites could not be written without it. FullStateCodecTests now takes QueryDataChunk
-//     from it, so the directive stands on the same footing as every other entry in this section and
-//     needs no special justification. The reasoning is left here rather than deleted because the
-//     measurement behind it is still useful: an unused global using provably costs nothing in this
+//     Persistence.V1 IS CONSUMED, so it needs no special justification: FullStateCodecTests takes
+//     QueryDataChunk from it, and the directive stands on the same footing as every other entry in
+//     this section. Were it NOT consumed, declaring it anyway - on the grounds that it carries
+//     contracts C-05 Query, C-06 Update, C-07 Command and C-08 Transaction and that service suites
+//     cannot be written without it - would be the one place this file departs from "declare only what
+//     is already consumed". The measurement behind that judgement is worth keeping either way: an
+//     unused global using provably costs nothing in this
 //     configuration - verified by building one, which produced zero warnings and zero errors,
 //     because the unused-import diagnostics are hidden by default - so a future addition made ahead
 //     of its first consumer is a judgement call about clarity, not about the build.
@@ -149,7 +140,7 @@ global using PowerFramework.Contracts.Persistence.V1;
 //     Concurrency and Transactions are declared by the application project today - Sql.Paging by
 //     Sql/Paging/{IPagingRewriter,SqlServerPagingRewriter,OraclePagingRewriter}.cs, Concurrency by
 //     Concurrency/{UpdateWhereBuilder,IdentityColumnResolver}.cs, Transactions by
-//     Transactions/TransactionData.cs. Adding one here is now LEGAL; it is not automatic, because
+//     Transactions/TransactionData.cs. Adding one here is LEGAL; it is not automatic, because
 //     section 1's rule is "declare what is consumed by more than one sibling". Sql.Paging has exactly
 //     one consumer (PagedUniqueIndexColumnValidatorTests), Transactions has exactly one
 //     (TransactionDataTests), and Concurrency has two that already import it file-scoped

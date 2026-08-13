@@ -317,14 +317,6 @@
 //  static, never lazily self-constructing. There is nothing to port, only a collision to avoid.
 //
 //  ==============================================================================================
-//  RULES POSITION
-//  ==============================================================================================
-//  No user rules were provided for this project: the rules document contains exactly one line
-//  saying so, confirmed directly rather than assumed. Nothing is invented or back-filled from
-//  convention in their place. The binding constraints are the enterprise-standard baseline
-//  together with the refactor's own named constraints, and every decision above cites the concern
-//  that drives it. No performance property is asserted anywhere in this file, because the
-//  repository publishes none.
 // ==============================================================================================
 
 using System.Security.Cryptography;

@@ -221,6 +221,10 @@
 //        own file records what breaks if that is "unified": PfwException's setmessage prefixes every
 //        message [pfwexception.sru:L23], which would corrupt payload field 1 and make the consumer's
 //        numeric parse read 0 instead of -10000 [pfw.sra:L117].
+//
+//  LOCATOR CONVENTION: every bare `pfw.sra:L...` in this file means ws_objects/pfw.pbl.src/pfw.sra,
+//  the framework application - never the same-named packager object at
+//  ws_objects/pfw.pack.pbl.src/pfw.sra (AAP 0.8.6 R7).
 // ==================================================================================================
 
 using System.Diagnostics.CodeAnalysis;
@@ -464,7 +468,7 @@ public static class Assertions
     /// </para>
     /// <para>
     /// Three of those call sites sit inside the legacy's own <c>#IF DEFINED DEBUG</c> blocks, which is
-    /// why this member is NOT marked <see cref="ConditionalAttribute"/>: the decision to compile an
+    /// why this member is NOT marked <c>System.Diagnostics.ConditionalAttribute</c>: the decision to compile an
     /// assertion away belongs to the caller in the legacy and still does here. See the deliberate
     /// omissions in this file's header.
     /// </para>

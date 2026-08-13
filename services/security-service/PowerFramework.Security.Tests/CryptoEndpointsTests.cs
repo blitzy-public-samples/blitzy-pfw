@@ -81,6 +81,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using PowerFramework.Security.Authorization;
 using PowerFramework.Security.Configuration;
 using PowerFramework.Security.Crypto;
 using PowerFramework.Security.Endpoints;
@@ -255,13 +256,13 @@ internal static class ContractDocument
 /// the contract publishes eighteen, and that gap is deliberate rather than an omission.
 /// </para>
 /// <para>
-/// THERE IS NO 403 FLAG, AND THERE USED TO BE. The forbidden status was once a per-operation property
-/// carried here, true for the eight operations of this table that resolve an inbound <c>keyRef</c> and
-/// false for the nine that resolve none. It is now UNIVERSAL across the contract: the group requires the
-/// <c>security.crypto</c> scope, so every operation can answer 403 for a reason that has nothing to do
-/// with its own parameters, and the authored document and the group's own response declaration both say
-/// so. A flag whose every row read true would invite a reader to set one to false, so the rows assert it
-/// unconditionally instead.
+/// THERE IS DELIBERATELY NO 403 FLAG. Modelling the forbidden status as a per-operation property here -
+/// true for the eight operations of this table that resolve an inbound <c>keyRef</c> and false for the nine
+/// that resolve none - would misdescribe the contract, because the status is UNIVERSAL across it: the group
+/// requires the <c>security.crypto</c> scope, so every operation can answer 403 for a reason that has
+/// nothing to do with its own parameters, and the authored document and the group's own response declaration
+/// both say so. A flag whose every row read true would invite a reader to set one to false, so the rows
+/// assert it unconditionally instead.
 /// </para>
 /// </remarks>
 internal sealed record CryptoOperation(
@@ -478,7 +479,7 @@ internal static class CryptoFixture
     }
 
     /// <summary>An empty store, for rows about resolution failure.</summary>
-    /// <param name="timeProvider">The clock retained-key expiry is measured against.</param>
+    /// <param name="clock">The time source, seamed so a test can supply a deterministic one.</param>
     /// <returns>A resolver whose permitted set is empty.</returns>
     internal static CryptoReferenceResolver EmptyStore(TimeProvider? clock = null) =>
         Store(new Dictionary<string, string>(StringComparer.Ordinal), clock: clock);
@@ -646,15 +647,15 @@ internal static class CryptoFixture
     /// <para>
     /// UNIQUE PER EXECUTION, NOT PER TEST NAME. Two rows in this file need a real file on disk, because
     /// the file-shaped operations on this surface resolve an opaque reference to a configured PATH and
-    /// there is no way to prove a file was read without one. Both previously composed a FIXED name under
-    /// the system temporary directory, which made three failures possible that have nothing to do with
-    /// cryptography: residue from an earlier run that did not finish satisfied a "missing file" row, two
-    /// concurrent runs of this suite on one agent - a routine thing under a parallel batch - deleted each
-    /// other's directory mid-assertion, and a leftover directory silently changed what the next run
-    /// observed. A fresh identifier per execution removes all three by construction.
+    /// there is no way to prove a file was read without one. A FIXED name under the system temporary
+    /// directory makes three failures possible that have nothing to do with cryptography: residue from an
+    /// earlier run that did not finish satisfies a "missing file" row, two concurrent runs of this suite on
+    /// one agent - a routine thing under a parallel batch - delete each other's directory mid-assertion, and
+    /// a leftover directory silently changes what the next run observes. A fresh identifier per execution
+    /// removes all three by construction.
     /// </para>
     /// <para>
-    /// THE REMOVAL IS THE DISPOSAL, so it happens on the failure path too. That is the half a
+    /// THE REMOVAL IS THE DISPOSAL, so it happens on the failure path too. That is the part a
     /// <c>try</c>/<c>finally</c> also achieves and a bare pair of statements does not; expressing it as a
     /// scope means a future row cannot acquire the directory and forget the teardown.
     /// </para>
@@ -731,7 +732,7 @@ public sealed class CryptoContractConformanceTests
     /// <param name="declaresNotFound">Whether 404 is declared.</param>
     /// <remarks>
     /// <para>
-    /// EVERY OPERATION DECLARES A 403, AND THAT IS NOW UNIVERSAL RATHER THAN PER-OPERATION. Each
+    /// EVERY OPERATION DECLARES A 403, AND THAT IS UNIVERSAL RATHER THAN PER-OPERATION. Each
     /// protected operation in this contract requires a named scope in addition to a valid token, and the
     /// scope a caller holds is decided per caller by this service's issuance roster - so a scope refusal
     /// is reachable on all eighteen published operations, including the ones that resolve no reference at
@@ -956,11 +957,11 @@ public sealed class CryptoContractConformanceTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// WHY THIS ROW EXISTS, STATED AS THE DEFECT IT CLOSES. Four numbers describe this contract, three of
-    /// them are one apart, and until this row every one of them was prose that nothing checked. Successive
-    /// revisions of the document, of the endpoint file and of this suite variously claimed fifteen
-    /// operations, seventeen PUBLISHED operations, ten key-reference-taking operations and eleven of them.
-    /// A statement no assertion reads is a statement that drifts, so all four are now MEASURED - from the
+    /// WHY THIS ROW EXISTS, STATED AS THE DEFECT IT CLOSES. Four numbers describe this contract and three
+    /// of them are one apart, so as prose nothing checks they drift against each other - fifteen
+    /// operations against seventeen PUBLISHED operations, ten key-reference-taking operations against
+    /// eleven, each plausible and each unverifiable.
+    /// A statement no assertion reads is a statement that drifts, so all four are MEASURED here - from the
     /// document's own path and verb keys, and from resolving each POST operation's declared request schema
     /// to the record that binds it. A nineteenth operation, a second authored one or a new keyed family
     /// moves the numbers here rather than silently contradicting a sentence somewhere.
@@ -2072,6 +2073,7 @@ public sealed class CryptoSecrecyTests
                 KeyRef = reference,
                 HashType = Enums.CRYPTO_HASH_SHA256,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Authenticators,
             CryptoFixture.Encodings,
             store,
@@ -2109,6 +2111,7 @@ public sealed class CryptoSecrecyTests
                 KeyRef = reference,
                 CipherType = 99L,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Ciphers,
             CryptoFixture.Encodings,
             store,
@@ -2155,6 +2158,7 @@ public sealed class CryptoSecrecyTests
         // material behind it is not what the response returned.
         ProblemHttpResult? rejection = store.TryResolveReference(
             response.KeyRef,
+            CryptoFixture.DefaultOwner,
             CryptoFixture.Loggers,
             out string retained);
 
@@ -2210,6 +2214,7 @@ public sealed class CryptoReferenceResolutionTests
 
         ProblemHttpResult? rejection = store.TryResolveReference(
             reference,
+            CryptoFixture.DefaultOwner,
             CryptoFixture.Loggers,
             out string material);
 
@@ -2231,6 +2236,7 @@ public sealed class CryptoReferenceResolutionTests
 
         ProblemHttpResult? rejection = store.TryResolveReference(
             reference,
+            CryptoFixture.DefaultOwner,
             CryptoFixture.Loggers,
             out string material);
 
@@ -2264,11 +2270,13 @@ public sealed class CryptoReferenceResolutionTests
 
         ProblemHttpResult? forbiddenRejection = store.TryResolveReference(
             forbidden,
+            CryptoFixture.DefaultOwner,
             CryptoFixture.Loggers,
             out _);
 
         ProblemHttpResult? absentRejection = store.TryResolveReference(
             absent,
+            CryptoFixture.DefaultOwner,
             CryptoFixture.Loggers,
             out _);
 
@@ -2296,6 +2304,7 @@ public sealed class CryptoReferenceResolutionTests
 
         ProblemHttpResult? rejection = store.TryResolveReference(
             reference,
+            CryptoFixture.DefaultOwner,
             CryptoFixture.Loggers,
             out string material);
 
@@ -2323,6 +2332,7 @@ public sealed class CryptoReferenceResolutionTests
 
         ProblemHttpResult? rejection = store.TryResolveReference(
             reference,
+            CryptoFixture.DefaultOwner,
             CryptoFixture.Loggers,
             out _);
 
@@ -2347,10 +2357,11 @@ public sealed class CryptoReferenceResolutionTests
                 [reference] = CryptoFixture.KeyMaterial(32),
             });
 
-        Assert.Null(store.TryResolveReference(reference, CryptoFixture.Loggers, out _));
+        Assert.Null(store.TryResolveReference(reference, CryptoFixture.DefaultOwner, CryptoFixture.Loggers, out _));
 
         ProblemHttpResult? rejection = store.TryResolveReference(
             "CASE-SENSITIVE",
+            CryptoFixture.DefaultOwner,
             CryptoFixture.Loggers,
             out _);
 
@@ -2372,6 +2383,7 @@ public sealed class CryptoReferenceResolutionTests
 
         ProblemHttpResult? rejection = store.TryResolveReference(
             "anything",
+            CryptoFixture.DefaultOwner,
             CryptoFixture.Loggers,
             out _);
 
@@ -2444,7 +2456,7 @@ public sealed class CryptoReferenceResolutionTests
 
         Assert.True(CryptoFixture.Retain(store, "synthetic-retained-material", out string minted));
 
-        Assert.Null(store.TryResolveReference(minted, CryptoFixture.Loggers, out string material));
+        Assert.Null(store.TryResolveReference(minted, CryptoFixture.DefaultOwner, CryptoFixture.Loggers, out string material));
         Assert.Equal("synthetic-retained-material", material);
 
         ProblemHttpResult? rejection = store.TryResolveFile(minted, CryptoFixture.Loggers, out _);
@@ -2493,7 +2505,14 @@ public sealed class CryptoReferenceResolutionTests
 
             Assert.InRange(reference.Length, 1, SecurityOptionsValidator.MaximumKeyRefLength);
 
-            Assert.Null(store.TryResolveReference(reference, CryptoFixture.Loggers, out string held));
+            // Resolved AS THE OWNER THIS ROW MINTED UNDER rather than as the fixture's default caller,
+            // because a minted reference resolves for the principal it was charged to and for nobody
+            // else. Passing the default here would fail on ownership and say nothing about uniqueness.
+            Assert.Null(store.TryResolveReference(
+                reference,
+                "owner-" + index.ToString(CultureInfo.InvariantCulture),
+                CryptoFixture.Loggers,
+                out string held));
             Assert.Equal("material-" + index.ToString(CultureInfo.InvariantCulture), held);
         }
     }
@@ -2508,10 +2527,10 @@ public sealed class CryptoReferenceResolutionTests
     /// </para>
     /// <para>
     /// THE BOUNDARY IS DRIVEN THROUGH THE RESERVATION RATHER THAN THROUGH RETENTION, and that is the
-    /// contract rather than an implementation detail this test reaches around. An earlier form of the
-    /// resolver decided capacity inside the retention call, by reading the store's count and then
-    /// inserting - a check-then-act pair that concurrent callers each passed, and one that ran only after
-    /// an RSA key pair had already been generated. Capacity is now taken by an interlocked increment
+    /// contract rather than an implementation detail this test reaches around. Deciding capacity inside the
+    /// retention call - reading the store's count and then
+    /// inserting - is a check-then-act pair concurrent callers each pass, and it runs only after
+    /// an RSA key pair has already been generated. Capacity is instead taken by an interlocked increment
     /// BEFORE any generation, so the exactness of the boundary is a property of that call and this test
     /// asserts it there.
     /// </para>
@@ -2576,13 +2595,13 @@ public sealed class CryptoReferenceResolutionTests
     }
 
     /// <summary>
-    /// Concurrent callers cannot overshoot the cap, which the previous check-then-act form allowed.
+    /// Concurrent callers cannot overshoot the cap, which a check-then-act reservation would allow.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THE REGRESSION THIS ROW EXISTS FOR, STATED PLAINLY. The earlier form read the store's count and
-    /// then inserted, so any number of callers could each observe room and each take it; the store
-    /// overshot its cap by as many callers as were in flight, and the cap was therefore a bound on
+    /// THE REGRESSION THIS ROW EXISTS FOR, STATED PLAINLY. A form that read the store's count and
+    /// then inserted lets any number of callers each observe room and each take it; the store
+    /// overshoots its cap by as many callers as are in flight, making the cap a bound on
     /// sequential use only. An interlocked increment has no such window - taking capacity IS observing
     /// it - so the count of successes is exactly the cap however many callers arrive at once.
     /// </para>
@@ -2711,14 +2730,14 @@ public sealed class CryptoReferenceResolutionTests
 
         Assert.True(CryptoFixture.Retain(store, "will-expire", out string reference));
 
-        Assert.Null(store.TryResolveReference(reference, CryptoFixture.Loggers, out string held));
+        Assert.Null(store.TryResolveReference(reference, CryptoFixture.DefaultOwner, CryptoFixture.Loggers, out string held));
         Assert.Equal("will-expire", held);
 
         // One tick past the published lifetime: the boundary itself is asserted below.
         clock.Advance(CryptoReferenceResolver.RetainedGeneratedKeyLifetime + TimeSpan.FromTicks(1));
 
         ProblemHttpResult expired = Assert.IsType<ProblemHttpResult>(
-            store.TryResolveReference(reference, CryptoFixture.Loggers, out string gone));
+            store.TryResolveReference(reference, CryptoFixture.DefaultOwner, CryptoFixture.Loggers, out string gone));
 
         Assert.Equal(StatusCodes.Status403Forbidden, expired.StatusCode);
         Assert.Equal(string.Empty, gone);
@@ -2746,7 +2765,7 @@ public sealed class CryptoReferenceResolutionTests
 
         clock.Advance(CryptoReferenceResolver.RetainedGeneratedKeyLifetime - TimeSpan.FromTicks(1));
 
-        Assert.Null(store.TryResolveReference(reference, CryptoFixture.Loggers, out string held));
+        Assert.Null(store.TryResolveReference(reference, CryptoFixture.DefaultOwner, CryptoFixture.Loggers, out string held));
         Assert.Equal("on-the-boundary", held);
     }
 
@@ -2780,7 +2799,7 @@ public sealed class CryptoReferenceResolutionTests
 
         // Released, so it no longer resolves...
         ProblemHttpResult gone = Assert.IsType<ProblemHttpResult>(
-            store.TryResolveReference(references[0], CryptoFixture.Loggers, out _));
+            store.TryResolveReference(references[0], CryptoFixture.DefaultOwner, CryptoFixture.Loggers, out _));
 
         Assert.Equal(StatusCodes.Status403Forbidden, gone.StatusCode);
 
@@ -2810,8 +2829,9 @@ public sealed class CryptoReferenceResolutionTests
         Assert.False(store.TryReleaseGeneratedKey(reference, "caller-b"));
         Assert.False(store.TryReleaseGeneratedKey("gen-999-nothing-here", "caller-b"));
 
-        // Untouched by the foreign attempt.
-        Assert.Null(store.TryResolveReference(reference, CryptoFixture.Loggers, out string held));
+        // Untouched by the foreign attempt, which only the OWNER can observe: resolution is owner-bound
+        // too, so this read is charged to caller-a rather than to the fixture's default caller.
+        Assert.Null(store.TryResolveReference(reference, "caller-a", CryptoFixture.Loggers, out string held));
         Assert.Equal("belongs-to-a", held);
 
         // And the owner can still release it.
@@ -2874,6 +2894,163 @@ public sealed class CryptoReferenceResolutionTests
         Assert.Equal(
             StatusCodes.Status404NotFound,
             Assert.IsType<ProblemHttpResult>(again.Result).StatusCode);
+    }
+
+    /// <summary>
+    /// A caller cannot RESOLVE another caller's minted reference, and cannot tell that refusal from one
+    /// naming a reference this deployment never issued.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>USE WAS THE UNGUARDED HALF, AND IT IS THE MORE DANGEROUS ONE.</b> An earlier revision compared
+    /// the owner on RELEASE and resolved on a bare table hit for USE - so a minted reference that leaked
+    /// through a log record, a proxy trace or the caller's own bug let another authenticated caller SIGN,
+    /// DECRYPT and AUTHENTICATE with a private key it never held, while the weaker operation was the
+    /// guarded one (CWE-639, CWE-863). This row is the use half.
+    /// </para>
+    /// <para>
+    /// <b>THE REFUSAL IS ASSERTED AS EQUALITY WITH AN UNKNOWN REFERENCE, NOT MERELY AS A FAILURE.</b> A
+    /// foreign minted reference FALLS THROUGH to the same permitted-set and configuration screens any
+    /// unknown value meets, rather than being refused in place with a distinct code - so nothing on this
+    /// surface can be used as an existence oracle for references it does not own. Status, code and the
+    /// whole rendered body are compared.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ACallerCannotResolveAnotherCallersKeyAndCannotDetectTheDifference()
+    {
+        CryptoReferenceResolver store = CryptoFixture.EmptyStore();
+
+        Assert.True(CryptoFixture.Retain(store, "belongs-to-a", out string reference, owner: "caller-a"));
+
+        ProblemHttpResult? foreign = store.TryResolveReference(
+            reference,
+            "caller-b",
+            CryptoFixture.Loggers,
+            out string foreignMaterial);
+
+        ProblemHttpResult? unknown = store.TryResolveReference(
+            "gen-999-nothing-here",
+            "caller-b",
+            CryptoFixture.Loggers,
+            out string unknownMaterial);
+
+        Assert.NotNull(foreign);
+        Assert.NotNull(unknown);
+
+        Assert.Equal(string.Empty, foreignMaterial);
+        Assert.Equal(string.Empty, unknownMaterial);
+        Assert.Equal(unknown.StatusCode, foreign.StatusCode);
+        Assert.Equal(CryptoFixture.RetCodeOf(unknown), CryptoFixture.RetCodeOf(foreign));
+        Assert.Equal(
+            JsonSerializer.Serialize(unknown.ProblemDetails),
+            JsonSerializer.Serialize(foreign.ProblemDetails));
+
+        // Nothing about the reference reaches the body either.
+        Assert.DoesNotContain(reference, JsonSerializer.Serialize(foreign.ProblemDetails), StringComparison.Ordinal);
+
+        // THE POSITIVE ARM: the owner still resolves it, and the foreign attempts consumed nothing.
+        Assert.Null(store.TryResolveReference(reference, "caller-a", CryptoFixture.Loggers, out string held));
+        Assert.Equal("belongs-to-a", held);
+    }
+
+    /// <summary>
+    /// The signing handler refuses a foreign minted key exactly as it refuses an unknown reference, and
+    /// signs for the caller that generated it.
+    /// </summary>
+    /// <remarks>
+    /// THE HANDLER COMPLEMENT of the resolver row above, and the one that proves the OWNER IS READ FROM THE
+    /// SUBJECT CLAIM on the operation itself rather than only inside the store: the handler is what decides
+    /// which identity to resolve with, and no amount of testing the store alone could establish that it
+    /// passes the caller's own. Signing is chosen because it is the operation that needs the PRIVATE half -
+    /// a foreign success here would be an authentication forgery with somebody else's key.
+    /// </remarks>
+    [Fact]
+    public void TheSigningHandlerRefusesAForeignMintedKeyExactlyAsAnUnknownOne()
+    {
+        CryptoReferenceResolver store = CryptoFixture.EmptyStore();
+
+        GenRsaKeyResponse generated = CryptoFixture.Success(CryptoEndpoints.GenerateRsaKey(
+            new GenRsaKeyRequest { Bits = Enums.CRYPTO_RSA_BITS_1024 },
+            CryptoFixture.Caller(),
+            CryptoFixture.Rsa,
+            CryptoFixture.Random,
+            store,
+            CryptoFixture.Loggers));
+
+        static RsaSignRequest Signing(string keyRef) => new()
+        {
+            Data = "payload",
+            PayloadForm = PayloadForm.STRING,
+            KeyRef = keyRef,
+            HashType = Enums.CRYPTO_HASH_SHA256,
+        };
+
+        ProblemHttpResult foreign = CryptoFixture.Rejection(CryptoEndpoints.RsaSign(
+            Signing(generated.KeyRef),
+            CryptoFixture.Caller("a-different-caller"),
+            CryptoFixture.Rsa,
+            CryptoFixture.Encodings,
+            store,
+            CryptoFixture.Loggers));
+
+        ProblemHttpResult unknown = CryptoFixture.Rejection(CryptoEndpoints.RsaSign(
+            Signing("gen-999-nothing-here"),
+            CryptoFixture.Caller("a-different-caller"),
+            CryptoFixture.Rsa,
+            CryptoFixture.Encodings,
+            store,
+            CryptoFixture.Loggers));
+
+        Assert.Equal(unknown.StatusCode, foreign.StatusCode);
+        Assert.Equal(CryptoFixture.RetCodeOf(unknown), CryptoFixture.RetCodeOf(foreign));
+        Assert.Equal(
+            JsonSerializer.Serialize(unknown.ProblemDetails),
+            JsonSerializer.Serialize(foreign.ProblemDetails));
+
+        // THE POSITIVE ARM: the generating caller signs with it, so the refusal above is ownership rather
+        // than a surface that refuses every minted reference.
+        PayloadResponse signed = CryptoFixture.Success(CryptoEndpoints.RsaSign(
+            Signing(generated.KeyRef),
+            CryptoFixture.Caller(),
+            CryptoFixture.Rsa,
+            CryptoFixture.Encodings,
+            store,
+            CryptoFixture.Loggers));
+
+        Assert.False(string.IsNullOrWhiteSpace(signed.Data));
+    }
+
+    /// <summary>
+    /// A CONFIGURED reference is not owner-scoped, because it belongs to the deployment rather than to a
+    /// caller.
+    /// </summary>
+    /// <remarks>
+    /// THE BOUNDARY OF THE CONTROL, STATED AS A ROW. Ownership guards MINTED references - material this
+    /// service generated and handed to one caller. A reference published in
+    /// <c>Security:KeyStore:PermittedKeyRefs</c> is a deployment-level grant to every caller entitled to
+    /// the surface, so scoping it to whoever used it first would break the configured-key path for
+    /// everybody else and would be a behaviour change dressed as a security fix. Both callers therefore
+    /// resolve it, and that is deliberate.
+    /// </remarks>
+    [Fact]
+    public void AConfiguredReferenceIsNotScopedToOneCaller()
+    {
+        const string configured = "shared-configured-key";
+
+        string material = CryptoFixture.KeyMaterial(32);
+
+        CryptoReferenceResolver store = CryptoFixture.Store(
+            new Dictionary<string, string>(StringComparer.Ordinal) { [configured] = material },
+            permitted: [configured]);
+
+        Assert.Null(store.TryResolveReference(configured, "caller-a", CryptoFixture.Loggers, out string first));
+        Assert.Null(store.TryResolveReference(configured, "caller-b", CryptoFixture.Loggers, out string second));
+        Assert.Null(store.TryResolveReference(configured, string.Empty, CryptoFixture.Loggers, out string third));
+
+        Assert.Equal(material, first);
+        Assert.Equal(material, second);
+        Assert.Equal(material, third);
     }
 
     /// <summary>
@@ -2954,7 +3131,6 @@ public sealed class CryptoReferenceResolutionTests
     /// Every key-bearing handler refuses an unknown reference, and none of them proceeds without one.
     /// </summary>
     /// <param name="operationId">The operation identifier, for row identity.</param>
-    /// <param name="invoke">The handler invocation, closed over the store it should consult.</param>
     /// <remarks>
     /// The per-handler complement of the resolver rows: it proves each handler actually CALLS the
     /// resolver rather than reaching configuration itself, which no amount of testing the resolver alone
@@ -3016,6 +3192,7 @@ public sealed class CryptoReferenceResolutionTests
                         KeyRef = unknown,
                         HashType = Enums.CRYPTO_HASH_SHA256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Authenticators,
                     CryptoFixture.Encodings,
                     store,
@@ -3036,6 +3213,7 @@ public sealed class CryptoReferenceResolutionTests
                         KeyRef = unknown,
                         HashType = Enums.CRYPTO_HASH_SHA256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Authenticators,
                     store,
                     CryptoFixture.Loggers));
@@ -3049,6 +3227,7 @@ public sealed class CryptoReferenceResolutionTests
                         KeyRef = unknown,
                         CipherType = Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Ciphers,
                     CryptoFixture.Encodings,
                     store,
@@ -3063,6 +3242,7 @@ public sealed class CryptoReferenceResolutionTests
                         KeyRef = unknown,
                         CipherType = Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Ciphers,
                     CryptoFixture.Encodings,
                     store,
@@ -3076,6 +3256,7 @@ public sealed class CryptoReferenceResolutionTests
                         PayloadForm = PayloadForm.STRING,
                         KeyRef = unknown,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -3089,6 +3270,7 @@ public sealed class CryptoReferenceResolutionTests
                         PayloadForm = PayloadForm.BLOB,
                         KeyRef = unknown,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -3103,6 +3285,7 @@ public sealed class CryptoReferenceResolutionTests
                         KeyRef = unknown,
                         HashType = Enums.CRYPTO_HASH_SHA256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -3118,6 +3301,7 @@ public sealed class CryptoReferenceResolutionTests
                         KeyRef = unknown,
                         HashType = Enums.CRYPTO_HASH_SHA256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -3212,6 +3396,7 @@ public sealed class CryptoDigestMatrixTests
                 KeyRef = reference,
                 HashType = hashType,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Authenticators,
             CryptoFixture.Encodings,
             store,
@@ -3247,6 +3432,7 @@ public sealed class CryptoDigestMatrixTests
                 KeyRef = reference,
                 HashType = Enums.CRYPTO_HASH_CRC32,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Authenticators,
             CryptoFixture.Encodings,
             store,
@@ -3408,6 +3594,7 @@ public sealed class CryptoDigestMatrixTests
                 KeyRef = "file-key",
                 HashType = Enums.CRYPTO_HASH_SHA256,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Authenticators,
             store,
             CryptoFixture.Loggers));
@@ -3552,6 +3739,7 @@ public sealed class CryptoSymmetricMatrixTests
                 CipherType = cipherType,
                 Mode = mode,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Ciphers,
             CryptoFixture.Encodings,
             store,
@@ -3572,6 +3760,7 @@ public sealed class CryptoSymmetricMatrixTests
                 CipherType = cipherType,
                 Mode = mode,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Ciphers,
             CryptoFixture.Encodings,
             store,
@@ -3629,6 +3818,7 @@ public sealed class CryptoSymmetricMatrixTests
                 CipherType = Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
                 Mode = mode,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Ciphers,
             CryptoFixture.Encodings,
             store,
@@ -3665,6 +3855,7 @@ public sealed class CryptoSymmetricMatrixTests
                 CipherType = Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
                 Mode = Enums.CRYPTO_SYMCRYPT_MODE_CFB,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Ciphers,
             CryptoFixture.Encodings,
             CryptoFixture.EmptyStore(),
@@ -3791,6 +3982,7 @@ public sealed class CryptoSymmetricMatrixTests
                 KeyRef = "any",
                 CipherType = cipherType,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Ciphers,
             CryptoFixture.Encodings,
             CryptoFixture.EmptyStore(),
@@ -3816,6 +4008,7 @@ public sealed class CryptoSymmetricMatrixTests
                 CipherType = Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
                 Mode = mode,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Ciphers,
             CryptoFixture.Encodings,
             CryptoFixture.EmptyStore(),
@@ -3887,7 +4080,7 @@ public sealed class CryptoSymmetricMatrixTests
                 "SYMMETRIC_FEEDBACK_WIDTH_UNPROVABLE"
             },
 
-            // Chaining mode with no vector, because the synthesized value is not determined either.
+            // Chaining mode with no vector, because no vector this port could supply is determined.
             {
                 Enums.CRYPTO_SYMCRYPT_MODE_CBC,
                 false,
@@ -3963,6 +4156,7 @@ public sealed class CryptoRsaMatrixTests
                 KeyRef = "rsa-public",
                 Padding = padding,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Encodings,
             store,
@@ -3979,6 +4173,7 @@ public sealed class CryptoRsaMatrixTests
                 KeyRef = "rsa-private",
                 Padding = padding,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Encodings,
             store,
@@ -4011,6 +4206,7 @@ public sealed class CryptoRsaMatrixTests
                 PayloadForm = PayloadForm.STRING,
                 KeyRef = "rsa-public",
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Encodings,
             store,
@@ -4024,6 +4220,7 @@ public sealed class CryptoRsaMatrixTests
                 KeyRef = "rsa-private",
                 Padding = Enums.CRYPTO_RSA_PADDING_PKCS1,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Encodings,
             store,
@@ -4041,6 +4238,7 @@ public sealed class CryptoRsaMatrixTests
                 KeyRef = "rsa-private",
                 Padding = Enums.CRYPTO_RSA_PADDING_OAEP,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Encodings,
             store,
@@ -4077,6 +4275,7 @@ public sealed class CryptoRsaMatrixTests
                 KeyRef = "rsa-public",
                 Padding = padding,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Encodings,
             store,
@@ -4115,6 +4314,7 @@ public sealed class CryptoRsaMatrixTests
                 KeyRef = "rsa-private",
                 HashType = hashType,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Encodings,
             store,
@@ -4132,6 +4332,7 @@ public sealed class CryptoRsaMatrixTests
                 KeyRef = "rsa-public",
                 HashType = hashType,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Encodings,
             store,
@@ -4161,6 +4362,7 @@ public sealed class CryptoRsaMatrixTests
                 KeyRef = "rsa-private",
                 HashType = Enums.CRYPTO_HASH_SHA256,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Encodings,
             store,
@@ -4175,6 +4377,7 @@ public sealed class CryptoRsaMatrixTests
                 KeyRef = "rsa-public",
                 HashType = Enums.CRYPTO_HASH_SHA256,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Encodings,
             store,
@@ -4197,6 +4400,7 @@ public sealed class CryptoRsaMatrixTests
                 KeyRef = "rsa-private",
                 HashType = Enums.CRYPTO_HASH_CRC32,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Encodings,
             store,
@@ -4308,6 +4512,7 @@ public sealed class CryptoRsaMatrixTests
                 KeyRef = generated.KeyRef,
                 HashType = Enums.CRYPTO_HASH_SHA256,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Encodings,
             store,
@@ -4330,6 +4535,7 @@ public sealed class CryptoRsaMatrixTests
                 KeyRef = "generated-public",
                 HashType = Enums.CRYPTO_HASH_SHA256,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Encodings,
             verification,
@@ -4361,6 +4567,7 @@ public sealed class CryptoRsaMatrixTests
                 PayloadForm = PayloadForm.STRING,
                 KeyRef = "broken",
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Encodings,
             store,
@@ -4908,6 +5115,7 @@ public sealed class CryptoWeakDefaultTests
                 KeyRef = "cipher-key",
                 CipherType = Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Ciphers,
             CryptoFixture.Encodings,
             store,
@@ -4980,6 +5188,7 @@ public sealed class CryptoWeakDefaultTests
                 KeyRef = "cipher-key",
                 CipherType = Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Ciphers,
             CryptoFixture.Encodings,
             store,
@@ -5094,6 +5303,7 @@ public sealed class CryptoWeakDefaultTests
                 CipherType = Enums.CRYPTO_SYMCRYPT_TYPE_AES128,
                 Mode = mode,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Ciphers,
             CryptoFixture.Encodings,
             store,
@@ -5419,6 +5629,7 @@ public sealed class CryptoRejectionArmTests
                 KeyRef = "any",
                 HashType = Enums.CRYPTO_HASH_SHA256,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Rsa,
             CryptoFixture.Encodings,
             CryptoFixture.EmptyStore(),
@@ -5459,6 +5670,7 @@ public sealed class CryptoRejectionArmTests
                     PayloadForm = PayloadForm.STRING,
                     KeyRef = "any",
                 },
+                CryptoFixture.Caller(),
                 CryptoFixture.Ciphers,
                 CryptoFixture.Encodings,
                 CryptoFixture.EmptyStore(),
@@ -5470,6 +5682,7 @@ public sealed class CryptoRejectionArmTests
                     PayloadForm = PayloadForm.STRING,
                     KeyRef = "any",
                 },
+                CryptoFixture.Caller(),
                 CryptoFixture.Ciphers,
                 CryptoFixture.Encodings,
                 CryptoFixture.EmptyStore(),
@@ -5586,6 +5799,7 @@ public sealed class CryptoRejectionArmTests
     {
         ProblemHttpResult problem = CryptoFixture.Rejection(CryptoEndpoints.HmacFile(
             new HmacFileRequest { FileRef = "somewhere", HashType = Enums.CRYPTO_HASH_SHA256 },
+            CryptoFixture.Caller(),
             CryptoFixture.Authenticators,
             CryptoFixture.EmptyStore(),
             CryptoFixture.Loggers));
@@ -5623,6 +5837,7 @@ public sealed class CryptoRejectionArmTests
                 CipherType = Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
                 Mode = Enums.CRYPTO_SYMCRYPT_MODE_CBC,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Ciphers,
             CryptoFixture.Encodings,
             store,
@@ -5656,6 +5871,7 @@ public sealed class CryptoRejectionArmTests
                 KeyRef = "cipher-key",
                 CipherType = Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Ciphers,
             CryptoFixture.Encodings,
             store,
@@ -5707,6 +5923,7 @@ public sealed class CryptoRejectionArmTests
                 KeyRef = reference,
                 HashType = Enums.CRYPTO_HASH_SHA256,
             },
+            CryptoFixture.Caller(),
             CryptoFixture.Authenticators,
             CryptoFixture.Encodings,
             store,
@@ -5794,6 +6011,7 @@ public sealed class CryptoRejectionArmTests
                         KeyRef = "any",
                         HashType = Enums.CRYPTO_HASH_SHA256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Authenticators,
                     CryptoFixture.Encodings,
                     store,
@@ -5807,6 +6025,7 @@ public sealed class CryptoRejectionArmTests
                         KeyRef = "any",
                         CipherType = Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Ciphers,
                     CryptoFixture.Encodings,
                     store,
@@ -5820,6 +6039,7 @@ public sealed class CryptoRejectionArmTests
                         KeyRef = "any",
                         CipherType = Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Ciphers,
                     CryptoFixture.Encodings,
                     store,
@@ -5828,6 +6048,7 @@ public sealed class CryptoRejectionArmTests
             case "rsaEncrypt":
                 return CryptoFixture.Rejection(CryptoEndpoints.RsaEncrypt(
                     new RsaCipherRequest { Data = "payload", KeyRef = "any" },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -5836,6 +6057,7 @@ public sealed class CryptoRejectionArmTests
             case "rsaDecrypt":
                 return CryptoFixture.Rejection(CryptoEndpoints.RsaDecrypt(
                     new RsaCipherRequest { Data = "payload", KeyRef = "any" },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -5849,6 +6071,7 @@ public sealed class CryptoRejectionArmTests
                         KeyRef = "any",
                         HashType = Enums.CRYPTO_HASH_SHA256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -5863,6 +6086,7 @@ public sealed class CryptoRejectionArmTests
                         KeyRef = "any",
                         HashType = Enums.CRYPTO_HASH_SHA256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -5903,6 +6127,7 @@ public sealed class CryptoRejectionArmTests
                         KeyRef = "any",
                         HashType = Enums.CRYPTO_HASH_SHA256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Authenticators,
                     CryptoFixture.Encodings,
                     store,
@@ -5916,6 +6141,7 @@ public sealed class CryptoRejectionArmTests
                         KeyRef = "any",
                         CipherType = Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Ciphers,
                     CryptoFixture.Encodings,
                     store,
@@ -5929,6 +6155,7 @@ public sealed class CryptoRejectionArmTests
                         KeyRef = "any",
                         CipherType = Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Ciphers,
                     CryptoFixture.Encodings,
                     store,
@@ -5937,6 +6164,7 @@ public sealed class CryptoRejectionArmTests
             case "rsaEncrypt":
                 return CryptoFixture.Rejection(CryptoEndpoints.RsaEncrypt(
                     new RsaCipherRequest { PayloadForm = PayloadForm.STRING, KeyRef = "any" },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -5945,6 +6173,7 @@ public sealed class CryptoRejectionArmTests
             case "rsaDecrypt":
                 return CryptoFixture.Rejection(CryptoEndpoints.RsaDecrypt(
                     new RsaCipherRequest { PayloadForm = PayloadForm.STRING, KeyRef = "any" },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -5958,6 +6187,7 @@ public sealed class CryptoRejectionArmTests
                         KeyRef = "any",
                         HashType = Enums.CRYPTO_HASH_SHA256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -5972,6 +6202,7 @@ public sealed class CryptoRejectionArmTests
                         KeyRef = "any",
                         HashType = Enums.CRYPTO_HASH_SHA256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -6019,6 +6250,7 @@ public sealed class CryptoRejectionArmTests
                         PayloadForm = PayloadForm.STRING,
                         KeyRef = "any",
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Authenticators,
                     CryptoFixture.Encodings,
                     store,
@@ -6034,6 +6266,7 @@ public sealed class CryptoRejectionArmTests
             case "hmacFile":
                 return CryptoFixture.Rejection(CryptoEndpoints.HmacFile(
                     new HmacFileRequest { FileRef = "any", KeyRef = "any" },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Authenticators,
                     store,
                     CryptoFixture.Loggers));
@@ -6046,6 +6279,7 @@ public sealed class CryptoRejectionArmTests
                         PayloadForm = PayloadForm.STRING,
                         KeyRef = "any",
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -6060,6 +6294,7 @@ public sealed class CryptoRejectionArmTests
                         Signature = "c2ln",
                         KeyRef = "any",
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -6110,6 +6345,7 @@ public sealed class CryptoRejectionArmTests
                         KeyRef = "cipher-key",
                         HashType = Enums.CRYPTO_HASH_SHA256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Authenticators,
                     CryptoFixture.Encodings,
                     store,
@@ -6124,6 +6360,7 @@ public sealed class CryptoRejectionArmTests
                         KeyRef = "cipher-key",
                         CipherType = Enums.CRYPTO_SYMCRYPT_TYPE_AES256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Ciphers,
                     CryptoFixture.Encodings,
                     store,
@@ -6137,6 +6374,7 @@ public sealed class CryptoRejectionArmTests
                         PayloadForm = PayloadForm.BLOB,
                         KeyRef = "rsa-public",
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -6151,6 +6389,7 @@ public sealed class CryptoRejectionArmTests
                         KeyRef = "rsa-private",
                         HashType = Enums.CRYPTO_HASH_SHA256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -6166,6 +6405,7 @@ public sealed class CryptoRejectionArmTests
                         KeyRef = "rsa-public",
                         HashType = Enums.CRYPTO_HASH_SHA256,
                     },
+                    CryptoFixture.Caller(),
                     CryptoFixture.Rsa,
                     CryptoFixture.Encodings,
                     store,
@@ -6233,5 +6473,156 @@ internal sealed class CapturingLoggerProvider : ILoggerProvider
 
             _captured.Records.Add(formatter(state, exception));
         }
+    }
+}
+
+/// <summary>
+/// KeyRef ownership through the REAL host: two genuine tokens, two subjects, one minted key.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>WHY THE UNIT ROWS ABOVE ARE NOT ENOUGH.</b> They call the handlers as methods and hand each one a
+/// principal directly. The deployed service obtains that principal from the request, through the
+/// framework's own special binding for <see cref="ClaimsPrincipal"/> - so a handler whose parameter was
+/// bound from the BODY instead, or a route that never reached the handler at all, would satisfy every unit
+/// row and fail in the only configuration that ships. These rows present real bearer tokens, minted by the
+/// host's own issuer for two different subjects, over HTTP.
+/// </para>
+/// <para>
+/// <b>BOTH CALLERS ARE EQUALLY ENTITLED TO THE SURFACE.</b> Each token carries the cryptographic scope the
+/// route group demands and is addressed to the audience this host accepts, so neither is refused by
+/// authentication, audience validation or the scope gate. The ONLY thing separating them is whose key it
+/// is - which is what makes the refusal below an ownership result rather than an authorization one.
+/// </para>
+/// </remarks>
+public sealed class CryptoKeyOwnershipOverTheWireTests
+{
+    /// <summary>Where a key pair is generated.</summary>
+    private static readonly Uri GenerateRoute = new("/v1/crypto/rsa/keys", UriKind.Relative);
+
+    /// <summary>Where a payload is signed - the operation that needs the PRIVATE half.</summary>
+    private static readonly Uri SignRoute = new("/v1/crypto/rsa/sign", UriKind.Relative);
+
+    /// <summary>A second rostered caller, equally entitled to the surface and not the key's owner.</summary>
+    private const string StrangerSubject = "powerframework-another-crypto-caller";
+
+    /// <summary>A reference of the minted shape that this host never issued.</summary>
+    private const string UnknownKeyRef = "gen-999-0123456789abcdef";
+
+    /// <summary>
+    /// A second caller cannot sign with a key another caller generated, cannot tell that refusal from one
+    /// naming a reference this host never issued, and the generating caller can still sign with it.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    [Fact]
+    public async Task ASecondCallerCannotSignWithAKeyAnotherCallerGenerated()
+    {
+        using SecurityAppFactory factory = new();
+
+        using HttpClient owner = factory.CreateAuthenticatedClient();
+        using HttpClient stranger = factory.CreateAuthenticatedClient(
+            StrangerSubject,
+            factory.ResolveInboundAudience(),
+            [SecurityScopes.Crypto, SecurityScopes.Ping]);
+
+        // --- The owner generates a pair and receives an opaque reference to its private half. --------
+        string keyRef;
+
+        using (HttpResponseMessage generated = await PostAsync(
+            owner,
+            GenerateRoute,
+            $"{{\"bits\":{Enums.CRYPTO_RSA_BITS_1024.ToString(CultureInfo.InvariantCulture)}}}"))
+        {
+            Assert.Equal(HttpStatusCode.OK, generated.StatusCode);
+
+            using JsonDocument body = JsonDocument.Parse(
+                await generated.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+
+            keyRef = body.RootElement.GetProperty("keyRef").GetString() ?? string.Empty;
+        }
+
+        Assert.False(string.IsNullOrWhiteSpace(keyRef));
+
+        // --- The stranger tries to sign with it, and with a reference that never existed. ------------
+        using (HttpResponseMessage foreign = await PostAsync(stranger, SignRoute, SigningBody(keyRef)))
+        using (HttpResponseMessage unknown = await PostAsync(stranger, SignRoute, SigningBody(UnknownKeyRef)))
+        {
+            Assert.NotEqual(HttpStatusCode.OK, foreign.StatusCode);
+            Assert.Equal(unknown.StatusCode, foreign.StatusCode);
+
+            string foreignBody = await foreign.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+            string unknownBody = await unknown.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+
+            // IDENTICAL BODIES MEMBER FOR MEMBER, correlation identifier aside: no code, title, detail or
+            // extension distinguishes "not yours" from "no such reference", so the operation is not an
+            // existence oracle for keys the caller does not hold. The correlation identifier is excluded
+            // because it is per-REQUEST by design - two calls of any kind differ in it - and comparing it
+            // would assert the opposite of what this service promises.
+            Assert.Equal(Comparable(unknownBody), Comparable(foreignBody));
+            Assert.DoesNotContain(keyRef, foreignBody, StringComparison.Ordinal);
+        }
+
+        // --- THE POSITIVE ARM: the owner signs with the same reference, over the same route. ---------
+        using (HttpResponseMessage mine = await PostAsync(owner, SignRoute, SigningBody(keyRef)))
+        {
+            Assert.Equal(HttpStatusCode.OK, mine.StatusCode);
+
+            using JsonDocument body = JsonDocument.Parse(
+                await mine.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+
+            Assert.False(string.IsNullOrWhiteSpace(body.RootElement.GetProperty("data").GetString()));
+        }
+    }
+
+    /// <summary>
+    /// Renders a problem body as an ordered member map with the correlation identifier removed.
+    /// </summary>
+    /// <param name="body">The response body.</param>
+    /// <returns>The comparable rendering.</returns>
+    /// <remarks>
+    /// ORDERED SO THE COMPARISON IS ABOUT CONTENT RATHER THAN MEMBER ORDER, and keyed so a member present
+    /// in one body and absent from the other fails rather than being skipped.
+    /// </remarks>
+    private static string Comparable(string body)
+    {
+        using JsonDocument document = JsonDocument.Parse(body);
+
+        SortedDictionary<string, string> members = new(StringComparer.Ordinal);
+
+        foreach (JsonProperty member in document.RootElement.EnumerateObject())
+        {
+            if (string.Equals(member.Name, "traceId", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            members[member.Name] = member.Value.GetRawText();
+        }
+
+        return string.Join('\u001f', members.Select(static member => member.Key + '=' + member.Value));
+    }
+
+    /// <summary>Builds a signing body naming a reference.</summary>
+    /// <param name="keyRef">The reference to sign with.</param>
+    /// <returns>The JSON text.</returns>
+    /// <remarks>
+    /// RAW TEXT RATHER THAN A SERIALIZED RECORD, so the row asserts the DOCUMENT's member spelling rather
+    /// than that the test's serializer agrees with itself. The reader is closed-schema, so a mis-spelled
+    /// member would be refused with a bad-request status and the row would fail loudly.
+    /// </remarks>
+    private static string SigningBody(string keyRef) => string.Create(
+        CultureInfo.InvariantCulture,
+        $"{{\"data\":\"payload\",\"payloadForm\":\"STRING\",\"keyRef\":\"{keyRef}\",\"hashType\":{Enums.CRYPTO_HASH_SHA256}}}");
+
+    /// <summary>Posts a raw JSON body to a route with whichever token the client carries.</summary>
+    /// <param name="client">The authenticated client.</param>
+    /// <param name="route">The route.</param>
+    /// <param name="body">The exact bytes to send.</param>
+    /// <returns>The response, which the caller disposes.</returns>
+    private static async Task<HttpResponseMessage> PostAsync(HttpClient client, Uri route, string body)
+    {
+        using StringContent content = new(body, Encoding.UTF8, "application/json");
+
+        return await client.PostAsync(route, content, TestContext.Current.CancellationToken);
     }
 }

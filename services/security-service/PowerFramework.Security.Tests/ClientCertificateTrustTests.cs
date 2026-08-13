@@ -4,10 +4,10 @@
 //  WHAT THESE ROWS PROTECT
 //  shared/PowerFramework.Contracts/OpenApi/security.v1.yaml declares a 401 on POST /v1/tokens whose
 //  meaning is "no client certificate was presented, OR the certificate presented is not trusted", and
-//  docs/ARCHITECTURE.md carries the same table. The second half of that sentence used to be a promise
-//  about the container's OS trust store rather than anything this service did: the operation read the
-//  connection's certificate and its common name, and honoured the name. These rows are what make it a
-//  behaviour.
+//  docs/ARCHITECTURE.md carries the same table. Without an explicit anchor the second half of that
+//  sentence would be a promise about the CONTAINER'S OS TRUST STORE rather than about anything this service
+//  does - the operation would read the connection's certificate and its common name and honour the name.
+//  These rows are what make it a behaviour of this service.
 //
 //  WHY AN EXPLICIT ANCHOR RATHER THAN THE MACHINE STORE, ASSERTED RATHER THAN ARGUED
 //  A .NET base image already trusts every public root shipped in it. With the anchor left implicit, the
@@ -485,10 +485,9 @@ public sealed class ClientCertificateTrustOperationTests
         // The fragment asserted is the OPENING of the operation's own refusal detail, and it is worded for
         // a credential rather than for a certificate on purpose: this operation accepts a shared secret as
         // an HTTP Basic credential as well as a client certificate, and the refusal folds every way of
-        // failing either into ONE sentence - which is the disclosure property the whole row is about. An
-        // earlier revision asserted a certificate-only sentence, from before the Basic scheme existed; a
-        // certificate-specific refusal would itself tell an unauthenticated caller which scheme it had
-        // been judged under.
+        // failing either into ONE sentence - which is the disclosure property the whole row is about. A
+        // certificate-specific refusal sentence would itself tell an unauthenticated caller which scheme
+        // it had been judged under, which is exactly what the shared sentence withholds.
         Assert.Contains(
             "No usable caller credential was presented",
             untrusted,

@@ -78,7 +78,7 @@ document is careful to say which one it is asserting.
 | [1. Position, scope and evidence discipline](#1-position-scope-and-evidence-discipline) | The no-values rule, the absence of user rules, the locator convention, and the severity scale |
 | [2. The sweep result](#2-the-sweep-result) | Three named, eleven found: the inventory, the two structural findings, the binary sites, adjacent defects, a corrected attribution, and the cleared false positives |
 | [3. The remediation posture](#3-the-remediation-posture) | Never replicate, document, and rotate — never edit the legacy file; and the two operational follow-ups |
-| [4. Token topology](#4-token-topology) | One signing secret, one issuer, three verifiers, the mutual-TLS fallback, and nothing scaffolded for a deferred service |
+| [4. Token topology](#4-token-topology) | One signing secret, one issuer, three verifiers, every secret projected as a file rather than an environment variable (§4.1.3), the mutual-TLS fallback, and nothing scaffolded for a deferred service |
 | [5. Credential-bearing fields on the new boundaries](#5-credential-bearing-fields-on-the-new-boundaries) | The per-field handling rules the contracts delegate here, and the deliberately ephemeral data-protection key ring |
 | [6. Log hygiene — the two controls this refactor adds](#6-log-hygiene--the-two-controls-this-refactor-adds) | Why two controls are added rather than behaviours preserved, and why neither is a behavioural change: statement redaction (§6.1–§6.4) and caller-identifier neutralization (§6.5) |
 | [7. Cryptographic weak defaults are preserved as annotated defaults](#7-cryptographic-weak-defaults-are-preserved-as-annotated-defaults) | Eight weaknesses kept exactly as they are — four of them established by absence — and annotated rather than fixed |
@@ -345,10 +345,10 @@ The remaining root binaries — `blinkfast.dll`, `pfw.dll`, `sqlite3.dll`, `sqli
 `pfw.pack.pbd` — return **zero markers**. Enumerating the clean ones matters as much as the dirty
 ones: it shows the scan covered every binary rather than stopping at the first hit.
 
-**Two of the three sites contain no embedded material whatsoever**, which an earlier draft of this
-table did not distinguish — it reported raw marker counts of 24, 1 and 1 without separating markers
-from bodies, and the sciter figure was not reproducible by the method now published above. The
-corrected reading is narrower and more useful: **the only binary with genuinely embedded key and
+**Two of the three sites contain no embedded material whatsoever**, which raw marker counts do not
+distinguish — counting markers alone gives 24, 1 and 1 without separating markers
+from bodies, and the sciter figure is not reproducible that way by the method published above. The
+narrower reading is the useful one: **the only binary with genuinely embedded key and
 certificate material is `sciter.dll`**, and `blink.dll` and `pfwx.dll` are matches on marker *text*
 in strings. Recording that distinction is the difference between an audit a reader can re-run and a
 number they must take on trust.
@@ -599,16 +599,16 @@ than a later addition. [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.1 works through 
 
 | | |
 | --- | --- |
-| **Name** | `SECURITY_JWT_SIGNING_KEY` |
+| **Name** | `SECURITY_JWT_SIGNING_KEY` — the **configuration key** Security reads. The orchestration template supplies it as `SECURITY_JWT_SIGNING_KEY_PATH`, a path to a file, which Compose projects and the service resolves through the `<KEY>_FILE` convention (§4.1.3) |
 | **Held by** | Security, and no other component |
 | **Kind of material** | An **RSA private key**, not a random symmetric secret. Security signs with `RS256` and publishes an RSA key set, so the two are not interchangeable: a random value has no modulus and no private exponent, cannot be imported as an RSA key, and cannot produce an `RS256` signature |
-| **Format** | Base64 of the DER encoding of the PKCS#8 private-key structure, **on one line** — this is the shape the template carries, because an environment file has no line continuation so a multi-line PEM block cannot be expressed there. PEM is **also** accepted, for the deployment path where the value arrives from a secret store that can carry newlines: Security tries PEM first, both the PKCS#8 and the older PKCS#1 encodings, and falls back to base64-DER. Neither shape may be refused — legacy private-key material exists in both, the generator's PEM output being an optional fourth argument [`ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20`]. That acceptance order is **fixed code**, and the `Security:SigningKeyFormat` leaf naming it is additionally a bound, validated option — a value outside the recognised set is refused at startup. See §4.1.1 |
-| **Supplied by** | Configuration injection from the orchestration secret layer, bound through the options pattern |
+| **Format** | Base64 of the DER encoding of the PKCS#8 private-key structure, **on one line** — the shape that was required while the key travelled as an environment variable, since a dotenv file has no line continuation and a multi-line PEM block cannot be expressed in one. **Now that the key is projected as a FILE (§4.1.3) a multi-line PEM block is expressible too.** PEM is accepted either way, and is tried first — it was already the shape a secret store that can carry newlines would deliver: Security tries PEM first, both the PKCS#8 and the older PKCS#1 encodings, and falls back to base64-DER. Neither shape may be refused — legacy private-key material exists in both, the generator's PEM output being an optional fourth argument [`ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20`]. That acceptance order is **fixed code**, and the `Security:SigningKeyFormat` leaf naming it is additionally a bound, validated option — a value outside the recognised set is refused at startup. See §4.1.1 |
+| **Supplied by** | Configuration injection from the orchestration secret layer, bound through the options pattern. **As a projected FILE rather than an environment variable** — see §4.1.3 for why that distinction is a security property rather than a packaging preference |
 | **Appears in source?** | **No** |
 | **Appears in `appsettings.json` or `appsettings.Development.json`?** | **No** |
 | **Appears in any container definition?** | **No** |
 | **Generated how?** | Locally, by the operator, at deployment time. It is not provided by the platform. The command is in `orchestration/.env.example` §1 |
-| **Rotated how?** | **There is no rotation mechanism. Read §4.1.1 before planning a replacement, and §4.2.1 for what the other three boundaries do while you do it.** Replacing the configured value and restarting Security is the only available procedure, and it is a hard cutover rather than a rollover |
+| **Rotated how?** | **By an overlapped rollover — the procedure is §4.1.2, and §4.2.1 is what the other three boundaries do while you run it.** Publish the outgoing key beside the incoming one through `SECURITY_JWT_RETIRING_SIGNING_KEY`, wait out the overlap, then drop the retiring pair. A hard cutover (replace the value, restart once) is still available and still refuses the tokens already in flight |
 
 The **name** of the variable is recorded here because consumers need to know what to set. **Its value
 is not recorded here, is not recorded anywhere else in this repository, and no placeholder resembling a
@@ -620,8 +620,7 @@ empty for exactly this reason: it tells an operator what to fill in without ship
 in with. **That file, the manifest that consumes it and the operator's guide beside it are all present in
 the tree** — [`../orchestration/.env.example`](../orchestration/.env.example),
 [`../orchestration/docker-compose.yml`](../orchestration/docker-compose.yml) and
-[`../orchestration/README.md`](../orchestration/README.md). An earlier revision of this section said the
-last two were absent; they are not.
+[`../orchestration/README.md`](../orchestration/README.md). All three are present.
 
 #### What kind of key this is: RSA, not random bytes
 
@@ -629,34 +628,45 @@ last two were absent; they are not.
 `shared/PowerFramework.Contracts/OpenApi/security.v1.yaml` publishes an **RSA-only** key set —
 `kty` `RSA` with the modulus and exponent members, no symmetric member anywhere in the schema. RS256 signs
 with an RSA private key, so random symmetric bytes cannot sign it and cannot be published as an RSA JWK.
-**An earlier revision of this document prescribed `openssl rand -base64 32` for this variable; that
-instruction was incompatible with the published contract and is corrected here.**
+**`openssl rand -base64 32` is therefore the wrong generator for this variable: what it produces is
+incompatible with the published contract.**
 
 | Property | Value |
 | --- | --- |
 | **Generation** | `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out security-signing.key` |
 | **Accepted form** | The key **material itself**, as a value rather than a path. In the template that is the single-line base64-of-DER form, because the Compose dotenv format has no line continuation and a PEM block cannot be written there; a secret store that can carry newlines may instead supply PEM, which Security tries first. An earlier revision of this document described the variable as a path to a mounted PEM file — that is not what the template declares, and the two statements are reconciled here in favour of the template, which is the artifact an operator actually fills in |
-| **Size** | **Measured and annotated, never enforced — see §4.1.1.** `SigningKeyProvider` records the imported modulus as `SigningKeySizeBits` and logs one warning when it is below the 2048-bit annotation threshold `SecurityOptions.LegacyWeakSigningKeySizeBits`. Nothing refuses a short key: AAP §0.6.6.4 preserves 1024-bit RSA as a legal size and §0.2.2.5 forbids correcting a legacy weakness, so a 1024-bit key starts the host and mints. The generation command above produces 2048 bits, which draws no warning. There is no minimum-size setting to configure |
+| **Size** | **Measured AND enforced at 2048 bits — see §4.1.1.** `SigningKeyProvider` records the imported modulus as `SigningKeySizeBits` and refuses to construct below `SecurityOptions.MinimumSigningKeySizeBits` (2048); `SecurityOptionsValidator` reports the same floor at bring-up, so a short key fails configuration validation with the variable named and the material never echoed. The floor is a **constant, not a setting** — there is no leaf to raise it and none to lower it. The generation command above produces 2048 bits. The 1024-bit legacy allowance AAP §0.6.6.4 preserves applies to the **C-02 crypto surface**, where a caller supplies the size; it does not extend to this key, which is a boundary the decomposition created (§4.1.1) |
 | **Public half** | **Derived, never configured.** Security computes the public JWK from the private key and publishes it under the `kid` in `Security:SigningKeyId`. There is no public-key variable, and there must not be one: two independently configured halves of one key pair is a way to publish material that does not verify what is being signed |
-| **Rotation** | **Not implemented — see §4.1.1, and §4.2.1 for the convergence window.** Replace the configured secret value (or the object in the secret store that supplies it) and restart Security. No code change and no rebuild, and no other service is reconfigured. **An earlier revision of this row said every token signed with the previous key "stops verifying the moment the host restarts", and that is false of the three VERIFIERS:** each holds a cached copy of the published key set, so a pre-rotation token keeps verifying at those boundaries until the cache is refreshed, and a post-rotation token is refused there until it is. §4.2.1 states the bound and the order to rotate in |
+| **Rotation** | **Overlapped rollover, implemented — see §4.1.2 for the procedure and §4.2.1 for the convergence window.** Security holds an active key and, during a rollover, a **retiring** key supplied through `SECURITY_JWT_RETIRING_SIGNING_KEY` with its own `kid` in `Security:RetiringSigningKeyId`. Both are published in the key set; only the active one mints. So a replacement is a three-step rollover rather than a cutover: publish both, wait out the overlap, then drop the retiring pair. No code change, no rebuild, and no other service is reconfigured — the three verifiers pick up the second key from the published set they already fetch |
 
-#### 4.1.1 What is enforced about this key, what is only measured, and why the difference is a requirement
+#### 4.1.1 What is enforced about this key, and why the 1024-bit legacy allowance does not reach it
 
 This subsection exists because an overstated control is worse than a missing one: it is relied on. What
 follows was read off the code rather than off the settings file.
 
-> ⚠ **THE 2048-BIT FLOOR WAS WITHDRAWN, AND ITS WITHDRAWAL IS THE REQUIREMENT RATHER THAN A RELAXATION.**
-> An intermediate revision declared `Security:SigningKeyMinimumSizeBits`, defaulted it to 2048, refused
-> anything shorter in the options validator AND again inside the signing-key provider, and documented that
-> refusal here, in [`BUILD.md`](BUILD.md) §8 and in `appsettings.json`. AAP §0.6.6.4 requires each weak
+> ⚠ **THE 2048-BIT FLOOR IS ENFORCED ON THE SIGNING KEY, AND THE SCOPE OF THE LEGACY ALLOWANCE IS WHY.**
+> This has been decided twice in opposite directions, so the reasoning is recorded rather than the outcome
+> alone. An intermediate revision withdrew the floor on the ground that AAP §0.6.6.4 requires each weak
 > legacy cryptographic default to be preserved **as an annotated default** and names 1024-bit RSA as one
-> that "remains a legal key size"; §0.2.2.5 forbids correcting a legacy defect at all. A floor that refused
-> a legacy-legal key was therefore a behaviour change dressed as hardening, and on the one service that
-> mints it converted a preserved allowance into a refusal to start. **The behaviour changed with this
-> correction, not only the description:** the option, both refusals and the settings leaf are gone, and what
-> replaces them is measurement plus a warning. Anyone reintroducing a floor is making a scope decision
-> against §0.6.6.4 and must change this subsection, [`BUILD.md`](BUILD.md) §8, `appsettings.json` and
-> `orchestration/.env.example` in the same edit.
+> that "remains a legal key size", and that §0.2.2.5 forbids correcting a legacy defect. That reading
+> applied the allowance to the wrong surface. §0.6.6.4 governs the **C-02 legacy cryptographic surface** —
+> the operations `n_crypto` actually publishes, where a CALLER supplies the key size and byte-for-byte
+> parity with `GenRSAKey` is the obligation. That surface still accepts 1024 bits and still generates them,
+> and this document's §6 annotates it.
+>
+> **JWT signing is not on that surface, because the legacy has no such surface.** The legacy framework has
+> no token issuer, no JWT, no key set and no signing identity of any kind, and opens no listening socket at
+> all [AAP §0.1.4] — so there is no legacy behaviour here either to preserve or to correct, and nothing for
+> §0.2.2.5 to protect. What governs this key is AAP **G7** and constraint **C-G**: decomposition creates
+> the estate's first ingress, and every newly created boundary is authenticated from the outset. A trust
+> root all three verifiers validate every token against is that boundary's foundation. Importing a weakness
+> from a surface that predates the boundary would not be parity; it would be a weakness with a citation.
+>
+> **The behaviour therefore changed with this correction, not only the description:** a 1024-bit signing key
+> no longer starts the host. The floor lives in `SecurityOptions.MinimumSigningKeySizeBits` as a
+> **constant** — anyone converting it back into a setting should read the note under the enforcement
+> bullets below before doing so — and any edit to it must change this subsection,
+> [`BUILD.md`](BUILD.md) §8, `orchestration/.env.example` and `orchestration/README.md` in the same pass.
 
 **The accepted format is a validated setting over a fixed acceptance sequence.**
 `Tokens/SigningKeyProvider.cs` always attempts the same closed sequence — PEM first, both the PKCS#8 and
@@ -670,57 +680,91 @@ leaf is not merely a record of the fixed behaviour: a deployment that names a fo
 implement (`Pkcs12` and `Jwk` being the plausible guesses) is told so at startup instead of having its
 expectation silently ignored.
 
-**THE KEY SIZE IS MEASURED AND ANNOTATED, AND NOTHING REFUSES A SHORT KEY.** There is no minimum-size
-option, and `PowerFramework.Security.Tests` asserts by reflection that none has been reintroduced. What the
-code does instead, all of it in `Tokens/SigningKeyProvider`:
+**THE KEY SIZE IS MEASURED AND ENFORCED, IN TWO PLACES, AND NEITHER IS CONFIGURABLE.**
 
-- it records the imported modulus as `SigningKeySizeBits`, so the measured size is observable rather than
-  inferred;
-- it sets `SigningKeyIsLegacyWeak` when that size is below `SecurityOptions.LegacyWeakSigningKeySizeBits`
-  (2048) — an ANNOTATION THRESHOLD, named so it cannot be mistaken for a floor; and
-- it logs exactly one warning naming the measured size and the threshold when the verdict is true. The
-  warning never echoes the key.
+- `SecurityOptionsValidator` imports the configured material, measures the modulus, and reports a
+  validation failure naming the measured size and the 2048-bit minimum. Because the options are registered
+  with `ValidateOnStart`, that failure is a refusal to start rather than a first-request error.
+- `Tokens/SigningKeyProvider` measures again after its own import, records the size as
+  `SigningKeySizeBits`, and throws rather than construct below the floor — logging one `Critical` record
+  naming the measured size and the minimum. Neither the message nor the record echoes the material.
+- The same floor applies to the RETIRING key, because a retiring key is still material every service in the
+  estate is asked to trust. If the outgoing key is below the floor, that is the reason to rotate rather
+  than a reason to publish it: cut over without an overlap and accept the window.
+- There is **no minimum-size setting**, and `PowerFramework.Security.Tests` asserts by reflection that no
+  configurable member has appeared which could LOWER it. A floor an operator can lower is not a floor, and
+  the operator most likely to lower it is the one whose deployment already holds a short key.
 
-**A 1024-bit RSA key therefore starts this host and mints tokens**, which is the legacy allowance
-`CRYPTO_RSA_BITS_1024` [`ws_objects/pfw.shared.pbl.src/enums.sru:L965`] preserved on the issuer exactly as
-it is preserved on the C-02 key-generation surface, where the caller supplies the size. Both are asserted
-by test, and the annotation is what AAP §0.6.6.4 asks for in place of a correction: the weakness is
-visible, and it is not silently repaired.
+**A 1024-bit RSA key therefore does not start this host.** The legacy allowance
+`CRYPTO_RSA_BITS_1024` [`ws_objects/pfw.shared.pbl.src/enums.sru:L965`] is preserved where it belongs — on
+the C-02 key-generation surface, where the caller supplies the size — and the divergence between the two is
+asserted by a single test that exercises both halves, so neither can drift into the other.
 
 **What still fails closed is unusable material, and that is not a size judgement.** A value that cannot be
 imported as an RSA private key at all — `openssl rand` output being the case that actually happens — makes
 the host refuse to start, reported as unusable and nothing else, with the variable named and the value
 never echoed. The `/v1/crypto` surface's own weak defaults are annotated the same way and listed in §6.
 
-**Rotation is not implemented, and replacement is a hard cutover.** Security holds exactly **one** signing
-key and publishes exactly **one** JWK under the single `kid` in `Security:SigningKeyId`. There is no key
-ring, no second key slot, no re-read of the configured material while the host runs, and no overlap
-window — the schema's `keys` array is plural because RFC 7517 defines it that way and because a consumer
-must tolerate a future rollover, **not** because this phase performs one
-([`security.v1.yaml`](../shared/PowerFramework.Contracts/OpenApi/security.v1.yaml), `JsonWebKeySet`).
-The operational consequence is therefore specific rather than reassuring:
+#### 4.1.2 Rotating the signing key without refusing the tokens already in flight
 
-- Replacing the configured secret value and restarting Security removes the old `kid` from the published
-  key set **in the same instant** the new one appears.
-- **Every token signed with the previous key stops verifying immediately.** Tokens live five minutes
-  (`Security:TokenLifetime`), so the interruption is bounded and short — but it is an interruption, and
-  callers holding a token at the moment of restart get a `401` from their next request rather than
-  continuing on a still-published old key. Earlier revisions of this document described that five-minute
-  window as a "brief overlap"; there is no overlap, only a bounded gap.
-- **Nothing is replaced on disk.** The variable carries key material rather than a path, so a rotation
-  replaces the configured secret value, or the object in the secret store that supplies it — not a file
-  in this repository, of which there is none.
-- Publishing more than one key concurrently would require a key ring in `Tokens/SigningKeyProvider.cs`
-  and a multi-key JWKS projection. Until that exists, plan a replacement as a scheduled restart, not as a
-  rollover.
+**A rollover is implemented, and a hard cutover is no longer the only option.** Security holds an **active**
+key and, for the duration of a rollover, a **retiring** one. The active key mints; both are published in
+the key set under their own `kid`, so a verifier selects by the token header and never has to guess. That is
+what the plural `keys` array in
+[`security.v1.yaml`](../shared/PowerFramework.Contracts/OpenApi/security.v1.yaml)'s `JsonWebKeySet` now
+carries in practice as well as in schema.
+
+**Why a cutover was a real outage rather than a theoretical one.** The three verifiers cache the published
+key set. Replacing the key in place removes the old `kid` in the same instant the new one appears, so every
+token minted under the previous key is refused at every boundary until each cache has refreshed — an
+estate-wide `401` that presents as a caller fault. Tokens live five minutes
+(`Security:TokenLifetime`), which bounds the damage but does not prevent it.
+
+**The three configuration inputs**, all supplied through the orchestration secret layer and none in any
+settings file, container definition or source file:
+
+| Input | Carries | Empty means |
+| --- | --- | --- |
+| `SECURITY_JWT_SIGNING_KEY` (supplied as `SECURITY_JWT_SIGNING_KEY_PATH` → projected file → `SECURITY_JWT_SIGNING_KEY_FILE`) | The ACTIVE private key. Mints every token | Refusal to start — there is no default for a secret |
+| `SECURITY_JWT_RETIRING_SIGNING_KEY` | The outgoing private key. **Published, never used to mint** | No rollover in progress: the steady state |
+| `SECURITY_JWT_RETIRING_SIGNING_KEY_ID` | The outgoing key's `kid`, bound at `Security:RetiringSigningKeyId` | As above; the two are a matched pair |
+
+Plus `SECURITY_JWT_SIGNING_KEY_ID`, the active `kid`, which is an identifier rather than a secret — a `kid`
+is published anonymously in the key set by design — and which exists as a variable so that the incoming key
+can be given a NEW identifier without rebuilding the image.
+
+**The procedure. Step 5 is the one that must not be shortened.**
+
+1. Generate the incoming key: `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -outform DER | base64 -w0`.
+2. Move the CURRENT signing key into `SECURITY_JWT_RETIRING_SIGNING_KEY` and the current `kid` into
+   `SECURITY_JWT_RETIRING_SIGNING_KEY_ID`.
+3. Write the new key to the file `SECURITY_JWT_SIGNING_KEY_PATH` names, and put a **new, different** `kid` in
+   `SECURITY_JWT_SIGNING_KEY_ID`.
+4. Restart Security only. Both keys are now published; new tokens carry the new `kid`; tokens minted under
+   the old one keep verifying.
+5. **Wait out the overlap** — at least `Security:TokenLifetime` (five minutes as shipped) **plus** the
+   verifiers' clock skew (30 seconds) **plus** however long a verifier's cached key set may remain stale.
+   Nothing enforces this wait, which is precisely why it is written down here.
+6. Clear both retiring variables and restart Security again. One key is published; the rollover is
+   complete, and the retired material can be destroyed at its source.
+
+**What the host refuses, so a half-applied rollover cannot run silently.** Material with no identifier (a
+key set entry cannot exist without a `kid`); an identifier with no material (publishes nothing while reading
+as a rollover in progress); two keys sharing one identifier (an ambiguous key set in which a verifier may
+select the wrong key and report what looks like forgery); and a retiring key below the 2048-bit floor. Each
+is a startup failure naming the configuration key and never the material.
+
+**Nothing is replaced on disk.** Both variables carry key material rather than a path, so a rollover edits
+the configured secret values, or the objects in the secret store that supply them — not a file in this
+repository, of which there is none.
 
 **The transport identity is a separate set of files.** `POST /v1/tokens` authenticates its caller with
 either a shared secret presented as an HTTP `Basic` credential or a client certificate — **either
 satisfies it** (§4.3) — so where the certificate scheme is used Security additionally needs a server
 certificate and a client-CA to trust.
 The **server** certificate is not Security-specific and not three-of-four: **all four services** terminate
-TLS with the same default material, supplied once through `TLS_CERTIFICATE_PATH` and
-`TLS_CERTIFICATE_KEY_PATH`, which the Compose manifest forwards to every service definition as
+TLS, each with its OWN material, supplied through `<SERVICE>_TLS_CERTIFICATE_PATH` and
+`<SERVICE>_TLS_CERTIFICATE_KEY_PATH`, which the Compose manifest projects into that service alone as
 `Kestrel:Certificates:Default:Path` and `:KeyPath`. One pair therefore covers **all four bound ports** —
 5101, 5102, 5104 and 5105, one listener per service. **Because one certificate is presented under four different service
 names and is probed locally at a fifth, it must carry every one of them as a subject alternative name —
@@ -736,8 +780,8 @@ client certificate each calling service presents — `GATEWAY_MTLS_CERT_PATH` / 
 orchestration secret layer, and none is material. **`SECURITY_MTLS_CERT_PATH` and
 `SECURITY_MTLS_KEY_PATH` are not part of this roster and must not be reintroduced as service settings**
 (the end-to-end suite reads the same two names for its own CLIENT pair, which is a different consumer and
-is not affected by this rule): they belonged to a
-withdrawn second mutual-TLS listener, and the server certificate now comes from the shared
+is not affected by this rule): they would belong to a
+second mutual-TLS listener that does not exist, and the server certificate comes from the shared
 `TLS_CERTIFICATE_*` pair above.
 
 > **The trust anchor is READ by application code; what is still missing is the mount.**
@@ -793,7 +837,8 @@ must agree word for word.
 >   cp orchestration/.env.example "$PFW_ENV"
 >   chmod 600 "$PFW_ENV"
 > fi
-> # populate SECURITY_JWT_SIGNING_KEY in that file -- it is an RSA PRIVATE key, not random bytes:
+> # write the key to a file and point SECURITY_JWT_SIGNING_KEY_PATH at it -- it is an RSA PRIVATE key,
+> # not random bytes:
 > #   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -outform DER | base64 -w0
 > cd orchestration && docker compose --env-file "$PFW_ENV" up --build -d
 > ```
@@ -818,6 +863,51 @@ must agree word for word.
 > Either way, `.env` files are excluded from every image layer by the repository-root `.dockerignore`,
 > so no environment file reaches a container image. That control is about images, not about version
 > control, and it is not a substitute for the path discipline above.
+
+#### 4.1.3 Every secret is projected as a file, not passed as an environment variable
+
+**The signing key and both caller credentials reach their services as projected files.** The orchestration
+template names a *path* for each — `SECURITY_JWT_SIGNING_KEY_PATH`,
+`SECURITY_CLIENT_SECRET_GATEWAY_PATH`, `SECURITY_CLIENT_SECRET_DATASERVICES_PATH` — the manifest declares
+each as a Compose secret and projects it read-only under `/run/secrets/security/`, and each service reads it
+through a `<KEY>_FILE` companion of the configuration key it already used.
+
+**This replaced an environment variable, and the change is a security property rather than a packaging
+preference.** An environment variable carrying key material is readable from far more places than its owner
+expects:
+
+- `docker compose config` renders it in cleartext — and that is precisely the command an operator is told
+  to run when a bring-up misbehaves, so the natural debugging step printed the RSA private key that signs
+  every token in the estate;
+- `docker inspect <container>` returns the whole environment to anyone who can reach the daemon socket, and
+  so does the API behind it;
+- `/proc/<pid>/environ` exposes it to any process in the container running as the same account;
+- every child process inherits the block whether it needs it or not;
+- it lands in shell history, in CI logs that echo the environment, and in a crash dump.
+
+A projected file has none of those properties: one path, one readable account, absent from a rendered
+manifest, an inspect payload and every process environment.
+
+**Three rules, and each refuses rather than guessing.** They are enforced in each service's own
+`Configuration/FileBackedSecrets.cs` — one copy per service, because no behaviour crosses a service
+boundary in this estate:
+
+| Condition | Outcome | Why not the alternative |
+| --- | --- | --- |
+| `<KEY>_FILE` set and readable | Its **trimmed** contents become `<KEY>` | The trim matters: every ordinary way of writing a secret to a file appends a newline, and an untrimmed base64 key fails to decode at first use |
+| Both `<KEY>` and `<KEY>_FILE` carry a value | **Refuse to start** | Two sources for one secret means nobody can tell which credential is being presented, so a rotation applied to one appears effective while the other is still in use |
+| `<KEY>_FILE` set but missing, unreadable or empty | **Refuse to start** | Falling back to the environment value would substitute a *different* credential for the one the deployment declared — silent, and indistinguishable from success |
+
+**The environment-variable form still works**, so a deployment that has not migrated is not broken (C-I).
+What changed is what the shipped manifest *does*.
+
+**Two optional slots keep a value form, and the reason is structural.** A Compose secret's `file:` must name
+a path that already exists, and both the retiring signing key and the optional operator identity are *empty*
+in the steady state — so declaring a projection for either would abort every ordinary bring-up to serve a
+case that is not happening. Both carry a `_FILE` companion that is passed through, and that companion is the
+**preferred** form whenever the slot is actually in use: during a rollover the value form would put a signing
+key back into the environment for the length of the rollover, which is the exposure the active key was moved
+out of.
 
 ### 4.1a Three issuance-roster secrets, and they are a different kind of material
 
@@ -879,9 +969,9 @@ There is a specific security reason this arrangement is preferred, and it is the
 REST rather than gRPC: a stock bearer handler consumes a published key set and discovery document with
 **zero bespoke code**. The security-critical validation path — signature checking, key selection by `kid`,
 issuer and audience validation, clock-skew handling — is therefore **framework code rather than
-hand-written code**, and it would remain framework code on the day a key ring is added on the issuing
-side (§4.1.1 records that none exists yet, so no verifier has more than one key to choose between
-today). Choosing gRPC for Security would have forced custom key-set retrieval into three separate
+hand-written code**, and it remained framework code when the key ring arrived on the issuing side: a
+verifier that fetches a two-key set selects by `kid` with no change to any of the three services (§4.1.2).
+Choosing gRPC for Security would have forced custom key-set retrieval into three separate
 services, which is a net *increase* in hand-written security-critical code and precisely the wrong
 direction.
 
@@ -891,11 +981,14 @@ direction.
 
 #### 4.2.1 Rotating the signing key: what each boundary does, and the order to do it in
 
-Rotation is a **hard cutover at the issuer and a cache expiry at each verifier**, and the two are not
-simultaneous. This subsection records the measured behaviour rather than the intended one, because the
-gap between them was a finding: a rotation left the estate accepting the **retired** credential and
-refusing the **current** one at the same time, and neither the window nor a safe order was written down
-anywhere.
+**The issuer half can now be overlapped (§4.1.2); the verifier half is still a cache expiry, and the two
+are not simultaneous.** This subsection records the measured behaviour of a HARD CUTOVER — replace the key,
+restart once, publish one key — because that is the case the intervals below actually bound, and because it
+is what a rollover that skips step 5 of §4.1.2 degenerates into. It was written after a finding: a cutover
+left the estate accepting the **retired** credential and refusing the **current** one at the same time,
+and neither the window nor a safe order was written down anywhere. Run the overlapped procedure and the
+first row of the measurement table below stops applying, because no token is ever signed by a key the
+published set omits.
 
 **What each boundary does the moment the issuer's key changes**
 
@@ -956,19 +1049,29 @@ Neither number is a service-level commitment: no latency budget or availability 
 anywhere in this system (AAP §0.8.5), and these are measurements of one deployment's convergence taken to
 establish that the window is bounded and roughly how tightly.
 
-Both intervals are a **bound, not an overlap**, and that is a constraint rather than a preference. The other way to
-remove the window is for the issuer to publish the superseded key beside the new one until every consumer
-has converged, which a key *set* can obviously carry — but **AAP §0.6.6.3 fixes exactly one signing
-secret in the estate**, and Security's published set is built from that single key. A second slot of
-issuer key material would be new capability rather than a setting, so it is deliberately not built; §4.1.1
-records that no key ring exists on the issuing side.
+Both intervals are a **bound on the cutover window**, and the other way to remove that window is the one
+§4.1.2 now implements: the issuer publishes the superseded key beside the new one until every consumer has
+converged, which a key *set* carries natively. The two mechanisms are complementary rather than
+alternatives — the intervals bound how long a verifier can be wrong about the current set, and the overlap
+means being briefly wrong costs nothing.
+
+**Why the retiring key does not breach the sole-issuer rule, stated plainly because AAP §0.6.6.3 counts
+signing secrets.** That clause fixes ONE signing secret in the estate and forbids the other three services
+holding an independent signing authority; what it protects against is a second ISSUER. The retiring key is
+not one: it never mints — `TokenIssuer` signs with the active credential only — it is published as
+verification material exactly like the active key's public half, it is held by the same sole issuer, and it
+is empty outside a rollover. There is still exactly one component in this estate that can mint a token, and
+exactly one key with which it does so. The transient second piece of private material at that one component
+is recorded as a deliberate divergence from the clause's literal count, made because an unrotatable signing
+key is a worse security posture than a bounded overlap.
 
 **The order to rotate in**
 
 1. **Drain or accept.** Decide whether a bounded interval in which some in-flight tokens are refused is
    acceptable. Tokens are short-lived (five minutes), so waiting one token generation before and after is
    usually cheaper than any mitigation.
-2. **Replace the value** of `SECURITY_JWT_SIGNING_KEY`, and change `Security:SigningKeyId` with it. The
+2. **Replace the contents of the file** `SECURITY_JWT_SIGNING_KEY_PATH` names, and change
+   `Security:SigningKeyId` with it. The
    `kid` must change: a new key published under the old `kid` is the one shape a verifier cannot detect,
    because a cached entry would appear to match and the signature check would then fail with nothing
    pointing at the cause.
@@ -1006,10 +1109,10 @@ Enforcing `kid` would make the header a second gate in front of the signature ch
 in front of a cryptographic check is only ever as strong as the check behind it, while the failure it
 adds is real: a rotation that changes the key identifier would begin refusing tokens whose signatures are
 perfectly valid, turning an orderly rotation into an outage. The security property this topology rests on
-is *one issuer, one signing key, verified by signature* (§4.1, §4.2), and a `kid` mismatch does not
-weaken it because it cannot make an unsigned or wrongly-signed token verify. §4.1.1's note that no
-verifier has more than one key to choose between today is the same fact from the other side: with one
-published key, `kid` has nothing to select.
+is *one issuer, one minting key, verified by signature* (§4.1, §4.2), and a `kid` mismatch does not
+weaken it because it cannot make an unsigned or wrongly-signed token verify. The hint earns its keep during
+a rollover, which is the one time the published set holds two keys (§4.1.2): the header then tells a
+verifier which to try first, and the fallback still resolves it if the hint is stale.
 
 Two consequences worth stating so nobody depends on the wrong one. A `kid` **cannot** be used as an
 authorization input anywhere in this system — audience and scope are the authorization inputs, and they
@@ -1039,7 +1142,7 @@ nothing should be scaffolded before the pair adopts it. The reasoning was sound 
 wrong: the pair has adopted it, since the published contract has required mutual TLS on issuance from the
 moment it was authored. Without the settings the stack starts and then cannot issue a single credential,
 so their absence was a functional defect rather than restraint. The seven variables now present are the
-shared server certificate and key (`TLS_CERTIFICATE_PATH` / `TLS_CERTIFICATE_KEY_PATH` — not
+per-service server certificate and key (`<SERVICE>_TLS_CERTIFICATE_PATH` / `_KEY_PATH` — not
 Security-specific, since all four services terminate TLS with the same default material), the trust
 anchor Security validates presented client certificates against, and a client certificate and key for
 each of the two services that request tokens — Gateway and DataServices. **Persistence has none**,
@@ -1137,9 +1240,9 @@ rotated without editing source, and anyone who can read the page can mint signat
 from legitimate ones.
 
 Security inverts every one of those properties. Its signing key arrives from configuration and exists
-nowhere in source; it can be **replaced** without a code change, an edit to any tracked file or a rebuild
-(§4.1.1 is explicit that replacement is a hard cutover rather than a rollover, because no rotation
-machinery exists); it is never returned to a caller (§4.5);
+nowhere in source; it can be **rotated** without a code change, an edit to any tracked file or a rebuild,
+and rotated with an overlap so the tokens already in flight keep verifying (§4.1.2); it is never returned
+to a caller (§4.5);
 and it is held by exactly one component (§4.2), so the set of things that can mint a token is
 enumerable. That is the whole difference between the anti-pattern and the design, and it is why the
 token topology is recorded in this document alongside the material it replaces.
@@ -1162,7 +1265,7 @@ then delegate the register to this document ([`CONTRACTS.md`](CONTRACTS.md) §5.
 | Field | Legacy locator | What it carries | Rule on a new boundary |
 | --- | --- | --- | --- |
 | `transactiondata.logpass` | `ws_objects/pfw.thread.ext.pbl.src/transactiondata.srs:L8` | The database account's password, as a member of the transaction descriptor | **Write-only.** Accepted inbound; **never echoed in a response, never logged, never captured into a recording** |
-| `dberrordata.sqlsyntax` | `ws_objects/pfw.thread.ext.pbl.src/dberrordata.srs:L6` | The complete generated statement of a failing operation, **including interpolated literal values** | **Redacted, or structurally split into statement plus parameters**, before it crosses a boundary or reaches a log. See §6 |
+| `dberrordata.sqlsyntax` | `ws_objects/pfw.thread.ext.pbl.src/dberrordata.srs:L6` | The complete generated statement of a failing operation, **including interpolated literal values** | **Redacted** — one field, every literal replaced by a placeholder — before it crosses a boundary, reaches a log, or is written to a characterization recording. This row previously read "redacted, or structurally split into statement plus parameters", which contradicted §6.3's own record that the split was considered and rejected; the alternative is withdrawn here too. See §6.3 |
 | The connection URI's optional credential parameter | `ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L450-L456` | An optional password parameter in the storage connection URI grammar | **Write-only, and never logged.** Supplied by configuration injection; the assembled URI is never emitted in an error payload, a diagnostic, or a recording |
 | Symmetric, keyed-hash and RSA private key parameters | `ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L23-L26`, `:L30-L61`, `:L62-L73` | Raw key bytes, passed as ordinary in-parameters by the legacy | **Replaced by an opaque key reference.** Key bytes never cross the wire from a caller at all (§4.5) |
 
@@ -1318,11 +1421,10 @@ parameter collection — and the **single redacted field** is the one implemente
 redaction rule stated on the field, `DbError` has **no** `parameters` member, and
 `services/persistence-service/PowerFramework.Persistence/Errors/SqlRedactor.cs` is the one component that
 produces the value. Adding a parameter collection now would be a contract revision, not a refinement.
-Earlier revisions of this section and of [`CONTRACTS.md`](CONTRACTS.md) §8.6 described the alternative as
-still open; that wording is withdrawn in both. The reason the single field won belongs in a secrets
-register: **a parameter collection is itself the sensitive data.** Separating a literal from its statement
-moves the value, it does not protect it, so splitting would have produced two fields to redact instead of
-one and a second place for a future change to forget.
+The alternative is CLOSED rather than open, here and in [`CONTRACTS.md`](CONTRACTS.md) §8.6. The reason the
+single field wins belongs in a secrets register: **a parameter collection is itself the sensitive data.**
+Separating a literal from its statement moves the value, it does not protect it, so splitting produces two
+fields to redact instead of one and a second place for a future change to forget.
 
 This is a **logging and transport control, not a behavioural change**, and the distinction rests on
 three points:
@@ -1550,13 +1652,17 @@ Stated so that the register's limits are as legible as its findings:
   and the typed clients exist and the listener requests a certificate, but no container installs the
   trust anchor and no Compose manifest mounts it, so no presented client certificate has ever been
   validated. §4.1.1 and §4.3 both record that as a pending implementation with two named options.
-- **It does not claim that key rotation exists, and it does not claim a size floor.** §4.1.1 states what is
-  actually enforced: a fixed import sequence whose failure refuses startup, a **bound and validated** format
-  setting — and exactly one published key with **no** rollover machinery. The key's **size is measured and
-  annotated, never enforced**: an intermediate revision of this document described a bound, twice-enforced
-  2048-bit floor, and that floor has since been withdrawn as the behaviour change it was, so a 1024-bit key
-  starts the host with one warning in the log. The rotation half was and remains true: there is one key, one
-  `kid`, and no overlap window.
+- **What it claims about the signing key is exactly what the code enforces, and both halves of this bullet
+  have been wrong in opposite directions before.** §4.1.1 states the enforcement: a fixed import sequence
+  whose failure refuses startup, a **bound and validated** format setting, and a **2048-bit floor enforced
+  twice** — in the options validator and again in the signing-key provider — held in a constant with no
+  setting to lower it. An intermediate revision withdrew that floor, reading AAP §0.6.6.4's 1024-bit
+  allowance as governing the issuer; the allowance governs the C-02 crypto surface, and §4.1.1 records why
+  the distinction is the requirement rather than a convenience. **Rotation now exists** and is an overlapped
+  rollover (§4.1.2): an active key, an optional retiring key published beside it, distinct `kid`s, and a
+  documented overlap that must be at least the token lifetime plus clock skew plus the verifiers' key-set
+  staleness. What is still NOT claimed is automation — every step of §4.1.2 is manual, nothing schedules a
+  rotation, and no code enforces the wait in step 5.
 - **It does not claim any user-specified rule governs this work.** None exists (§1.2); the bar applied
   in their place is stated there rather than assumed.
 - **It reproduces no secret value of any kind** — the claim this document opens with, and the one every

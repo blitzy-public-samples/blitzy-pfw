@@ -40,9 +40,11 @@
 // --------------------------------------------------------------------------------------------------
 //  2. THE FLAGS ARE DOCUMENTED. THIS NARROWS THE RISK THE PLAN DESCRIBES.
 // --------------------------------------------------------------------------------------------------
-//  The plan states in two places - its native-binding substitution matrix and its open risk R1 - that
-//  the pinyin flag semantics are UNDOCUMENTED, and docs/PARITY.md repeats it. THAT IS OUT OF DATE.
-//  The oracle documents all three bits itself, under its own heading:
+//  AAP 0.6.5 and its open risk R1 both describe the pinyin flag semantics as UNDOCUMENTED. They are
+//  not: the oracle documents all three bits itself, under its own heading, so the risk is narrower
+//  than the plan's wording - docs/PARITY.md R1 records the narrowed form, which scopes the risk to the
+//  lookup table, the matching algorithm and the fuzzy-equivalence set and states that the flag decoding
+//  needs no characterization.
 //
 //      /*--- Pinyin ---*/                                          [enums.sru:L1144]
 //      //PinyinFirstLetterLike:[flags]                             [enums.sru:L1146]

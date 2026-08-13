@@ -6,18 +6,19 @@
 //  Clients/DataServicesClient.cs, and the fact that Program.ConfigureOutboundResilience actually
 //  installs both predicates on all three outbound clients rather than merely being able to.
 //
-//  WHY IT IS WORTH A SUITE OF ITS OWN. The defect this replaces was not a wrong value; it was a policy
-//  that could not see what it was deciding about. All three outbound clients called
-//  AddStandardResilienceHandler() with NO configuration at all, and an HTTP-level pipeline cannot read
-//  a `grpc-status`: a call the server REFUSED arrives as HTTP 200, so a server-declared Unavailable was
-//  never retried, while a TRANSPORT fault arrived as an exception and was retried on every method -
-//  including Update, whose replay after an unknown outcome is the silent double-apply that contract
-//  C-06 exists to prevent, and including every session open, whose replay leaves a second server-held
-//  session nobody holds a handle to. Both halves are invisible in a passing build.
+//  WHY IT IS WORTH A SUITE OF ITS OWN. The defect it guards is not a wrong value; it is a policy
+//  that cannot see what it is deciding about. Call
+//  AddStandardResilienceHandler() with NO configuration on the three outbound clients and an
+//  HTTP-level pipeline cannot read a `grpc-status`: a call the server REFUSED arrives as HTTP 200, so a
+//  server-declared Unavailable is never retried, while a TRANSPORT fault arrives as an exception and is
+//  retried on every method - including Update, whose replay after an unknown outcome is the silent
+//  double-apply that contract C-06 exists to prevent, and including every session open, whose replay
+//  leaves a second server-held session nobody holds a handle to. Both halves are invisible in a
+//  passing build.
 //
 //  THE SUITE IS IN THREE PARTS, and the third is the one that matters most: the decision, the
-//  deadline, and then the WIRING - because parts one and two would both pass with the predicates
-//  written and never installed, which is exactly the shape of the original defect.
+//  deadline, and then the WIRING - because parts one and two both pass with the predicates
+//  written and never installed, which is exactly the shape the defect takes.
 // ==================================================================================================
 
 using System.Globalization;
@@ -128,8 +129,8 @@ public sealed class OutboundCallPolicyTests
     /// could not tell a deliberate exclusion from a forgotten one.
     /// </para>
     /// <para>
-    /// 🔴 The rows worth reading twice: BOTH SESSION CLOSES ARE EXCLUDED, and they used to be admitted on
-    /// the reading that a replayed close is idempotent. The END STATE is; the ANSWER is not. A close is
+    /// 🔴 The rows worth reading twice: BOTH SESSION CLOSES ARE EXCLUDED, and admitting them on
+    /// the reading that a replayed close is idempotent is the trap. The END STATE is; the ANSWER is not. A close is
     /// destructive of the information its own response carries - <c>CloseValidationSession</c> answers
     /// <c>was_open</c> plus the session's <c>final_state</c>, captured immediately before the session is
     /// removed - so a replay after a first attempt that SUCCEEDED and lost its response answers
@@ -201,12 +202,11 @@ public sealed class OutboundCallPolicyTests
             Add(columnExpression, "OpenExpressionSession", replaySafe: false);
             Add(columnExpression, "CloseExpressionSession", replaySafe: false);
 
-            // A `LoadRows` ROW USED TO SIT HERE AND IS DELIBERATELY NOT REINSTATED. The exhaustiveness
-            // guard below found the table missing it while the schema declared it, so it was added; the
-            // schema has since withdrawn the method, and the same guard is what would fail on a row for a
-            // method no descriptor declares. The pairing is the point: this table is checked against the
-            // descriptor in both directions, so neither a new method nor a withdrawn one can leave it
-            // silently wrong.
+            // THERE IS DELIBERATELY NO `LoadRows` ROW HERE: no descriptor declares that method. The
+            // exhaustiveness guard below fails on a table missing a method the schema declares, and the
+            // companion guard fails on a row for a method no descriptor declares. The pairing is the
+            // point: this table is checked against the descriptor in both directions, so neither an
+            // added method nor a removed one can leave it silently wrong.
             Add(columnExpression, "AddExpression", replaySafe: false);
             Add(columnExpression, "SetExpression", replaySafe: false);
             Add(columnExpression, "GetExpression", replaySafe: true);
@@ -476,11 +476,11 @@ public sealed class OutboundCallPolicyTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>THE TABLE CLAIMED THE WHOLE SURFACE AND NOTHING CHECKED THE CLAIM.</b> An operation nobody
-    /// classifies inherits "attempted exactly once", which is the safe default and a silent one: a method
-    /// added to the C-03 and C-04 contract set was neither admitted by the policy nor refused by it on the
-    /// record, so a deliberate exclusion and a forgotten one looked identical. That is precisely the
-    /// distinction the table was written to make, so the claim is now enforced against the descriptors.
+    /// <b>THE TABLE CLAIMS THE WHOLE SURFACE, AND THE CLAIM IS CHECKED RATHER THAN TRUSTED.</b> An operation
+    /// nobody classifies inherits "attempted exactly once", which is the safe default and a silent one: a
+    /// method added to the C-03 and C-04 contract set is then neither admitted by the policy nor refused by
+    /// it on the record, so a deliberate exclusion and a forgotten one look identical. That is precisely the
+    /// distinction the table exists to make, so the claim is enforced against the descriptors.
     /// </para>
     /// <para>
     /// STREAMING METHODS ARE INCLUDED IN THE COMPARISON. They can never be replay-safe - the policy's own
@@ -779,20 +779,21 @@ public sealed class OutboundCallPolicyTests
     /// vacuously.
     /// </para>
     /// <para>
-    /// 🔴 THE ATTEMPTS ARE NOW PERFORMED BY THE gRPC LAYER, NOT THIS ONE, which is why this test still
-    /// passes after the HTTP pipeline's retry was stood down. It is the same observable - a replay-safe
+    /// 🔴 THE ATTEMPTS ARE PERFORMED BY THE gRPC LAYER, NOT THIS ONE, which is why this test holds with the
+    /// HTTP pipeline's retry stood down. It is the same observable - a replay-safe
     /// read is attempted several times and an unsafe one exactly once - reached through the layer that can
-    /// actually see a connect failure. Keeping the assertion unchanged across that move is the point:
+    /// actually see a connect failure. That the assertion is indifferent to which layer performs them is
+    /// the point:
     /// the policy is what is being tested, not the mechanism that implements it.
     /// </para>
     /// <para>
-    /// THE EXPECTED COUNT IS DERIVED FROM THE BOUND OPTIONS, and that is a correction. It used to be read
-    /// from the resilience package's own default on the ground that Gateway configured no attempt count.
-    /// Gateway configures one now - the gRPC layer needs the same number, and a number living in two
-    /// places under two defaults is a number that will disagree - and the shipped value happens to equal
-    /// the package's, so the old expression would have passed even if the composition root stopped
-    /// configuring anything at all. Both the count and its base delay are set from configuration here, so
-    /// the assertion observes the derivation rather than a coincidence.
+    /// THE EXPECTED COUNT IS DERIVED FROM THE BOUND OPTIONS RATHER THAN FROM THE RESILIENCE PACKAGE'S OWN
+    /// DEFAULT, and the difference is not cosmetic. Gateway configures an attempt count - the gRPC layer
+    /// needs the same number, and a number living in two places under two defaults is a number that will
+    /// disagree - and the shipped value happens to EQUAL the package's, so an expression reading the
+    /// package default would pass even if the composition root stopped configuring anything at all. Both
+    /// the count and its base delay are set from configuration here, so the assertion observes the
+    /// derivation rather than a coincidence.
     /// </para>
     /// <para>
     /// THE BASE DELAY IS SHORTENED AT BOTH LAYERS, for the reason the HTTP delay always was: the
@@ -1136,14 +1137,14 @@ public sealed class OutboundCallPolicyTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// 🔴 <b>THE DISABLE USED TO BE UNDEPLOYABLE, WHICH IS WHY THE FIRST ASSERTION IS THAT THE HOST
-    /// STARTS AT ALL.</b> Zero was documented as disabling retries and validated only against being
-    /// negative, while both retry layers consumed it unconditionally. The resilience package declares its
-    /// retry strategy's count in the range one to <see cref="int.MaxValue"/>, so resolving a client threw
-    /// "The field &lt;client&gt;-standard.Retry.MaxRetryAttempts must be between 1 and 2147483647" for all
-    /// three named pipelines at once - and the gRPC layer's <c>MaxAttempts = retries + 1</c> became one,
-    /// which its own retry policy rejects. Creating the client here is the whole of that first claim: on
-    /// the old build this line was the failure.
+    /// 🔴 <b>THE DISABLE IS EASILY UNDEPLOYABLE, WHICH IS WHY THE FIRST ASSERTION IS THAT THE HOST
+    /// STARTS AT ALL.</b> Documenting zero as disabling retries and validating it only against being
+    /// negative, while both retry layers consume it unconditionally, is the trap. The resilience package
+    /// declares its retry strategy's count in the range one to <see cref="int.MaxValue"/>, so resolving a
+    /// client then throws "The field &lt;client&gt;-standard.Retry.MaxRetryAttempts must be between 1 and
+    /// 2147483647" for all three named pipelines at once - and the gRPC layer's
+    /// <c>MaxAttempts = retries + 1</c> becomes one, which its own retry policy rejects. Creating the
+    /// client here is the whole of that first claim: under that arrangement this line is the failure.
     /// </para>
     /// <para>
     /// <b>AND "DISABLED" IS ASSERTED AS AN ABSENCE AT ONE LAYER AND A PREDICATE AT THE OTHER</b>, because
@@ -1335,11 +1336,11 @@ public sealed class OutboundCallPolicyTests
             fixture.Services.GetRequiredService<OutboundDeadlines>().Unary);
 
         // 🔴 THE PER-ATTEMPT BOUND IS ASSIGNED, NOT INHERITED - and it is the bound that actually decides
-        // when a call gives up. Only the total used to be configured, so the package's ten-second
-        // per-attempt default applied; and because retry here is operation-scoped, every operation that
-        // creates or mutates upstream state is attempted exactly once, so the total was never reached and
-        // those ten seconds were the whole story. An operator reading a twenty-five-second setting
-        // observed ten.
+        // when a call gives up. Configuring only the total leaves the package's ten-second
+        // per-attempt default in force; and because retry here is operation-scoped, every operation that
+        // creates or mutates upstream state is attempted exactly once, so the total is never reached and
+        // those ten seconds are the whole story. An operator reading a twenty-five-second setting would
+        // observe ten.
         //
         // ASSERTED AS THE DERIVATION RATHER THAN AS A LITERAL, because two constraints bound it: it cannot
         // exceed the total, and the package requires the breaker's sampling window to be at least DOUBLE

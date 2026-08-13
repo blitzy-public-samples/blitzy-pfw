@@ -23,14 +23,15 @@
 //  anywhere in this repository, so the ONLY way to obtain the oracle's own output would be to
 //  execute PowerBuilder. This is therefore a TARGET CHARACTERIZATION - it records what the .NET
 //  rewriters emit so that a change to any of them is visible in review, and it does not certify
-//  agreement with pfw.dll. The five sentinel identifiers and the count alias ARE traceable to the
-//  oracle's source text, and each is asserted by name so that a rename cannot pass.
+//  agreement with pfw.dll. The SIX sentinel identifiers - pfwPagedSQL_OutterTbl, pfwPagedSQL_RN and
+//  pfwPagedSQL_Tbl on the SQL Server side, pfwPagedSQL_TblInnerInner, pfwPagedSQL_TblInner and
+//  pfwPagedSQL_TblOuter on the Oracle side - and the count alias ARE traceable to the oracle's source
+//  text, and each is asserted by name so that a rename cannot pass.
 //
-//  ITS IMMEDIATE PURPOSE. Three changes were made to these files to resolve review findings: the
-//  inner sub-query reads became terminator-free, every page product became `checked`, and the
-//  dispatcher began handing the arms RESOLVED unique-index identifiers. All three are no-ops for a
-//  statement with no terminator, no overflow and no aliased column - which is every case below - so
-//  this suite is the evidence that they cost nothing.
+//  ITS IMMEDIATE PURPOSE. It is the evidence that three properties of the rewriters cost nothing
+//  observable: the inner sub-query reads are terminator-free, every page product is `checked`, and the
+//  dispatcher hands the arms RESOLVED unique-index identifiers. All three are no-ops for a statement
+//  with no terminator, no overflow and no aliased column - which is every case below.
 //
 //  NO DATABASE OF EITHER DIALECT IS INVOLVED. Both rewriters are pure string transforms, which is
 //  precisely how the plan preserves SQL Server and Oracle behaviour without provisioning either
@@ -251,7 +252,7 @@ public sealed class PagingRewriterByteExactTests
     }
 
     /// <summary>
-    /// THE FIVE SENTINEL IDENTIFIERS AND THE COUNT ALIAS ARE SPELLED EXACTLY AS THE ORACLE SPELLS
+    /// ALL SIX SENTINEL IDENTIFIERS AND THE COUNT ALIAS ARE SPELLED EXACTLY AS THE ORACLE SPELLS
     /// THEM, including the doubled <c>t</c> in <c>OutterTbl</c>.
     /// </summary>
     /// <remarks>

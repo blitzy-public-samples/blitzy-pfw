@@ -950,10 +950,10 @@ public sealed class ColumnExpressionServiceContractTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THE BOUND USED TO BE ABSENT, and its absence was argued for: passing no invocation timeout was
-    /// documented as refusing to invent a duration, with the per-call cancellation token named as the
-    /// bound instead. The reasoning was sound and the conclusion was not, because at the time NO CALLER
-    /// SET A DEADLINE - so the "bound" was the caller's own cancellation and nothing else, and a client
+    /// LEAVING THE BOUND ABSENT is arguable: passing no invocation timeout can be defended as refusing to
+    /// invent a duration, with the per-call cancellation token named as the
+    /// bound instead. The reasoning is sound and the conclusion is not, because NO CALLER
+    /// NEED SET A DEADLINE - so the "bound" is the caller's own cancellation and nothing else, and a client
     /// that attached a channel and then never answered on it held the session, its engines and the
     /// calculating call open for as long as the transport stayed up.
     /// </para>
@@ -2022,7 +2022,7 @@ public sealed class ColumnExpressionServiceContractTests
             }
         }
 
-        // The reverse dependency index is now observable on the wire [:L46-L47].
+        // The reverse dependency index is observable on the wire [:L46-L47].
         GetExpressionStateResponse state = await h.Service.GetExpressionState(
             new GetExpressionStateRequest { SessionId = session, DatawindowHandle = dw }, ctx);
 
@@ -2518,11 +2518,12 @@ public sealed class ColumnExpressionServiceContractTests
     /// not an event that may or may not occur.
     /// </para>
     /// <para>
-    /// TOKEN-DRIVEN AND UNBOUNDED, WHICH IS THE POINT. This used to be a bounded retry of up to five hundred
-    /// ten-millisecond delays ending in <c>Assert.Fail</c>, and a bound like that is a timing assumption
-    /// wearing a convenience's clothes: on a loaded agent it expires because a thread was not scheduled
-    /// within five seconds, and the failure then accuses the SERVICE of never attaching the channel. There
-    /// is now no attempt count and no delay - the loop yields until the state appears, and the ONLY thing
+    /// TOKEN-DRIVEN AND UNBOUNDED, WHICH IS THE POINT. A bounded retry of up to five hundred
+    /// ten-millisecond delays ending in <c>Assert.Fail</c> is the tempting shape, and a bound like that is a
+    /// timing assumption wearing a convenience's clothes: on a loaded agent it expires because a thread was
+    /// not scheduled within five seconds, and the failure then accuses the SERVICE of never attaching the
+    /// channel. There
+    /// is no attempt count and no delay - the loop yields until the state appears, and the ONLY thing
     /// that can end it early is the test's own cancellation token. A state that genuinely never arrives is
     /// therefore reported by the runner's timeout, which is the separate liveness bound that belongs outside
     /// the assertion. Nothing here asserts a duration (AAP 0.8.5).

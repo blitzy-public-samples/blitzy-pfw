@@ -1580,9 +1580,9 @@ public sealed class PersistenceClientTests
     /// </summary>
     /// <returns>The test.</returns>
     /// <remarks>
-    /// THE OLD SHAPE COMPARED SCOPE COUNTS AND PROCEEDED. That is wrong in two independent ways: a count
-    /// cannot say WHICH scope was withheld, and an issuer granting a completely different scope of the
-    /// same cardinality would have satisfied the comparison outright. Both are covered below - the
+    /// COMPARING SCOPE COUNTS AND PROCEEDING IS THE TEMPTING CHECK. It is wrong in two independent ways: a
+    /// count cannot say WHICH scope was withheld, and an issuer granting a completely different scope of the
+    /// same cardinality satisfies the comparison outright. Both are covered below - the
     /// missing-name case and the right-count-wrong-name case.
     /// </remarks>
     [Fact]
@@ -2703,10 +2703,10 @@ public sealed class PersistenceClientTests
             Assert.NotNull(options);
             Assert.Equal(expected, options.Value.Headers?.GetValue("authorization"));
 
-            // EVERY CALL CARRIES A DEADLINE, AND THIS ASSERTION USED TO SAY THE OPPOSITE. The reasoning
-            // it recorded - that a duration invented in the client would have no derivation, and that
-            // the policy belongs in the composition root - was right about where the policy belongs and
-            // was being used to justify having none. Without one, Persistence keeps working, and keeps
+            // EVERY CALL CARRIES A DEADLINE, AND ASSERTING THE OPPOSITE IS THE TEMPTING READING. The
+            // reasoning for it - that a duration invented in the client would have no derivation, and that
+            // the policy belongs in the composition root - is right about where the policy belongs and
+            // wrong as a justification for having none. Without one, Persistence keeps working, and keeps
             // the query, update, command or transaction handle behind that work alive, for a caller
             // that has already gone; those handles are bounded per principal and globally, so the
             // abandoned work consumes admission capacity a live caller then cannot get. The policy now

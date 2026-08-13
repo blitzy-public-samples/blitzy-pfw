@@ -47,11 +47,6 @@
 //  C-F SELF-AUDIT: every value here is a small synthetic status or row number. No credential, key,
 //  token, password, connection string or captured statement text appears.
 //
-//  RULES POSITION: review_rules returns exactly one line, "No user rules provided.", so no
-//  user-specified rule governs this file and none is invented. The enterprise-standard baseline
-//  applies instead: deterministic, no I/O, no clock, no shared mutable state, every test
-//  independent of every other. No performance property is asserted anywhere, because the
-//  repository publishes no latency, throughput or availability target to assert against.
 // ==============================================================================================
 
 using System.Reflection;

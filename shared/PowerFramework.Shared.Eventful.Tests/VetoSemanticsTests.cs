@@ -51,7 +51,7 @@
 // makes the nested divergence attributable to the mode and to nothing else.
 //
 // C-K (AAP 0.7.3) - THE BOUNDARY DECISION, NAMED. This is why the NUMBERS are asserted and not
-// only the behaviours. The veto does not stay inside one process any more. AAP 0.4.3 C-03 puts
+// only the behaviours. The veto does not stay inside one process. AAP 0.4.3 C-03 puts
 // DataServices' `EventChain` on a bidirectional gRPC stream "carrying all 13 raw and all 9
 // semantic events with sequencing tokens", and AAP 0.6.1.2 names the tri-valued broker veto as
 // part of what that stream must carry - "prevent-once is 1, prevent-deep is 2, and continue is

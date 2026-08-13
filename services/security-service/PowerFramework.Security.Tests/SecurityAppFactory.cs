@@ -69,12 +69,7 @@
 //  CONSTRAINT COMPLIANCE - WHAT EACH GOVERNING CONSTRAINT REQUIRES OF THIS FILE SPECIFICALLY
 //  ==================================================================================================
 //
-//  RULES POSITION. The project's rules document contains exactly one line: no user rules were
-//  provided. Nothing is invented in their place and their absence is not treated as licence to lower
-//  the bar; the enterprise-standard baseline applies instead - warning-clean under warnings as
-//  errors, correct nullable annotations, no secret in source, no package added for convenience, and
-//  no performance property asserted, because the repository publishes none.
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  C-F  NOTHING HARDCODED, AND THE NAMED SECRET SITES ARE A FLOOR RATHER THAN A CEILING. This is the
 //       file most exposed to that constraint, because it is the one that holds signing material.
 //       EVERY BYTE OF KEY MATERIAL BELOW IS GENERATED AT RUN TIME - RSA.Create for an asymmetric key
@@ -213,16 +208,15 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
     /// </summary>
     /// <remarks>
     /// Chosen because it is the smallest size the minting library will sign an <c>RS256</c> token
-    /// with, so a host built on it exercises the ordinary path rather than a boundary. It is also the
-    /// size at and above which the service stops remarking on the modulus -
-    /// <see cref="SecurityOptions.LegacyWeakSigningKeySizeBits"/> - so a host this factory builds starts
-    /// with no weak-key warning in its log, and a case that WANTS that warning has to ask for a shorter
-    /// key deliberately. NO SIZE IS REFUSED ANYWHERE, AND NOTHING HERE NEEDS LOWERING TO USE A SHORT
-    /// KEY: material requested through <see cref="CreateSigningKeyMaterial(int)"/> at 1024 bits starts a
-    /// host just as well, annotated rather than rejected, because AAP 0.6.6.4 keeps that size legal
-    /// across this estate [<c>ws_objects/pfw.shared.pbl.src/enums.sru:L965</c>]. This constant is the one
-    /// place a 2048-bit size is still named as a VALUE, and it belongs here because it is a test's choice
-    /// of an unremarkable size rather than a policy of the service.
+    /// with, so a host built on it exercises the ordinary path rather than a boundary. It is also
+    /// exactly <see cref="SecurityOptions.MinimumSigningKeySizeBits"/>, the floor below which the service
+    /// REFUSES TO START, so a host this factory builds starts cleanly and a case that wants the refusal
+    /// has to ask for a shorter key deliberately. Material requested through
+    /// <see cref="CreateSigningKeyMaterial(int)"/> at 1024 bits does NOT start a host: that allowance
+    /// belongs to C-02's key-GENERATION surface [<c>ws_objects/pfw.shared.pbl.src/enums.sru:L965</c>] and
+    /// not to this service's own signing identity, which is a boundary the decomposition created. This
+    /// constant is the one place a 2048-bit size is still named as a VALUE here, and it belongs because
+    /// it is a test's choice of an ordinary size that happens to coincide with the floor.
     /// </remarks>
     internal const int DefaultSigningKeySizeInBits = 2048;
 
@@ -283,7 +277,7 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
     /// <summary>The subject claim of a token minted through the convenience overloads.</summary>
     /// <remarks>
     /// <para>
-    /// A ROSTERED PRODUCTION IDENTITY RATHER THAN A TEST-SHAPED ONE, AND THAT IS NOW A REQUIREMENT
+    /// A ROSTERED PRODUCTION IDENTITY RATHER THAN A TEST-SHAPED ONE, AND THAT IS A REQUIREMENT
     /// rather than a preference. The issuer consults the deployment's issuance roster on every request:
     /// a subject with no entry is refused, and one whose entry does not grant the requested audience or
     /// scopes is refused too. A self-describing invented identity would therefore mint nothing at all,
@@ -300,24 +294,14 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
     internal const string DefaultTokenSubject = "powerframework-security-tests";
 
     /// <summary>
-    /// The scopes requested by the convenience overloads: exactly the two this service's protected
-    /// routes require.
+    /// A scope the roster grants that NO route requires - the vehicle for asking for a refusal.
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// NO LONGER AN ARBITRARY TOKEN, BECAUSE THE ROUTES NOW READ IT. The cryptographic contract's 18
-    /// operations are gated by a named policy requiring
-    /// <see cref="CryptoEndpoints.RequiredScope"/> and the authenticated probe by one requiring
-    /// <see cref="PingEndpoints.RequiredScope"/>, so a token carrying neither is authenticated and then
-    /// forbidden. The two names are read from the routes' own declarations rather than spelled here, so
-    /// a rename is a compile-time change instead of a suite that fails with a 403 nobody can place.
-    /// </para>
-    /// <para>
-    /// BOTH SCOPES, NOT ONE, so a single convenience client can reach every protected route on the
-    /// service. Both are granted to the default subject by the settings file's roster entry for it,
-    /// which is what makes the request succeed - a test wanting a refusal asks for something the roster
-    /// does not grant, which no longer requires any special configuration.
-    /// </para>
+    /// A token carrying only this scope is authenticated and then FORBIDDEN by every protected route, so
+    /// a case wanting a 403 asks for this rather than reconfiguring the host. It is granted to the
+    /// default subject by the settings file's roster entry, which is what keeps the ISSUANCE half of such
+    /// a case succeeding while the AUTHORIZATION half refuses - the only arrangement in which a 403 is
+    /// distinguishable from a failed mint.
     /// </remarks>
     internal const string DefaultTokenScope = "security.test";
 
@@ -330,7 +314,7 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
     /// </summary>
     /// <remarks>
     /// <para>
-    /// NO LONGER AN ARBITRARY TOKEN, BECAUSE THE ROUTES NOW READ IT. The cryptographic contract's 18
+    /// NOT AN ARBITRARY TOKEN, BECAUSE THE ROUTES READ IT. The cryptographic contract's 18
     /// operations are gated by a named policy requiring
     /// <see cref="CryptoEndpoints.RequiredScope"/> and the authenticated probe by one requiring
     /// <see cref="PingEndpoints.RequiredScope"/>, so a token carrying neither is authenticated and then
@@ -340,8 +324,8 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
     /// <para>
     /// BOTH SCOPES, NOT ONE, so a single convenience client can reach every protected route on the
     /// service. Both are granted to the default subject by the settings file's roster entry for it,
-    /// which is what makes the request succeed - a test wanting a refusal asks for something the roster
-    /// does not grant, which no longer requires any special configuration.
+    /// which is what makes the request succeed - a case wanting a refusal asks for
+    /// <see cref="DefaultTokenScope"/> instead, which needs no special configuration.
     /// </para>
     /// </remarks>
     private static readonly string[] DefaultTokenScopes =
@@ -588,9 +572,11 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
     /// </summary>
     /// <remarks>
     /// This is the single audience the inbound bearer handler accepts, which is deliberately narrower
-    /// than the issuance roster: a token addressed to Gateway must not be replayable at Security. When a
-    /// deployment declares none the handler falls back to the whole roster, so the empty string is a
-    /// meaningful override that exercises exactly that fallback.
+    /// than the issuance roster: a token addressed to Gateway must not be replayable at Security. A
+    /// deployment that declares NONE is refused at startup rather than widened to the roster - the
+    /// fallback that once did widen is withdrawn, because it accepted every token minted for any service
+    /// in the trust domain - so the empty string is a meaningful override that exercises exactly that
+    /// REFUSAL, and a host configured with it does not start.
     /// </remarks>
     internal string? InboundAudience { get; set; }
 
@@ -896,12 +882,12 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
     /// <remarks>
     /// <para>
     /// 🔴 <b>THE MATRIX IS THE ONLY PLACE A PERMISSION IS DECLARED, WHICH IS WHY THIS HELPER EXISTS.</b>
-    /// Tests used to read <c>Security:Clients[n]:Audiences</c> and <c>:Scopes</c> for "an audience this
-    /// caller may address" and "a scope it may hold". Those lists described permissions without deciding
-    /// them - every issuance decision is taken against the matrix folded from <c>Security:Callers</c> and
-    /// <c>Security:CallerAuthorizations</c> - and they are gone. Reading the matrix is therefore not a
-    /// substitution of convenience: it is reading the surface that actually decides, which is what a
-    /// setup step needs if the row is to reach the behaviour it exists to assert.
+    /// Reading <c>Security:Clients[n]:Audiences</c> and <c>:Scopes</c> for "an audience this caller may
+    /// address" and "a scope it may hold" is the intuitive move and there is nothing there to read: a
+    /// credential-directory entry carries no permission member, and every issuance decision is taken against
+    /// the matrix folded from <c>Security:Callers</c> and <c>Security:CallerAuthorizations</c>. Reading the
+    /// matrix is therefore not a substitution of convenience - it is reading the surface that actually
+    /// decides, which is what a setup step needs if the row is to reach the behaviour it exists to assert.
     /// </para>
     /// <para>
     /// BOTH SHAPES ARE FOLDED, in the same order the issuer folds them - nested first, flat added on top -

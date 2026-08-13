@@ -34,9 +34,6 @@
 //  accepts an EMPTY name, which means "every name". It is far more permissive, and the asymmetry is the
 //  point: registering nothing is a programming error, selecting everything is a feature.
 //
-//  RULES POSITION
-//  review_rules returns "No user rules provided.". Constraints cited inline: C-B (replicate behaviour),
-//  AAP 0.6.1.2 (the three encodings must be carried separately), C-K (document boundary decisions).
 // ==================================================================================================
 
 using System;

@@ -104,15 +104,6 @@
 //  the double-quote control that separates "contains a metacharacter" from "escapes the literal",
 //  and asserts the composed key STRING that no other suite in the project inspects.
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  review_rules returns exactly "No user rules provided.", verified for this file. No user rule
-//  governs it, none is inferred, and the enterprise baseline of AAP 0.7.2 applies in their place.
-//  The binding constraints cited inline are AAP 0.7.3's: C-B (preserve behaviour, correct no legacy
-//  defect), C-C (the legacy tree and pfw.i18n.xml are read-only - this file only ever READS the
-//  table and adds no entry to make a row pass), C-H (nullable, warnings as errors, coverage) and
-//  C-K (document every technology-specific and boundary-specific decision). Table-driven theories
-//  with member data are the shape AAP 0.6.7 asks parity matrices to take.
 // ==================================================================================================
 
 using System;

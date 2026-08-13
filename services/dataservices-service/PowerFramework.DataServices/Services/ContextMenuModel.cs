@@ -824,7 +824,7 @@ public sealed record TextMeasurementCandidate
     /// CHARACTERS and the longest in DBCS BYTES [<c>:L1132-L1133</c>]. Their difference is the number of
     /// WIDE characters, because a wide character costs two bytes and one character. The character count is
     /// then REDUCED by that difference [<c>:L1134</c>], leaving the number of single-width characters.
-    /// See <see cref="ProxyText"/> for what the pair is for.
+    /// See <c>ProxyText</c> for what the pair is for.
     /// </remarks>
     public int AsciiCount { get; init; }
 
@@ -1839,7 +1839,7 @@ public sealed class ContextMenuModel : DataWindowServiceBase, IDataWindowContext
     /// THE RANGE CHECK IS A FAIL-FAST SUBSTITUTION, NOT A NEW BEHAVIOUR. PowerScript raises on an
     /// out-of-range array read too; naming the argument makes the failure legible instead of surfacing as
     /// a bare index fault one frame deeper. Every ported call site is bounded by the oracle's own guard
-    /// BEFORE reaching here - with ONE deliberate exception, <see cref="GetId(int)"/>, whose preserved
+    /// BEFORE reaching here - with ONE deliberate exception, <c>GetId(int)</c>, whose preserved
     /// defect reads position zero and whose port therefore never calls this at all.
     /// </remarks>
     private MenuItemData ItemAt(int oneBasedIndex)
@@ -2321,7 +2321,7 @@ public sealed class ContextMenuModel : DataWindowServiceBase, IDataWindowContext
     /// <returns>The identifier, or <c>0</c> when no item carries that label.</returns>
     /// <remarks>
     /// *** DEFECT 6 A THIRD TIME: BACKWARDS, SO THE LAST MATCH WINS *** [<c>:L1423</c>]. This overload,
-    /// unlike <see cref="GetId(int)"/>, is CORRECT - it returns the identifier of the item it found. The
+    /// unlike <c>GetId(int)</c>, is CORRECT - it returns the identifier of the item it found. The
     /// two share a name and only one of them works, which is exactly the kind of thing a characterization
     /// suite exists to record.
     /// <para>
@@ -3990,8 +3990,8 @@ public sealed class ContextMenuModel : DataWindowServiceBase, IDataWindowContext
     //  of behaviour a characterization suite has to be able to reproduce.
     //
     //  THE PUBLIC NAMES DROP THE ORACLE'S `_of_` PRIVATE-CONVENTION PREFIX AND BECOME PUBLIC, because
-    //  the dispatch is the only legacy caller and the dispatch is now split across a boundary
-    //  (DECISION 5) - so what was an internal detail of one event is now a callable operation. The
+    //  the dispatch is the only legacy caller and that dispatch is split across a boundary
+    //  (DECISION 5) - so an internal detail of one event becomes a callable operation. The
     //  prefix is not part of any payload, log record or recording, so AAP 0.4.5.3 does not reach it.
     // ==========================================================================================
 

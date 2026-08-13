@@ -15,13 +15,12 @@
 #  SOFTENING. `../README.md` section 5.5 and `../../docs/PARITY.md` R1 are the authoritative
 #  statements; this definition is their application to one capture.
 #
-#  ---- THE PINYIN FLAG QUESTION IS SETTLED, AND THIS FILE USES THE SETTLED READING ---------------
-#  An earlier reading - carried in the migration plan's own wording and in an earlier revision of
-#  `../../docs/PARITY.md` - said the flag value `7` passed at
-#  `n_cst_dwsvc_dropdownsearch.sru:L323` had semantics "recorded nowhere in the repository". THAT
-#  READING IS WITHDRAWN, and it is withdrawn by the document that made it:
-#  `../../docs/PARITY.md` R1 states that the earlier claim "was wrong, and the correction narrows the
-#  risk rather than widening it". `ws_objects/pfw.shared.pbl.src/enums.sru:L1146-L1149` declares the
+#  ---- THE PINYIN FLAGS ARE DOCUMENTED, AND THIS FILE USES THE DOCUMENTED READING ---------------
+#  The migration plan's own wording says the flag value `7` passed at
+#  `n_cst_dwsvc_dropdownsearch.sru:L323` has semantics "recorded nowhere in the repository". THAT
+#  READING IS WRONG, and `../../docs/PARITY.md` R1 says so in terms - the claim "was wrong, and the
+#  correction narrows the risk rather than widening it".
+#  `ws_objects/pfw.shared.pbl.src/enums.sru:L1146-L1149` declares the
 #  flags under the comment `//PinyinFirstLetterLike:[flags]` as ignore-case = 1, ignore-width = 2 and
 #  fuzzy-sound = 4, so `7` is all three enabled and NEEDS NO CHARACTERIZATION AT ALL.
 #  `../../docs/DEFERRED.md` section 8 and `../../docs/ARCHITECTURE.md` section 13 L1 record the same
@@ -642,8 +641,7 @@ capturePhase:
         the assertion that the two-part condition really did fail. This is the reference-string
         out-parameter's whole observable effect, and it is why the ordering for this pair is strictly
         synchronous: the event produces its result by MUTATING A PARAMETER rather than by returning a
-        value, so there is no asynchronous representation of it and the caller cannot proceed until it
-        returns.
+        value, and the caller cannot proceed until it returns, so the answer has no fire-and-forget form.
       format: >-
         The string verbatim, plus a boolean for whether it differs from the constructed expression, plus
         the row number and column name the condition was evaluated against. Row and column numbers are
@@ -794,10 +792,9 @@ blockedBehaviours:
       WHAT KEEPS A BLOCKED REPORT FROM READING AS AN EXCUSE. What is NOT missing: the flag argument.
       `ws_objects/pfw.shared.pbl.src/enums.sru:L1146-L1149` declares the flags under the comment naming
       this very function - ignore-case is 1, ignore-width is 2 and fuzzy-sound is 4 - so the literal 7
-      decodes as all three enabled and NEEDS NO CHARACTERIZATION WHATSOEVER. An earlier reading, carried
-      in the migration plan's wording and in an earlier revision of `../../docs/PARITY.md`, said the
-      flag semantics were recorded nowhere in the repository; that reading is WITHDRAWN by
-      `../../docs/PARITY.md` R1 in terms, and `../../docs/DEFERRED.md` section 8,
+      decodes as all three enabled and NEEDS NO CHARACTERIZATION WHATSOEVER. The migration plan's
+      wording says the flag semantics are recorded nowhere in the repository; that reading is WRONG and
+      `../../docs/PARITY.md` R1 says so in terms, while `../../docs/DEFERRED.md` section 8,
       `../../docs/ARCHITECTURE.md` section 13 L1 and `../README.md` section 5.5 all carry the same
       decoding. Anyone characterizing the flags is characterizing something the source already states.
       WHAT IS GENUINELY MISSING IS STILL ENOUGH TO KEEP THIS BLOCKED, AND IT IS EXACTLY FOUR THINGS.
@@ -1043,7 +1040,7 @@ provesDefects:
     locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L323"
     note: >-
       Same reasoning as D-01 and the same prohibition on quietly fixing it. THE PRECISION THAT MATTERS
-      HERE, AND THAT AN EARLIER READING GOT WRONG: this clause interpolates the LOWER-CASED input
+      HERE, AND THAT IS EASY TO GET WRONG: this clause interpolates the LOWER-CASED input
       [`:L316`], NOT the raw input, while the guard that admits the clause tests the RAW input
       [`:L322`]. Guard and clause read two different strings, and the display clause reads a third - the
       wildcard-substituted form. A port that derived all three from one string would produce a

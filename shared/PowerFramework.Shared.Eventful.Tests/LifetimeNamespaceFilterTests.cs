@@ -71,23 +71,6 @@
 //  that it answers FALSE for a disabled-but-retained subscription is asserted here as CORRECT rather
 //  than worked around - see the disable section.
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  review_rules returns "No user rules provided." No user rule governs this file and none is invented;
-//  enterprise-standard practice applies and the constraints cited inline are the AAP's own (0.7.3):
-//    C-B  Every assertion below treats the negation semantics as CORRECT and carries the locator that
-//         makes it legacy behaviour rather than an implementation choice. Three things are asserted as
-//         correct specifically because they look like defects: a present-but-empty namespace criterion
-//         is NOT the same as an absent one, a disabled subscription is RETAINED rather than removed,
-//         and a bulk unsubscribe deliberately SPARES a namespace.
-//    C-D  No deferred capability appears. Nothing here references the dynamic script-invoker family
-//         (ScriptBridge) or any other deferred service; the broker itself is pure PowerScript in the
-//         legacy and carries no native binding, so there is nothing to substitute.
-//    C-H  Nullable reference types and TreatWarningsAsErrors apply. This suite passes NULL targets
-//         deliberately, and does so through the real object? signatures - there is no suppression, no
-//         null-forgiving operator on a broker argument and no NoWarn anywhere in this file.
-//    C-K  The boundary decision above is stated rather than left implicit.
-//
 //  DETERMINISM (AAP 0.6.7)
 //  No clock, no GUID, no random, no thread, no file, no network and no database is touched. Every row
 //  builds a fresh broker, fresh subscribers and a fresh log, so no row can observe another's state.

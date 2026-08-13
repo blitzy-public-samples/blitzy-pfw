@@ -132,7 +132,7 @@ public static class ExceptionChain
     /// two unrelated failures look like one: this estate and its packages between them declare
     /// several same-named exception types, and a record naming only the last segment sends a reader
     /// to the wrong assembly. <see cref="Type.FullName"/> is null for a few constructed generic
-    /// forms, so <see cref="MemberInfo.Name"/> is the fallback rather than an empty slot.
+    /// forms, so <c>MemberInfo.Name</c> is the fallback rather than an empty slot.
     /// </para>
     /// <para>
     /// NULL IS ACCEPTED SO THAT CALL SITES DO NOT EACH GUARD. This is reached from catch blocks and

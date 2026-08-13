@@ -59,8 +59,8 @@
 //
 //  NOTHING IS GENERATED HERE EITHER. shared/PowerFramework.Contracts owns all .proto compilation
 //  through a single Protobuf item with GrpcServices="Both", so this project declares no Protobuf item
-//  at all - adding one produces 244 CS0436 diagnostics, each reporting that a locally generated type
-//  conflicts with the imported type of the same name. No .proto is edited, no message type is
+//  at all - adding one double-generates every contract type and raises CS0436 on each, reporting that a
+//  locally generated type conflicts with the imported type of the same name. No .proto is edited, no message type is
 //  hand-written, and no local type duplicates a generated one.
 //
 //  HOW OUTCOMES ARE REPORTED, AND WHY IT IS NOT EXCEPTIONS
@@ -119,18 +119,6 @@
 //  The transaction descriptor's logid, logpass and dbparm and every changeset or row payload are
 //  never logged either.
 //
-//  RULES POSITION. review_rules returns exactly "No user rules provided." That is a finding rather
-//  than latitude. The binding constraints are the twelve non-rule constraints C-A through C-L of the
-//  transformation plan, its performance position, and its enterprise baseline. Those governing this
-//  file are cited at the decisions they shape rather than restated at length here.
-//
-//  NO PERFORMANCE OBJECTIVE IS ASSERTED ANYWHERE IN THIS FILE. The repository publishes no
-//  service-level agreement, no latency budget, no throughput target and no availability commitment, so
-//  none may be claimed, met, or used to justify a choice. Three things in particular are NOT
-//  optimizations and are not described as such: the resilience pipeline the composition root attaches
-//  exists solely because an in-process call could not fail in transit and a network call can; server
-//  streaming reproduces the legacy's progressive delivery; and the leading-@ statement prefix is a
-//  preserved legacy affordance carried through verbatim.
 // ==================================================================================================
 
 using System.Collections.Concurrent;
@@ -451,10 +439,10 @@ public class PersistenceClient
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>ONE SCOPE PER REQUEST, AND THE REQUEST IS CHOSEN BY THE OPERATION (constraint C-G).</b> A
-    /// single credential asking for read AND write was attached to every call this client makes, which
-    /// meant a retrieval carried the authority to update - so any weakness anywhere on the read path
-    /// borrowed the write path's privileges. Each call now presents a credential for exactly what it is
+    /// <b>ONE SCOPE PER REQUEST, AND THE REQUEST IS CHOSEN BY THE OPERATION (constraint C-G).</b> Attaching a
+    /// single credential asking for read AND write to every call this client makes is the convenient shape, and
+    /// it means a retrieval carries the authority to update - so any weakness anywhere on the read path
+    /// borrows the write path's privileges. Each call presents a credential for exactly what it is
     /// about to do, and the upstream enforces the same two names per RPC.
     /// </para>
     /// <para>
@@ -462,7 +450,7 @@ public class PersistenceClient
     /// scope set defensively, which makes the instance immutable and safe to share.
     /// </para>
     /// <para>
-    /// <b>A NARROWED GRANT IS NO LONGER PROCEEDED ON.</b> The token contract permits the issuer to grant
+    /// <b>A NARROWED GRANT IS NOT PROCEEDED ON.</b> The token contract permits the issuer to grant
     /// less than was asked for, and it remains a successful token response - but with one scope per
     /// request, a narrowing can only mean the ONE scope the call requires was withheld, and continuing
     /// would send a request the upstream must refuse. See
@@ -579,6 +567,7 @@ public class PersistenceClient
     /// The logger. It never receives a credential, a statement, a transaction descriptor, a changeset or
     /// a row payload.
     /// </param>
+    /// <param name="deadlines">The deadlines the call is bounded by.</param>
     /// <exception cref="ArgumentNullException">Any argument is <see langword="null"/>.</exception>
     /// <remarks>
     /// PERFORMS NO INPUT OR OUTPUT. Nothing here connects, resolves, probes or warms anything up.
@@ -1957,6 +1946,7 @@ public class PersistenceClient
     /// release both.
     /// </summary>
     /// <param name="spec">The retrieval specification the task is created with.</param>
+    /// <param name="session">The transaction session the call is scoped to.</param>
     /// <param name="cancellationToken">Cancels the acquisition.</param>
     /// <returns>
     /// The scope. Test <see cref="PersistenceWorkScope.IsAcquired"/> before using it, and dispose it on
@@ -2039,6 +2029,7 @@ public class PersistenceClient
     /// Opens a C-06 update scope: a transaction session, an update task on it, and the obligation to
     /// release both.
     /// </summary>
+    /// <param name="session">The transaction session the call is scoped to.</param>
     /// <param name="cancellationToken">Cancels the acquisition.</param>
     /// <returns>The scope, on the same terms as <see cref="OpenQueryScopeAsync"/>.</returns>
     /// <remarks>
@@ -2742,6 +2733,8 @@ public class PersistenceClient
     /// <summary>
     /// Obtains a bearer credential and packages it as the call options every outbound call uses.
     /// </summary>
+    /// <param name="callClass">The call class the policy is selected for.</param>
+    /// <param name="tokenRequest">The issuance request as it arrived.</param>
     /// <param name="cancellationToken">Cancels the token acquisition and the call it is built for.</param>
     /// <returns>Call options carrying the authorization header and the caller's cancellation token.</returns>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
@@ -2755,12 +2748,13 @@ public class PersistenceClient
     /// mints none.
     /// </para>
     /// <para>
-    /// THE DEADLINE COMES FROM THE COMPOSITION ROOT, WHICH IS WHAT MAKES IT LEGITIMATE. This file
-    /// previously set none, on the reasoning that a duration invented here would have no derivation and
-    /// that the policy belonged where the resilience pipeline is configured. Both halves of that were
-    /// right; what was missing was the policy. It now exists as <c>DataServices:Resilience:Persistence</c>,
-    /// the unary bound is the same setting that configures that pipeline's total request timeout, and the
-    /// stream bound is derived from Persistence's own handle idle expiry - so no duration originates here.
+    /// THE DEADLINE COMES FROM THE COMPOSITION ROOT, WHICH IS WHAT MAKES IT LEGITIMATE. Setting none here,
+    /// on the reasoning that a duration invented in this file would have no derivation and
+    /// that the policy belongs where the resilience pipeline is configured, is right in both halves and
+    /// wrong as a conclusion: what it leaves missing is the policy. That policy is
+    /// <c>DataServices:Resilience:Persistence</c>, the unary bound is the same setting that configures that
+    /// pipeline's total request timeout, and the stream bound is derived from Persistence's own handle idle
+    /// expiry - so no duration originates here.
     /// </para>
     /// <para>
     /// WHY CANCELLATION ALONE WAS NOT ENOUGH, since it was already threaded through every member. A

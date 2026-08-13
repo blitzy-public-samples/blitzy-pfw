@@ -33,9 +33,6 @@
 //       must not take a project reference on Diagnostics - the two are sibling shared libraries - so the
 //       coupling is by shape rather than by type.
 //
-//  RULES POSITION
-//  review_rules returns "No user rules provided.". Constraints cited inline: C-B (replicate behaviour),
-//  C-K (document boundary decisions).
 // ==================================================================================================
 
 using System;

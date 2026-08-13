@@ -42,10 +42,6 @@
 //  subject reads no clock at all. The only reflection here reaches the base class's three protected
 //  members (OnInit, OnPrepare, Notifications) that the framework raises rather than a caller.
 //
-//  RULES POSITION. No user rules were provided for this project: the rules document contains
-//  exactly one line saying so, and re-reading it returns the same. Nothing is invented or
-//  back-filled in their place. The binding constraints are the enterprise-standard baseline plus
-//  the named non-rule constraints, and C-B and C-H are the two that shape this file.
 // ==============================================================================================
 
 using Microsoft.Extensions.Logging.Abstractions;
@@ -1444,6 +1440,20 @@ public sealed class SqlQueryTaskProxyTests
         public string SqlReturnData => string.Empty;
 
         public bool AutoCommit { get; set; }
+
+        /// <summary>Moves the auto-commit mode and answers <see cref="RetCode.OK"/>.</summary>
+        /// <param name="autoCommit">The mode to put in force.</param>
+        /// <returns>Always <see cref="RetCode.OK"/>.</returns>
+        /// <remarks>
+        /// ROUTED THROUGH THE PROPERTY, so this double moves exactly the state the assignment moves. There is
+        /// no engine beneath it whose begin could fail, which is the contract's own nothing-to-do case.
+        /// </remarks>
+        public long TrySetAutoCommit(bool autoCommit)
+        {
+            AutoCommit = autoCommit;
+
+            return RetCode.OK;
+        }
 
         public void StampSqlState(in SqlState state)
         {

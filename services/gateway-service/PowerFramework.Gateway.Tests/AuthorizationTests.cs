@@ -371,7 +371,7 @@ internal sealed class RecordingUpstreamReadinessProbe : IUpstreamReadinessProbe
 /// <param name="instant">The instant every read returns.</param>
 /// <remarks>
 /// ONLY THE WALL CLOCK IS FROZEN. <see cref="CreateTimer"/>, <see cref="GetTimestamp"/>,
-/// <see cref="TimestampFrequency"/> and <see cref="LocalTimeZone"/> keep delegating to
+/// <c>TimestampFrequency</c> and <see cref="LocalTimeZone"/> keep delegating to
 /// <see cref="TimeProvider.System"/>, because the resilience pipelines and the client factory's handler
 /// rotation build timers from whichever provider is registered and a frozen timer source would leave any
 /// component that waits on one waiting forever. Freezing the reads that appear in a response body while
@@ -1293,6 +1293,7 @@ public sealed class GatewayTestHostFixture : WebApplicationFactory<Program>
     /// How long the credential is valid for, measured from now. A negative value produces an
     /// already-expired credential.
     /// </param>
+    /// <param name="scopes">The requested scope set.</param>
     /// <returns>The compact serialization.</returns>
     /// <remarks>
     /// <para>
@@ -1496,7 +1497,7 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
     /// message names a configuration key and does NOT name the value behind it - a mounted certificate or
     /// private-key path. The absence half is asserted as a boolean, because
     /// <c>Assert.DoesNotContain</c> renders both its operands and would therefore publish the path at
-    /// exactly the moment the defect it guards against was present. The presence half still wants to show
+    /// exactly the moment the defect it guards against is present. The presence half still wants to show
     /// the message, so the message is redacted with this marker first: the failure stays diagnosable and
     /// the path cannot ride along.
     /// </para>
@@ -2042,12 +2043,12 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
     /// PASSES rather than recomputed from a convention.
     /// </para>
     /// <para>
-    /// 🔴 THE EARLIER SHAPE OF THIS TEST COULD NOT HAVE CAUGHT THE DEFECT IT WAS WRITTEN FOR. It
-    /// asserted that a <c>ScopePolicyName</c> constant equalled <c>"gateway:scope:" + RequiredScope</c> -
-    /// a string-concatenation tautology that held while THREE POLICIES REGISTERED UNDER THOSE VERY NAMES
-    /// were required by no route at all, because the endpoints pass <c>GatewayScopes.*</c> instead. The
-    /// dead policies, the constants and their duplicate scope predicate are gone; this asserts the
-    /// surviving relationship against the container.
+    /// 🔴 THE TAUTOLOGICAL SHAPE OF THIS TEST WOULD CATCH NOTHING, WHICH IS WHY IT IS NOT USED HERE.
+    /// Asserting that a <c>ScopePolicyName</c> constant equals <c>"gateway:scope:" + RequiredScope</c> is
+    /// a string-concatenation tautology: it holds even when the policies registered under those very names
+    /// are required by no route at all, because the endpoints pass <c>GatewayScopes.*</c> instead. There is
+    /// no such constant, no duplicate scope predicate and no unrequired policy in this composition; the
+    /// assertion below reads the relationship off the container instead.
     /// </para>
     /// </remarks>
     [Fact]
@@ -2446,13 +2447,13 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THIS ASSERTION USED TO SAY THE OPPOSITE, AND THE OPPOSITE WAS THE DEFECT. It asserted an EMPTY body
+    /// ASSERTING THE OPPOSITE HERE WOULD PIN THE DEFECT. That assertion requires an EMPTY body
     /// on the reasoning that a framework challenge writes no body and that adding status-code pages "to
-    /// satisfy a test" would change the shipped service. Both halves were wrong. The published contract is
+    /// satisfy a test" would change the shipped service. Both halves are wrong. The published contract is
     /// authoritative over the framework default, and it declares a reusable <c>Unauthorized</c> response
     /// whose body is <c>ProblemDetails</c> [shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml] while
-    /// the routes themselves declare <c>ProducesProblem</c> for 401 - so the bodyless refusal was a
-    /// published promise the service was not keeping, and a test that asserted the gap froze it.
+    /// the routes themselves declare <c>ProducesProblem</c> for 401 - so a bodyless refusal is a
+    /// published promise the service is not keeping, and a test asserting the gap freezes it.
     /// </para>
     /// <para>
     /// BOTH EXTENSION MEMBERS ARE ASSERTED, because the middleware alone would produce a body without them.
@@ -3882,13 +3883,13 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
                 + "certificate path for the same reason it is more sensitive.");
 
         // NO PATH-BEARING CAUSE IS ATTACHED TO THE OPERATOR-VISIBLE CHAIN, AND THAT ABSENCE IS THE
-        // ASSERTION - THIS TEST USED TO REQUIRE THE OPPOSITE.
+        // ASSERTION - REQUIRING THE OPPOSITE IS THE TEMPTING READING.
         //
-        // It asserted the cause was preserved "so the failure is diagnosable", which sounded right and
-        // defeated the redaction directly above it: the file exception the runtime raises is constructed
+        // Requiring the cause be preserved "so the failure is diagnosable" sounds right and
+        // defeats the redaction directly above it: the file exception the runtime raises is constructed
         // FROM THE PATH and carries it in its own Message, and startup logging renders an exception
-        // CHAIN rather than only its outermost message. So the wrapper omitted both paths and the
-        // InnerException published one anyway. Redacting a message while wrapping an unredacted cause is
+        // CHAIN rather than only its outermost message. So the wrapper would omit both paths and the
+        // InnerException would publish one anyway. Redacting a message while wrapping an unredacted cause is
         // not redaction.
         Assert.Null(compositionRootFrame.InnerException);
 
@@ -5238,9 +5239,9 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
     /// what an ANSWER WITHOUT A USABLE TOKEN means, and EVERY ONE OF THEM FAILS CLOSED TO UNHEALTHY.
     /// </para>
     /// <para>
-    /// THAT UNIFORMITY IS THE POINT, AND IT IS A DELIBERATE CORRECTION. An earlier revision answered
-    /// HEALTHY for the six cases with no readable token, on the reasoning that the 200 was itself the
-    /// readiness signal and the shared framework's plain-text probe carries no token at all. The reasoning
+    /// THAT UNIFORMITY IS THE POINT, AND IT IS DELIBERATE. Answering HEALTHY for the six cases with no
+    /// readable token is the tempting reading, on the reasoning that the 200 is itself the readiness
+    /// signal and the shared framework's plain-text probe carries no token at all. The reasoning
     /// does not hold: this probe only ever addresses the three upstreams named in
     /// <c>Gateway:HealthProbes</c>, every one of which publishes contract C-10's JSON report from its own
     /// hand-written endpoint, so "no token" is not a lesser dialect - it is a body that failed to state

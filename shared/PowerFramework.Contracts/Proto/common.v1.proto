@@ -54,17 +54,7 @@
 //  the published boundary, and the two types are deliberately distinct - Shared.Kernel.RetCode is
 //  the in-process catalogue of const long values, while this one is the wire enum.
 //
-//  RULES POSITION
-//  --------------------------------------------------------------------------------------------
-//  review_rules returns exactly "No user rules provided.", so NO user-specified rule governs this
-//  file and none is invented here. The enterprise-standard baseline applies in their place, and
-//  the binding constraints are the refactor plan's own non-rule inventory. Those that govern this
-//  file are cited inline at the point each is discharged: C-A (boundary definition, not a
-//  shared-code back door), C-B (replicate behaviour and defects, never improve), C-C (the legacy
-//  tree is read-only and is the behavioural oracle), C-D (the four deferred services are not
-//  implemented, even partially), C-K (document every technology and boundary decision), C-F (no
-//  secret in any form) and C-G (do not hand-write security surface).
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  C-F SELF-AUDIT: no key, credential, token, password, connection string, certificate or
 //  secret-shaped placeholder appears anywhere in this file, in any field, default or comment.
 //  C-G SELF-AUDIT: no auth, token, credential or identity message is defined here. Authentication
@@ -718,7 +708,7 @@ enum ItemStatus {
   //
   // "THE ROW IS UNMODIFIED" VERSUS "NO STATUS WAS SUPPLIED" - a real distinction, kept, but moved
   // off the value domain and onto field presence. The two statements are genuinely different and
-  // conflating them would lose the second, which is why an earlier reading reached for a sentinel.
+  // conflating them would lose the second - which is why a sentinel VALUE is the tempting mechanism.
   // The correct mechanism is proto3 `optional` on the field that needs it: ColumnValue.item_status
   // is declared optional precisely because a status is not meaningful on every column in every
   // direction, and its absence is then expressed by presence tracking rather than by a fourth-plus
@@ -968,8 +958,8 @@ message ColumnValue {
 // DataWindowRow - one row, buffer-tagged and status-tagged.
 //
 // WHY THIS MESSAGE IS IN THE COMMON FILE (the C-A admission test, C-K).
-// It was originally declared in dataservices.v1.proto, and it moved here for one reason: BOTH
-// siblings now need it. C-03's RetrieveChunk and its update rows produce and consume it, and
+// It sits in the common file for one reason: BOTH
+// siblings need it. C-03's RetrieveChunk and its update rows produce and consume it, and
 // persistence.v1's CarrierState carries it inside every buffer segment of C-05's query chunks and
 // C-06's update input. Two consumers, so one definition, here - exactly the ruling IdentityColumnData
 // records below. A per-file copy would be two types that serialise alike until one of them gained a
@@ -1020,13 +1010,13 @@ message DataWindowRow {
   // carries the key column PLUS THE ORIGINAL VALUE OF EVERY UPDATEABLE COLUMN. A payload carrying only
   // current values could not express what the failed statement compared.
   //
-  // ONE ENTRY PER COLUMN THIS ROW CARRIES, WITH NO OMIT-WHEN-EQUAL ALLOWANCE. An earlier revision let a
-  // producer skip a column whose original equalled its current value and required the consumer to read
-  // the omission as "unchanged since the last baseline". That is an inference the carrier codecs can
-  // make about their own payloads and a consumer of this CONTRACT cannot be asked to: it left a freshly
-  // retrieved row carrying no baseline for any column, so the caller that has to build the concurrency
-  // predicate had to reconstruct it from an absence - and reading the absence the other legal way, as
-  // "no baseline exists", drops the predicate and silently overwrites. AAP 0.6.3.2 states the rule
+  // ONE ENTRY PER COLUMN THIS ROW CARRIES, WITH NO OMIT-WHEN-EQUAL ALLOWANCE. Letting a producer skip a
+  // column whose original equals its current value, and requiring the consumer to read the omission as
+  // "unchanged since the last baseline", is the tempting compression. That is an inference the carrier
+  // codecs can make about their own payloads and a consumer of this CONTRACT cannot be asked to: it
+  // leaves a freshly retrieved row carrying no baseline for any column, so the caller that has to build
+  // the concurrency predicate must reconstruct it from an absence - and reading the absence the other
+  // legal way, as "no baseline exists", drops the predicate and silently overwrites. AAP 0.6.3.2 states the rule
   // without an exemption: per row, both the current and the original value of every marked column.
   //
   // AN EMPTY LIST THEREFORE MEANS EXACTLY ONE THING: the row has NO PRIOR STATE. That is an
@@ -1257,8 +1247,8 @@ message ConflictDetail {
 //  SECTION 10 - IdentityColumnData : THE IDENTITY ROUND TRIP
 //  --------------------------------------------------------------------------------------------
 //  WHY THIS MESSAGE IS IN THE COMMON FILE (the C-A admission test, C-K).
-//  It was originally declared in persistence.v1.proto, and it moved here for one reason: BOTH
-//  siblings now need it. C-06's UpdateResponse produces it, and C-03's UpdateResponse RELAYS IT
+//  It sits in the common file for one reason: BOTH
+//  siblings need it. C-06's UpdateResponse produces it, and C-03's UpdateResponse RELAYS IT
 //  UNCHANGED to Gateway - without which a caller that inserted rows could never learn the
 //  auto-increment values the database assigned them, and no inserted DataWindow row could be
 //  reconciled with its generated identity. Two consumers, so one definition, here. Duplicating it in
@@ -1352,10 +1342,11 @@ message IdentityColumnData {
   // in order, with `value` set; it emits an element with `value` UNSET for a null. A consumer must
   // test presence per element and must not treat an unset element as zero.
   //
-  // On the sole evidenced fixture a null cannot arise - `id` is an INTEGER PRIMARY KEY AUTOINCREMENT
-  // marked `key=yes identity=yes` [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8] and the database
-  // always assigns it - so this is the contract being able to say what the oracle can produce rather
-  // than a case the fixture exercises.
+  // On the sole evidenced fixture a null cannot arise - the DataWindow marks `id`
+  // `key=yes identity=yes` [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8] over
+  // `ID INTEGER PRIMARY KEY NOT NULL` [ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L464], which is
+  // rowid aliasing with no AUTOINCREMENT keyword, and the database always assigns it - so this is the
+  // contract being able to say what the oracle can produce rather than a case the fixture exercises.
   // ==========================================================================================
   repeated NullableInt64 primary_values = 2;
 

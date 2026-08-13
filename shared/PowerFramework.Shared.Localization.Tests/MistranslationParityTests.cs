@@ -298,7 +298,8 @@ public class MistranslationParityTests
     /// The source is always <see cref="Enums.I18N_SRC_PFW"/>, because anything else is declined at
     /// <c>n_cst_i18n_en.sru</c>:L32 before the table is reached and no assertion in this file would
     /// then be exercising the data. The default constructor is used on purpose: it is the one
-    /// <c>pfw.sra</c>'s open event reaches [:L95-L103], and it resolves the table exactly as the
+    /// <c>ws_objects/pfw.pbl.src/pfw.sra</c>'s open event reaches [:L95-L103] - the framework
+    /// application, not the same-named packager object - and it resolves the table exactly as the
     /// legacy does.
     /// </remarks>
     private static (long ReturnCode, string? Text) Translate(long category, string sourceText)

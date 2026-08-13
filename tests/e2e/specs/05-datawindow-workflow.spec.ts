@@ -349,25 +349,25 @@ interface WireUpdateRequest {
 /* ------------------------------------------------------------------------- *
  * THE RESPONSE SIDE — ONE CANDIDATE-KEY TABLE, RESOLVED CANONICALLY
  *
- * 🔴 THIS TABLE USED TO LIST ALTERNATIVES, AND THAT WAS A DEFECT RATHER THAN A
- * KINDNESS. Each entry carried the canonical spelling plus "plausible"
+ * 🔴 THIS TABLE LISTS NO ALTERNATIVES, AND LISTING THEM WOULD BE A DEFECT RATHER
+ * THAN A KINDNESS. Such a table carries the canonical spelling plus "plausible"
  * alternatives — `Rows` beside `rows`, `row_count` beside `rowCount`, `isFinal`
  * beside `final`, and an `items`/`result`/`data` envelope beside a body the
- * contract publishes as a bare array. The stated intent was a better diagnostic.
- * The actual effect was that THIS SUITE COULD PASS AGAINST A BOUNDARY NO
+ * contract publishes as a bare array. The intent is a better diagnostic.
+ * The effect is that THIS SUITE COULD PASS AGAINST A BOUNDARY NO
  * GENERATED CLIENT CAN CONSUME: a service emitting `row_count` would satisfy
  * every assertion here while a client generated from the OpenAPI document or
- * from protobuf JSON read `undefined`. A contract test that accepts a shape the
+ * from protobuf JSON reads `undefined`. A contract test that accepts a shape the
  * contract does not publish is not testing the contract.
  *
- * ⚠ THE ALTERNATIVES ARE DETECTED, NOT ACCEPTED. This table used to be resolved
- * TOLERANTLY: whichever spelling appeared was returned, so `ret_code`, `is_final`
- * and `Rows` each satisfied a read and everything downstream passed. The
- * diagnostic reasoning above is sound and is preserved — a boundary that merely
+ * ⚠ THE ALTERNATIVES ARE DETECTED, NOT ACCEPTED. Resolving this table TOLERANTLY —
+ * returning whichever spelling appears, so `ret_code`, `is_final` and `Rows` each
+ * satisfy a read and everything downstream passes — is the natural thing to write.
+ * The diagnostic reasoning above is sound and is preserved: a boundary that merely
  * serialized a member differently should be told so in those words rather than
- * accused of omitting it — but the VERDICT was wrong: a response-field rename is
+ * accused of omitting it. What is wrong is the VERDICT — a response-field rename is
  * a contract change, and it is the single most likely drift on a freshly
- * decomposed boundary. The canonical spelling is now required, and an alternative
+ * decomposed boundary. So the canonical spelling is required, and an alternative
  * found in its place produces that same good diagnostic AS A FAILURE.
  *
  * This is emphatically NOT a licence to guess a shape: no member is read that the
@@ -379,9 +379,9 @@ interface WireUpdateRequest {
  * ------------------------------------------------------------------------- */
 const RESPONSE_KEYS = {
   /**
-   * ⚠ THE ENVELOPE ENTRY IS GONE, AND ITS ABSENCE IS THE ASSERTION.
+   * ⚠ THERE IS NO ENVELOPE ENTRY, AND ITS ABSENCE IS THE ASSERTION.
    *
-   * It read `chunkCollection: ['chunks', 'items', 'result', 'data']`, described as
+   * `chunkCollection: ['chunks', 'items', 'result', 'data']` is the tempting entry,
    * covering "an envelope appearing anyway" — four member names, not one of which
    * the published contract declares. `RetrieveResult` is `type: array`: a
    * retrieval answers the ORDERED SEQUENCE OF CHUNKS the server stream would have
@@ -389,11 +389,11 @@ const RESPONSE_KEYS = {
    * message for a stream and wrapping one would add a member the gRPC contract
    * does not have.
    *
-   * Removing the entry is what makes an invented envelope FAIL rather than be
-   * silently unwrapped — and the old fallback was worse than tolerant: when none
-   * of the four matched it yielded an EMPTY collection, so an unrecognised envelope
-   * produced zero rows and every downstream assertion reported a missing row
-   * instead of a wrong shape. `readChunks` now refuses a non-array body outright
+   * Declaring no such entry is what makes an invented envelope FAIL rather than be
+   * silently unwrapped — and such a fallback is worse than tolerant: when none
+   * of the four matched it would yield an EMPTY collection, so an unrecognised envelope
+   * yields zero rows and every downstream assertion reports a missing row
+   * instead of a wrong shape. `readChunks` refuses a non-array body outright
    * and says so.
    */
 
@@ -1008,11 +1008,11 @@ function requestUpdate(
  * envelope message for a stream. Element order is the stream's order and is never
  * re-sorted here.
  *
- * 🔴 AN ENVELOPE IS NO LONGER TOLERATED. This used to fall back to reading
- * `chunks`/`items`/`result`/`data` off an object body, which meant a projection
- * that wrapped the stream in an invented envelope satisfied every assertion in
- * this file while a client generated from the published document received an
- * object where it expected an array. A non-array body now yields an empty
+ * 🔴 AN ENVELOPE IS NOT TOLERATED. Falling back to reading
+ * `chunks`/`items`/`result`/`data` off an object body is the tempting shape, and it
+ * lets a projection that wrapped the stream in an invented envelope satisfy every
+ * assertion in this file while a client generated from the published document received
+ * an object where it expected an array. A non-array body instead yields an empty
  * sequence, and the caller reports that as the shape failure it is.
  */
 async function readChunks(response: APIResponse): Promise<readonly unknown[]> {
@@ -1062,10 +1062,10 @@ async function readChunks(response: APIResponse): Promise<readonly unknown[]> {
  * `ColumnValue` as it passes through. That is the assertion that makes the payload
  * a DATAWINDOW CARRIER rather than a flat rowset — the distinction the whole
  * update contract rests on, since `buffer`, `row`, `itemStatus` and the optional
- * `originalValues` are exactly what a rowset would have discarded. It was
- * previously unasserted anywhere: the file read `buffer` and `itemStatus` off
- * individual rows where it happened to need them, so a projection that had dropped
- * them from every OTHER row went unnoticed.
+ * `originalValues` are exactly what a rowset would have discarded. Reading `buffer`
+ * and `itemStatus` off individual rows only where they happen to be needed is the
+ * cheaper alternative and it asserts nothing: a projection that dropped them from
+ * every OTHER row would go unnoticed.
  */
 function collectRows(chunks: readonly unknown[]): readonly unknown[] {
   const rows: unknown[] = [];
@@ -1276,7 +1276,7 @@ const NOT_NULL_VIOLATION_COLUMNS: readonly CompanyColumnName[] = ['age'];
  *
  * Distinct from {@link INSERT_SCOPE} for the same load-bearing reason the refusal
  * scope is distinct: the update test mutates its row, and mutating the row the
- * insert test asserted on would couple two tests that are now deliberately
+ * insert test asserted on would couple two tests that are deliberately
  * independent. Neither test finds a row by label — the engine-assigned key is the
  * only identifier either uses — but two labels keep a store read by hand legible.
  */
@@ -1324,13 +1324,13 @@ const BIRTH_TEXT_PATTERN = new RegExp(`^${BIRTH_FORMAT.replace(/[a-z]/g, '\\d')}
 /* ------------------------------------------------------------------------- *
  * ARRANGEMENT, NOT CARRIED STATE
  *
- * This spec once held two module-scope `let` bindings — the inserted row and its
+ * Two module-scope `let` bindings — the inserted row and its
  * verbatim column values — written by the insert test and read by the update
- * test, with the group configured `mode: 'serial'` to guarantee the order. That
- * arrangement had a cost the ordering hid: the update test could not run on its
- * own at all. `npx playwright test -g "an update carrying original values"`
- * reported a contrived failure about a missing binding rather than exercising
- * the contract, and after any insert-test failure the update test was either
+ * test, with the group configured `mode: 'serial'` to guarantee the order, is the
+ * arrangement this spec avoids. Its cost is hidden by the ordering: the update test
+ * cannot run on its own at all. `npx playwright test -g "an update carrying original values"`
+ * then reports a contrived failure about a missing binding rather than exercising
+ * the contract, and after any insert-test failure the update test is either
  * skipped or meaningless. A test that cannot be run by itself cannot be used to
  * diagnose the thing it tests.
  *
@@ -1339,7 +1339,7 @@ const BIRTH_TEXT_PATTERN = new RegExp(`^${BIRTH_FORMAT.replace(/[a-z]/g, '\\d')}
  * assertion, which is the insert test's job and its alone — and hands back the
  * row as the retrieval answered it. Two consequences worth stating:
  *
- *   * THE UPDATE TEST IS NOW SELF-CONTAINED and independently runnable, and its
+ *   * THE UPDATE TEST IS SELF-CONTAINED and independently runnable, and its
  *     failure means what it says.
  *   * THE TESTS WRITE DIFFERENT ROWS. The arranged baseline carries its own
  *     scope label, so the row the update test mutates is never the row the
@@ -1455,9 +1455,11 @@ async function arrangeStoredRow(
 test.describe('DataWindow retrieve / validate / update workflow (C-03 over C-09)', () => {
   // THE TOKEN-ISSUANCE PRECONDITION, and it is the FIRST thing this group does.
   //
-  // `POST /v1/tokens` on Security is authenticated by a client certificate and by
-  // nothing else, on every topology including the local bring-up, so with no
-  // identity provisioned every authenticated assertion below is unrunnable. The
+  // `POST /v1/tokens` on Security is authenticated by a presented caller
+  // credential - an HTTP Basic credential or a trusted client certificate - and
+  // never by a bearer token, on every topology including the local bring-up, so
+  // with no identity provisioned every authenticated assertion below is
+  // unrunnable. The
   // hook fails this group's SETUP in a full acceptance run rather than letting
   // fifteen token calls fail one at a time with transport errors that never say
   // why; a run that has explicitly declared itself partial passes straight
@@ -1659,10 +1661,10 @@ test.describe('DataWindow retrieve / validate / update workflow (C-03 over C-09)
     // THE BARE ORDERED COLLECTION, REQUIRED RATHER THAN PREFERRED. The contract
     // publishes this body as `RetrieveResult`, `type: array`, because the protocol
     // definition has no envelope message for a stream — wrapping one would add a
-    // member the gRPC contract does not have. The envelope spelling used to be
-    // "resolved as a tolerance, never as an expectation", which in practice meant
-    // an invented envelope was accepted; `readChunks` now refuses anything that is
-    // not an array and asserts every chunk against `RetrieveChunk` as it passes.
+    // member the gRPC contract does not have. Resolving an envelope spelling "as a
+    // tolerance, never as an expectation" means in practice that an invented envelope
+    // is accepted; `readChunks` refuses anything that is not an array and asserts
+    // every chunk against `RetrieveChunk` as it passes.
     const sequence: readonly unknown[] = await readChunks(response);
 
     expect(
@@ -1776,10 +1778,10 @@ test.describe('DataWindow retrieve / validate / update workflow (C-03 over C-09)
 
       // ONE BASELINE PER COLUMN ON A RETRIEVED ROW, and it must agree with the
       // current value: a retrieval baselines every row, so original and current
-      // are the same value stated twice. An earlier revision let a producer omit a
-      // column whose original equalled its current one, which meant a freshly
-      // retrieved row carried NO baseline at all and a caller had to reconstruct
-      // the concurrency predicate from an absence — and the other legal reading of
+      // are the same value stated twice. Letting a producer omit a column whose
+      // original equals its current one is the tempting economy, and it means a
+      // freshly retrieved row carries NO baseline at all and a caller has to
+      // reconstruct the concurrency predicate from an absence — and the other legal reading of
       // that absence, "no baseline exists", drops the predicate and silently
       // overwrites.
       for (const column of COMPANY_COLUMNS) {
@@ -2040,10 +2042,10 @@ test.describe('DataWindow retrieve / validate / update workflow (C-03 over C-09)
     ).toBe(false);
 
     // 🔴 THE REFUSAL MUST BE ATTRIBUTED TO THE CALLER, WHICH IS A 4xx AND NOT A 5xx.
-    // This used to be asserted only as ">= 400", and the chain answered 502 with a
-    // body reading "SQLite Error <redacted>: '<redacted>'." — so a caller who
-    // omitted a required field was told the database had failed, that the fault lay
-    // behind the gateway, and nothing said which column. A row omitting a NOT NULL
+    // Asserting only ">= 400" admits a 502 carrying a body that reads
+    // "SQLite Error <redacted>: '<redacted>'." — so a caller who omitted a required
+    // field would be told the database had failed, that the fault lay behind the
+    // gateway, and nothing would say which column. A row omitting a NOT NULL
     // column is the CALLER's payload being wrong, and the whole corrective action is
     // available to the caller, so the class of the status is part of the contract.
     //

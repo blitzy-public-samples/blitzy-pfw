@@ -100,7 +100,7 @@ parity position in full.
 > checkable from the document itself.
 >
 > **It cannot attest that it has been signed off.** Sign-off is an act performed by a reviewer, not a
-> property a document can claim on its own behalf, and an earlier draft of this section did claim it.
+> property a document can claim on its own behalf, so nothing here claims it.
 > The distinction matters for the STEP 0 gate below: what the gate needs is a mapping that is complete
 > and reviewable rather than a placeholder, and that condition is met here. **Recording the reviewer's
 > acceptance remains a separate step, external to this file.**
@@ -973,13 +973,12 @@ a mapping whose citations do not resolve would fail the audit it exists to pass.
   should treat as carrying credentials. **No value, key fragment, certificate body or credential is
   reproduced anywhere in this document**; `docs/SECRETS.md` is the single register of locators,
   severities and required actions.
-- **The event-chain dialog locators in `se_cst_dw.sru` are `:L355` and `:L357`.** An earlier
-  statement cited `:L357` and `:L368`. Verified: `:L355` and `:L357` are the only two localization
+- **The event-chain dialog locators in `se_cst_dw.sru` are `:L355` and `:L357`, and NOT `:L357` and
+  `:L368`.** Measured: `:L355` and `:L357` are the only two localization
   calls in the file and the live dialog is at `:L357`; `:L368` is a comment documenting the
   posted-message hazard rather than a call site; and the third dialog match, `:L286`, is inside the
-  block comment spanning `:L280`–`:L290`. Section 6.5 uses the verified locators. Likewise, the
-  context-menu service has **ten** live dialog sites rather than the six previously listed, and
-  Section 6.5 records the complete set.
+  block comment spanning `:L280`–`:L290`. Section 6.5 uses the measured locators. Likewise, the
+  context-menu service has **ten** live dialog sites, not six, and Section 6.5 records the complete set.
 
 ### 12.3 Cross-references
 

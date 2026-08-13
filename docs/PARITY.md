@@ -539,8 +539,8 @@ columns. The disagreements are **preserved as defects, and are not reconciled**:
 
 | # | DataWindow declares [`dw_sqlite.srd`] | The table declares [`w_test_sqlite.srw:L463-L469`] | Consequence to reproduce |
 | ---: | --- | --- | --- |
-| 1 | `name` as `char(100)` [`:L9`] | `NAME TEXT NOT NULL` — **unbounded** | The bound exists **only** in the DataWindow. SQLite stores a longer value in full, so any truncation observed is the DataWindow's, and a port that enforces 100 characters in storage diverges from the oracle. An earlier revision of this table omitted this row entirely |
-| 2 | `address` as `char(200)` [`:L11`] | `ADDRESS CHAR(50)` | **`CHAR(50)` is not a width constraint in SQLite.** The declared type sets *affinity* only — TEXT affinity here — and the length is ignored entirely: a 200-character address is stored in full, unpadded and untruncated, with no error. So the two declarations disagree and **the engine enforces neither**; the observable behaviour is whatever the DataWindow does with its own 200-character bound. An earlier revision of this row said the column "cannot store" the value; SQLite can, and does |
+| 1 | `name` as `char(100)` [`:L9`] | `NAME TEXT NOT NULL` — **unbounded** | The bound exists **only** in the DataWindow. SQLite stores a longer value in full, so any truncation observed is the DataWindow's, and a port that enforces 100 characters in storage diverges from the oracle |
+| 2 | `address` as `char(200)` [`:L11`] | `ADDRESS CHAR(50)` | **`CHAR(50)` is not a width constraint in SQLite.** The declared type sets *affinity* only — TEXT affinity here — and the length is ignored entirely: a 200-character address is stored in full, unpadded and untruncated, with no error. So the two declarations disagree and **the engine enforces neither**; the observable behaviour is whatever the DataWindow does with its own 200-character bound. Do not read `CHAR(50)` as meaning the column "cannot store" the value; SQLite can, and does |
 | 3 | `salary` as `decimal(2)` [`:L12`] | `SALARY REAL` | A two-place decimal presented over REAL affinity. The scale exists only in the DataWindow; round-trip values are not guaranteed identical, and the observed result is the specification |
 | 4 | `birth` as `date` [`:L13`] | `BIRTH TEXT` | Date semantics over text storage: SQLite has no date type at all, so ordering, comparison and format all follow from the text representation actually written, not from a date type |
 
@@ -626,10 +626,10 @@ occurrence of the volume name `data-service-db` becomes `persistence-db`, for th
 > ID, or the paired recordings required by the Agent Action Plan's success criteria will not be
 > comparable.**
 
-Nothing above is paraphrase. Two things an earlier revision of this section dropped while shortening it
-are back, and both carry weight: that the recordings are **keyed per workflow ID** on the legacy side as
+Nothing above is paraphrase, and two clauses a shortened restatement tends to drop both carry weight:
+that the recordings are **keyed per workflow ID** on the legacy side as
 well as the target side, and that what a broken pair invalidates is **the Agent Action Plan's own success
-criteria** rather than merely a local comparison. A third, `Docker volume` in full, is back because the
+criteria** rather than merely a local comparison. A third, `Docker volume` in full, matters because the
 rule is about a volume in a specific technology and a "volume state" in the abstract is a weaker
 instruction.
 
@@ -669,9 +669,9 @@ Two things about the rename are recorded rather than assumed (C-K):
   Renaming a volume in an instruction and paraphrasing the instruction at the same time is how an
   operational rule quietly loses its force. §4.2 is therefore the environment's own two sentences, word
   for word, with `data-service-db` replaced by `persistence-db` in both places it occurs and **no other
-  edit** — not a shortening, not a re-ordering, not a summary. An earlier revision of this document
-  claimed verbatim reproduction while in fact carrying a paraphrase that had dropped material wording;
-  the full text is now restored and §4.2 names what had been lost.
+  edit** — not a shortening, not a re-ordering, not a summary. Claiming verbatim reproduction while
+  carrying a paraphrase that has dropped material wording is the specific failure to guard against, and
+  §4.2 names the clauses a paraphrase loses first.
 - **`characterization/README.md` is to restate the identical rule, and that duplication is deliberate and
   mandated — not an oversight to consolidate.** The two must say the same thing. The reason is
   situational: an operator capturing a recording is working inside `characterization/`, and a rule that
@@ -706,7 +706,7 @@ the abstract.
 
 A seam that is documented but not injected has no effect on a single test (§5.2), so each row below
 carries **its own status** in the vocabulary [`BUILD.md`](BUILD.md) §1 declares, rather than a blanket
-claim over all four. **All four are now injected in source**, each at a named injection point, so every
+claim over all four. **All four ARE injected in source**, each at a named injection point, so every
 row is checkable rather than asserted — which is the reason the per-row status column exists and the reason
 it is kept now that the statuses agree.
 
@@ -839,7 +839,7 @@ hand-assembled approximation of them. That distinction matters for a decompositi
 behaviours in §7 are only observable *across* the boundary, and a test that calls the implementation
 class directly cannot see them.
 
-> **This is now the current state, not planned architecture.** All four service applications carry an
+> **This is the current state, not planned architecture.** All four service applications carry an
 > entry point and all four service test projects build and pass, and they do use `WebApplicationFactory`
 > against the implicitly generated internal `Program` with no `public partial` shim — the Gateway
 > authorization, health-aggregation and route-census suites, the Security endpoint suites and the
@@ -847,10 +847,22 @@ class directly cannot see them.
 > is referenced by all four because all four use it. The per-project totals and the shared-versus-service
 > split are in [`BUILD.md`](BUILD.md) §1.3, which is the canonical record; none is restated here.
 >
-> **What an in-process host still cannot see.** It performs no TLS handshake, no ALPN negotiation, no real
-> gRPC channel setup and no client-certificate exchange. Those gaps are closed by the container bring-up of
-> [`BUILD.md`](BUILD.md) §1.3 rather than by any test — but a bring-up is still not a *capture*: no
-> recording has been taken on either side (§1.5).
+> **What an in-process host still cannot see, and how much of it the bring-up actually covered.** It
+> performs no TLS handshake, no ALPN negotiation, no real gRPC channel setup and no client-certificate
+> exchange. The container bring-up closed **two** of those four and left two open, and the distinction is
+> not pedantic — the two it left open are the two this document's §7 behaviours travel over:
+>
+> | Gap in an in-process host | Closed by the bring-up? |
+> | --- | --- |
+> | TLS handshake | **Closed.** Every `/health` gate was answered over TLS against the projected anchor, and in-network reachability was verified with hostname validation |
+> | ALPN negotiation | **Closed for HTTP/1.1 only.** The `Http1AndHttp2` listeners answered an HTTP/1.1 request on the very port a gRPC caller negotiates HTTP/2 on; no HTTP/2 negotiation by a gRPC client was observed |
+> | Real gRPC channel setup | **Open.** No gRPC RPC has been invoked at all, so no C-03 to C-08 call has crossed a container boundary |
+> | Client-certificate exchange | **Open.** The bring-up authenticated callers with the shared-secret scheme and left every `*_MTLS_*` path empty |
+>
+> Those verdicts are not this document's to publish and are not restated as figures here: they come from
+> [`orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised), the
+> only execution-status record in the repository, and the two open rows are the same two §R4 names. And a
+> bring-up is still not a *capture* in any case: no recording has been taken on either side (§1.5).
 
 ### 6.2 The paging rewriters are pure-function matrices requiring no storage engine
 
@@ -893,23 +905,28 @@ are observable in the generated text, so all three **must be** pinned.
 
 > **The paging matrix now EXISTS, and the withdrawal recorded here in an earlier revision is itself
 > withdrawn.** `SqlServerPagingRewriter`, `OraclePagingRewriter` and `PagingRewriteDispatcher` are present
-> in the tree and all three are driven: `SqlServerPagingRewriterTests.cs` carries 27 cases across the three
-> SQL Server strategies, `PagingRewriterByteExactTests.cs` carries 3 more, and between them they cover the
+> in the tree and all three are driven: `SqlServerPagingRewriterTests.cs` carries 27 test methods across the FOUR ARMS OF THE
+> SQL Server 2x2 matrix, `PagingRewriterByteExactTests.cs` carries 3 more, and between them they cover the
 > dispatcher's `DBT_MSSQL` / `DBT_ORACLE` selection and its `E_NO_IMPLEMENTATION` arm for anything else.
-> `PowerFramework.Persistence.Tests` builds and its 4,470 tests pass. So the sentinel register, the
+> `PowerFramework.Persistence.Tests` builds and passes in full — its total is in
+> [`BUILD.md`](BUILD.md) §1.3 with every other measured figure and is deliberately not repeated here, which
+> is the rule this document states for itself two subsections earlier and had broken in this one sentence.
+> So the sentinel register, the
 > four-form cross-product and the count wrapper above are pinned by byte-exact assertions rather than
 > specified for someone else to write — which is what makes them testable with no instance of either DBMS,
 > the property that let this matrix be written at all.
 >
-> **It pins the .NET output rather than certifying agreement with the oracle.** The expectations are
-> transcribed from a run of the .NET rewriters, so the suite detects drift and nothing more.
+> **It is a 2×2 matrix, not the three strategies the migration plan's prose names.** The two selectors —
+> whether the unique-index column list is non-empty, and the state of the native-implementation flag —
+> are independent, and all four arms emit different statement text, so merging any pair breaks byte-exact
+> parity outright. `SqlServerPagingRewriter.cs` records the correction at its own point of reproduction.
 >
 > **The limitation that remains is the one that matters, and the suite states it about itself.** Its
 > expectations are **transcribed from a run of the .NET rewriters, not derived from the legacy generator**,
 > because `n_sql` is a closed binary with no C++ source in this repository and obtaining the oracle's own
-> output would require executing PowerBuilder. It is therefore a **target characterization**: it makes any
-> change to a rewriter visible in review, and it does **not** certify agreement with `pfw.dll`. Closing
-> that gap needs a legacy-side capture (§4), not another test.
+> output would require executing PowerBuilder. It is therefore a **target characterization**: it detects
+> drift, it makes any change to a rewriter visible in review, and it does **not** certify agreement with
+> `pfw.dll`. Closing that gap needs a legacy-side capture (§4), not another test.
 >
 > **The rows the matrix must contain**, so the obligation is checkable rather than gestural — and so a
 > reader can audit which of them a future oracle capture has to cover:
@@ -1210,8 +1227,7 @@ The handler in order, with locators:
      do it too early. A port that gives `1` a body changes behaviour; a port that omits `1` from the
      switch changes it differently; and a port that treats `1` as `2` restores where the legacy leaves
      things alone. `Proto/dataservices.v1.proto` and [`CONTRACTS.md`](CONTRACTS.md) §6.5 settle this the
-     same way — earlier revisions of this document described the arm as falling through, and that reading
-     is withdrawn.
+     same way — reading the arm as falling through is the mistake to avoid.
    - **`case 2` restores the value and status, but only if the earlier equality test held**
      [`:L216-L222`]. The guard exists because the buffer may already have been changed and must not be
      overwritten.
@@ -1309,8 +1325,8 @@ records them as parity obligations:
 
 There are **eight**, and the numbering below is the authoritative register's own — the one in
 `shared/PowerFramework.Contracts/OpenApi/security.v1.yaml`, which is where each is annotated and which
-`CryptoWeakDefaultAnnotationTests` asserts against. An earlier revision of this section listed six by
-merging two pairs, which is why the numbering is stated as shared rather than local:
+`CryptoWeakDefaultAnnotationTests` asserts against. Merging two of the pairs gives six, which is why the
+numbering is stated as shared rather than local:
 
 | # | Legacy default or limitation | Parity obligation |
 | ---: | --- | --- |
@@ -1516,9 +1532,9 @@ its boundary right decides how much characterization is actually needed.
 | `PY_LIKE_IGNORE_WIDTH` | 2 | 忽略全角半角 | Ignore full-width versus half-width forms |
 | `PY_LIKE_FUZZY_SOUND` | 4 | 匹配模糊发音（l=n，f=h，r=l） | Match fuzzy pronunciation, the comment naming `l`/`n`, `f`/`h` and `r`/`l` |
 
-`7` is therefore `1 | 2 | 4` — all three enabled. An earlier revision of this document said the flag
-semantics were recorded nowhere in the repository; that was wrong, and the correction narrows the risk
-rather than widening it. [`ARCHITECTURE.md`](ARCHITECTURE.md) §13 L1 records the same decoding.
+`7` is therefore `1 | 2 | 4` — all three enabled. The flag semantics ARE recorded in the repository, at
+the locator above, which narrows this risk rather than widening it.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) §13 L1 records the same decoding.
 
 **What genuinely remains unprovable from the repository, and it is enough to keep this risk live:**
 
@@ -1589,8 +1605,8 @@ from the storage side.
 
 ### R4 — The stack has been brought up, but no capture has been taken against it
 
-**What changed, and why the risk is narrowed rather than retired.** An earlier revision of this entry said
-nothing assembled the container set. `orchestration/docker-compose.yml` and `orchestration/README.md` now
+**Why the risk is narrowed rather than retired.** The container set IS assembled:
+`orchestration/docker-compose.yml` and `orchestration/README.md`
 exist alongside all four container definitions and `.github/workflows/ci.yml`, and the bring-up **has** been
 exercised: all four images built, all four services reached Docker health `healthy` in the documented order,
 and Persistence provisioned a fresh `persistence-db` volume by itself. That is reported gate by gate in one
@@ -1599,7 +1615,7 @@ place —
 — and this document does not restate it.
 
 **What remains, and it is the half this document is about: no capture exists on either side.** §4.2's
-capture rule is expressed in terms of a Docker volume, and the seam is now observed rather than presumed —
+capture rule is expressed in terms of a Docker volume, and the seam **is** observed rather than presumed —
 but observing that a fresh volume provisions itself and survives a plain `down` is **not** a recording. No
 legacy-side capture has been taken, no target-side capture has been taken, and therefore no comparison
 exists.
@@ -1609,8 +1625,9 @@ exists.
 
 **A passing service test does not retire this risk either** — an in-process host mounts no volume, so it
 cannot be the target side of a paired capture no matter how thorough it is. Two further gaps travel with
-this one and are recorded in the same single statement rather than here: the mutual-TLS arm of the issuance
-edge, and any gRPC call across a container boundary.
+this one and are recorded in the same single statement rather than here: the *caller* half of the
+mutual-TLS arm — Gateway's and DataServices' own configured certificate pairs, the issuance half having
+since been exercised — and any gRPC call across a container boundary.
 
 **Mitigation.** Take the first pair against one unrecreated `persistence-db` volume, in the order §4.2
 prescribes, and record the workflow identifier on both sides. Until then, treat every parity assertion in
@@ -1672,11 +1689,10 @@ what that showed and what it did not —
 [`orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised).
 Nothing here duplicates it, and nothing here contradicts it: a bring-up is not a capture, which is R4.
 
-**One thing it now claims that an earlier revision denied**, because the state changed: the container path
-*was* exercised. All four images build and the four-service stack came up healthy with requests crossing
+**One thing it does claim, and it is easy to assume the opposite**: the container path *was* exercised.
+All four images build and the four-service stack came up healthy with requests crossing
 real boundaries ([`BUILD.md`](BUILD.md) §1.3). **That is not a parity claim** and nothing here should be
-read as one — which is precisely why R4 was repointed from "nothing assembles the container set" to the
-oracle gap rather than being closed.
+read as one — which is precisely why R4 names the oracle gap rather than being closed.
 
 **It also does not claim** that any service has served a request across a network **in a test** — every
 service test drives its host in process, so no TLS handshake, ALPN negotiation, real gRPC channel setup or

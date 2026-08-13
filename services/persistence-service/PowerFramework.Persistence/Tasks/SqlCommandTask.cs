@@ -81,16 +81,16 @@
 //
 //  The resolution is the one C-07 already provides: the triple is declared once, in the published
 //  protocol definition, as `enum AutoCommitMode { AC_OFF = 0; AC_ON = 1; AC_NATIVE = 2; }`
-//  [shared/PowerFramework.Contracts/Proto/persistence.v1.proto:L1720-L1727], and this file REFERENCES
+//  [shared/PowerFramework.Contracts/Proto/persistence.v1.proto:L1841-L1849], and this file REFERENCES
 //  the generated enum. THE VALUES ARE PRESERVED (0/1/2); ONLY THE DECLARATION SITE MOVES. The same
-//  applies to DBT_MSSQL/DBT_ORACLE [same file, :L2031-L2035] and to DwBuffer [common.v1.proto:L655].
+//  applies to DBT_MSSQL/DBT_ORACLE [same file, :L2341-L2346] and to DwBuffer [common.v1.proto:L673-L675].
 //
 // -------------------------------------------------------------------------------------------------
 //  THE LEADING `@` IS A MODE SELECTOR, NOT SQL  (AAP §0.4.3 C-07 - constraints C-B, C-K)
 // -------------------------------------------------------------------------------------------------
 //  The character carries TWO UNRELATED MEANINGS in the legacy, in two different objects, and the
-//  distinction between them is the whole subtlety - conflating them is how this file previously came
-//  to claim the mode did not exist here at all:
+//  distinction between them is the whole subtlety - conflating them is how a reader comes
+//  to conclude the mode does not exist here at all:
 //      1. A DATAWINDOW-OBJECT SELECTOR, on the RETRIEVE verb - the rest of the string is that
 //         object's NAME rather than SQL:
 //         `if Left(sql,1) = "@" then ds.DataObject = Mid(sql,2)` [n_cst_thread_trans.sru:L309].
@@ -218,7 +218,7 @@ namespace PowerFramework.Persistence.Tasks;
 /// <b>This type drives contract C-07 <c>persistence.v1.CommandService</c>.</b> Its four mutators and
 /// its execution entry point correspond to the service's <c>Reset</c>, <c>SetAutoCommit</c>,
 /// <c>SetSql</c> and <c>Exec</c> methods
-/// [<c>shared/PowerFramework.Contracts/Proto/persistence.v1.proto:L1943-L1962</c>]. It registers no
+/// [<c>shared/PowerFramework.Contracts/Proto/persistence.v1.proto:L2229-L2235, L2271</c>]. It registers no
 /// route and opens no listener of its own (constraint C-G): it is reachable only through those
 /// authorized gRPC methods.
 /// </para>
@@ -281,10 +281,10 @@ internal sealed class SqlCommandTask : SqlTaskBase
     /// <b>⚠ THE SAME CHARACTER MEANS SOMETHING ELSE ON THE COMMAND VERB, AND CONFLATING THE TWO IS THE
     /// MISTAKE THIS PAIR OF CONSTANTS EXISTS TO PREVENT.</b> On a command the prefix selects the
     /// statement-caching execution mode, which C-07 does carry and this task does implement - see
-    /// <see cref="StatementCachingPrefix"/>. An earlier revision of this file reasoned from the
-    /// transaction object's <c>of_Exec</c> alone, concluded that neither meaning reached C-07, and
-    /// documented the prefix as passed through verbatim; that was wrong, and the reasoning is recorded
-    /// in this file's header so it cannot be re-derived.
+    /// <see cref="StatementCachingPrefix"/>. Reasoning from the transaction object's <c>of_Exec</c>
+    /// alone leads to the conclusion that neither meaning reaches C-07 and that the prefix is therefore
+    /// passed through verbatim. That conclusion is wrong; this file's header records why, so it cannot
+    /// be re-derived.
     /// </para>
     /// </remarks>
     internal const char DataWindowObjectPrefix = '@';
@@ -602,7 +602,7 @@ internal sealed class SqlCommandTask : SqlTaskBase
     /// <para>
     /// <b>If C-07's generated enum constrains the value, that is the CONTRACT's doing, not this
     /// file's.</b> <c>SetCommandAutoCommitRequest.autocommit</c> is typed
-    /// <c>AutoCommitMode</c> [<c>persistence.v1.proto:L1761-L1764</c>], but a proto3 enum field is
+    /// <c>AutoCommitMode</c> [<c>persistence.v1.proto:L1901</c>], but a proto3 enum field is
     /// OPEN - an unrecognised numeric value is carried through rather than rejected - so the wire
     /// cannot be relied on to filter, and the in-process path must tolerate an unmatched value
     /// regardless. It does.
@@ -663,7 +663,7 @@ internal sealed class SqlCommandTask : SqlTaskBase
     /// </para>
     /// <para>
     /// <b>Unreachable from C-07, and kept anyway.</b> <c>SetCommandSqlRequest.sql</c> is a proto3
-    /// <c>string</c> field [<c>persistence.v1.proto:L1771-L1774</c>], and a proto3 scalar string is
+    /// <c>string</c> field [<c>persistence.v1.proto:L1945</c>], and a proto3 scalar string is
     /// never null - an unset field arrives as the empty string. So only an in-process caller can reach
     /// the null path. It is preserved because the parity model characterizes the in-process surface,
     /// not just the wire surface.
@@ -718,7 +718,7 @@ internal sealed class SqlCommandTask : SqlTaskBase
     /// mode goes back to <see cref="AutoCommitMode.AcOff"/> [<c>:L34</c>] and the statement is cleared
     /// to the EMPTY STRING rather than to null [<c>:L35</c>]. The published contract states the same
     /// thing - a caller that reset a task and then ran it without setting the mode again gets
-    /// <c>AC_OFF</c> [<c>persistence.v1.proto:L1755-L1757</c>] - so drifting on either would break a
+    /// <c>AC_OFF</c> [<c>persistence.v1.proto:L1876-L1877</c>] - so drifting on either would break a
     /// documented promise.
     /// </para>
     /// <para>
@@ -809,7 +809,7 @@ internal sealed class SqlCommandTask : SqlTaskBase
     /// commit succeeded [<c>n_cst_thread_task_sqlbase.sru:L235-L237</c>]. On
     /// <see cref="AutoCommitMode.AcOff"/> it is never raised. Those three readings are exactly what
     /// C-07's <c>ExecResponse.committed</c> field documents
-    /// [<c>persistence.v1.proto:L1887-L1903</c>].
+    /// [<c>persistence.v1.proto:L2158-L2194</c>].
     /// </para>
     /// <para>
     /// <b>The ancestor task handler.</b> The oracle inlines <c>call super::ondotask</c> ahead of even

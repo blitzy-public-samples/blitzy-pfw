@@ -58,9 +58,9 @@ public sealed class ScopeAuthorizationTests
     /// <param name="expectedPolicy">The policy every method of that contract must name.</param>
     /// <remarks>
     /// <para>
-    /// STRONGER THAN "SOME AUTHORIZATION IS PRESENT", WHICH IS WHAT USED TO BE ASSERTED HERE. A row that
-    /// only checked for authorization metadata passed equally against the parameterless requirement that
-    /// let a read-scoped token commit, so it could not distinguish the defect from the fix. Naming the
+    /// STRONGER THAN "SOME AUTHORIZATION IS PRESENT", WHICH IS THE TEMPTING ASSERTION HERE. A row that
+    /// only checks for authorization metadata passes equally against the parameterless requirement that
+    /// lets a read-scoped token commit, so it cannot distinguish the two. Naming the
     /// expected policy is what makes the assignment itself the subject.
     /// </para>
     /// <para>

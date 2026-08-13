@@ -23,7 +23,7 @@
 //
 //  THIS IS A GENERATED FILE AND IS TREATED AS ONE. Its body is verbatim what
 //  `dotnet ef migrations add InitialCreate --output-dir Data/Migrations` emits for the model in
-//  Data/PowerFrameworkDbContext.cs on EF Core 10.0.10 / SDK 10.0.302. Only comments were added, and
+//  Data/PowerFrameworkDbContext.cs on EF Core 10.0.11 / the pinned SDK. Only comments were added, and
 //  only the ones the constraints below require. Nothing is restructured, no helper is extracted and
 //  no personal formatting is imposed, so a regeneration diffs cleanly against it. The generator's
 //  UTF-8 BOM is the single byte-level departure: the repository-root .editorconfig sets

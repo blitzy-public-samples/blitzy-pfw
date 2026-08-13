@@ -1565,7 +1565,7 @@ public sealed class SqlUpdateTaskProxyTests
 
             if (attachWorker)
             {
-                // The base's OnInit is what assigns WorkerTask from the host [SqlTaskProxyBase.cs:L2328],
+                // The base's OnInit is what assigns WorkerTask from the host [SqlTaskProxyBase.cs:L2607],
                 // and it is protected, so the harness reaches it the way the substrate would.
                 Assert.Equal(RetCode.OK, RecordingProxyHost.Invoke(Proxy, "OnInit"));
             }

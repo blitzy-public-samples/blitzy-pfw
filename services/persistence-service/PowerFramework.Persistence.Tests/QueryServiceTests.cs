@@ -142,6 +142,7 @@ using Microsoft.Extensions.Options;
 using PowerFramework.Persistence.Authorization;
 using PowerFramework.Persistence.Configuration;
 using PowerFramework.Persistence.Grpc;
+using PowerFramework.Persistence.Runtime;
 using PowerFramework.Persistence.Sql.Paging;
 using PowerFramework.Persistence.Tasks;
 using PowerFramework.Persistence.Transactions;
@@ -366,6 +367,94 @@ public sealed class QueryServiceTests
 
         Assert.Equal(WireRetCode.Ok, accepted.Status.RetCode);
         Assert.Equal(1_001L, fixture.TaskFor(accepted.Task).ChunkSize);
+    }
+
+    /// <summary>
+    /// A caller that does not own a query task can neither use it nor release it, and cannot tell either
+    /// refusal from one naming a task this service never issued.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A HANDLE IS UNGUESSABLE, WHICH IS NOT THE SAME AS OWNER-BOUND.</b> Nothing in this service finds
+    /// another caller's handle by search, but unguessable bounds DISCOVERY and not USE: a handle that
+    /// escapes through a log record, a proxy trace or the caller's own bug is otherwise a bearer credential
+    /// for the retrieval behind it - another caller's rows, its statement and its paging state
+    /// (CWE-639, CWE-862, CWE-863). Both halves are covered here, and the release half matters more: a
+    /// foreign release disposes a task its owner is mid-retrieval on.
+    /// </para>
+    /// <para>
+    /// <b>THE SECOND CALLER IS PRODUCED BY RE-ATTRIBUTING THE ENTRY, AND THAT IS THE SAME COMPARISON.</b>
+    /// This fixture constructs the service directly, so there is no ambient request for a principal to be
+    /// read from and every task it creates is attributed to the unattributed sentinel. Ownership is decided
+    /// by comparing the STORED principal against the RESOLVED caller, so moving the stored value away from
+    /// the caller exercises exactly the code path a second caller's request would - and it keeps this row
+    /// free of a host. <c>HandleOwnershipTests</c> drives the same comparison from the other side, by
+    /// varying the ambient caller, and additionally proves the deployed host supplies one.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AForeignCallerCanNeitherUseNorReleaseAnotherCallersQueryTask()
+    {
+        using Fixture fixture = new();
+        TaskHandle handle = await fixture.CreateTaskAsync();
+        TaskHandle unknownHandle = new() { TaskId = "no-such-query-task" };
+
+        Assert.True(fixture.Tasks.TryResolve(handle, out QueryTaskEntry? entry));
+        Assert.NotNull(entry);
+        Assert.Equal(HandlePrincipalResolver.Unattributed, entry.Principal);
+
+        // Charged to somebody else from here on.
+        entry.Principal = "powerframework-another-caller";
+
+        // --- USE: the registry refuses, and refuses as it does for an unknown handle. ---------------
+        Assert.False(fixture.Tasks.TryResolve(handle, out QueryTaskEntry? foreignResolve));
+        Assert.Null(foreignResolve);
+        Assert.False(fixture.Tasks.TryResolve(unknownHandle, out QueryTaskEntry? unknownResolve));
+        Assert.Null(unknownResolve);
+
+        // --- USE, over the wire: a per-task mutator answers exactly as it does for an unknown task. --
+        SetChunkSizeResponse foreignSet = await fixture.Service.SetChunkSize(
+            new SetChunkSizeRequest { Task = handle, ChunkSize = 20_000L },
+            Fixture.Context);
+
+        SetChunkSizeResponse unknownSet = await fixture.Service.SetChunkSize(
+            new SetChunkSizeRequest { Task = unknownHandle, ChunkSize = 20_000L },
+            Fixture.Context);
+
+        Assert.Equal(unknownSet.Status.RetCode, foreignSet.Status.RetCode);
+        Assert.Equal(unknownSet.Status.ErrorText, foreignSet.Status.ErrorText);
+
+        // --- RELEASE: refused the same way, and the task SURVIVES the attempt. ----------------------
+        ReleaseQueryTaskResponse foreignRelease = await fixture.Service.ReleaseQueryTask(
+            new ReleaseQueryTaskRequest { Task = handle },
+            Fixture.Context);
+
+        ReleaseQueryTaskResponse unknownRelease = await fixture.Service.ReleaseQueryTask(
+            new ReleaseQueryTaskRequest { Task = unknownHandle },
+            Fixture.Context);
+
+        Assert.Equal(unknownRelease.Status.RetCode, foreignRelease.Status.RetCode);
+        Assert.Equal(unknownRelease.Status.ErrorText, foreignRelease.Status.ErrorText);
+        Assert.Equal(1, fixture.Tasks.Count);
+
+        // --- THE POSITIVE ARM, so a registry refusing everybody cannot pass this row. ---------------
+        entry.Principal = HandlePrincipalResolver.Unattributed;
+
+        Assert.True(fixture.Tasks.TryResolve(handle, out _));
+
+        SetChunkSizeResponse mineSet = await fixture.Service.SetChunkSize(
+            new SetChunkSizeRequest { Task = handle, ChunkSize = 20_000L },
+            Fixture.Context);
+
+        Assert.Equal(WireRetCode.Ok, mineSet.Status.RetCode);
+        Assert.Equal(20_000L, fixture.TaskFor(handle).ChunkSize);
+
+        ReleaseQueryTaskResponse mineRelease = await fixture.Service.ReleaseQueryTask(
+            new ReleaseQueryTaskRequest { Task = handle },
+            Fixture.Context);
+
+        Assert.Equal(WireRetCode.Ok, mineRelease.Status.RetCode);
+        Assert.Equal(0, fixture.Tasks.Count);
     }
 
     // ==============================================================================================

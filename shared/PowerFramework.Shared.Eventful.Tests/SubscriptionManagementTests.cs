@@ -27,15 +27,9 @@
 //  ALL FOURTEEN OVERLOAD SHAPES ARE COVERED, AND THE COUNT WAS VERIFIED RATHER THAN ASSUMED
 //      The subject declares exactly SEVEN `Unsubscribe` overloads and exactly SEVEN `Disable`
 //      overloads, matching the oracle's seven `of_off` and seven `of_disable` declarations. Each is one
-//      row of <see cref="UnsubscribeShapeRows"/> or <see cref="DisableShapeRows"/> - fourteen rows for
+//      row of UnsubscribeShapeRows or DisableShapeRows - fourteen rows for
 //      fourteen shapes, with the expected surviving set spelled out per row. No shape is collapsed onto
 //      another and no subset is sampled.
-//
-//  RULES POSITION, STATED EXPLICITLY
-//      `review_rules` returns exactly one line: "No user rules provided." No user-specified rule governs
-//      this file, none was invented to fill the gap, and that absence is not licence to lower the bar.
-//      The AAP 0.7.2 enterprise baseline and the AAP 0.7.3 binding non-rule constraints govern in their
-//      place. The four that bear on this file, and what each required here:
 //
 //  C-B - PRESERVE BEHAVIOUR EXACTLY; ASSERT THE QUIRKS AS CORRECT RATHER THAN TIDY THEM
 //      Five quirks are asserted here as the DESIRED outcome, each at its assertion carrying the locator
@@ -55,7 +49,7 @@
 //      the target, handler name and signature, answering `RetCode.E_EVENT_NOT_FOUND` when that
 //      initialisation fails (:L398-L401). `n_scriptinvoker` belongs to the DEFERRED ScriptBridge
 //      service, so this suite names no script-invoker type, no stand-in for one and no deferred service:
-//      <see cref="EachRejectedSubscriptionAnswersItsOwnLegacyCodeAndThrowsNothing"/> asserts the CODE
+//      EachRejectedSubscriptionAnswersItsOwnLegacyCodeAndThrowsNothing asserts the CODE
 //      and is deliberately silent about the mechanism that produces it.
 //
 //  C-H - NULLABLE AND WARNINGS-AS-ERRORS APPLY HERE EXACTLY AS THEY DO TO SHIPPING CODE
@@ -82,7 +76,7 @@
 //      which pins retention and ordering in a single equality.
 //
 //  METHOD
-//      Outcomes are verified by TRIGGERING and reading the shared <see cref="DispatchLog"/>, because
+//      Outcomes are verified by TRIGGERING and reading the shared DispatchLog, because
 //      dispatch behaviour is the real contract; the query surface is a secondary signal and is itself
 //      under test. Every test builds a fresh broker, fresh subscribers and a fresh log, so no test can
 //      observe another's state. Member data carries only strings, booleans and numbers - never a live

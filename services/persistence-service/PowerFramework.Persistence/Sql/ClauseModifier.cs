@@ -113,8 +113,8 @@
 //  criterion. Nothing below changes a single character of an accepted clause.
 //
 //  A BIND PARAMETER CANNOT PROTECT SQL STRUCTURE, WHICH IS WHY THE PARAGRAPH ABOVE IS NOT THE WHOLE
-//  ANSWER. This file previously concluded from it that no validation belonged here at all. That
-//  conclusion was wrong, and a review found it: parameterisation substitutes VALUES, whereas a
+//  ANSWER. Concluding from it that no validation belongs here at all is the mistake it invites. That
+//  conclusion is wrong: parameterisation substitutes VALUES, whereas a
 //  clause is spliced in as SYNTAX. The clause reaches n_sql's ModifyWhere / ModifyOrder entry points
 //  and then the DataWindow's select property with NO grammar standing between it and execution, so
 //  there is nothing downstream for this file to defer to. And the exposure is NEW rather than
@@ -157,12 +157,6 @@
 //  file already grants PowerFramework.Persistence.Tests access through InternalsVisibleTo, so
 //  nothing needs widening for testability.
 //
-//  RULES POSITION
-//  --------------------------------------------------------------------------------------------
-//  No user rules were provided for this project: the rules document contains exactly one line
-//  saying so. The binding constraints are therefore the enterprise-standard baseline plus the
-//  named non-rule constraints, and each non-obvious decision above and below cites the one that
-//  drives it. No rule is inferred, invented or back-filled from convention.
 // ==============================================================================================
 
 using PowerFramework.Contracts.Persistence.V1;

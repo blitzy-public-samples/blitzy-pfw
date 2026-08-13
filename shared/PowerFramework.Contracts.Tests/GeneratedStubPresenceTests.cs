@@ -19,7 +19,7 @@
 //
 //  A DESCRIPTOR-LEVEL ASSERTION CANNOT DETECT A MISCONFIGURATION HERE. That is measured, not assumed.
 //  A throwaway build of these same three definitions with GrpcServices="None" was executed on this
-//  toolchain (SDK 10.0.302, Grpc.Tools 2.83.0): DataservicesV1Reflection.Descriptor.Services still
+//  toolchain (the pinned SDK, Grpc.Tools 2.83.0): DataservicesV1Reflection.Descriptor.Services still
 //  reported both services with all 16 and 26 methods, because the FileDescriptorProto embedded in the
 //  generated MESSAGE file carries the service declarations regardless of the GrpcServices value - only
 //  the *Grpc.cs file, and with it every container, server base and client type, disappeared. Repeating
@@ -52,14 +52,6 @@
 //  of the sweeps are written as exact set comparisons rather than "contains" checks precisely so that
 //  a service appearing for a deferred capability would FAIL rather than pass unnoticed.
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  review_rules returns exactly "No user rules provided.", so no user-specified rule governs this
-//  file. The enterprise-standard baseline applies in its place and is honoured here: nullable
-//  reference types and warnings-as-errors inherited from the repository root and never relaxed or
-//  suppressed, no secret or credential literal of any kind, one assertion per fact so a single
-//  mis-generated service cannot mask the rest, and every assertion annotated with the plan decision
-//  or the legacy locator it pins.
 // ==================================================================================================
 
 using System.Reflection;
@@ -98,7 +90,7 @@ public sealed class GeneratedStubPresenceTests
     //  Proto file names are BARE, with no Proto/ prefix, because the contracts project sets
     //  ProtoRoot="Proto" explicitly - which is what makes `import "common.v1.proto";` resolve and what
     //  FileDescriptor.Name reports back. The namespaces are the csharp_namespace values declared at
-    //  common.v1.proto:L88, dataservices.v1.proto:L75 and persistence.v1.proto:L123.
+    //  common.v1.proto:L78, dataservices.v1.proto:L65 and persistence.v1.proto:L112.
     // ==============================================================================================
 
     private const string CommonFileName = "common.v1.proto";
@@ -490,8 +482,9 @@ public sealed class GeneratedStubPresenceTests
     // ==============================================================================================
     //  THE AUTHORED MESSAGE SURFACE - COMPLETE, EXPLICIT AND FROZEN
     //
-    //  All 244 messages the three definitions AUTHOR, nested declarations included and the three
-    //  synthetic map-entry messages excluded, written out for exactly the reason the method roster is:
+    //  All 248 messages the three definitions AUTHOR - 18 in common.v1, 142 in dataservices.v1 and 88 in
+    //  persistence.v1 - nested declarations included and the three synthetic map-entry messages excluded,
+    //  written out for exactly the reason the method roster is:
     //  an inventory derived from ContractDescriptors.AllMessages() cannot detect a DELETED message,
     //  because the deletion removes the row that would have failed. Both directions are compared below.
     //
@@ -513,7 +506,7 @@ public sealed class GeneratedStubPresenceTests
 
     private static readonly string[] AuthoredMessageRoster =
     [
-        // ---- common.v1.proto  (20 authored messages) ----
+        // ---- common.v1.proto  (18 authored messages) ----
         "common.v1.RetCode",
         "common.v1.XmlParseStatus",
         "common.v1.SqliteResultCode",
@@ -1479,8 +1472,7 @@ public sealed class GeneratedStubPresenceTests
             + "names are reviewed rather than inferred from whatever was generated.");
 
         // Stated as a count as well, so the failure message carries the size of the surface a reader is
-        // being asked to trust. 77 is the whole of C-03 through C-08 - 78 while C-04 also carried the
-        // withdrawn row-loading rpc, which AAP 0.4.3's frozen inventory never named.
+        // being asked to trust. 77 is the whole of C-03 through C-08.
         Assert.Equal(77, declared.Length);
     }
 
@@ -1848,15 +1840,14 @@ public sealed class GeneratedStubPresenceTests
             + $"[{string.Join(", ", unlisted)}]. Adding a message to the inventory in the same change that "
             + "adds it to the definition is what keeps the published surface a reviewed one.");
 
-        // 248 = 20 in common.v1 + 142 in dataservices.v1 + 88 in persistence.v1, less no map entries.
-        // The count moved from 244 with the carrier-state typing: common.v1 gained DataWindowRow
-        // (PROMOTED out of dataservices.v1, which therefore lost it) and NullableInt64, and
-        // persistence.v1 gained CarrierBufferSegment and CarrierState - a net of three. It moved from
-        // 247 to 248 with dataservices.v1.RowValidationError, the per-column refusal C-03's Update
-        // answers for a payload rejected before any statement is generated. It reached 250 with
-        // dataservices.v1.LoadRowsRequest and LoadRowsResponse and RETURNED to 248 when they were
-        // withdrawn: that pair was an unreviewed row-loading mutator absent from AAP 0.4.3's frozen C-04
-        // inventory, so it is no longer part of the published surface.
+        // 248 = 18 in common.v1 + 142 in dataservices.v1 + 88 in persistence.v1. Map entries are not
+        // counted here: the three `map` fields in dataservices.v1 make protoc synthesise three nested
+        // ...Entry messages, so the DESCRIPTOR graph holds 251 while the definitions AUTHOR 248, and the
+        // difference is asserted in its own right by
+        // TheOnlyMessagesWithoutAGeneratedTypeAreTheThreeSyntheticMapEntries below.
+        //
+        // The literal is written out rather than derived so that ADDING a message to the definitions
+        // without adding it to the roster fails here, which a derived count could not detect.
         Assert.Equal(248, authored.Length);
         Assert.Equal(authored.Length, AuthoredMessageRoster.Distinct(StringComparer.Ordinal).Count());
     }

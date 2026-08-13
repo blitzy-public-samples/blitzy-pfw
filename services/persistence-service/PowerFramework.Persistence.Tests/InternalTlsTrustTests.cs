@@ -209,7 +209,30 @@ public sealed class InternalTlsTrustTests
         ];
 
         Assert.Equal(
-            [nameof(InternalTlsTrustOptions.IsConfigured), nameof(InternalTlsTrustOptions.TrustedCaPath)],
+            [
+                nameof(InternalTlsTrustOptions.IsConfigured),
+
+                // THE REVOCATION POSTURE, AND IT BELONGS IN THIS SET RATHER THAN BREAKING IT. The check
+                // this row performs is that no member could hold KEY MATERIAL - an anchor with a private
+                // key beside it would mean this service could ISSUE certificates for the internal topology,
+                // which the sole-issuer topology forbids it (constraint C-G). A revocation posture is one
+                // of three fixed mode names, so it carries no material and cannot; it is listed here
+                // because the assertion is deliberately a CLOSED set, and a closed set is what would catch
+                // the member that did.
+                nameof(InternalTlsTrustOptions.RevocationMode),
+
+                nameof(InternalTlsTrustOptions.TrustedCaPath),
+            ],
             members);
+
+        // AND THE INVARIANT ITSELF, STATED DIRECTLY RATHER THAN ONLY IMPLIED BY THE LIST. The list above
+        // catches a new member; this catches a new member whose name a future reader might not recognise as
+        // key material. Both are cheap and they fail on different mistakes.
+        foreach (string member in members)
+        {
+            Assert.DoesNotContain("Key", member, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Secret", member, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Password", member, StringComparison.OrdinalIgnoreCase);
+        }
     }
 }

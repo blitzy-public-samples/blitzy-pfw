@@ -271,14 +271,7 @@
 //  hazards (docs/PB多线程绕坑提示.md items 1 and 2) are structurally unreachable because it returns
 //  no string or blob across a thread boundary and holds no main-thread object.
 //
-//  RULES POSITION. review_rules returns exactly one line, "No user rules provided.", so NO
-//  user-specified rule governs this file. That is a finding, not latitude: nothing is invented or
-//  back-filled from convention in its place. The enterprise-standard baseline applies instead -
-//  nullable reference types on, warnings as errors, no secret in source, deterministic and
-//  trivially testable - and the binding constraints are the refactor plan's own non-rule inventory,
-//  of which C-B, C-C, C-D, C-E, C-F, C-H and C-K bite on this file and are each discharged at the
-//  point they are cited above.
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  NO PERFORMANCE PROPERTY IS ASSERTED and no decision here is justified by one: the repository
 //  publishes no latency budget, no throughput target and no availability commitment, so there is no
 //  baseline against which such a claim could be made. The collection is a plain list because the
@@ -326,7 +319,7 @@ namespace PowerFramework.Persistence.Transactions;
 /// </para>
 /// <para>
 /// <b>The struct's all-bits-zero default IS the legacy cleared state</b>, which is why
-/// <see cref="Cleared"/> is simply <see langword="default"/>. The legacy clearing routine assigns
+/// <c>Cleared</c> is simply <see langword="default"/>. The legacy clearing routine assigns
 /// <c>0</c>, <c>0</c>, <c>0</c>, <c>""</c> and <c>""</c> [<c>:L363-L367</c>]; the two string members
 /// project <see langword="null"/> to <see cref="string.Empty"/> on read, so a defaulted instance
 /// observes exactly those five values. That projection is not cosmetic: under the repository's
@@ -335,7 +328,7 @@ namespace PowerFramework.Persistence.Transactions;
 /// </para>
 /// <para>
 /// C-F: no member of this type is a credential and none is ever a descriptor field.
-/// <see cref="SqlErrText"/> carries provider message text, and <see cref="SqlReturnData"/> carries
+/// <c>SqlErrText</c> carries provider message text, and <c>SqlReturnData</c> carries
 /// provider return text; NEITHER is redacted here, because neither is a statement and the redaction
 /// obligation attaches to statement text (see the ISqlRedactor ruling in this file's header). A
 /// caller that surfaces either across the network boundary owns that decision at the mapping layer,
@@ -825,8 +818,40 @@ internal interface ITransactionEngine : IDisposable
     /// of them [<c>:L345-L351</c>]. The setter exists because the command task toggles it around a
     /// statement to reproduce the <c>AC_NATIVE</c> arm, which belongs to <c>Tasks/</c>.
     /// </para>
+    /// <para>
+    /// <b>THE SETTER CANNOT REPORT, WHICH IS WHY <see cref="TrySetAutoCommit(bool)"/> EXISTS BESIDE
+    /// IT.</b> An implementation that opens a real transaction has provider work to do on the transition,
+    /// and a property assignment has nowhere to put the outcome. Both spellings must move the same state;
+    /// only one of them can say what the move cost.
+    /// </para>
     /// </value>
     bool AutoCommit { get; set; }
+
+    /// <summary>
+    /// Moves <see cref="AutoCommit"/> and reports what the move cost.
+    /// </summary>
+    /// <param name="autoCommit">The mode to put in force.</param>
+    /// <returns>
+    /// A succeeded state when the mode is in force and, for the non-auto-commit mode, whatever the
+    /// implementation needs in order to honour it is in place; otherwise the provider's own failure.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>A NET-NEW REPORTING CHANNEL FOR A PORT-CREATED FAILURE MODE, NOT A LEGACY MEMBER.</b>
+    /// PowerBuilder's transaction is implicit after <c>CONNECT</c>, so the oracle has no separate begin
+    /// that can fail and no return code for one to reproduce. A port that opens an EXPLICIT transaction
+    /// does, and swallowing that failure hands back a session which reports non-auto-commit mode while
+    /// applying every statement immediately - so the fault must be reportable even though the oracle has
+    /// no arm for it (AAP 0.1.4: the fail-fast posture survives as fail-fast, never as degraded service).
+    /// </para>
+    /// <para>
+    /// An implementation with nothing to do on the transition - an in-memory double, an unconnected
+    /// engine, a mode that is already in force - assigns the mode and answers
+    /// <see cref="SqlState.Succeeded(long)"/>. An implementation that fails MUST leave no state in which a
+    /// statement could execute outside the transaction the mode promises.
+    /// </para>
+    /// </remarks>
+    SqlState TrySetAutoCommit(bool autoCommit);
 
     /// <summary>
     /// Applies the descriptor's seven connection fields to the connection target.
@@ -883,6 +908,7 @@ internal interface ITransactionEngine : IDisposable
     /// The statement text. Never <see langword="null"/> and never empty: the caller rejects both with
     /// <see cref="RetCode.E_INVALID_ARGUMENT"/> before reaching here [<c>:L220</c>].
     /// </param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
     /// <returns>The five state values the statement left behind.</returns>
     /// <remarks>
     /// <b>AAP 0.6.4 APPLIES TO EVERY IMPLEMENTATION OF THIS METHOD.</b> The legacy interpolates
@@ -897,13 +923,14 @@ internal interface ITransactionEngine : IDisposable
 
     /// <summary>
     /// Executes a statement with PROVIDER-BOUND parameters. The obligation AAP 0.6.4 places on
-    /// <see cref="Execute(string)"/> is discharged structurally here rather than by review.
+    /// <see cref="Execute(string, CancellationToken)"/> is discharged structurally here rather than by review.
     /// </summary>
     /// <param name="command">
     /// The canonical statement, its ordered values, and the rendered parity text. Never carries a null
     /// or empty canonical text: the caller rejects both with
     /// <see cref="RetCode.E_INVALID_ARGUMENT"/> before reaching here [<c>:L220</c>].
     /// </param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
     /// <returns>The five state values the statement left behind.</returns>
     /// <remarks>
     /// <para>
@@ -1203,9 +1230,39 @@ internal interface IPooledTransaction : IDisposable
     /// <value>
     /// Gates <see cref="Rollback"/> [<c>:L185</c>], <see cref="Commit(bool)"/> [<c>:L240</c>] and both
     /// branches of <see cref="AutoCommitCheckpoint"/> [<c>:L371, :L376</c>]. Settable because the
-    /// command task toggles it around a statement to reproduce the <c>AC_NATIVE</c> arm.
+    /// command task toggles it around a statement to reproduce the <c>AC_NATIVE</c> arm; the assignment
+    /// reports nothing, so a caller that needs the outcome uses
+    /// <see cref="TrySetAutoCommit(bool)"/> instead.
     /// </value>
     bool AutoCommit { get; set; }
+
+    /// <summary>
+    /// Moves <see cref="AutoCommit"/> and reports the outcome as a return code.
+    /// </summary>
+    /// <param name="autoCommit">The mode to put in force.</param>
+    /// <returns>
+    /// <see cref="RetCode.OK"/> when the mode is in force and the engine has whatever it needs to honour
+    /// it; <see cref="RetCode.E_DB_ERROR"/> when the engine's own transition failed, in which case the five
+    /// statement status values carry the provider's code and text and
+    /// <see cref="CaptureError"/> reports them.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THE PROJECTION OF <see cref="ITransactionEngine.TrySetAutoCommit(bool)"/> ONTO THE RETURN
+    /// ALGEBRA, AND THE REASON THE C-08 HANDLER CAN ANSWER HONESTLY.</b> <c>SetAutoCommit</c> used to write
+    /// through the property and answer <see cref="RetCode.OK"/> unconditionally, so an engine that could not
+    /// open the transaction the mode promises reported success to the caller that had just asked for it.
+    /// </para>
+    /// <para>
+    /// <see cref="RetCode.E_DB_ERROR"/> rather than <see cref="RetCode.FAILED"/>, because this is the
+    /// pool's established code for "the provider spoke and what it said was an error", and it is the code
+    /// <see cref="Connect"/> and <see cref="Commit(bool)"/> already answer for a spoiled statement state
+    /// [<c>n_cst_thread_trans.sru:L129-L133</c>, <c>:L250-L256</c>]. The transaction is NOT marked broken: a
+    /// refused begin says nothing about the connection's health, and condemning the entry would evict a
+    /// live connection the pool could still serve.
+    /// </para>
+    /// </remarks>
+    long TrySetAutoCommit(bool autoCommit);
 
     /// <summary>
     /// Opens the connection, reproducing every arm of <c>of_connect</c> [<c>:L111-L143</c>].
@@ -1290,6 +1347,7 @@ internal interface IPooledTransaction : IDisposable
     /// Executes a statement. [<c>:L220-L238</c>]
     /// </summary>
     /// <param name="sqlCommand">The statement text.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
     /// <returns>
     /// <see cref="RetCode.E_INVALID_ARGUMENT"/> when the text is <see langword="null"/> or empty;
     /// <see cref="RetCode.CANCELLED"/> on a clean veto; <see cref="RetCode.E_DB_ERROR"/> on a veto that
@@ -1301,10 +1359,11 @@ internal interface IPooledTransaction : IDisposable
 
     /// <summary>
     /// Executes a statement with PROVIDER-BOUND parameters, on the same arms as
-    /// <see cref="Exec(string?)"/>. [<c>:L220-L238</c>]
+    /// <c>Exec(string?, CancellationToken)</c>. [<c>:L220-L238</c>]
     /// </summary>
     /// <param name="command">The canonical statement, its ordered values, and the rendered parity text.</param>
-    /// <returns>Exactly the codes <see cref="Exec(string?)"/> returns, on exactly the same tests.</returns>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>Exactly the codes <c>Exec(string?)</c> returns, on exactly the same tests.</returns>
     /// <remarks>
     /// <para>
     /// EVERY ARM IS THE SAME AS THE SINGLE-STRING OVERLOAD'S. The emptiness guard tests the CANONICAL
@@ -1320,13 +1379,14 @@ internal interface IPooledTransaction : IDisposable
 
     /// <summary>
     /// Executes a statement whose values travel BESIDE it - the parameterized form of
-    /// <see cref="Exec(string?)"/>. [<c>:L220-L238</c>]
+    /// <see cref="Exec(string?, CancellationToken)"/>. [<c>:L220-L238</c>]
     /// </summary>
     /// <param name="statement">The statement in both its parity and its executable forms.</param>
-    /// <returns>Exactly the codes <see cref="Exec(string?)"/> returns.</returns>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>Exactly the codes <c>Exec(string?)</c> returns.</returns>
     /// <remarks>
     /// <para>
-    /// Every guard, hook and status test of <see cref="Exec(string?)"/> applies unchanged - the empty
+    /// Every guard, hook and status test of <c>Exec(string?)</c> applies unchanged - the empty
     /// statement guard [<c>:L220</c>], the state clear [<c>:L222</c>], the vetoable before-command hook
     /// with its database-error discrimination [<c>:L224-L226</c>], the after-command notification that
     /// fires on failure too [<c>:L231</c>], and the arm in which <c>SQLCode = 100</c> reads as a SUCCESS
@@ -1338,7 +1398,7 @@ internal interface IPooledTransaction : IDisposable
     /// would change what an existing hook observes - a behavioural change C-B forbids.
     /// </para>
     /// <para>
-    /// <b>Defaulted to the observable form, exactly as <see cref="ITransactionEngine.Execute(SqlBoundStatement)"/>
+    /// <b>Defaulted to the observable form, exactly as <c>ITransactionEngine.Execute(SqlBoundStatement)</c>
     /// is.</b> An implementation that carries no parameters - a test double, or a transaction over an
     /// engine with no binding support - runs the interpolated text, which is precisely what the legacy
     /// ran, so the default is the legacy behaviour rather than a shortcut. The shipped implementation
@@ -1802,6 +1862,37 @@ internal sealed class PooledTransaction : IPooledTransaction
     {
         get => _engine.AutoCommit;
         set => _engine.AutoCommit = value;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// <para>
+    /// THE FAILED STATE IS STAMPED BEFORE THE CODE IS RETURNED, and that ordering is what makes the answer
+    /// useful rather than merely correct. <see cref="CaptureError"/> reads the five statement status values,
+    /// so the handler that projects <see cref="RetCode.E_DB_ERROR"/> onto the wire finds the provider's own
+    /// code and text there - exactly as it does for a failed connect or commit. Returning the code without
+    /// stamping would publish a database error whose driver payload was two zeroes and an empty string.
+    /// </para>
+    /// <para>
+    /// A SUCCESSFUL transition leaves the state untouched, deliberately: <c>SQLCode</c> means "what the last
+    /// SQL OPERATION left behind", the oracle's own property assignment is not one, and overwriting the
+    /// state here would erase the row count or the error a caller's preceding statement had just reported.
+    /// </para>
+    /// </remarks>
+    public long TrySetAutoCommit(bool autoCommit)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        SqlState outcome = _engine.TrySetAutoCommit(autoCommit);
+
+        if (outcome.SqlCode >= 0)
+        {
+            return RetCode.OK;
+        }
+
+        _state = outcome;
+
+        return RetCode.E_DB_ERROR;
     }
 
     /// <inheritdoc/>
@@ -3221,6 +3312,7 @@ internal sealed class TransactionPool : IDisposable
         /// Initializes a new instance of the <see cref="PooledEntry"/> class for a descriptor.
         /// </summary>
         /// <param name="descriptor">The descriptor this entry is keyed on.</param>
+        /// <param name="leaseId">The identifier of the lease this entry was created for.</param>
         internal PooledEntry(in TransactionData descriptor, long leaseId)
         {
             Descriptor = descriptor;
@@ -4299,7 +4391,7 @@ internal sealed class TransactionPool : IDisposable
     ///     end if
     /// next
     /// _transactions = NewTransactions                                                 [:L205]
-    /// return RetCode.OK                                                               [:L207</c>]
+    /// return RetCode.OK                                                               [:L207]
     /// </code>
     /// <para>
     /// <b>THE DISCONNECT HERE IS UNGUARDED</b> [<c>:L197</c>] - a valid transaction is disconnected
@@ -4595,34 +4687,24 @@ internal sealed class TransactionPool : IDisposable
         }
     }
 
-    /// <summary>
-    /// THE ONE AND ONLY one-based to zero-based translation in this file.
-    /// </summary>
-    /// <param name="refIndex">The caller's one-based index.</param>
-    /// <param name="position">The zero-based list position, or <c>-1</c> when out of range.</param>
-    /// <returns><see langword="false"/> when the index is out of range.</returns>
-    /// <remarks>
-    /// <para>
-    /// <b>CENTRALISED ON PURPOSE.</b> AAP 0.4.5.4 names one-based-to-zero-based translation the single
-    /// most dangerous mechanical hazard in this refactor, because an off-by-one here is
-    /// indistinguishable from a behavioural regression: the call succeeds, it just touches the wrong
-    /// entry. Every entry point routes through this method, so the subtraction exists in exactly one
-    /// place and the three guard sites [<c>:L89, :L120, :L154</c>] cannot drift apart.
-    /// </para>
-    /// <para>
-    /// The guard is the oracle's, character for character:
-    /// <c>refIndex &lt;= 0 or refIndex &gt; UpperBound(_transactions)</c>. <b>THE UPPER BOUND IS THE
-    /// COUNT</b> - PowerBuilder's upper bound is the LAST VALID INDEX of a one-based array, so
-    /// <c>&gt; Count</c> is correct and <c>&gt;= Count</c> would make the highest entry permanently
-    /// unreachable. Zero and every negative index are rejected by the first half, which is why an index
-    /// of <c>0</c> - the value the consumer stores to mean "no reference"
-    /// [<c>n_cst_thread_task_sqlbase.sru:L123</c>] - can never accidentally address entry one.
-    /// </para>
-    /// <para>
-    /// <b>MUST BE CALLED WHILE HOLDING <see cref="_gate"/></b>, because it reads the entry count. Every
-    /// caller does; there is no path to it from outside the lock.
-    /// </para>
-    /// </remarks>
+    // THE ONE AND ONLY one-based to zero-based translation in this file.
+    // refIndex: The caller's one-based index.
+    // position: The zero-based list position, or -1 when out of range.
+    // Returns: false when the index is out of range.
+    // <b>CENTRALISED ON PURPOSE.</b> AAP 0.4.5.4 names one-based-to-zero-based translation the single
+    // most dangerous mechanical hazard in this refactor, because an off-by-one here is
+    // indistinguishable from a behavioural regression: the call succeeds, it just touches the wrong
+    // entry. Every entry point routes through this method, so the subtraction exists in exactly one
+    // place and the three guard sites [:L89, :L120, :L154] cannot drift apart.
+    // The guard is the oracle's, character for character:
+    // refIndex &lt;= 0 or refIndex &gt; UpperBound(_transactions). <b>THE UPPER BOUND IS THE
+    // COUNT</b> - PowerBuilder's upper bound is the LAST VALID INDEX of a one-based array, so
+    // &gt; Count is correct and &gt;= Count would make the highest entry permanently
+    // unreachable. Zero and every negative index are rejected by the first half, which is why an index
+    // of 0 - the value the consumer stores to mean "no reference"
+    // [n_cst_thread_task_sqlbase.sru:L123] - can never accidentally address entry one.
+    // <b>MUST BE CALLED WHILE HOLDING _gate</b>, because it reads the entry count. Every
+    // caller does; there is no path to it from outside the lock.
     // ==============================================================================================
     //  THE STABLE-LEASE API - THE SAME SEVEN OPERATIONS, ADDRESSED BY AN IDENTITY THAT CANNOT RENUMBER
     //

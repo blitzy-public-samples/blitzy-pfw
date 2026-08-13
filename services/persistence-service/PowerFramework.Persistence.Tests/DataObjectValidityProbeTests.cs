@@ -1,5 +1,5 @@
 // ==================================================================================================
-//  F-16 - THE DATA-OBJECT VALIDITY PROBE
+//  THE DATA-OBJECT VALIDITY PROBE
 //
 //  WHY THIS FILE EXISTS. The oracle validates a named data object with ONE property read:
 //
@@ -283,8 +283,8 @@ public sealed class DataObjectValidityProbeTests
     /// </summary>
     /// <remarks>
     /// The three shaping arms are mutually exclusive and each source setter clears the other
-    /// [<c>:L316-L331</c>]. A probe that had been placed outside the named arm would refuse every
-    /// syntax-driven update, which is the second way this change could have gone wrong.
+    /// [<c>:L316-L331</c>]. A probe placed outside the named arm would refuse every
+    /// syntax-driven update, which is the second way the placement can go wrong.
     /// </remarks>
     [Fact]
     public void ASyntaxDrivenUpdateIsUntouchedByTheProbe()
@@ -460,6 +460,21 @@ public sealed class DataObjectValidityProbeTests
 
         /// <inheritdoc/>
         public bool AutoCommit { get; set; }
+
+        /// <summary>Moves the auto-commit mode and answers success, because this double opens no transaction.</summary>
+        /// <param name="autoCommit">The mode to put in force.</param>
+        /// <returns>Always a succeeded state.</returns>
+        /// <remarks>
+        /// ROUTED THROUGH THE PROPERTY so whatever the property records still records. A double with no
+        /// provider behind it has nothing the transition can fail on, which is the contract's own
+        /// nothing-to-do case.
+        /// </remarks>
+        public SqlState TrySetAutoCommit(bool autoCommit)
+        {
+            AutoCommit = autoCommit;
+
+            return SqlState.Succeeded();
+        }
 
         /// <inheritdoc/>
         public void ApplyConnectionFields(in TransactionData descriptor) => Dbms = descriptor.Dbms;

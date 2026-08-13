@@ -122,15 +122,7 @@
 //  pair measured to translate under the framework source, asserted not to translate under a foreign
 //  one - which is an observable statement of the same fact and needs no seam at all.
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  review_rules returns exactly "No user rules provided.", confirmed for this file. AAP §0.7.3's
-//  binding constraints stand in their place, and the three that govern here are cited at every
-//  assertion that turns on them: C-B (replicate behaviour, including deliberate holes, and improve
-//  nothing), C-C (the legacy tree and pfw.i18n.xml are read-only - this file's only file APIs are
-//  File.Exists and XDocument.Load, both of which read), C-H (nullable, warnings-as-errors, and the
-//  per-project coverage gate).
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  IF AN ASSERTION HERE FAILS, INVESTIGATE THE IMPLEMENTATION - NEVER EDIT THE RESOURCE. Every
 //  expected value below is quoted from a read-only file with its line number so a disagreement can be
 //  adjudicated against the oracle instead of re-derived.
@@ -1442,8 +1434,8 @@ public class CategoryMappingTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// This is the assumption the whole matrix rests on, and it was previously only verified by hand
-    /// while the rows were being chosen. <see cref="EveryMappedCategoryTranslatesFromItsOwnElement"/>
+    /// This is the assumption the whole matrix rests on, and verifying it by hand while the rows are
+    /// chosen is not enough. <see cref="EveryMappedCategoryTranslatesFromItsOwnElement"/>
     /// treats a hit as evidence about WHICH element the switch selected - but that inference is only
     /// sound while each key is unique to one element. Were a key to appear under two, the row would keep
     /// passing with an arm pointed at either of them, and the matrix would quietly stop testing the

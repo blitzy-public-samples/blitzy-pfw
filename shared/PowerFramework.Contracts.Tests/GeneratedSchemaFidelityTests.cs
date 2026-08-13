@@ -1,5 +1,5 @@
 // ==================================================================================================
-//  GeneratedSchemaFidelityTests - THE COMPILE-TIME EDGE gateway.v1.yaml PREVIOUSLY DID NOT HAVE
+//  GeneratedSchemaFidelityTests - THE COMPILE-TIME EDGE UNDER gateway.v1.yaml
 //  ------------------------------------------------------------------------------------------------
 //  SUBJECT     OpenApi/gateway.v1.yaml, components/schemas - every schema carrying
 //              `x-proto-message` or `x-proto-enum`, which is 133 of the document's 144.
@@ -9,18 +9,17 @@
 //
 //  WHY THIS FILE EXISTS, STATED AS THE PROBLEM IT SOLVES
 //  ------------------------------------------------------------------------------------------------
-//  gateway.v1.yaml used to publish ONE open schema - `ProtoPayload`, `additionalProperties: true`
-//  with no members - for every projected request and response body, 75 of them on today's projection,
-//  and pointed a consumer at the
-//  operation's `x-proto-*` extension to find the real message. That was wrong in the one direction
-//  that matters: the projection binds every request with the STRICT canonical protobuf JSON parser,
-//  which REJECTS a member the target message does not declare and answers 400. The document therefore
-//  promised a permissiveness the runtime does not have, and a consumer generating a client from it
-//  could not see a single member it was required to send. `UpdateResponse.rowsInserted`, `.rowsUpdated`,
-//  `.rowsDeleted` and `.identity` were invisible to every standard OpenAPI consumer, on the one
+//  Publishing ONE open schema - `ProtoPayload`, `additionalProperties: true`
+//  with no members - for every projected request and response body, and pointing a consumer at the
+//  operation's `x-proto-*` extension to find the real message, is the economical shape. It is wrong in
+//  the one direction that matters: the projection binds every request with the STRICT canonical protobuf
+//  JSON parser, which REJECTS a member the target message does not declare and answers 400. Such a
+//  document promises a permissiveness the runtime does not have, and a consumer generating a client from
+//  it cannot see a single member it is required to send. `UpdateResponse.rowsInserted`, `.rowsUpdated`,
+//  `.rowsDeleted` and `.identity` would be invisible to every standard OpenAPI consumer, on the one
 //  operation whose entire purpose is to tell a caller what it changed and what the engine assigned.
 //
-//  The delegation's stated defence was sound and is answered here rather than overruled: transcribing
+//  The delegation's defence is sound and is answered here rather than overruled: transcribing
 //  the shapes BY HAND would create a second source of truth in a different language with nothing
 //  keeping the two in step, so the first divergence would be silent, "because nothing compiles this
 //  document against those definitions". THIS FILE IS THAT COMPILATION. Every member of every marked
@@ -92,11 +91,6 @@
 //  in the generated descriptions are citations inside the document under test, not paths this file
 //  opens. No secret, key or credential literal appears anywhere below.
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  review_rules returns exactly "No user rules provided.", so no user-specified rule governs this
-//  file. Absence is not licence: the AAP 0.7.2 baseline applies - nullable and warnings-as-errors
-//  inherited from Directory.Build.props and never relaxed, no NoWarn, no #pragma.
 // ==================================================================================================
 
 using System.Globalization;
@@ -819,7 +813,7 @@ public sealed class GeneratedSchemaFidelityTests
             "Every protobuf shape must be closed, because the projection binds with JsonParser.Default "
                 + "and its IgnoreUnknownFields is false: an unrecognised member is answered with 400, "
                 + "not discarded. An open schema publishes a permissiveness the runtime does not have, "
-                + "which is the defect this tier replaced. Open: "
+                + "which is the defect this tier exists to prevent. Open: "
                 + string.Join(", ", open));
     }
 
@@ -1223,10 +1217,10 @@ public sealed class GeneratedSchemaFidelityTests
         // assigned to the rows it created. Under the delegated envelope not one of them was visible to a
         // consumer's generator.
         //
-        // THE WITNESS USED TO READ `LoadRowsResponse`, WHICH THE SCHEMA HAS SINCE WITHDRAWN. It is
-        // retargeted rather than deleted, because the property under test is the tier's rule - a
-        // response-only shape declares every member without explicit presence as required - and that
-        // rule needs a witness whose members are all legitimately zero or empty on a real response.
+        // THE WITNESS MUST BE A SHAPE THE SCHEMA ACTUALLY DECLARES, which rules out a plausible-looking
+        // `LoadRowsResponse`. The property under test is the tier's rule - a response-only shape declares
+        // every member without explicit presence as required - and that rule needs a witness whose members
+        // are all legitimately zero or empty on a real response.
         IOpenApiSchema schema = Document.Components!.Schemas!["UpdateResponse"];
 
         Assert.Equal(

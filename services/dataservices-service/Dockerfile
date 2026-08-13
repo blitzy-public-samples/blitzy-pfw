@@ -86,12 +86,17 @@
 #      password, certificate, passphrase or connection credential, and no such value may ever be
 #      added. SECURITY_JWT_SIGNING_KEY is the system's single signing secret and belongs to the
 #      Security service alone; DataServices holds VERIFICATION material only (constraint C-G), so no
-#      signing key of any spelling appears here. NEITHER LISTENER TERMINATES TLS, so no server
-#      certificate is needed to start this image at all - see the endpoint note in the runtime stage
-#      for the frozen-environment reason. The client credential this service presents on the
-#      token-issuance edge, and the OPTIONAL client-certificate pair a TLS-terminating deployment may
-#      add alongside it, are supplied by the orchestration secret layer at run time and reach the
-#      application through the options pattern; no path to either appears in this file.
+#      signing key of any spelling appears here. NO SERVER CERTIFICATE EITHER, and that one is worth
+#      stating precisely because this service's single listener DOES terminate TLS: Kestrel refuses to
+#      start an `https` endpoint with no certificate, so this image cannot run until the deployment
+#      supplies Kestrel__Certificates__Default__Path and __KeyPath. That is the intended failure mode -
+#      a missing certificate stops the service rather than silently degrading it to cleartext - and it
+#      is why the certificate is a deployment input rather than a layer. It, the trust anchor described
+#      below, the client credential this service presents on the token-issuance edge, and the OPTIONAL
+#      client-certificate pair a mutual-TLS deployment may add alongside that credential all arrive from
+#      the orchestration secret layer at run time and reach the application through the options pattern;
+#      no path to any of them appears in this file. See the endpoint note in the runtime stage for why
+#      one TLS endpoint carries both protocol versions.
 #    * Nothing for a deferred capability (constraint C-D). DesignSystem, Documents, Integration and
 #      ScriptBridge have no stage, layer, label, port, environment variable or build input here.
 #    * No port outside the one this service binds. It is gRPC-primary with a thin REST projection
@@ -148,7 +153,21 @@
 # pins SDK 10.0.303 with rollForward: latestFeature, and 10.0.400 satisfies that pin by rolling
 # forward one feature band within 10.0 - both are the same 10.0.11 platform release.
 # --------------------------------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/sdk:10.0.400 AS build
+#
+# ⚠ PINNED BY DIGEST, NOT BY TAG, AND THE `pinned-tag:` LINE ABOVE THE `FROM` IS LOAD BEARING. A
+# tag is a NAME a registry may republish over: `mcr.microsoft.com/dotnet/sdk:10.0.400` resolved to different content the
+# day MCR rebuilt the OS layer, so a build that reported success could silently be building on content
+# nobody reviewed (CWE-1104, CWE-494). The digest below is the content itself.
+#
+# THE COMMENT IS NOT DECORATION - THE CI IMAGE LEG PARSES IT. Dockerfile has no inline comment syntax,
+# so the tag the digest was taken from is recorded on its own line immediately above. Before every
+# build, .github/workflows/ci.yml reads that pair out of this file, asks the registry what the tag
+# resolves to NOW, and fails the leg when it has moved - naming the new digest to adopt. Drift is
+# therefore the signal that a patched base image exists, which is the OS-image freshness control.
+# Both halves must stay together and stay adjacent: the digest alone cannot be re-checked, and the tag
+# alone is not a pin.
+# pinned-tag: mcr.microsoft.com/dotnet/sdk:10.0.400
+FROM mcr.microsoft.com/dotnet/sdk@sha256:e1fc6e423f543119c406d24e2e687d67c569f18f04a37a8b0005d80ad0dcee80 AS build
 
 WORKDIR /src
 
@@ -268,7 +287,21 @@ RUN dotnet publish services/dataservices-service/PowerFramework.DataServices/Pow
 # hosting Kestrel, gRPC endpoints, Minimal API endpoints and an OpenAPI document, and it would fail
 # to start without the shared framework this image provides.
 # --------------------------------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/aspnet:10.0.11 AS final
+#
+# ⚠ PINNED BY DIGEST, NOT BY TAG, AND THE `pinned-tag:` LINE ABOVE THE `FROM` IS LOAD BEARING. A
+# tag is a NAME a registry may republish over: `mcr.microsoft.com/dotnet/aspnet:10.0.11` resolved to different content the
+# day MCR rebuilt the OS layer, so a build that reported success could silently be building on content
+# nobody reviewed (CWE-1104, CWE-494). The digest below is the content itself.
+#
+# THE COMMENT IS NOT DECORATION - THE CI IMAGE LEG PARSES IT. Dockerfile has no inline comment syntax,
+# so the tag the digest was taken from is recorded on its own line immediately above. Before every
+# build, .github/workflows/ci.yml reads that pair out of this file, asks the registry what the tag
+# resolves to NOW, and fails the leg when it has moved - naming the new digest to adopt. Drift is
+# therefore the signal that a patched base image exists, which is the OS-image freshness control.
+# Both halves must stay together and stay adjacent: the digest alone cannot be re-checked, and the tag
+# alone is not a pin.
+# pinned-tag: mcr.microsoft.com/dotnet/aspnet:10.0.11
+FROM mcr.microsoft.com/dotnet/aspnet@sha256:207cc51496778557731c81ff670333d8ade4a4fec22768fd1be8e78474a84ecf AS final
 
 WORKDIR /app
 

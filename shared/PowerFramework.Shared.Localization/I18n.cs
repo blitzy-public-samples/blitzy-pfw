@@ -2,313 +2,176 @@
 // I18n.cs
 // The framework's translation entry point: install a provider, then translate through it - or,
 // with no provider installed, hand every string straight back untouched.
+//
+// Source of record: ws_objects/pfw.ui.pbl.src/i18n.srf, a twenty-four-line global function object
+// publishing exactly three overloads and no more [:L6-L10] - an INSTALLER taking a provider and
+// answering RetCode.E_INVALID_OBJECT or RetCode.OK [:L12-L14], and two TRANSLATORS that invoke the
+// installed provider only when one is installed and return the text unconditionally either way
+// [:L17-L18, :L21-L22]. The two-argument translator hardcodes Enums.I18N_SRC_PFW as its source
+// [:L17]. The slot all three share is `global n_cst_i18n n_cst_i18n` [n_cst_i18n.sru:L11] - a global
+// whose name shadows its own type name, one of the two collisions AAP 0.4.5.1 names.
+//
+// About a dozen lines of executable code carry two behaviours the AAP requires intact, so the
+// reasoning is recorded rather than left to be reconstructed.
 // ==============================================================================================
 //
-// WHAT THIS FILE IS
-// Three overloads over about a dozen lines of executable code, ported from a PowerScript global
-// function object whose entire source is twenty-four lines. The size is misleading twice over.
-// Two of the three overloads carry the SILENT-PASSTHROUGH localization fallback, which AAP §0.1.4
-// lists among the error-ergonomics behaviours that "must all survive the migration intact"; and
-// the third overload is not a translator at all - it is the installer that decides which provider
-// the other two dispatch to, and it is the seam the composition root drives.
+// DECISION 1  The slot is an INSTANCE FIELD of an instantiable class, never a static mutable.
+// AAP 0.4.5.1: the TYPE keeps the descriptive .NET name (II18nProvider) and the INSTANCE becomes an
+// injected dependency rather than a global. The apparent tension with AAP 0.4.5.2 - which maps a
+// `*.srf` to a static method on a role-named static class - resolves on specificity: its three
+// worked examples (Predicates.IsSucceeded, Bits.BitAnd, Formatting.Sprintf) are PURE functions,
+// while this one reads and writes global mutable state, which is the installer's whole point. Three
+// load-bearing consequences: the sibling test project runs collections in parallel, so a static slot
+// would make one test's fake visible to every other and the suite order-dependent - and a flaky
+// suite cannot hold the AAP 0.7.3 C-H coverage gate; Gateway installs through ordinary DI, selecting
+// a provider from the locale token whose hardcoded "en" default it preserves and makes overridable
+// [pfw.sra:L94-L103, AAP 0.4.2.4], which an ambient static would put out of the container's reach;
+// and nothing in this project declares a `Current`, `Default` or `Instance` holder of II18nProvider,
+// which is a decision recorded in both files. There is no static mutable state here, and none may be
+// added.
 //
-// AUTHORITATIVE SOURCE, QUOTED IN FULL
-//     ws_objects/pfw.ui.pbl.src/i18n.srf
+// DECISION 2  The members are spelled `I18N` inside a class named `I18n`. The class name is fixed by
+// Categories.cs; C# forbids a member named identically to its enclosing type (CS0542), so a second
+// spelling was needed - and `I18N` is the more faithful one, because PowerScript is case-insensitive
+// and every call site in the estate writes the all-capitals form: `I18N(locale)` at pfw.sra:L103 and
+// `I18N(ne_cst_i18n.CAT_DWSVC, ...)` at se_cst_dw.sru:L355 and :L357. A reader diffing against the
+// oracle sees one token in both. Naming analyzers were checked rather than assumed: the root
+// .editorconfig sets its naming rules to `suggestion` and no project sets EnforceCodeStyleInBuild,
+// so IDE1006 cannot gate the build, and this file declares no underscore for CA1707 to report. The
+// corollary constrains future edits: the .editorconfig's suppression bands are scoped to exact paths
+// and THIS PATH IS NOT AMONG THEM, so no SCREAMING_SNAKE constant may be declared here - Kernel's
+// are only CONSUMED, and any new preserved-spelling constant of this library belongs in Categories.cs.
 //
-// The forward prototypes fix the published surface at exactly three overloads and no more
-// [:L6-L10]:
-//
-//     global function long i18n (n_cst_i18n n)                                              L7
-//     global function string i18n (readonly long category,string text)                      L8
-//     global function string i18n (readonly long source,readonly long category,string text) L9
-//
-// And the three bodies are three one-liners with a return apiece [:L12-L23]:
-//
-//     global function long i18n (n_cst_i18n n);if Not IsValid(n) then return RetCode.E_INVALID_OBJECT
-//     n_cst_i18n = n
-//     return RetCode.OK
-//     end function
-//
-//     global function string i18n (readonly long category,string text);if IsValid(n_cst_i18n) then n_cst_i18n.Event OnTranslate(Enums.I18N_SRC_PFW,category,ref text)
-//     return text
-//     end function
-//
-//     global function string i18n (readonly long source,readonly long category,string text);if IsValid(n_cst_i18n) then n_cst_i18n.Event OnTranslate(source,category,ref text)
-//     return text
-//     end function
-//
-// Everything this file does is in those nine lines. Everything below explains why reproducing them
-// faithfully in C# takes more thought than transcribing them.
-//
-// THE SLOT THEY SHARE
-// `n_cst_i18n` in the two translating bodies is not a type name being used as a value by accident:
-// ws_objects/pfw.ui.pbl.src/n_cst_i18n.sru:L11 declares `global n_cst_i18n n_cst_i18n`, a global
-// variable whose name is identical to its own type name. That variable is the installed-provider
-// slot - the installer assigns it [i18n.srf:L13] and both translators test it [:L17, :L21]. It is
-// one of the two shadowing collisions AAP §0.4.5.1 names, and resolving it is DECISION 1.
-//
-// ----------------------------------------------------------------------------------------------
-// DECISION 1  The slot is an INSTANCE FIELD of an instantiable class, never a static mutable
-// ----------------------------------------------------------------------------------------------
-// AAP §0.4.5.1 rules that "where a legacy global auto-instance shadows its own type name, the type
-// keeps the descriptive .NET name and the instance becomes an INJECTED DEPENDENCY rather than a
-// global". The type kept the descriptive name in II18nProvider.cs; the instance is this class's
-// `_provider` field.
-//
-// There is an apparent tension with AAP §0.4.5.2, whose object-kind table maps a `*.srf` global
-// function to "a static method on a role-named static class", and its three worked examples are
-// Predicates.IsSucceeded, Bits.BitAnd and Formatting.Sprintf. Every one of those is a PURE
-// function of its arguments. This one is not: it READS AND WRITES global mutable state, which is
-// the whole point of the installer overload. The more specific ruling therefore governs, and this
-// class is instantiable and registrable as a singleton rather than static. Three consequences,
-// each load-bearing:
-//
-//   * Test isolation, which AAP §0.7.3 C-H depends on. The sibling PowerFramework.Shared
-//     .Localization.Tests project runs xunit collections in parallel. With a static slot, a test
-//     that installs a fake would be observable by every other test in the assembly and the suite
-//     would be order-dependent and flaky - and a flaky suite cannot hold a coverage gate. With an
-//     instance field, two tests construct two facades and neither can see the other's provider.
-//   * Gateway installs through ordinary DI. The legacy composition root selects one of three
-//     providers from a locale token and installs it [ws_objects/pfw.pbl.src/pfw.sra:L94-L103];
-//     Gateway's Configuration/GatewayOptions.cs preserves that token's hardcoded "en" default and
-//     makes it overridable (AAP §0.4.2.4). A singleton registration plus a constructor parameter
-//     is how that reaches a service; an ambient static would put it out of the container's reach.
-//   * Nothing in this project declares a `Current`, `Default` or `Instance` holder of
-//     II18nProvider, and II18nProvider.cs records that absence as a decision too. This file is
-//     where the absence would otherwise have appeared, so it is restated here: there is no static
-//     mutable state in this file, and none may be added.
-//
-// ----------------------------------------------------------------------------------------------
-// DECISION 2  The members are spelled `I18N` inside a class named `I18n`
-// ----------------------------------------------------------------------------------------------
-// The class name is fixed: Categories.cs:L240 already records that "the entry point that
-// dispatches to whichever provider is installed is I18n". The members cannot share that spelling
-// - C# forbids a member named identically to its enclosing type (CS0542) - so a second spelling
-// was needed, and `I18N` is not a compromise but the more faithful of the two. PowerScript is
-// case-insensitive and every call site in the estate writes the all-capitals form: `I18N(locale)`
-// at pfw.sra:L103, and `I18N(ne_cst_i18n.CAT_DWSVC, ...)` at both
-// ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L355 and :L357. A reader comparing
-// ported code against the oracle sees the same token in both.
-//
-// Naming analyzers are not an obstacle and were checked rather than assumed: the repository-root
-// .editorconfig sets its three naming rules to `suggestion`, and no project sets
-// EnforceCodeStyleInBuild, so IDE1006 cannot gate the build. CA1707 would report an underscore,
-// and this file declares no identifier containing one. Note the corollary carefully, because it
-// constrains future edits to this file: the .editorconfig's CA1707/IDE1006 suppression bands are
-// scoped to exact file paths and THIS PATH IS NOT AMONG THEM. No SCREAMING_SNAKE constant may be
-// declared here; Kernel's are CONSUMED, which needs no suppression, and any new preserved-spelling
-// constant of this library belongs in Categories.cs.
-//
-// ----------------------------------------------------------------------------------------------
-// DECISION 3  SILENT PASSTHROUGH is the headline behaviour, and it is absolute
-// ----------------------------------------------------------------------------------------------
-// Both translating bodies invoke the provider ONLY when one is installed, and then return the text
-// UNCONDITIONALLY [i18n.srf:L17-L18, :L21-L22]. There is no else branch, no diagnostic and no
-// marker. With no provider installed the text comes back exactly as it went in, and the caller
-// cannot tell that from a successful translation to an identical string.
-//
-// That is not a fallback bolted onto the design; with localization absent it is the ONLY
-// behaviour. It also composes with the sibling reader's unchecked load - I18nResourceReader
-// reproduces the legacy's ignored `LoadFile` result [n_cst_i18n_en.sru:L158-L159], so a missing
-// pfw.i18n.xml makes every lookup miss - which means an entirely unconfigured system returns every
-// string untouched and reports nothing at all. AAP §0.7.3 C-B forbids improving that, and it is
-// worth naming exactly what "improving" would mean here, because every item on the list is
-// something a well-meaning engineer would add:
+// DECISION 3  SILENT PASSTHROUGH is the headline behaviour, and it is absolute. Both translating
+// bodies invoke the provider ONLY when one is installed and then return the text UNCONDITIONALLY
+// [i18n.srf:L17-L18, :L21-L22]: no else branch, no diagnostic, no marker. With no provider installed
+// the text comes back exactly as it went in, and the caller cannot tell that from a successful
+// translation to an identical string. It is not a fallback bolted on - with localization absent it is
+// the ONLY behaviour - and it composes with the sibling reader's unchecked load, which reproduces the
+// legacy's ignored `LoadFile` result [n_cst_i18n_en.sru:L158-L159], so an entirely unconfigured
+// system returns every string untouched and reports nothing at all. AAP 0.7.3 C-B forbids improving
+// that, and every item on this list is something a well-meaning engineer would add:
 //
 //     no throw when no provider is installed          no throw when the provider returns 0
 //     no log, trace or metric of a miss, at any level no returning null for a missed lookup
 //     no sentinel, marker, prefix or suffix           no out parameter or flag reporting a miss
 //     no "was it translated" result record            no fallback chain to a second provider
 //
-// The mechanical statement of the rule, checkable by reading the code: `return text` is reached on
-// EVERY path through both translating overloads, and neither overload contains a `throw`.
+// The mechanical statement, checkable by reading the code: `return text` is reached on EVERY path
+// through both translating overloads, and neither contains a `throw`.
 //
-// ----------------------------------------------------------------------------------------------
-// DECISION 4  The provider's return value is discarded, visibly and on purpose  (AAP §0.7.3 C-K)
-// ----------------------------------------------------------------------------------------------
-// II18nProvider.OnTranslate returns a long: 1 means handled, 0 means not handled, and the legacy
-// documents that alphabet in the doc block all three providers carry - `返回1代表已处理`
-// [ws_objects/pfw.ui.controls.ext.pbl.src/n_cst_i18n_chs.sru:L23]. The value is real and every
-// provider produces it. This facade THROWS IT AWAY, because the legacy invokes the event as a bare
-// statement and returns the text regardless [i18n.srf:L17-L18, :L21-L22].
+// DECISION 4  The provider's return value is discarded, visibly and on purpose (AAP 0.7.3 C-K).
+// II18nProvider.OnTranslate returns a long - 1 handled, 0 not handled, documented in the doc block
+// all three providers carry [n_cst_i18n_chs.sru:L23]. Every provider produces it and this facade
+// THROWS IT AWAY, because the legacy invokes the event as a bare statement and returns the text
+// regardless. It is written as `_ = provider.OnTranslate(...)` so the discard is a visible act rather
+// than an accident of a bare call. Reproducing it correctly means the translation is taken from the
+// `ref` argument and NOT from the return code, which has two consequences: a provider answering 0
+// must be indistinguishable from no provider at all (DECISION 3), and a provider that mutates `text`
+// and STILL answers 0 has its mutation honoured, because the facade never consults the code. That is
+// not a contradiction to tidy away - it is what "the ref argument is the channel" means, and the
+// sibling test project asserts it.
 //
-// It is written as a discard assignment - `_ = provider.OnTranslate(...)` - so that the discard is
-// a visible act rather than an accident of a bare call, and this comment is the C-K record of it at
-// its point of reproduction. Reproducing it correctly means the translation is taken from the `ref`
-// argument and NOT from the return code. Two consequences worth spelling out:
+// DECISION 5  Nullability: `string?` text, `string?` return, `II18nProvider?` installer parameter.
+// Each annotation is forced by an authority, and the file contains no null-forgiving `!`.
+// II18nProvider.OnTranslate takes `ref string?` and C# requires a `ref` argument's type to match
+// EXACTLY, so a non-nullable `string` here could only be passed as `ref text!`; the return type is
+// that same variable, and AAP 0.4.5.4 forbids collapsing null, which is a real value in this estate
+// because the DataWindow handlers reaching this entry point carry explicit null-and-null comparison
+// arms [se_cst_dw.sru:L200, :L372]. A null `text` still reaches the provider: the legacy guard tests
+// the PROVIDER's validity and never the text [i18n.srf:L17, :L21], so short-circuiting on a null
+// text would be new behaviour - and II18nProvider binds the other half, that no provider throws on
+// one. The installer parameter is `II18nProvider?` because the legacy tests `Not IsValid(n)` and
+// returns an error code [:L12], making an invalid argument EXPECTED INPUT rather than a caller
+// defect; a non-nullable parameter would raise CS8625 at `I18N(null)`, so the very case the oracle
+// handles could not be exercised without a suppression, and warnings are errors here.
 //
-//   * A provider that answers 0 must be indistinguishable from no provider at all, so a 0 must
-//     never become an exception, a log line or an untranslated marker (DECISION 3).
-//   * A provider that mutates `text` and STILL answers 0 has its mutation honoured, because the
-//     facade never consults the code. That is not a contradiction to be tidied away; it is what
-//     "the ref argument is the channel" means, and the sibling test project asserts it.
+// DECISION 6  `in` on source and category, plain by-value on text. AAP 0.4.5.2 maps `readonly` to
+// `in` and PowerBuilder `long` to C# `long`, applied literally against the prototypes
+// [i18n.srf:L8-L9]. `text` is NOT `readonly` in either prototype - it is the one parameter the oracle
+// leaves writable, because it is the channel a translation travels back through - so it stays plain
+// by-value and is handed onward by `ref`; marking it `in` makes the file uncompilable at that
+// argument, which is a fair measure of how load-bearing the distinction is. `in` on a 64-bit integer
+// buys nothing at runtime; it is here as the faithful rendering of `readonly`, and II18nProvider
+// deliberately does NOT carry it because the legacy EVENT declares bare `long` [n_cst_i18n.sru:L9].
 //
-// ----------------------------------------------------------------------------------------------
-// DECISION 5  Nullability: `string?` text, `string?` return, `II18nProvider?` installer parameter
-// ----------------------------------------------------------------------------------------------
-// Every annotation here was forced by an authority rather than chosen by taste, and each avoids a
-// null-forgiving `!` operator, of which this file contains none.
+// DECISION 7  The validity test is `is not null`, and Predicates.IsValidObject is NOT used. The
+// oracle gates on PowerBuilder's `IsValid`, which reports whether a reference is created and not yet
+// `Destroy`ed; Kernel records the substitution reasoning on Predicates.IsValidObject - .NET has no
+// destroy-and-dangle state, so the exact managed equivalent is "not null". This file applies that
+// reasoning without calling that member, for two independent reasons: Predicates.cs is not among
+// this file's declared dependencies, and inventing an import outside that set is what the refactor's
+// dependency discipline forbids; and `IsValidObject(object?)` carries no [NotNullWhen(true)], so the
+// compiler learns nothing from a true result and the dereference would need `provider!`,
+// reintroducing the operator DECISION 5 exists to avoid. `is not null` is what that member computes
+// anyway - its body is `value is not null` - so nothing is lost.
 //
-//   * `text` is `string?`. II18nProvider.OnTranslate takes `ref string?`, and C# requires a `ref`
-//     argument's type to match EXACTLY, so a non-nullable `string` parameter here could only be
-//     passed as `ref text!`. II18nProvider.cs states the obligation directly: "I18n.cs must
-//     declare its own `text` parameter as `string?`, so that it can pass `ref text` with no
-//     null-forgiving operator anywhere."
-//   * The return type is `string?` because it returns that same variable. AAP §0.4.5.4 forbids
-//     collapsing PowerBuilder's null semantics for value types, and the same reasoning applies to
-//     a null string: the DataWindow handlers that reach this entry point carry explicit
-//     null-and-null comparison arms [se_cst_dw.sru:L200, :L372], so a null string is a real value
-//     in this estate and must remain expressible.
-//   * A null `text` still reaches the provider. The legacy guard tests the PROVIDER's validity and
-//     never the text [i18n.srf:L17, :L21], so short-circuiting on a null text would be a new
-//     behaviour. II18nProvider.cs binds the other half of that bargain: no provider may throw on a
-//     null text; "not handled" is the correct answer to a null lookup key.
-//   * The installer parameter is `II18nProvider?`. The legacy tests `Not IsValid(n)` and returns an
-//     error code for the invalid case [:L12], which means an invalid argument is EXPECTED INPUT and
-//     part of the contract rather than a caller defect. A non-nullable parameter would make
-//     `I18N(null)` raise CS8625 at the call site, so the very case the oracle handles could not be
-//     exercised without a suppression - and this repository treats warnings as errors.
-//
-// ----------------------------------------------------------------------------------------------
-// DECISION 6  `in` on source and category, plain by-value on text
-// ----------------------------------------------------------------------------------------------
-// AAP §0.4.5.2 maps a `readonly` parameter to an `in` parameter and PowerBuilder `long` to C#
-// `long`, and both are applied literally against the prototypes at i18n.srf:L8-L9: `category` is
-// `readonly` in both translating overloads and `source` is `readonly` in the three-argument one,
-// so all three are `in long`. `text` is NOT `readonly` in either prototype - it is the one
-// parameter the oracle leaves writable, because it is the channel a translation travels back
-// through - so it stays a plain by-value parameter that is handed onward by `ref`. Marking it `in`
-// would make the file uncompilable at the `ref` argument, which is a fair sign of how load-bearing
-// the distinction is. Note that `in` on a 64-bit integer buys nothing at runtime; it is here
-// because it is the faithful rendering of `readonly`, and II18nProvider.cs deliberately does NOT
-// carry it, because the legacy EVENT declares bare `long` parameters [n_cst_i18n.sru:L9].
-//
-// ----------------------------------------------------------------------------------------------
-// DECISION 7  The validity test is `is not null`, and Predicates.IsValidObject is NOT used
-// ----------------------------------------------------------------------------------------------
-// The oracle gates on the PowerBuilder intrinsic `IsValid`, which reports whether a reference is
-// live - created and not yet `Destroy`ed. Kernel already records the substitution reasoning for
-// that intrinsic on Predicates.IsValidObject: ".NET has no destroy-and-dangle state: a reference is
-// either null or points at an object the garbage collector guarantees is alive, so the exact
-// managed equivalent of 'created and not yet destroyed' is 'not null'". This file applies that
-// reasoning but deliberately does not call that member, for two independent reasons:
-//
-//   * Predicates.cs is not among this file's declared dependencies (II18nProvider.cs, this
-//     library's project file, Kernel's RetCode.cs and Kernel's Enums.cs), and inventing an import
-//     outside that set is exactly what the refactor's dependency discipline forbids.
-//   * `IsValidObject(object? value)` carries no [NotNullWhen(true)] annotation, so the compiler
-//     learns nothing from a true result. Gating the dereference on it would require `provider!`,
-//     reintroducing the null-forgiving operator DECISION 5 exists to avoid.
-//
-// `is not null` is behaviourally identical to what that member computes - its body is
-// `value is not null` - so nothing is lost, and the reference comparison is allocation-free and
-// cannot itself throw.
-//
-// ----------------------------------------------------------------------------------------------
-// DECISION 8  Two overloads, one shared body, and NOT an optional parameter
-// ----------------------------------------------------------------------------------------------
-// The two-argument overload delegates to the three-argument one passing Enums.I18N_SRC_PFW. That
-// is faithful rather than merely tidy: the oracle's two-argument body hardcodes exactly that
-// constant as the source [i18n.srf:L17], so the delegation reproduces the value and eliminates a
-// duplicated body in which the two could later drift.
-//
-// Collapsing them into ONE method with a defaulted parameter was rejected. The oracle publishes two
-// distinct overloads [:L8-L9] and callers select between them - se_cst_dw.sru:L355 and :L357 both
-// call the two-argument form - and a defaulted parameter is a different published surface with a
-// different metadata shape, a different overload-resolution story, and a default value baked into
+// DECISION 8  Two overloads, one shared body, and NOT an optional parameter. The two-argument
+// overload delegates to the three-argument one passing Enums.I18N_SRC_PFW, reproducing the constant
+// the oracle hardcodes [i18n.srf:L17] and eliminating a duplicated body the two could later drift
+// apart in. Collapsing them into one method with a defaulted parameter was rejected: the oracle
+// publishes two distinct overloads [:L8-L9], callers select between them (se_cst_dw.sru:L355 and
+// :L357 both call the two-argument form), and a defaulted parameter is a different published surface
+// with a different metadata shape, a different overload-resolution story, and a default baked into
 // every caller's compiled call site rather than resolved here.
 //
-// ----------------------------------------------------------------------------------------------
-// DECISION 9  Install ordering, and the guards that are deliberately absent
-// ----------------------------------------------------------------------------------------------
-// The invalid case returns BEFORE any assignment [i18n.srf:L12 precedes :L13], so a failed install
-// leaves whatever was installed before it intact. That ordering is observable - install a provider,
-// then fail an install, then translate, and the first provider still answers - so it is preserved
-// exactly and the sibling test project asserts it.
+// DECISION 9  Install ordering, and the guards that are deliberately absent. The invalid case returns
+// BEFORE any assignment [i18n.srf:L12 precedes :L13], so a failed install leaves whatever was
+// installed before it intact - observable by installing a provider, failing an install, then
+// translating, and the sibling test project asserts it. Equally deliberate is what the oracle does
+// NOT do, none of which may be added: no already-installed guard, so a second install simply
+// replaces the slot; no uninstall, reset or dispose, so the slot's lifetime is null -> provider ->
+// provider' and never back to null; and no property, accessor or IsInstalled probe, because the
+// oracle publishes three functions and no fourth thing - a caller learns what is installed by
+// translating, which is also how the tests observe it.
 //
-// Equally deliberate is what the oracle does NOT do, none of which may be added:
-//
-//   * No already-installed guard. A second install simply replaces the slot; there is no
-//     "already installed" error and no idempotence check.
-//   * No uninstall, reset or dispose. Once a provider is installed the slot is never emptied, so
-//     the slot's lifetime is null -> provider -> provider' and never back to null. No public
-//     member here can clear it.
-//   * No property or accessor exposing the installed provider, and no IsInstalled probe. The
-//     oracle publishes three functions and no fourth thing; a caller learns what is installed by
-//     translating, which is also how the tests observe it.
-//
-// ----------------------------------------------------------------------------------------------
-// DECISION 10  Concurrency: no lock, no volatile, no Interlocked - and why that is correct here
-// ----------------------------------------------------------------------------------------------
-// This class is registrable as a singleton, so in a service its translating overloads will be
-// entered concurrently while the oracle's original was a single-threaded desktop global installed
-// once during the application's open event [pfw.sra:L103]. Adding synchronization anyway was
-// considered and rejected, because it would be unobservable ceremony rather than safety:
-//
-//   * A reference-typed field is read and written atomically under the CLI memory model, so no
-//     reader can observe a torn or partially published reference.
-//   * The slot only ever moves forward (DECISION 9), so a concurrent install cannot turn a
-//     non-null observation back into null.
-//   * The translating overloads copy the field into a local ONCE and then test and dereference the
-//     LOCAL. That is not a micro-optimisation: it is what makes the null test and the call refer to
-//     the same instance, so an install racing with a translation can only mean the translation used
-//     the older provider - never a NullReferenceException, and never two different providers within
-//     one call.
-//
-// The intended pattern - install during startup, translate while serving - additionally gives the
+// DECISION 10  Concurrency: no lock, no volatile, no Interlocked - and that is correct here. This
+// class is registrable as a singleton, so its translating overloads will be entered concurrently
+// where the oracle's original was a single-threaded desktop global installed once during the open
+// event [pfw.sra:L103]. Synchronization was considered and rejected as unobservable ceremony: a
+// reference-typed field is read and written atomically under the CLI memory model, so no reader can
+// observe a torn reference; the slot only ever moves forward (DECISION 9), so a concurrent install
+// cannot turn a non-null observation back into null; and the translating overloads copy the field
+// into a local ONCE and then test and dereference the LOCAL, which is what makes the null test and
+// the call refer to the same instance - so an install racing a translation can only mean the older
+// provider was used, never a NullReferenceException and never two providers within one call. The
+// intended pattern, install during startup and translate while serving, additionally gives the
 // host's own startup barrier a happens-before edge for free. A `lock` would serialise every
 // translation in the process for no behavioural gain, which is a change the oracle cannot express.
 //
-// ----------------------------------------------------------------------------------------------
-// DELIBERATELY ABSENT, each for a stated reason, so nobody "completes" this file by adding one
-// ----------------------------------------------------------------------------------------------
-//   * Any call to Sprintf, and any formatting at all. This is worth stating explicitly because
-//     Kernel's Formatting.cs summarises this folder as one where "the I18n path formats translated
-//     text through Sprintf". Checked against the oracle: it does not. i18n.srf never calls Sprintf.
-//     Sprintf appears on BOTH SIDES of this entry point - the two XPath providers use it to build a
-//     query, and CALL SITES such as ws_objects/pfw.datawindow.services.pbl.src/
-//     n_cst_dwsvc_rowselect.sru:L239 use it to format a result they already translated - and in
-//     neither case inside this file. Adding a formatting dependency here would be a new capability.
-//   * Any logging, ILogger, Console, trace, metric or diagnostic sink. Forbidden twice over: as a
-//     dependency the §0.7.2 baseline does not want in a pure shared library, and as behaviour,
+// DELIBERATELY ABSENT, each for a stated reason, so nobody "completes" this file by adding one:
+//   * Any call to Sprintf, and any formatting at all - worth stating because Kernel's Formatting.cs
+//     summarises this folder as one where "the I18n path formats translated text through Sprintf".
+//     Checked against the oracle: it does not. Sprintf appears on BOTH SIDES of this entry point -
+//     the two XPath providers build a query with it, and call sites such as
+//     n_cst_dwsvc_rowselect.sru:L239 format a result they already translated - and in neither case
+//     inside this file. A formatting dependency here would be new capability.
+//   * Any logging, ILogger, Console, trace, metric or diagnostic sink. Forbidden twice: as a
+//     dependency the AAP 0.7.2 baseline does not want in a pure shared library, and as behaviour,
 //     because logging a miss is precisely what DECISION 3 forbids.
-//   * Any `throw`, including argument validation on the installer. The installer's answer to an
-//     invalid argument is a return CODE, which is the whole content of i18n.srf:L12; converting it
-//     to an exception would change a documented result into a control-flow break.
+//   * Any `throw`, including argument validation on the installer. Its answer to an invalid argument
+//     is a return CODE, which is the whole content of i18n.srf:L12.
 //   * Any interface over this facade. Consumers substitute behaviour by installing a fake PROVIDER,
-//     which is the seam the oracle itself publishes and which II18nProvider already types. A second
-//     abstraction over three lines of dispatch would be surface with no legacy counterpart.
-//   * Any async or Task-returning form. The oracle TRIGGERS the event rather than posting it, so
-//     the mutation is visible on the very next line; an async form would break that sequence.
-//   * Any CultureInfo, locale property, resource manager or fallback chain. The locale is not data
-//     on this facade - it is WHICH provider was installed [pfw.sra:L95-L102] - and a fallback chain
-//     is a capability the oracle does not have.
+//     the seam the oracle itself publishes and II18nProvider already types.
+//   * Any async or Task-returning form. The oracle TRIGGERS the event rather than posting it, so the
+//     mutation is visible on the very next line; an async form would break that sequence.
+//   * Any CultureInfo, locale property, resource manager or fallback chain. The locale is not data on
+//     this facade - it is WHICH provider was installed [pfw.sra:L95-L102].
 //   * Any file, network or environment access. This library performs exactly one narrow read, in
 //     I18nResourceReader.cs, and this file performs none.
 //
-// DEPENDENCY SURFACE - one import, three constants, and nothing else
-// `using PowerFramework.Shared.Kernel;` is the only import in the file, and the executable code
-// reaches exactly three names through it: RetCode.E_INVALID_OBJECT and RetCode.OK
-// [retcode.sru:L48, :L39] and Enums.I18N_SRC_PFW [enums.sru:L115]. All three are referenced BY
-// IDENTIFIER and never by their literal values -5, 0 and 0, because AAP §0.4.5.3 preserves those
-// spellings precisely so they stay legible in log records and in characterization recordings.
+// DEPENDENCY SURFACE. `using PowerFramework.Shared.Kernel;` is the only import, and the executable
+// code reaches exactly three names through it: RetCode.E_INVALID_OBJECT and RetCode.OK
+// [retcode.sru:L48, :L39] and Enums.I18N_SRC_PFW [enums.sru:L115] - all BY IDENTIFIER and never by
+// their literal values -5, 0 and 0, because AAP 0.4.5.3 preserves those spellings so they stay
+// legible in log records and characterization recordings. II18nProvider and Categories need no
+// import, being siblings in this namespace; Categories appears in DOCUMENTATION ONLY. Nothing else
+// is reachable: no package, no other shared library, nothing under services/, and nothing belonging
+// to the four deferred services - notably not Kernel's Predicates, for the reasons in DECISION 7.
 //
-// Two names appear without an import because they are siblings in this same namespace, so no
-// import exists for them to appear in: II18nProvider, which the field and the installer signature
-// use, and Categories, which appears in DOCUMENTATION ONLY and in no line of code - it is named
-// where a reader needs to know which values a category parameter takes.
-//
-// Nothing else is reachable from here at all: no package (the project file declares none and this
-// file needs none), no other shared library, nothing under services/, and nothing belonging to the
-// four deferred services. Notably absent is Kernel's Predicates, for the two reasons DECISION 7
-// records; it is discussed in prose above and imported nowhere.
-//
-// THE LEGACY TREE IS READ-ONLY AND SHARES THIS WORKING DIRECTORY  (AAP §0.7.3 C-C)
-// Every `:Lnnn` locator above and below points into ws_objects/, which is the behavioural oracle
-// for parity testing: read as specification, never edited, moved or reformatted, and never a build
-// input. i18n.srf is the sole specification for this file, and every line number quoted here was
-// verified against the file on disk rather than carried forward from a summary - which is how the
-// Formatting.cs claim above came to be corrected instead of copied.
+//  LOCATOR CONVENTION: every bare `pfw.sra:L...` in this file means ws_objects/pfw.pbl.src/pfw.sra,
+//  the framework application - never the same-named packager object at
+//  ws_objects/pfw.pack.pbl.src/pfw.sra (AAP 0.8.6 R7).
 // ==============================================================================================
 
 using PowerFramework.Shared.Kernel;

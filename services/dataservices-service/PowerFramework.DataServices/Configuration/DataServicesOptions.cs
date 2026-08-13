@@ -18,13 +18,6 @@
 // is PowerFramework.Shared.Kernel, for the three Pinyin flag constants, and it is present for a
 // stated reason recorded on the property that uses it.
 //
-// RULES POSITION, STATED PLAINLY
-// The project's rules document was retrieved and contains exactly one statement: no user rules
-// were provided. That is a finding, not latitude. This file is therefore held to the enterprise
-// baseline of the transformation plan (section 0.7.2) and to the twelve binding non-rule
-// constraints C-A through C-L (section 0.7.3). No rule is invented, inferred or back-filled from
-// convention, and no constraint is relaxed on the strength of the rules' absence.
-//
 // TWO BINDABLE ROOTS IN ONE FILE, AND WHY THAT IS CORRECT RATHER THAN UNTIDY
 // Two root types are declared here, with two different section paths:
 //
@@ -144,9 +137,13 @@
 // what travels in a recording here is a configuration VALUE, not the C# name that holds it. So no
 // constant is declared in this file, and none should be added.
 //
+//  LOCATOR CONVENTION: every bare `pfw.sra:L...` in this file means ws_objects/pfw.pbl.src/pfw.sra,
+//  the framework application - never the same-named packager object at
+//  ws_objects/pfw.pack.pbl.src/pfw.sra (AAP 0.8.6 R7).
 // ==============================================================================================
 
 using System.ComponentModel.DataAnnotations;
+using System.Security.Cryptography.X509Certificates;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using Microsoft.Extensions.Options;
@@ -830,22 +827,23 @@ public sealed class PersistenceClientOptions
     public string Address { get; set; } = string.Empty;
 
     // ==========================================================================================
-    //  NO Transaction PROPERTY LIVES HERE, AND THE REMOVAL IS THE FIX RATHER THAN AN OVERSIGHT.
+    //  NO Transaction PROPERTY LIVES HERE, AND ITS ABSENCE IS DELIBERATE RATHER THAN AN OVERSIGHT.
     //
-    //  A `PersistenceTransactionOptions Transaction` group used to be declared here and bound from
-    //  `DataServices:Persistence:Transaction`, carrying a database name, a DBMS token, a server
-    //  name, a DBParm string and an auto-commit flag. NOTHING EVER READ IT. The descriptor every
-    //  session is actually begun with comes from `DataServices:PersistenceSession`, which
-    //  Grpc/DataWindowService.BuildSessionRequest composes - and the two groups disagreed on their
-    //  defaults, the dead one defaulting the database to COMPANY and auto-commit to true where the
-    //  live one defaults the database to empty and auto-commit to false.
+    //  A `PersistenceTransactionOptions Transaction` group bound from
+    //  `DataServices:Persistence:Transaction` - carrying a database name, a DBMS token, a server
+    //  name, a DBParm string and an auto-commit flag - is the shape this class attracts, AND NOTHING
+    //  WOULD READ IT. The descriptor every session is actually begun with comes from
+    //  `DataServices:PersistenceSession`, which Grpc/DataWindowService.BuildSessionRequest composes -
+    //  and the two groups disagree on their defaults, the second one defaulting the database to
+    //  COMPANY and auto-commit to true where the live one defaults the database to empty and
+    //  auto-commit to false.
     //
-    //  A DEAD CONFIGURATION GROUP IS WORSE THAN A MISSING ONE, which is why it is deleted rather
-    //  than annotated: it appears in a documented section name, an operator setting it observes no
+    //  A DEAD CONFIGURATION GROUP IS WORSE THAN A MISSING ONE, which is why none is declared here
+    //  even annotated: it appears in a documented section name, an operator setting it observes no
     //  effect whatsoever, and the value most likely to be set - auto-commit, whose two readings have
     //  opposite consequences for a partially applied multi-row update - is the one that would look
-    //  most like it had taken. One operator-facing authority now exists for the session descriptor,
-    //  and it is the one the code reads.
+    //  most like it had taken. Exactly one operator-facing authority exists for the session
+    //  descriptor, and it is the one the code reads.
     // ==========================================================================================
 }
 
@@ -1102,6 +1100,117 @@ public sealed class InternalTlsTrustOptions
     /// Whether this deployment narrows internal trust to a mounted anchor.
     /// </summary>
     public bool IsConfigured => !string.IsNullOrWhiteSpace(TrustedCaPath);
+    /// <summary>
+    /// How the revocation status of an internal peer's certificate is checked. One of
+    /// <see cref="RevocationModes.NoCheck"/>, <see cref="RevocationModes.Offline"/> or
+    /// <see cref="RevocationModes.Online"/>, compared case-insensitively.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>CONFIGURABLE, AND THE SHIPPED DEFAULT IS THE ONLY VALUE THE DOCUMENTED TOPOLOGY CAN ANSWER.</b>
+    /// This was a hardcoded <c>NoCheck</c>, which meant a deployment whose authority DOES publish revocation
+    /// information had no way to ask for it and a stolen peer certificate stayed acceptable until it expired
+    /// (CWE-295). It is a setting now. What it is NOT is a setting whose default can be the strict value:
+    /// the local authority the documented recipe generates publishes no distribution point and runs no
+    /// responder, and that was MEASURED rather than assumed - building a chain for a leaf it issued under
+    /// <c>CustomRootTrust</c> succeeds under <c>NoCheck</c> and FAILS under both <c>Offline</c> and
+    /// <c>Online</c> with <c>RevocationStatusUnknown | OfflineRevocation</c>. Shipping a strict default
+    /// would therefore refuse every internal peer on a clean bring-up and hold every dependent behind an
+    /// unsatisfiable health gate.
+    /// </para>
+    /// <para>
+    /// AN INDETERMINATE STATUS IS A REFUSAL UNDER THE STRICTER MODES, NEVER A PASS. The chain policy sets no
+    /// verification flag that ignores a revocation failure, so a deployment that selects <c>Offline</c> or
+    /// <c>Online</c> gets a genuine check whose unknown answer refuses the peer - which is the only reading
+    /// under which selecting the mode means anything at all.
+    /// </para>
+    /// <para>
+    /// WHAT SUBSTITUTES FOR REVOCATION WHILE THIS IS <c>NoCheck</c> IS CERTIFICATE LIFETIME, and the
+    /// documented issuance recipe is <c>-days 30</c> for both the authority and every leaf. The operational
+    /// surfaces state the production recommendation - issue from an authority that publishes a distribution
+    /// point or a responder and set this to <c>Online</c> - and the emergency procedure for a compromise
+    /// under <c>NoCheck</c>, which is to replace the anchor and restart rather than to revoke.
+    /// </para>
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string RevocationMode { get; set; } = RevocationModes.NoCheck;
+
+    /// <summary>
+    /// Resolves <see cref="RevocationMode"/> to the platform value the chain policy is built with.
+    /// </summary>
+    /// <param name="configurationKeyPrefix">
+    /// The configuration path of this group, quoted into the failure so an operator can find the offending
+    /// key without reading source.
+    /// </param>
+    /// <returns>The resolved mode.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// The configured value names no recognised mode. Structural, and therefore fatal: guessing a mode
+    /// would either silently weaken the check a deployment asked for or silently refuse every peer, and
+    /// both are worse than not starting. The value IS quoted, because a mode name is not a secret and an
+    /// operator fixing a typo needs to see what was read.
+    /// </exception>
+    internal X509RevocationMode ResolveRevocationMode(string configurationKeyPrefix)
+    {
+        string configured = RevocationMode?.Trim() ?? string.Empty;
+
+        if (RevocationModes.Matches(configured, RevocationModes.NoCheck))
+        {
+            return X509RevocationMode.NoCheck;
+        }
+
+        if (RevocationModes.Matches(configured, RevocationModes.Offline))
+        {
+            return X509RevocationMode.Offline;
+        }
+
+        if (RevocationModes.Matches(configured, RevocationModes.Online))
+        {
+            return X509RevocationMode.Online;
+        }
+
+        throw new InvalidOperationException(
+            $"'{configurationKeyPrefix}:{nameof(RevocationMode)}' is set to '{RevocationMode}', which "
+                + "names no recognised revocation posture, so this service will not start. Set one of "
+                + $"{string.Join(", ", RevocationModes.Recognised)}, or remove the key to accept the "
+                + "default. Note that the stricter two require an authority that publishes a certificate "
+                + "revocation list or runs a responder: against one that does not, every peer is refused "
+                + "with an indeterminate revocation status, which is a refusal by design.");
+    }
+
+    /// <summary>The revocation postures this group accepts.</summary>
+    /// <remarks>
+    /// Declared here rather than as loose strings so that the settings file, the validator, the resolver
+    /// and the failure message cannot spell them three different ways.
+    /// </remarks>
+    public static class RevocationModes
+    {
+        /// <summary>No revocation check is performed. The shipped default.</summary>
+        public const string NoCheck = "NoCheck";
+
+        /// <summary>Only cached revocation information is consulted.</summary>
+        public const string Offline = "Offline";
+
+        /// <summary>Revocation information is fetched from the authority.</summary>
+        public const string Online = "Online";
+
+        /// <summary>Every accepted spelling, in the order a failure message lists them.</summary>
+        public static IReadOnlyList<string> Recognised { get; } = [NoCheck, Offline, Online];
+
+        /// <summary>Reports whether a configured value is recognised.</summary>
+        /// <param name="candidate">The configured value, which may be <see langword="null"/>.</param>
+        /// <returns><see langword="true"/> when it names a mode.</returns>
+        public static bool IsRecognised(string? candidate) =>
+            candidate is not null
+                && Recognised.Any(mode => Matches(candidate.Trim(), mode));
+
+        /// <summary>Compares a configured value against one mode, case-insensitively.</summary>
+        /// <param name="candidate">The configured value.</param>
+        /// <param name="mode">The mode to compare against.</param>
+        /// <returns><see langword="true"/> when they name the same mode.</returns>
+        internal static bool Matches(string candidate, string mode) =>
+            string.Equals(candidate, mode, StringComparison.OrdinalIgnoreCase);
+    }
+
 
     /// <summary>
     /// Describes the one way this group can be wrong: present but blank.
@@ -1343,11 +1452,11 @@ public sealed class ClientResilienceOptions
     /// </summary>
     /// <remarks>
     /// <para>
-    /// 🔴 THE PER-ATTEMPT BOUND USED TO BE INHERITED SILENTLY, AND IT WAS THE BOUND THAT APPLIED. Only
-    /// <see cref="RequestTimeout"/> was configured, onto the pipeline's TOTAL timeout, while the
-    /// pipeline's per-attempt timeout kept its package default of ten seconds. Retry here is
+    /// 🔴 LEAVING THE PER-ATTEMPT BOUND TO BE INHERITED SILENTLY MAKES IT THE BOUND THAT APPLIES.
+    /// Configuring only <see cref="RequestTimeout"/>, onto the pipeline's TOTAL timeout, leaves the
+    /// pipeline's per-attempt timeout at its package default of ten seconds. Retry here is
     /// operation-scoped, so for every operation that creates, mutates or advances upstream state the
-    /// total budget is never reached and the inherited ten seconds decided when the call gave up - a
+    /// total budget is never reached and the inherited ten seconds decides when the call gives up - a
     /// different number from the one this service documents.
     /// </para>
     /// <para>
@@ -1580,9 +1689,10 @@ public sealed class EventChainOptions
     /// <remarks>
     /// <para>
     /// 🔴 <b>CREATED BY THE DECOMPOSITION, AND WITHOUT IT A SILENT CLIENT HELD THE STREAM FOR EVER.</b>
-    /// Nine of the 22 events are semantic questions the chain asks BACK, and under the synchronous
-    /// discipline the dispatch that raised one blocks until it is answered - which is the oracle's own
-    /// shape, because in process the handler simply returned. Across a wire the answer may never come: a
+    /// Nine of the 22 events are semantic invocations the chain makes BACK, and FIVE of those are
+    /// answer-bearing, so five await a reply. Under the synchronous discipline the dispatch that raised one
+    /// blocks until it is answered - which is the oracle's own shape, because in process the handler simply
+    /// returned. Across a wire the answer may never come: a
     /// client that reads the outbound question and sends nothing leaves the dispatch waiting on a task
     /// nothing will complete, and the stream neither fails nor finishes.
     /// </para>
@@ -1617,7 +1727,7 @@ public sealed class EventChainOptions
     /// <remarks>
     /// <para>
     /// 🔴 <b>CREATED BY THE DECOMPOSITION, AND IT IS THE SERVER-SIDE ENFORCEMENT OF A DISCIPLINE THAT
-    /// WAS PREVIOUSLY ONLY ASSUMED.</b> A notification is handed to a single ordered consumer rather
+    /// IS OTHERWISE ONLY ASSUMED.</b> A notification is handed to a single ordered consumer rather
     /// than dispatched on the read loop, because nine of the 22 events are questions the chain asks
     /// BACK and blocks on, and only the read loop can deliver the answer
     /// [<c>se_cst_dw.sru:L11-L14</c>, <c>:L24-L26</c>, <c>:L28</c>, <c>:L32</c>]. That handover is
@@ -1706,11 +1816,11 @@ public sealed class EventChainOptions
 /// merely unused here but unreachable.
 /// </para>
 /// <para>
-/// NO PROPERTY NAME ON THIS TYPE CONTAINS THE WORD "KEY" AT ALL. One did - a boolean switch selecting
-/// whether the framework's handler verified the signature it retrieves from Security's published
-/// verification document - and it was removed along with the other three validation switches, because
-/// a boundary whose signature checking a settings file can switch off is only optionally
-/// authenticated. Signature verification is now a compiled-in <c>true</c> in Program.cs and is not
+/// NO PROPERTY NAME ON THIS TYPE CONTAINS THE WORD "KEY" AT ALL. The one that tempts its way in is a
+/// boolean switch selecting whether the framework's handler verifies the signature it retrieves from
+/// Security's published verification document, and it is absent along with the other three validation
+/// switches, because a boundary whose signature checking a settings file can switch off is only
+/// optionally authenticated. Signature verification is a compiled-in <c>true</c> in Program.cs and is not
 /// configurable from anywhere.
 /// </para>
 /// <para>
@@ -1722,8 +1832,8 @@ public sealed class EventChainOptions
 /// Validated at startup by <see cref="JwtAuthenticationOptionsValidator"/>, which is fatal for the
 /// same fail-fast reason recorded on <see cref="DataServicesOptions"/>: a service that cannot verify
 /// an inbound credential must not start and then accept requests it cannot authenticate. The
-/// annotations on the members below are necessary but NOT sufficient, and an earlier form of this file
-/// claimed otherwise. An attribute can say that an authority is present; it cannot say that the value
+/// annotations on the members below are necessary but NOT sufficient, however complete they look.
+/// An attribute can say that an authority is present; it cannot say that the value
 /// is an absolute address, that its scheme is one the handler can fetch metadata over, or that it does
 /// not directly contradict <see cref="RequireHttpsMetadata"/>. Each of those survives an
 /// annotation-only check and then fails at metadata retrieval or on the first protected request, long
@@ -1913,10 +2023,10 @@ public sealed class JwtAuthenticationOptions
     /// </summary>
     /// <remarks>
     /// <para>
-    /// AUTHENTICATION IS NOT AUTHORIZATION, AND THIS IS THE SUBJECT HALF OF THE DIFFERENCE. Both contracts
-    /// and all thirty-nine projected routes used to be protected by "an authenticated user" and nothing
-    /// more, so any holder of any token minted for this audience could call every operation - including a
-    /// caller with no business here at all. The AAP fixes the call graph as layered and acyclic: nothing but
+    /// AUTHENTICATION IS NOT AUTHORIZATION, AND THIS IS THE SUBJECT HALF OF THE DIFFERENCE. Protecting both
+    /// contracts and all thirty-nine projected routes with "an authenticated user" and nothing
+    /// more is the default that has to be refused: any holder of any token minted for this audience could
+    /// then call every operation - including a caller with no business here at all. The AAP fixes the call graph as layered and acyclic: nothing but
     /// Gateway calls DataServices. This roster is that statement made enforceable, and the operation's scope
     /// is enforced alongside it, because either alone leaves a hole (CWE-862, CWE-863).
     /// </para>
@@ -3209,14 +3319,15 @@ public sealed class PersistenceSessionOptions
     /// wrong. The properties are gone; the string is the only input.
     /// </para>
     /// <para>
-    /// <b>THE NESTING RULE IS THE PART THAT MADE THE OLD SHAPE A TRAP.</b> The oracle reads
+    /// <b>THE NESTING RULE IS WHY A SEPARATE PAIR OF BOOLEANS WOULD BE A TRAP.</b> The oracle reads
     /// <c>NCharBind</c> ONLY inside the <c>DisableBind</c> branch [<c>:L127-L132</c>], so
     /// <c>"DisableBind=1"</c> on its own resolves to <c>disable_bind=true, nchar_bind=FALSE</c> - and an
     /// operator who set that string and then set both properties true, which reads as the obviously
-    /// consistent thing to do, produced a disagreement. Deriving both from one string cannot produce one.
+    /// consistent thing to do, would produce a disagreement. Deriving both from one string cannot produce
+    /// one.
     /// </para>
     /// <para>
-    /// This service still does not parse the string. It forwards it and lets the service that owns the
+    /// This service does not parse the string. It forwards it and lets the service that owns the
     /// connection resolve it, which keeps ONE reproduction of the legacy regular expressions in the whole
     /// system rather than two that can drift across a network boundary.
     /// </para>
@@ -3256,7 +3367,7 @@ public sealed class PersistenceSessionOptions
     //  settings file leaves DbParm empty, so a deployment that configures nothing gets the safe arm -
     //  which is the same guarantee, with one fewer way to contradict it.
     //
-    //  See the remarks on DbParm for the nesting rule that made the old shape a trap for exactly the
-    //  configuration an operator would most plausibly write.
+    //  See the remarks on DbParm for the nesting rule that makes a separate boolean pair a trap for
+    //  exactly the configuration an operator would most plausibly write.
     // ==============================================================================================
 }

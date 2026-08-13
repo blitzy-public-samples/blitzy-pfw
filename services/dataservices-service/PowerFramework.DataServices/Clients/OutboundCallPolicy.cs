@@ -32,13 +32,13 @@
 //  it. EXACTLY ONE family is admitted - a pure READ, whose repetition changes nothing and is
 //  unobservable - and everything else is attempted exactly once.
 //
-//  🔴 A SECOND FAMILY USED TO BE ADMITTED AND HAS BEEN WITHDRAWN: the "idempotent teardown", meaning a
-//  task release. The reasoning was that a lost release response leaks a server-held task against
-//  Persistence's quota, so repeating the release is useful rather than merely harmless. The premise was
+//  🔴 A SECOND FAMILY IS THE TEMPTING ADMISSION AND IS EXCLUDED: the "idempotent teardown", meaning a
+//  task release. The reasoning is that a lost release response leaks a server-held task against
+//  Persistence's quota, so repeating the release is useful rather than merely harmless. The premise is
 //  false. The published contract freezes the opposite - "Releasing an already-released handle is
 //  E_INVALID_HANDLE, not a silent success" - and all three upstream implementations enforce it, so a
-//  replay after a lost response reports a FAILURE for a release that had in fact succeeded. Making
-//  release idempotent instead would have been a contract change made to accommodate a retry policy,
+//  replay after a lost response reports a FAILURE for a release that in fact succeeded. Making
+//  release idempotent instead would be a contract change made to accommodate a retry policy,
 //  and it would cost the answer that lets two concurrent releases be resolved. See
 //  BuildReplaySafePaths for the full record.
 //
@@ -293,7 +293,7 @@ internal static class OutboundCallPolicy
     /// something the server was holding - a task registration, a pending commit - answers differently the
     /// second time even where the end state is identical, and the caller has no way to tell that second
     /// answer apart from a genuine one. See <see cref="BuildReplaySafePaths"/> for the four operations
-    /// that were admitted on the weaker test and are not any more.
+    /// the weaker test would admit and this one excludes.
     /// </para>
     /// </remarks>
     private static readonly string[] ReplaySafeQueryMethods = ["Count"];
@@ -312,9 +312,9 @@ internal static class OutboundCallPolicy
 
     /// <summary>The replay-safe methods of C-08, by name on its descriptor.</summary>
     /// <remarks>
-    /// Five pure reads. <c>AutoCommit</c> was here and is not any more: it COMMITS or ROLLS BACK
+    /// Five pure reads. <c>AutoCommit</c> is deliberately not among them: it COMMITS or ROLLS BACK
     /// [<c>Grpc/TransactionService.AutoCommit</c>], which is the plainest possible non-idempotent
-    /// operation and was admitted only because its name reads like a settings query.
+    /// operation, and it is admissible only to a reader who takes its name for a settings query.
     /// </remarks>
     private static readonly string[] ReplaySafeTransactionMethods =
     [
@@ -434,7 +434,7 @@ internal static class OutboundCallPolicy
     /// <summary>
     /// Answers whether the operation behind this attempt may be replayed.
     /// </summary>
-    /// <param name="context">The resilience context the pipeline is executing under.</param>
+    /// <param name="request">The inbound request.</param>
     /// <returns><see langword="true"/> when the path is classified replay-safe.</returns>
     private static bool IsReplaySafe(HttpRequestMessage? request)
     {
@@ -618,9 +618,9 @@ internal static class OutboundCallPolicy
     /// second server-held task nobody holds a handle to.
     /// </para>
     /// <para>
-    /// 🔴 <b>THE THREE TASK RELEASES ARE ABSENT, AND THEY USED TO BE HERE ON A PREMISE THE CONTRACT
-    /// CONTRADICTS.</b> They were admitted because a release of an already-released handle was believed to
-    /// report success, so a replay after a lost response would cost nothing and would stop a task being
+    /// 🔴 <b>THE THREE TASK RELEASES ARE ABSENT, AND THE PREMISE THAT WOULD ADMIT THEM IS ONE THE
+    /// CONTRACT CONTRADICTS.</b> That premise is that a release of an already-released handle reports
+    /// success, so a replay after a lost response would cost nothing and would stop a task being
     /// orphaned against the registry's quota. The published contract says the opposite and says it as a
     /// frozen rule - "Releasing an already-released handle is <c>E_INVALID_HANDLE</c>, not a silent
     /// success" [<c>docs/CONTRACTS.md</c>, C-05 method table] - and all three upstream implementations
@@ -685,8 +685,8 @@ internal static class OutboundCallPolicy
 
         // THE ROSTERS ARE THE HOISTED FIELDS, NOT LITERALS REPEATED HERE, so the path table this builds
         // and the gRPC service config BuildRetryServiceConfig builds cannot classify one method
-        // differently. They used to be inline collection expressions at these four call sites, which is
-        // exactly the arrangement that lets a later edit admit a method at one layer only.
+        // differently. Inline collection expressions at these four call sites are the tempting form, and
+        // they are exactly the arrangement that lets a later edit admit a method at one layer only.
         AddContractMethods(paths, QueryService.Descriptor, ReplaySafeQueryMethods);
         AddContractMethods(paths, UpdateService.Descriptor, ReplaySafeUpdateMethods);
         AddContractMethods(paths, CommandService.Descriptor, ReplaySafeCommandMethods);

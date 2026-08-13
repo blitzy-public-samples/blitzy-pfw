@@ -33,9 +33,6 @@
 //  consequence: the interface has exactly one member, no default implementation, and nothing to
 //  dispose.
 //
-//  RULES POSITION
-//  review_rules returns "No user rules provided.". The binding constraints cited inline are C-B
-//  (replicate behaviour, never improve) and C-C (the legacy tree is read-only and is the oracle).
 // ==================================================================================================
 
 using System.Linq;
@@ -159,7 +156,8 @@ public class II18nProviderTests
     /// <remarks>
     /// C-B. <c>n_cst_i18n_chs.sru</c> is 28 lines whose translate body is entirely commented out,
     /// because Simplified Chinese IS the base locale and needs no table. Dropping it would be the
-    /// tidy-up the constraint forbids: <c>pfw.sra</c> selects one of three provider classes from the
+    /// tidy-up the constraint forbids: <c>ws_objects/pfw.pbl.src/pfw.sra</c> - the framework
+    /// application, not the same-named packager object - selects one of three provider classes from the
     /// locale string, so a two-provider port would leave one locale unmappable.
     /// </remarks>
     [Fact]

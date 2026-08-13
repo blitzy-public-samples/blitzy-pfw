@@ -143,6 +143,7 @@
 // ======================================================================================================
 
 using System.ComponentModel.DataAnnotations;
+using System.Security.Cryptography.X509Certificates;
 using Microsoft.IdentityModel.Tokens;
 using PowerFramework.Shared.Kernel;
 
@@ -369,14 +370,14 @@ public sealed class GatewayOptions : IValidatableObject
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>PRECEDENCE, STATED BECAUSE THIS PROPERTY HAS TWO POSSIBLE INGRESSES AND ONE OF THEM USED TO BE
-    /// SILENTLY DISCARDED.</b> The flat key above is the DOCUMENTED route and wins whenever it is set.
+    /// <b>PRECEDENCE, STATED BECAUSE THIS PROPERTY HAS TWO POSSIBLE INGRESSES AND ONE OF THEM IS EASILY
+    /// DISCARDED IN SILENCE.</b> The flat key above is the DOCUMENTED route and wins whenever it is set.
     /// This property is nonetheless a bindable leaf of the <c>Gateway</c> section - the environment
-    /// provider folds <c>Gateway__SecurityClientSecret</c> onto it - and the composition root's
-    /// post-configure step once assigned the flat key UNCONDITIONALLY, so an unset flat key overwrote a
-    /// bound value with empty. A deployment supplying the credential that way was then refused at startup
-    /// for presenting nothing, with a message naming a key it had deliberately not used. The step is now
-    /// guarded on presence, matching Security's signing-key step and DataServices'
+    /// provider folds <c>Gateway__SecurityClientSecret</c> onto it - so a composition-root post-configure
+    /// step that assigns the flat key UNCONDITIONALLY lets an unset flat key overwrite a
+    /// bound value with empty. A deployment supplying the credential that way is then refused at startup
+    /// for presenting nothing, with a message naming a key it had deliberately not used. The step is
+    /// therefore guarded on presence, matching Security's signing-key step and DataServices'
     /// <c>ApplyIssuanceSecret</c>: an absent flat key assigns nothing, so a value from another legitimate
     /// ingress survives.
     /// </para>
@@ -485,6 +486,7 @@ public sealed class GatewayOptions : IValidatableObject
     /// </remarks>
     public OutboundCallOptions Outbound { get; set; } = new();
 
+    /// <summary>
     /// Bounds on the REST projection of the upstream DataWindow and column-expression contracts.
     /// </summary>
     public RestProjectionOptions RestProjection { get; set; } = new();
@@ -780,18 +782,18 @@ public sealed class GatewayOptions : IValidatableObject
         /// end-to-end fixture addresses.
         /// </para>
         /// <para>
-        /// AN EARLIER REVISION DEFAULTED THIS TO 5112, A SECOND HTTP/2-ONLY LISTENER, and the reasoning
-        /// is worth recording because it was not frivolous: one protocol version per port is a
-        /// misaddressing guard, since a listener that accepts only what it is for cannot be reached by
-        /// the wrong client and answer anyway. What it also did was publish C-03 and C-04 at an address
-        /// the plan does not assign, and the plan's port map is the one every caller, probe, manifest
-        /// and fixture uses. One measurement remains true and still rules the CLEARTEXT variant out on
-        /// functional grounds: a cleartext endpoint configured for both versions disables HTTP/2 outright
+        /// DEFAULTING THIS TO 5112, A SECOND HTTP/2-ONLY LISTENER, IS THE TEMPTING ALTERNATIVE, and the
+        /// reasoning is not frivolous: one protocol version per port is a misaddressing guard, since a
+        /// listener that accepts only what it is for cannot be reached by the wrong client and answer
+        /// anyway. What it also does is publish C-03 and C-04 at an address the plan does not assign, and
+        /// the plan's port map is the one every caller, probe, manifest and fixture uses. A separate
+        /// measurement rules the CLEARTEXT variant out on functional grounds too: a cleartext endpoint
+        /// configured for both versions disables HTTP/2 outright
         /// and logs that it has, and configured for <c>Http2</c> alone answers an HTTP/1.1 <c>GET</c>
         /// with <c>400</c> - which is why the collapsed endpoint must stay TLS. The reserved 5103
-        /// DesignSystem slot is untouched (C-D), and the collapse removes a port from the deployment
-        /// rather than adding one. This value and <see cref="GatewayOptions.HealthProbes"/>'s
-        /// DataServices entry now name the same address, and they remain separate members because one is
+        /// DesignSystem slot is untouched (C-D), and one shared endpoint keeps a port out of the
+        /// deployment rather than adding one. This value and <see cref="GatewayOptions.HealthProbes"/>'s
+        /// DataServices entry name the same address, and they stay separate members because one is
         /// a call edge and the other an observation.
         /// </para>
         /// <para>
@@ -1053,6 +1055,117 @@ public sealed class GatewayOptions : IValidatableObject
         /// Whether this deployment narrows internal trust to a mounted anchor.
         /// </summary>
         public bool IsConfigured => !string.IsNullOrWhiteSpace(TrustedCaPath);
+        /// <summary>
+        /// How the revocation status of an internal peer's certificate is checked. One of
+        /// <see cref="RevocationModes.NoCheck"/>, <see cref="RevocationModes.Offline"/> or
+        /// <see cref="RevocationModes.Online"/>, compared case-insensitively.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// 🔴 <b>CONFIGURABLE, AND THE SHIPPED DEFAULT IS THE ONLY VALUE THE DOCUMENTED TOPOLOGY CAN ANSWER.</b>
+        /// This was a hardcoded <c>NoCheck</c>, which meant a deployment whose authority DOES publish revocation
+        /// information had no way to ask for it and a stolen peer certificate stayed acceptable until it expired
+        /// (CWE-295). It is a setting now. What it is NOT is a setting whose default can be the strict value:
+        /// the local authority the documented recipe generates publishes no distribution point and runs no
+        /// responder, and that was MEASURED rather than assumed - building a chain for a leaf it issued under
+        /// <c>CustomRootTrust</c> succeeds under <c>NoCheck</c> and FAILS under both <c>Offline</c> and
+        /// <c>Online</c> with <c>RevocationStatusUnknown | OfflineRevocation</c>. Shipping a strict default
+        /// would therefore refuse every internal peer on a clean bring-up and hold every dependent behind an
+        /// unsatisfiable health gate.
+        /// </para>
+        /// <para>
+        /// AN INDETERMINATE STATUS IS A REFUSAL UNDER THE STRICTER MODES, NEVER A PASS. The chain policy sets no
+        /// verification flag that ignores a revocation failure, so a deployment that selects <c>Offline</c> or
+        /// <c>Online</c> gets a genuine check whose unknown answer refuses the peer - which is the only reading
+        /// under which selecting the mode means anything at all.
+        /// </para>
+        /// <para>
+        /// WHAT SUBSTITUTES FOR REVOCATION WHILE THIS IS <c>NoCheck</c> IS CERTIFICATE LIFETIME, and the
+        /// documented issuance recipe is <c>-days 30</c> for both the authority and every leaf. The operational
+        /// surfaces state the production recommendation - issue from an authority that publishes a distribution
+        /// point or a responder and set this to <c>Online</c> - and the emergency procedure for a compromise
+        /// under <c>NoCheck</c>, which is to replace the anchor and restart rather than to revoke.
+        /// </para>
+        /// </remarks>
+        [Required(AllowEmptyStrings = false)]
+        public string RevocationMode { get; set; } = RevocationModes.NoCheck;
+
+        /// <summary>
+        /// Resolves <see cref="RevocationMode"/> to the platform value the chain policy is built with.
+        /// </summary>
+        /// <param name="configurationKeyPrefix">
+        /// The configuration path of this group, quoted into the failure so an operator can find the offending
+        /// key without reading source.
+        /// </param>
+        /// <returns>The resolved mode.</returns>
+        /// <exception cref="InvalidOperationException">
+        /// The configured value names no recognised mode. Structural, and therefore fatal: guessing a mode
+        /// would either silently weaken the check a deployment asked for or silently refuse every peer, and
+        /// both are worse than not starting. The value IS quoted, because a mode name is not a secret and an
+        /// operator fixing a typo needs to see what was read.
+        /// </exception>
+        internal X509RevocationMode ResolveRevocationMode(string configurationKeyPrefix)
+        {
+            string configured = RevocationMode?.Trim() ?? string.Empty;
+
+            if (RevocationModes.Matches(configured, RevocationModes.NoCheck))
+            {
+                return X509RevocationMode.NoCheck;
+            }
+
+            if (RevocationModes.Matches(configured, RevocationModes.Offline))
+            {
+                return X509RevocationMode.Offline;
+            }
+
+            if (RevocationModes.Matches(configured, RevocationModes.Online))
+            {
+                return X509RevocationMode.Online;
+            }
+
+            throw new InvalidOperationException(
+                $"'{configurationKeyPrefix}:{nameof(RevocationMode)}' is set to '{RevocationMode}', which "
+                    + "names no recognised revocation posture, so this service will not start. Set one of "
+                    + $"{string.Join(", ", RevocationModes.Recognised)}, or remove the key to accept the "
+                    + "default. Note that the stricter two require an authority that publishes a certificate "
+                    + "revocation list or runs a responder: against one that does not, every peer is refused "
+                    + "with an indeterminate revocation status, which is a refusal by design.");
+        }
+
+        /// <summary>The revocation postures this group accepts.</summary>
+        /// <remarks>
+        /// Declared here rather than as loose strings so that the settings file, the validator, the resolver
+        /// and the failure message cannot spell them three different ways.
+        /// </remarks>
+        public static class RevocationModes
+        {
+            /// <summary>No revocation check is performed. The shipped default.</summary>
+            public const string NoCheck = "NoCheck";
+
+            /// <summary>Only cached revocation information is consulted.</summary>
+            public const string Offline = "Offline";
+
+            /// <summary>Revocation information is fetched from the authority.</summary>
+            public const string Online = "Online";
+
+            /// <summary>Every accepted spelling, in the order a failure message lists them.</summary>
+            public static IReadOnlyList<string> Recognised { get; } = [NoCheck, Offline, Online];
+
+            /// <summary>Reports whether a configured value is recognised.</summary>
+            /// <param name="candidate">The configured value, which may be <see langword="null"/>.</param>
+            /// <returns><see langword="true"/> when it names a mode.</returns>
+            public static bool IsRecognised(string? candidate) =>
+                candidate is not null
+                    && Recognised.Any(mode => Matches(candidate.Trim(), mode));
+
+            /// <summary>Compares a configured value against one mode, case-insensitively.</summary>
+            /// <param name="candidate">The configured value.</param>
+            /// <param name="mode">The mode to compare against.</param>
+            /// <returns><see langword="true"/> when they name the same mode.</returns>
+            internal static bool Matches(string candidate, string mode) =>
+                string.Equals(candidate, mode, StringComparison.OrdinalIgnoreCase);
+        }
+
 
         /// <summary>
         /// Checks that a supplied anchor path is at least shaped like a path.
@@ -1164,13 +1277,13 @@ public sealed class GatewayOptions : IValidatableObject
         /// </summary>
         /// <remarks>
         /// <para>
-        /// 🔴 THIS EXISTS BECAUSE THE PER-ATTEMPT BOUND USED TO BE INHERITED SILENTLY, AND IT WAS THE
-        /// BOUND THAT ACTUALLY APPLIED. Only <see cref="RequestTimeout"/> was configured, onto the
-        /// pipeline's TOTAL timeout; the pipeline's per-attempt timeout kept its package default of ten
+        /// 🔴 THIS EXISTS BECAUSE AN INHERITED PER-ATTEMPT BOUND IS THE BOUND THAT ACTUALLY APPLIES.
+        /// Configuring only <see cref="RequestTimeout"/>, onto the
+        /// pipeline's TOTAL timeout, leaves the pipeline's per-attempt timeout at its package default of ten
         /// seconds. For an operation that is never retried - which is every operation that creates,
         /// mutates or advances upstream state - the total budget is never reached, so a call against an
-        /// upstream that had stopped reading its socket gave up after ten seconds while this service
-        /// documented thirty. The number an operator configured was not the number they observed.
+        /// upstream that has stopped reading its socket gives up after ten seconds while this service
+        /// documents thirty. The number an operator configures is then not the number they observe.
         /// </para>
         /// <para>
         /// DEFAULTING TO <see cref="RequestTimeout"/> RATHER THAN TO A NUMBER OF ITS OWN, so the
@@ -1474,15 +1587,15 @@ public sealed class JwtBearerVerificationOptions : IValidatableObject
     /// explicitly rather than leaving it implied.
     /// </para>
     /// <para>
-    /// <b>THERE IS NO RELAXATION ANY MORE, IN EITHER ENVIRONMENT, AND THAT IS THE CURRENT STATE.</b> An
-    /// earlier form of the base appsettings.json set this to <see langword="false"/> so that a local
-    /// plain-HTTP topology worked out of the box. Base settings load in EVERY environment and take
-    /// precedence over a code default, so that arrangement silently disabled transport security for
-    /// metadata retrieval everywhere - a production deployment that simply omitted an override inherited
-    /// the relaxation without anything saying so. It was first narrowed to appsettings.Development.json
-    /// and is now gone from both: every listener in this system terminates TLS in every environment, so
+    /// <b>THERE IS NO RELAXATION IN EITHER ENVIRONMENT.</b> Setting this to
+    /// <see langword="false"/> in the base appsettings.json, so that a local
+    /// plain-HTTP topology works out of the box, is the tempting convenience. Base settings load in EVERY
+    /// environment and take precedence over a code default, so that arrangement silently disables transport
+    /// security for metadata retrieval everywhere - a production deployment that simply omits an override
+    /// inherits the relaxation without anything saying so. Narrowing it to appsettings.Development.json is
+    /// no better than removing it: every listener in this system terminates TLS in every environment, so
     /// the Development authority is <c>https://localhost:5104</c> and BOTH settings files state
-    /// <see langword="true"/> here. Do not reintroduce a <see langword="false"/> anywhere - a local
+    /// <see langword="true"/> here. Do not introduce a <see langword="false"/> anywhere - a local
     /// certificate is what the local bring-up supplies, not a relaxation.
     /// </para>
     /// </remarks>

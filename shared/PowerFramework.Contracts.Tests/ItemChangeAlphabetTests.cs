@@ -1,8 +1,8 @@
 // ==================================================================================================
 //  ItemChangeAlphabetTests - THE ITEM-CHANGE ALPHABET IS ITS OWN DOMAIN AND IS NEVER RetCode
 //  ------------------------------------------------------------------------------------------------
-//  SUBJECT   dataservices.v1.ItemChangeResult   [Proto/dataservices.v1.proto:L686-L710]
-//  FOIL      common.v1.RetCode.Value            [Proto/common.v1.proto:L324-L388]
+//  SUBJECT   dataservices.v1.ItemChangeResult   [Proto/dataservices.v1.proto:L720-L744]
+//  FOIL      common.v1.RetCode.Value            [Proto/common.v1.proto:L315-L377]
 //  ORACLE    ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru - `event ondwnitemchange`
 //            [:L182-L254] and its consumer `event ondwnitemvalidationerror` [:L322-L385]
 //            ws_objects/pfw.shared.pbl.src/retcode.sru - the return-code catalogue [:L39-L45]
@@ -67,7 +67,7 @@
 //  C-family reading: PowerScript CHOOSE CASE does not fall through, and [:L212] is an arm with no
 //  statements, so a result of 1 returns exactly as the semantic handler produced it, with no restore
 //  and no coercion - which is what the source's own comment at [:L210] describes, since it is
-//  OnDwnItemValidationError that performs the restore [:L369-L379]. dataservices.v1.proto:L657-L685 and
+//  OnDwnItemValidationError that performs the restore [:L369-L379]. dataservices.v1.proto:L680-L744 and
 //  docs/CONTRACTS.md 6.5 both record the point with its evidence.
 //
 //  IT CHANGES NOTHING HERE, and that is worth saying explicitly: the wire alphabet is {0,1,2,3} under
@@ -80,13 +80,13 @@
 //  A .proto records prose in leading comments, which reach a descriptor through `source_code_info`.
 //  MEASURED ON THIS BUILD RATHER THAN ASSUMED: `DataservicesV1Reflection.Descriptor.ToProto()
 //  .SourceCodeInfo` is null, because Grpc.Tools does not embed source information in the descriptor it
-//  serialises into the generated reflection holder. So the comments at dataservices.v1.proto:L646-L710
+//  serialises into the generated reflection holder. So the comments at dataservices.v1.proto:L680-L744
 //  are unreachable at runtime, and no assertion here can read them. Rather than invent a mechanism for
 //  reading them, this file asserts the documentation carrier that DOES survive into the descriptor -
 //  THE VALUE NAMES - and that is not a consolation prize: a name like
 //  `ITEM_CHANGE_RESULT_RESTORE_AND_REJECT_TEXT` is what appears in a JSON payload, in a log record and
 //  in a characterization recording, so it is the only self-description a consumer of the wire ever
-//  actually sees. The prose behind each name lives in Proto/dataservices.v1.proto:L646-L710 and in
+//  actually sees. The prose behind each name lives in Proto/dataservices.v1.proto:L680-L744 and in
 //  docs/CONTRACTS.md 6.5, which are cited from the assertions that depend on them.
 //
 //  The REST projection is NOT asserted, because it does not carry this alphabet: `ITEM_CHANGE_RESULT_`
@@ -107,14 +107,6 @@
 //  the assertions compare against are DERIVED from the tables below rather than written as literals, so
 //  a row added to a table cannot leave a count assertion silently out of date.
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  review_rules returns exactly "No user rules provided.", so NO user-specified rule governs this file.
-//  Its absence is not licence: the enterprise-standard baseline of AAP 0.7.2 applies in its place -
-//  nullable enabled and warnings as errors inherited from Directory.Build.props and never relaxed, no
-//  NoWarn and no #pragma anywhere, and versioned contracts as the only cross-service coupling. The
-//  binding non-rule constraints of AAP 0.7.3 that govern this file are C-A, C-B, C-C, C-F, C-H and C-K,
-//  and each is cited above at the point where it applies.
 // ==================================================================================================
 
 using Google.Protobuf.Reflection;
@@ -141,7 +133,7 @@ namespace PowerFramework.Contracts.Tests;
 /// <b>Semantic documentation is not in the descriptor.</b> Leading comments reach a descriptor only
 /// through <c>source_code_info</c>, which Grpc.Tools does not embed - measured on this build:
 /// <c>ToProto().SourceCodeInfo</c> is <see langword="null"/>. The prose therefore lives in
-/// <c>Proto/dataservices.v1.proto:L646-L710</c> and in <c>docs/CONTRACTS.md</c> 6.5, and the on-wire
+/// <c>Proto/dataservices.v1.proto:L680-L744</c> and in <c>docs/CONTRACTS.md</c> 6.5, and the on-wire
 /// carrier this file can and does assert is the set of value <i>names</i>, which is what appears in
 /// payloads, logs and characterization recordings.
 /// </para>
@@ -342,21 +334,21 @@ public sealed class ItemChangeAlphabetTests
             "THE STASH - `_nItemChangeRetCode` [se_cst_dw.sru:L96], written by the item-change handler "
                 + "[:L195] and read-and-CLEARED by the validation-error handler [:L331-L332]. Its "
                 + "legacy name reads like a return code and is not one, which is exactly why it is "
-                + "typed as the alphabet [dataservices.v1.proto:L630]"
+                + "typed as the alphabet [dataservices.v1.proto:L664]"
         },
         {
             "DwnItemValidationErrorEvent",
             "stashed_item_change_ret_code",
             "the stash as it stood BEFORE the read-and-clear at [se_cst_dw.sru:L331-L332], carried "
                 + "because the pre-set [:L338-L340] and the restore guard [:L369] both read it and it "
-                + "is unrecoverable afterwards [dataservices.v1.proto:L1271]"
+                + "is unrecoverable afterwards [dataservices.v1.proto:L1305]"
         },
         {
             "EventResult",
             "item_change_result",
             "the value the event YIELDS after the legacy's own rewrites - 3 becomes 1 [se_cst_dw.sru:"
                 + "L225] and the default arm becomes 2 [:L250]. Applies to the item-change, "
-                + "do-item-change and validation-error events only [dataservices.v1.proto:L1453]"
+                + "do-item-change and validation-error events only [dataservices.v1.proto:L1507-L1508]"
         },
     };
 
@@ -984,7 +976,7 @@ public sealed class ItemChangeAlphabetTests
     //
     //  MEASURED, NOT ASSUMED: this build's descriptor carries no source information -
     //  `DataservicesV1Reflection.Descriptor.ToProto().SourceCodeInfo` is null, because Grpc.Tools does
-    //  not embed it - so the prose at dataservices.v1.proto:L646-L710 is unreachable at runtime and no
+    //  not embed it - so the prose at dataservices.v1.proto:L680-L744 is unreachable at runtime and no
     //  assertion can read it. Reading the .proto text off disk would be a different mechanism rather
     //  than the same one, and it would put file I/O into a suite whose repeatability is its whole value,
     //  so it is deliberately not done.
@@ -995,7 +987,7 @@ public sealed class ItemChangeAlphabetTests
     //  assertions below make each name carry its meaning, which is what turns the naming from a style
     //  choice into a documented property of the contract.
     //
-    //  THE PROSE ITSELF lives in Proto/dataservices.v1.proto:L646-L710 (the four arms, each with its
+    //  THE PROSE ITSELF lives in Proto/dataservices.v1.proto:L680-L744 (the four arms, each with its
     //  se_cst_dw.sru locator) and in docs/CONTRACTS.md 6.5 ("The item-change alphabet is its own
     //  enumeration"). Both are cited from the XML documentation on the tests that depend on them.
     //
@@ -1017,7 +1009,7 @@ public sealed class ItemChangeAlphabetTests
     /// </param>
     /// <param name="locator">The oracle locator for that meaning, reported in any failure message.</param>
     /// <remarks>
-    /// The prose behind each token is in <c>Proto/dataservices.v1.proto:L646-L710</c> and in
+    /// The prose behind each token is in <c>Proto/dataservices.v1.proto:L680-L744</c> and in
     /// <c>docs/CONTRACTS.md</c> 6.5. This test pins the part of it that a runtime consumer can see.
     /// </remarks>
     [Theory]

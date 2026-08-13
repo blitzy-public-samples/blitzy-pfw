@@ -10,15 +10,14 @@
 #                                      cryptographic overloads; the EIGHTEENTH is
 #                                      DELETE /v1/crypto/rsa/keys/{keyRef}, which is AUTHORED and
 #                                      projects no legacy overload - the legacy had no key store, so
-#                                      it had nothing to release. Two earlier revisions of this header
-#                                      were wrong in two different ways: one said 15, from a
-#                                      superseded accounting that declined to project the three
-#                                      HashFile overloads (both are projected, at /v1/crypto/hash-file
-#                                      and /v1/crypto/hmac-file); the other said 17, conflating the
-#                                      projection count with the published count. Keep the two
+#                                      it has nothing to release. TWO WAYS TO GET THIS COUNT WRONG,
+#                                      both easy: declining to project the three HashFile overloads
+#                                      gives 15 (they ARE projected, at /v1/crypto/hash-file and
+#                                      /v1/crypto/hmac-file), and conflating the projection count with
+#                                      the published count gives 17. Keep the two
 #                                      numbers apart: 63 overloads onto 17 POST operations, 18
 #                                      operations published. Verify by counting operationId
-#                                      occurrences, never prose - and note the count is now asserted
+#                                      occurrences, never prose - and note the count is asserted
 #                                      against this document by PowerFramework.DataServices.Tests'
 #                                      CryptoContractClientCoherenceTests, so a nineteenth operation
 #                                      fails a test rather than quietly outrunning this header.
@@ -75,11 +74,11 @@
 #  leaves an overload family with no landing site, this boundary has silently drifted from the
 #  oracle. Re-verify by counting the declarations, not by reading them.
 #
-#  THE HashFile FAMILY IS PROJECTED, WHICH CORRECTS AN EARLIER OMISSION (C-K)
-#    An earlier revision of this document declined to project HashFile at all, on the grounds that its
-#    only argument is a FILENAME and accepting a caller-supplied filesystem path across a service
-#    boundary is an arbitrary-file-read primitive. The first half of that reasoning is right and is
-#    retained; the conclusion was wrong. A declared legacy capability silently disappearing is not a
+#  THE HashFile FAMILY IS PROJECTED RATHER THAN OMITTED (C-K)
+#    Declining to project HashFile at all is the tempting reading, on the grounds that its only
+#    argument is a FILENAME and accepting a caller-supplied filesystem path across a service boundary
+#    is an arbitrary-file-read primitive. The first half of that reasoning is right and is retained;
+#    the conclusion does not follow. A declared legacy capability silently disappearing is not a
 #    narrowing, it is a gap - a caller reading this document could not tell whether file hashing was
 #    unsupported, forgotten, or supported by some other means, and the refactor's own rule is to NARROW
 #    A CONTRACT WITH A DEFINED ERROR RATHER THAN OMIT IT.
@@ -95,17 +94,7 @@
 #    operations hash any file the SERVER HAS BEEN CONFIGURED TO EXPOSE. That is a real reduction in
 #    reach and it is deliberate; it is recorded here rather than presented as equivalence.
 #
-#  RULES POSITION
-#  review_rules returns exactly "No user rules provided.", so NO user-specified rule governs this
-#  file and none is invented here. The enterprise-standard baseline applies in its place, and the
-#  binding constraints are the refactor plan's own non-rule inventory. Those that govern this file
-#  are cited inline at the point each is discharged: C-A (boundary definition, and the only
-#  permitted cross-service coupling), C-B (replicate behaviour and defects, never improve), C-C
-#  (the legacy tree is read-only and is the behavioural oracle), C-D (the four deferred services
-#  are not implemented, even partially), C-F (no secret in any form), C-G (every newly created
-#  boundary is authenticated from the outset) and C-K (document every technology and boundary
-#  decision).
-#
+#  BINDING CONSTRAINTS AT THIS SITE
 #  C-F SELF-AUDIT. No key, credential, token, certificate, connection string or secret-shaped
 #  literal appears anywhere in this document, in any field, default, example or comment. There is
 #  no `example` and no `examples` keyword ANYWHERE in this file, by design and not by omission: a
@@ -255,10 +244,9 @@ info:
     left implicit.** There is exactly one `servers` entry below, it is fixed rather than templated,
     and it is `https` - there is no `scheme` variable to override, deliberately, because a selectable
     plaintext base URL would apply to the token endpoint and the key set as well as to the readiness
-    probe. An earlier revision of this document described a templated entry whose `scheme` defaulted
-    to `http`; that is not what it declares, and the accompanying claim that a caller could reach
-    `POST /v1/tokens` over plain HTTP with caller authentication merely unavailable is withdrawn
-    (C-G, C-K).
+    probe. A templated entry whose `scheme` defaulted to `http` would carry with it the claim that a
+    caller can reach `POST /v1/tokens` over plain HTTP with caller authentication merely unavailable.
+    Neither is true of this service, which is why no such variable is declared (C-G, C-K).
 
     **What the local bring-up actually does is serve everything on ONE TLS listener, not split the
     listeners.** The service declares exactly one Kestrel endpoint - `https://+:5104`, `Http1`,
@@ -280,11 +268,11 @@ info:
     sidecar leaves no certificate for the application to read, and issuance must stay authenticated
     there rather than becoming uncallable.
 
-    An earlier revision described a second, cleartext endpoint carrying `/health` and C-02 so the
-    attached environment's `curl -sf http://localhost:5104/health` gate could satisfy verbatim. That
-    listener is **withdrawn**: it contradicted the one-port-per-service map, and it placed an
-    unauthenticated listener on the one service that holds the system's signing key. What changes
-    instead is one character of the gate, which becomes
+    A SECOND, CLEARTEXT ENDPOINT carrying `/health` and C-02 would let the attached environment's
+    `curl -sf http://localhost:5104/health` gate satisfy verbatim, and that is the tempting shape. It is
+    **not declared**: it contradicts the one-port-per-service map, and it places an unauthenticated
+    listener on the one service that holds the system's signing key. What changes instead is one
+    character of the gate, which becomes
     `curl -sf https://localhost:5104/health`. Nothing about this service is reachable over plain HTTP
     in any environment, so the key set and the discovery document are never fetched over cleartext and
     the on-path key-substitution exposure that a cleartext bootstrap would carry does not arise at all.
@@ -313,8 +301,9 @@ info:
     2. **3.1 provides the `mutualTLS` security-scheme type.** That is exactly what the
        token-issuance edge needs, and 3.0 cannot express it. `POST /v1/tokens` is the one
        operation a bearer token cannot protect - a caller cannot present a token in order to
-       obtain its first token - so its caller identity is established by the transport, and 3.1
-       lets the document say so in a machine-readable way instead of in prose.
+       obtain its first token - so its caller identity comes from a presented Basic credential or a
+       trusted client certificate, and 3.1 lets the document declare the certificate scheme in a
+       machine-readable way instead of in prose.
 
     ## 5. One JSON integer, and the legacy width inconsistency it normalizes (C-K)
 
@@ -381,9 +370,9 @@ info:
       could not have had. The operations are nonetheless published - `POST /v1/crypto/hash-file`
       and `POST /v1/crypto/hmac-file` - taking a server-resolved reference exactly as `keyRef`
       works. What narrows is the REACH: the legacy hashes any file its process can open, and these
-      hash any file the server has been configured to expose. An earlier revision omitted the
-      family outright, which was a gap rather than a narrowing, because a reader could not tell
-      whether the capability was unsupported or merely forgotten.
+      hash any file the server has been configured to expose. Omitting the family outright would be a
+      gap rather than a narrowing, because a reader could not tell whether the capability was
+      unsupported or merely forgotten.
     - **`BlobReverse` mutates its argument in place** and returns only a success boolean
       [n_crypto.sru:L13]. In-place mutation has no wire representation, so the response carries
       the reversed payload *and* the boolean.
@@ -570,9 +559,11 @@ paths:
 
         ## The granted scope set may be narrower than the requested one
 
-        A caller **must read `scope` from the response** rather than assume its request was
-        honoured in full. A narrowing is a normal, successful outcome and is reported as `200`, not
-        as an error.
+        The granted set is the INTERSECTION of the requested scopes with what this caller is
+        permitted to hold for the requested audience, in the requested order. A caller **must read
+        `scope` from the response** rather than assume its request was honoured in full. A narrowing
+        to a non-empty set is a normal, successful outcome and is reported as `200`; an intersection
+        that is empty is refused with `403` rather than answered with a token granting nothing.
       security:
         # OVERRIDES the document-level bearer requirement. Not an omission - see the description.
         # TWO ALTERNATIVES, and the list form means EITHER satisfies the operation: the credential the
@@ -599,10 +590,27 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
-          description: >-
-            No client certificate was presented, or the certificate presented is not trusted by
-            this service. Mutual TLS is the only accepted caller authentication on this operation,
-            so there is no bearer-token alternative to fall back to.
+          description: |-
+            **No accepted caller credential was presented, under either scheme.** Concretely: no
+            `Authorization: Basic` header and no client certificate; or a `Basic` credential whose
+            user-id is not on this service's issuance roster or whose secret does not match; or a
+            client certificate that does not chain to an authority this service is configured to
+            trust.
+
+            **This status does NOT mean "a client certificate was missing".** The `security` block
+            three lines above declares `clientCredential` and `mutualTls` as ALTERNATIVES - either
+            satisfies the operation, and the runtime accepts either - so a deployment where a proxy
+            or mesh sidecar terminates TLS ahead of this service and strips the client certificate
+            reaches issuance through `clientCredential` alone, and needs no certificate authority to
+            bring the estate up at all. Read this status as *neither of the two accepted credentials
+            was presented, or the one that was presented did not verify*, and treat it as a signal
+            to check the roster entry and the trusted issuer configuration rather than to provision
+            certificates a topology does not require.
+
+            What this operation genuinely does not accept is a **bearer token**: a bearer token is
+            what it ISSUES, so requiring one in order to call it would make the estate's first token
+            unobtainable. That is a statement about bearer tokens only, and says nothing about which
+            of the two declared caller credentials a deployment uses.
           content:
             application/problem+json:
               schema:
@@ -611,7 +619,7 @@ paths:
           description: >-
             The authenticated caller is not permitted what it asked for. FOUR DISTINCT DECISIONS
             answer this status, and a caller cannot tell them apart from the response by design.
-            (1) The claimed `subject` does not match the identity the presented client certificate
+            (1) The claimed `subject` does not match the identity the presented credential
             establishes. (2) The requested `audience` is not one this issuer serves at all.
             (3) The audience IS one this issuer serves, but this caller is not authorised for it.
             (4) NONE of the requested `scopes` is permitted for this caller and audience.
@@ -632,6 +640,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/ProblemDetails'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -683,6 +693,8 @@ paths:
                 $ref: '#/components/schemas/JsonWebKeySet'
         '500':
           $ref: '#/components/responses/ServerError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /.well-known/openid-configuration:
     get:
@@ -739,6 +751,8 @@ paths:
                 $ref: '#/components/schemas/ProviderMetadata'
         '500':
           $ref: '#/components/responses/ServerError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
 
   # ================================================================================================
@@ -857,6 +871,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/ScopeForbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
 
   # ================================================================================================
@@ -943,8 +959,8 @@ paths:
         identifiers minus the checksum - is used by `hmac`, `hmac-file`, `rsa/sign` and `rsa/verify`,
         because there is no standard construction that keys a checksum: CRC32 has no compression
         function for HMAC to key and no algorithm identifier for a signature scheme to name. Do not read
-        that exclusion across onto this operation; an earlier revision of this description did, and it
-        contradicted this operation's own request schema.
+        that exclusion across onto this operation - doing so contradicts this operation's own request
+        schema, which admits CRC32.
       requestBody:
         required: true
         content:
@@ -964,6 +980,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/RefForbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1021,6 +1039,8 @@ paths:
           $ref: '#/components/responses/RefForbidden'
         '404':
           $ref: '#/components/responses/RefNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1046,9 +1066,9 @@ paths:
 
         ## Why the family is published at all rather than omitted
 
-        An earlier revision of this document declined to project `HashFile` and recorded the omission
-        as a documented gap. That was the wrong call: a declared legacy capability that simply is not
-        there leaves a reader unable to tell unsupported from forgotten, and this refactor's rule is to
+        Declining to project `HashFile` and recording the omission as a documented gap is the tempting
+        call. It is the wrong one: a declared legacy capability that simply is not there leaves a reader
+        unable to tell unsupported from forgotten, and this refactor's rule is to
         **narrow a contract with a defined error, never to omit it silently**. What is narrowed is the
         REACH - the legacy hashes any file its process can open, this hashes any file the server exposes
         - and that is stated on the `FileReference` schema rather than implied.
@@ -1067,8 +1087,8 @@ paths:
 
         The narrowed `CryptoKeyedHashType` selector applies to the KEYED file operation
         (`POST /v1/crypto/hmac-file`) and to the other keyed operations, never here: keying a checksum is
-        not a defined construction, but digesting a file with one is. An earlier revision of this
-        description claimed the narrowed selector and excluded CRC32; it contradicted the schema.
+        not a defined construction, but digesting a file with one is. Claiming the narrowed selector here
+        and excluding CRC32 would contradict this operation's own schema.
       requestBody:
         required: true
         content:
@@ -1090,6 +1110,8 @@ paths:
           $ref: '#/components/responses/RefForbidden'
         '404':
           $ref: '#/components/responses/RefNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1139,6 +1161,8 @@ paths:
           $ref: '#/components/responses/RefForbidden'
         '404':
           $ref: '#/components/responses/RefNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1219,6 +1243,8 @@ paths:
           $ref: '#/components/responses/RefForbidden'
         '404':
           $ref: '#/components/responses/RefNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1270,6 +1296,8 @@ paths:
           $ref: '#/components/responses/RefForbidden'
         '404':
           $ref: '#/components/responses/RefNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1332,6 +1360,8 @@ paths:
           $ref: '#/components/responses/RefForbidden'
         '404':
           $ref: '#/components/responses/RefNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1382,6 +1412,8 @@ paths:
           $ref: '#/components/responses/RefForbidden'
         '404':
           $ref: '#/components/responses/RefNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1450,6 +1482,8 @@ paths:
           $ref: '#/components/responses/RefForbidden'
         '404':
           $ref: '#/components/responses/RefNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1515,6 +1549,8 @@ paths:
           $ref: '#/components/responses/RefForbidden'
         '404':
           $ref: '#/components/responses/RefNotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1600,6 +1636,8 @@ paths:
         # neither the required scope nor the caller's held scopes are ever reported.
         '403':
           $ref: '#/components/responses/ScopeForbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1695,6 +1733,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/ProblemDetails'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
 
   /v1/crypto/random/blob:
@@ -1743,6 +1783,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/RefForbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1786,6 +1828,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/RefForbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1833,6 +1877,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/RefForbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1888,6 +1934,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/RefForbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1927,6 +1975,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/RefForbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -1980,6 +2030,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/RefForbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
 
@@ -2047,12 +2099,14 @@ components:
         It is an opaque secret held by this service for one named caller, injected from the deployment
         secret layer through the options pattern. **No credential value appears in this repository, in
         any settings file or in any container image** (constraint C-F), and none is reproduced here.
-        It is compared in constant time, it is never logged, and it is never echoed in a response.
+        It is compared byte-wise in time independent of how much of an equal-length candidate matches,
+        it is never logged, and it is never echoed in a response.
 
         The credential establishes IDENTITY only. What that identity may then ask for - which
         audiences, and which scopes - is a separate, per-subject decision this service makes against
-        its configured issuance roster, and a request outside it is refused with `403` rather than
-        silently narrowed.
+        its configured issuance roster. An audience outside that roster is refused with `403` and is
+        never substituted; requested scopes are intersected with the permitted set and the narrowed
+        result is reported in the response, with an empty intersection refused with `403`.
 
         ## The user name must match the claimed `subject`
 
@@ -2061,14 +2115,20 @@ components:
         response reveals which identity the credential established no more than it reveals the
         expected credential.
 
-        ## On a plaintext listener this credential is on-path visible, and that is stated rather than
-        ## glossed
+        ## This scheme REQUIRES TLS, and that is a condition of use rather than a caveat
 
-        Presented over `http` the credential can be captured by anyone on path, exactly as a bearer
-        token can. That is accepted only for the single-host private-network bring-up the frozen
-        environment describes, and it is why `mutualTls` below remains available and why the `servers`
-        entry records precisely what a TLS-terminating deployment changes. Rotating the credential is a
-        configuration change with no code change.
+        A `Basic` credential is a shared secret carried in a header, so the transport - and only the
+        transport - supplies its two missing properties: CONFIDENTIALITY, without which anyone on path
+        captures a reusable credential (CWE-319), and SERVER AUTHENTICATION, without which a caller
+        cannot know it is presenting that credential to the real issuer rather than to an impostor
+        collecting credentials. Presented over `http` this scheme is therefore **not secure at any scale,
+        including a private network**, because neither property can be recovered elsewhere: the operation
+        can verify a credential it receives but cannot make an unauthenticated channel confidential.
+
+        Every `servers` entry this document publishes is consequently `https`, and the deployed estate
+        terminates TLS at this listener. `mutualTls` below is an alternative CREDENTIAL, not an
+        alternative to TLS - it needs the same handshake and more of it. Rotating the credential itself
+        is a configuration change with no code change.
 
     mutualTls:
       type: mutualTLS
@@ -2144,6 +2204,40 @@ components:
         an unrecognised property rejected by `additionalProperties: false`, or a payload that is not
         valid for the declared `payloadForm`. A request for RSA no-padding also lands here, because
         the legacy declares no such value. `retCode` typically carries `E_INVALID_ARGUMENT` (-3).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    TooManyRequests:
+      description: >-
+        An ingress bound was met, so the request was refused without being served. TWO BOUNDS REACH THIS
+        STATUS and a caller cannot tell them apart, deliberately: a process-wide concurrency ceiling and a
+        per-caller request allowance over a fixed window. Distinguishing them would report how much of this
+        deployment's capacity its OTHER callers are holding, so the refusal names neither the bound that was
+        met nor this caller's consumption of it.
+
+
+        `Retry-After` is present whenever the limiter can say when the caller may return, and absent when it
+        cannot - an absent header means "retry with backoff", never "retry immediately". `retCode` carries
+        `E_BUSY` (-23).
+
+
+        THE BOUNDS EXIST BECAUSE THE DECOMPOSITION CREATED THIS SERVICE'S FIRST LISTENING SOCKET (C-B). The
+        legacy was an in-process library that received no unsolicited request, so nothing could be flooded
+        and there was no legacy limit to port; this answers a failure mode the transition itself introduced.
+        `/health` is exempt from both bounds, because it is the readiness gate this service's dependents are
+        held behind and a rate-limited probe would make a busy service a permanently unready one.
+      headers:
+        Retry-After:
+          description: >-
+            How many seconds to wait before retrying, when the limiter can determine it. Absent when it
+            cannot.
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
       content:
         application/problem+json:
           schema:
@@ -2566,6 +2660,19 @@ components:
 
         > **No caller-supplied filesystem path ever crosses this boundary.**
 
+        ## AND A PUBLISHED READ CEILING OF 64 MiB, which is a work bound rather than a path rule
+
+        The file is chosen by the **deployment**, so the ceiling is not there to stop a caller naming
+        an arbitrary file - the indirection above already does that. It is there because the caller
+        chooses **how often**: an unbounded read repeated under an authenticated credential is an I/O
+        amplifier whose multiplier is the file's size. A reference resolving to a file larger than the
+        ceiling is answered `400` with return code `-13` (`E_OUT_OF_RANGE`) on both file operations,
+        and the refusal reports no path, filename, location or content. A file this service cannot
+        read at all keeps its own distinct answer - `E_IO_ERROR` - so one condition has one answer.
+
+        A deployment needing to digest something larger through this surface should reconsider the
+        surface rather than the ceiling.
+
         The legacy `HashFile` family takes `readonly string filename` and hashes a file from the local
         filesystem [n_crypto.sru:L27-L29]. In process that is unremarkable: the filename came from the
         same trust domain as the code that opened it. Republished as a wire parameter it would be an
@@ -2697,12 +2804,12 @@ components:
         body, nothing in this repository could confirm the invention matched. The governing rule
         applies exactly: a contract is narrowed with a defined error, never widened with a guess.
 
-        ## WHAT THIS FIXES, STATED PLAINLY
+        ## WHAT THE NARROWING BUYS, STATED PLAINLY
 
-        Previously these four operations advertised the full six-member set while the implementation
-        refused the sixth deterministically. A request naming `5` was schema-valid, was accepted by
-        the client, and then failed inside the provider - the contract promised something no layer
-        could deliver. The narrowing moves that refusal to the earliest point at which it can be
+        Advertising the full six-member set on these four operations while the implementation
+        refuses the sixth deterministically makes a request naming `5` schema-valid, accepted by
+        the client, and then failed inside the provider - a contract promising something no layer
+        can deliver. The narrowing moves that refusal to the earliest point at which it can be
         detected: schema validation, before a request is sent.
       enum: [0, 1, 2, 3, 4]
       x-enum-varnames:
@@ -2859,9 +2966,9 @@ components:
         forbids any in-scope surface from presenting itself the same way. A `501` on a Security operation
         would say this service is a placeholder, when in fact 30 of the 32 symmetric cells are
         implemented and answer normally. The legacy vocabulary carries the distinction the status cannot:
-        `E_NO_IMPLEMENTATION` names the missing cell without demoting the surface that hosts it. An
-        earlier revision of this description said `501`, contradicting both the operations' own response
-        metadata and the runtime; the operations and the runtime were right.
+        `E_NO_IMPLEMENTATION` names the missing cell without demoting the surface that hosts it. Saying
+        `501` here would contradict both the operations' own response metadata and the runtime, which
+        agree with each other.
       enum: [0, 1, 2]
       x-enum-varnames:
         [CRYPTO_SYMCRYPT_MODE_ECB, CRYPTO_SYMCRYPT_MODE_CBC, CRYPTO_SYMCRYPT_MODE_CFB]
@@ -2993,10 +3100,9 @@ components:
 
         As with the random-string flags, the legacy argument is `readonly ulong` [n_crypto.sru:L18] -
         PowerBuilder's **32-bit unsigned** integer - so the domain is exactly `0 .. 4294967295` and
-        that is what `minimum` and `maximum` carry. An earlier revision called the argument
-        "unconstrained" and omitted the `maximum`, which made values above 2^32 contract-valid while the
-        implementation's parameter is 32-bit unsigned: the document promised a request the service
-        cannot represent. Bits above the two named stay accepted inside the domain, because the legacy
+        that is what `minimum` and `maximum` carry. Calling the argument "unconstrained" and omitting the
+        `maximum` would make values above 2^32 contract-valid while the implementation's parameter is
+        32-bit unsigned: the document would promise a request the service cannot represent. Bits above the two named stay accepted inside the domain, because the legacy
         defines no behaviour for them and rejecting them would be an invented narrowing.
       x-bitmask-values: [1, 2]
       x-bitmask-varnames: [CRYPTO_GUID_INCLUDE_BRACKET, CRYPTO_GUID_INCLUDE_SEPARATOR]
@@ -3007,7 +3113,8 @@ components:
       format: int64
       title: CryptoRsaKeyBits
       minimum: 0
-      maximum: 65535
+      maximum: 4096
+      x-legacy-domain-maximum: 65535
       description: |-
         The modulus length, in bits, of an RSA key pair to generate.
 
@@ -3023,14 +3130,29 @@ components:
         - `2048` = `CRYPTO_RSA_BITS_2048` [`:L966`]
         - `4096` = `CRYPTO_RSA_BITS_4096` [`:L967`]
 
-        ## The stated bounds are the legacy parameter's own domain, not a policy of this contract
+        ## The floor is the legacy parameter's own domain; the ceiling is a PUBLISHED SERVICE-LEVEL CAP
 
         `readonly uint` is PowerBuilder's 16-bit **unsigned** integer, so the legacy argument's own
-        domain is exactly `0 .. 65535`, and that is what `minimum` and `maximum` above carry -
-        neither narrower nor wider than the declaration. They are a faithful statement of the
-        parameter's type, **not a cryptographic minimum and not a cryptographic maximum.** The
-        sibling `Proto/common.v1.proto` §1 permits a wire type to be *wider* than its legacy
-        counterpart; here JSON Schema can state the exact domain, so it does.
+        domain is exactly `0 .. 65535`, and `x-legacy-domain-maximum` above records it. `minimum` is
+        that domain's own floor and is **not** a cryptographic minimum - see the preserved-weakness
+        section below, which is the whole reason the floor must stay where it is.
+
+        `maximum` is a **service-level cap** and narrows the legacy domain, exactly as `RandomSize`
+        does and for the same class of reason. Across a network boundary the legacy domain is not a
+        bound at all: the platform attempts any size it considers legal, and generating a 16384-bit
+        modulus occupies a core for **minutes** - on the service that holds the system's only signing
+        key, at the request of any caller holding the crypto scope. A handful of concurrent requests
+        near the top of the legacy domain is a denial of service delivered entirely through
+        legitimate calls.
+
+        **The cap is the largest published convenience value, so it narrows nothing a caller can name
+        from a declared legacy constant.** All three of `1024`, `2048` and `4096` are accepted; what
+        is refused is only the range *above* the published vocabulary. A request above the cap is
+        answered `400` with return code `-13` (`E_OUT_OF_RANGE`) and a detail that quotes the cap; a
+        request outside the legacy domain keeps its own distinct answer, `400` with return code `-3`
+        (`E_INVALID_ARGUMENT`), because the two statements are different and a caller must be able to
+        tell which rule it met. In process there was no boundary and therefore nothing to bound, which
+        is why this is a boundary-created bound rather than a legacy rule being changed (C-B).
 
         ## KNOWN LEGACY WEAKNESS - 1024 BITS REMAINS LEGAL
 
@@ -3104,45 +3226,83 @@ components:
 
         There is **no client secret, no password, no API key, no client assertion, no passphrase and
         no key material of any kind** in this schema. Caller identity is established by the
-        **transport** - the mutual-TLS client certificate the operation requires - and not by a
-        credential in a JSON body.
+        **transport** - the `Authorization: Basic` header under the `clientCredential` scheme, or the
+        client certificate under the `mutualTls` alternative - and never by a credential in a JSON
+        body.
+
+        BOTH transports are named above deliberately, and neither is optional prose. The operation's
+        `security` block declares the two schemes as alternatives and the runtime accepts either, so
+        a paragraph naming only the client certificate would be narrower than the contract it
+        describes - and `clientCredential` is the scheme that survives a proxy or mesh sidecar
+        terminating TLS ahead of this service, which is the topology most deployments actually run.
+        The point the paragraph makes is the same under either scheme: the credential is in the
+        transport, never in this schema.
 
         `additionalProperties: false` is what makes that structural rather than advisory: a caller
         cannot add a credential-shaped property, and a request that tries is refused with `400`
         rather than silently accepted and ignored.
 
         The `subject` below is a *claim*, not a credential. The identity actually honoured is the one
-        the presented certificate establishes; a mismatch is refused with `403`.
+        the presented credential establishes - the `Basic` user-id, or the certificate subject - and a
+        mismatch is refused with `403`.
       additionalProperties: false
       required: [subject, audience, scopes]
       properties:
         subject:
           type: string
           minLength: 1
+          maxLength: 256
           description: >-
             The identity the caller is requesting a token for. This is a claim rather than a
-            credential - it is checked against the identity the presented client certificate
-            establishes, and a mismatch is refused.
+            credential - it is checked against the identity the presented credential establishes,
+            which is the `Basic` user-id under `clientCredential` or the certificate subject under
+            `mutualTls`, and a mismatch is refused.
+
+
+            The upper bound is a **work bound created by the service boundary**, not a legacy rule:
+            the subject is stamped into the minted token, so every later request presenting that
+            token carries it. It is compared against a roster of short service names and therefore
+            has no legitimate long form. Exceeding it is answered `400` with return code `-3`.
         audience:
           type: string
           minLength: 1
+          maxLength: 256
           description: >-
             The single intended audience for the token, which the recipient's stock bearer handler
             validates. A caller needing tokens for two audiences requests two tokens; the contract
             carries one audience per request, deliberately, so that a token is never valid somewhere
             its holder did not intend.
+
+
+            The upper bound exists for the same reason as `subject`'s and is the same value.
         scopes:
           type: array
           minItems: 1
+          maxItems: 32
           uniqueItems: true
           description: >-
             The requested scope set. The granted set returned in the response **may be narrower**,
             and a narrowing is a successful outcome rather than an error, so a caller must read the
             response rather than assume its request was honoured in full.
+
+
+            `maxItems` is a **work bound created by the service boundary** rather than a limit of the
+            issuance protocol. Every entry is hashed for uniqueness and scanned for white space before
+            the roster is consulted at all, so an unbounded array is work an authenticated caller can
+            spend on this service's behalf; the widest grant this deployment's authorization matrix
+            carries is two scopes, so the ceiling is far above anything a caller can legitimately
+            request. It is screened **before** the per-entry walk, so exceeding it costs nothing.
+            Exceeding either bound is answered `400` with return code `-3`, and the refusal quotes the
+            bound - unlike a roster refusal, which deliberately reports neither the offending scope nor
+            the granted set.
           items:
             type: string
             minLength: 1
-            description: One requested scope.
+            maxLength: 128
+            description: >-
+              One requested scope. The upper bound is a work bound: a scope is an opaque protocol token
+              carried inside the minted claim, so its length is bounded by this contract rather than by
+              the request-body ceiling.
 
     TokenResponse:
       type: object
@@ -3185,16 +3345,29 @@ components:
           type: integer
           format: int64
           minimum: 1
-          description: >-
+          maximum: 900
+          description: |-
             The token lifetime in seconds from issuance. Tokens are short-lived by contract; a
             caller must be prepared to obtain another rather than caching one indefinitely.
+
+            **`maximum` is a published bound the issuer enforces on itself, not merely advice.** The
+            documented posture is five minutes and the shipped configuration is five minutes; the
+            issuer refuses to START with `Security:TokenLifetime` above 900 seconds
+            (`SecurityOptions.MaximumTokenLifetime`), so no deployment of this contract can hand a
+            caller a longer-lived credential. An earlier revision published no upper bound and the
+            service enforced none, which meant the word "short-lived" in this description was the only
+            thing standing between a configuration typo and a year-long bearer credential valid at
+            every service in the estate - there being one issuer, no refresh flow and no revocation
+            list. A consumer sizing its own credential cache can therefore read this number rather
+            than infer one.
         scope:
           type: string
           description: >-
             The **granted** scope set as a space-delimited list, per RFC 6749 §5.1. It may be
             narrower than the requested set. A caller must read this value; treating the request as
-            authoritative is the mistake this field exists to prevent. An empty string means no
-            requested scope was granted.
+            authoritative is the mistake this field exists to prevent. It is never empty on a `200`:
+            a request whose scopes intersect the permitted set in nothing at all is refused with
+            `403` rather than answered with a token granting nothing.
         issued_at:
           type: integer
           format: int64
@@ -3334,9 +3507,10 @@ components:
 
         **`authorization_endpoint` and `userinfo_endpoint` are not published, and no equivalent is
         published under another name.** There is no interactive flow and no user-facing flow anywhere
-        in this system: every caller is a service, identity on the issuance operation is established
-        by the transport, and there is no end user to redirect, to prompt for consent, or to
-        describe. Publishing either member would advertise a capability that does not exist.
+        in this system: every caller is a service, the issuance operation authenticates a presented
+        Basic credential or a trusted client certificate, and there is no end user to redirect, to
+        prompt for consent, or to describe. Publishing either member would advertise a capability that
+        does not exist.
 
         `additionalProperties: false` makes that machine-checkable. The standards that define this
         document permit additional members and require consumers to ignore unrecognised ones; this
@@ -3370,8 +3544,9 @@ components:
           format: uri
           description: >-
             The absolute location of the issuance operation, which is `/v1/tokens` on this same
-            service. Published for completeness; note that the operation is protected by mutual TLS
-            and is not an OAuth 2.0 grant endpoint.
+            service. Published for completeness; note that the operation requires a caller credential
+            under either the `clientCredential` (HTTP `Basic`) or the `mutualTls` scheme, and is not an
+            OAuth 2.0 grant endpoint.
         id_token_signing_alg_values_supported:
           type: array
           uniqueItems: true

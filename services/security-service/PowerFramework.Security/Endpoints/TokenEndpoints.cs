@@ -23,25 +23,34 @@
 //  retrieval implementation into three services, which is a net INCREASE in hand-written security
 //  code - the opposite of what the requirement asks for.
 //
-//  WHY THIS ROUTE IS AUTHENTICATED BY A CLIENT CERTIFICATE RATHER THAN BY A TOKEN (constraint C-G)
+//  WHY THIS ROUTE IS AUTHENTICATED BY A PRESENTED CREDENTIAL RATHER THAN BY A TOKEN (constraint C-G)
 //  A caller CANNOT PRESENT A BEARER TOKEN IN ORDER TO OBTAIN ITS FIRST BEARER TOKEN. Caller identity
-//  on this one operation therefore has to come from somewhere other than a token, and it comes from
-//  the transport. The published document says so in a machine-readable way rather than in prose: it
-//  declares a `mutualTLS` security scheme and applies it to this operation as an OVERRIDE of the
-//  document-level bearer requirement
-//  [shared/PowerFramework.Contracts/OpenApi/security.v1.yaml, operation `issueToken`]. Mutual TLS is
-//  the documented per-pair fallback for a pair where a token issuer is inappropriate, and the
-//  issuance edge is that pair - the SINGLE such edge in this system. Two consequences this file
-//  implements rather than merely documents:
+//  on this one operation therefore has to come from somewhere other than a token, and the published
+//  document declares TWO schemes for it in a machine-readable way rather than in prose, EITHER of
+//  which satisfies the operation, both applied as an OVERRIDE of the document-level bearer requirement
+//  [shared/PowerFramework.Contracts/OpenApi/security.v1.yaml, operation `issueToken`]:
+//
+//    * `clientCredential` - an HTTP `Basic` credential whose user-id names a subject on this service's
+//      issuance roster. This is the PRIMARY scheme, because the operation reads the header itself and
+//      so needs no cooperation from whatever terminated the handshake - which matters wherever a
+//      TLS-terminating proxy strips the client certificate before the request reaches this process.
+//    * `mutualTLS` - a trusted client certificate presented during the handshake. This is the
+//      documented per-pair fallback for a pair where a token issuer is inappropriate, and the issuance
+//      edge is that pair - the SINGLE such edge in this system. It is reachable only where TLS is
+//      terminated at this listener.
+//
+//  A request presenting NEITHER is refused with 401. Two consequences this file implements rather
+//  than merely documents:
 //
 //    * NO CREDENTIAL CROSSES IN THE BODY. The request carries a claimed identity, an audience and a
 //      scope set, and the published schema forbids any further member outright. There is no client
-//      secret, no password, no key reference, no assertion and nowhere to put one.
-//    * THE CLAIMED IDENTITY IS RECONCILED AGAINST THE TRANSPORT'S. The `subject` member is a CLAIM;
-//      the identity honoured is the one the presented certificate establishes, and a disagreement is
-//      refused. docs/ARCHITECTURE.md section 9.3.1 assigns that mapping to THIS FILE, and the local
-//      certificate recipe in that same subsection fixes the caller identity as the certificate's
-//      common name.
+//      secret, no password, no key reference, no assertion and nowhere to put one - the Basic secret
+//      travels in the `Authorization` header, never in the payload.
+//    * THE CLAIMED IDENTITY IS RECONCILED AGAINST THE PRESENTED CREDENTIAL'S. The `subject` member is
+//      a CLAIM; the identity honoured is the one the presented Basic credential or the trusted client
+//      certificate establishes, and a disagreement is refused. docs/ARCHITECTURE.md section 9.3.1
+//      assigns that mapping to THIS FILE, and the local certificate recipe in that same subsection
+//      fixes the certificate-branch identity as the certificate's common name.
 //
 //  This route is NOT one of the service's three anonymous exemptions - the readiness probe, the
 //  published key set and the discovery metadata - and `AllowAnonymous` appears nowhere below.
@@ -218,9 +227,9 @@ public static class TokenEndpoints
     /// <remarks>
     /// Authored as a constant rather than inline so the published prose is reviewable in one place
     /// against the contract document it must agree with. It states the three properties a consumer
-    /// cannot infer from the schema: that identity comes from the transport, that this is not a grant
-    /// request despite the response following the grant response's member spellings, and that the
-    /// granted scope set may be narrower than the requested one.
+    /// cannot infer from the schema: that identity comes from the presented credential rather than from
+    /// the body, that this is not a grant request despite the response following the grant response's
+    /// member spellings, and that the granted scope set may be narrower than the requested one.
     /// </remarks>
     private const string OperationDescription =
         "Issues a short-lived service token from a caller identity, an intended audience and a "
@@ -335,6 +344,80 @@ public static class TokenEndpoints
         "A requested scope contains white space. The granted set is carried as a single "
         + "space-delimited value in both the response and the token claim, so a scope containing white "
         + "space could not be recovered by the reader and would silently become two scopes.";
+
+    /// <summary>
+    /// The largest number of scopes one request may name.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A WORK BOUND CREATED BY THE DECOMPOSITION, NOT A LEGACY RULE (constraint C-B). The legacy had no
+    /// token, no scope and no listener: nothing could submit a scope array to it, so there is no legacy
+    /// behaviour here to preserve or to change. What the boundary creates is an authenticated caller able
+    /// to submit an array whose only previous bound was the request-body ceiling - hundreds of thousands of
+    /// unique scopes, every one of them deserialised, hashed for uniqueness and scanned character by
+    /// character for white space, before the roster refuses the request for naming a scope it is not
+    /// granted. Bounding the array is what makes the refusal cost the caller rather than this service.
+    /// </para>
+    /// <para>
+    /// SIZED AGAINST THE ROSTER RATHER THAN AGAINST A ROUND NUMBER. The widest grant the shipped
+    /// authorization matrix carries is two scopes, and the published scope vocabulary is small; thirty-two
+    /// is far above anything a caller could legitimately request and far below anything that costs this
+    /// service measurable work. It is published as <c>maxItems</c> on the request schema, so a caller
+    /// learns the bound from the contract rather than from a refusal.
+    /// </para>
+    /// </remarks>
+    internal const int MaximumScopeCount = 32;
+
+    /// <summary>The longest a single requested scope may be.</summary>
+    /// <remarks>
+    /// A scope is an opaque protocol token that ends up inside a signed claim, so an unbounded one is both
+    /// a work bound and a token-size bound. Published as <c>maxLength</c> on the scope item schema.
+    /// </remarks>
+    internal const int MaximumScopeLength = 128;
+
+    /// <summary>The longest a requested subject may be.</summary>
+    /// <remarks>
+    /// The subject is stamped into the minted token, so its length is carried by every request that token
+    /// is later presented on - which is why it is bounded here rather than left to the body ceiling.
+    /// </remarks>
+    internal const int MaximumSubjectLength = 256;
+
+    /// <summary>The longest a requested audience may be.</summary>
+    /// <remarks>
+    /// Bounded for the same reason as the subject, and to the same value: both are compared against a
+    /// roster whose entries are short service names, so neither has a legitimate long form.
+    /// </remarks>
+    internal const int MaximumAudienceLength = 256;
+
+    /// <summary>Detail for a request naming more scopes than the schema permits.</summary>
+    /// <remarks>
+    /// It states the bound, unlike the roster refusals which deliberately state nothing: a published
+    /// schema bound is not a fact about this deployment's grants or its other callers, so quoting it tells
+    /// a caller how to correct the request and discloses nothing.
+    /// </remarks>
+    private static readonly string ScopeSetTooLargeDetail =
+        $"scopes carries more than the {MaximumScopeCount} entries the published request schema permits. "
+            + "A token's granted set is a small, fixed vocabulary; a request naming more scopes than the "
+            + "schema admits was refused before any of them was compared against this caller's grants, so "
+            + "no token was created and no signature was computed.";
+
+    /// <summary>Detail for a scope longer than the schema permits.</summary>
+    private static readonly string ScopeTooLongDetail =
+        $"A requested scope is longer than the {MaximumScopeLength} characters the published request "
+            + "schema permits. A scope is an opaque protocol token carried inside the minted claim, so its "
+            + "length is bounded by the contract rather than by the request body ceiling.";
+
+    /// <summary>Detail for a subject longer than the schema permits.</summary>
+    private static readonly string SubjectTooLongDetail =
+        $"subject is longer than the {MaximumSubjectLength} characters the published request schema "
+            + "permits. The subject is stamped into the minted token, so every request that token is later "
+            + "presented on would carry it.";
+
+    /// <summary>Detail for an audience longer than the schema permits.</summary>
+    private static readonly string AudienceTooLongDetail =
+        $"audience is longer than the {MaximumAudienceLength} characters the published request schema "
+            + "permits. It is compared against a roster of short service names, so it has no legitimate "
+            + "long form.";
 
     /// <summary>Detail for a scope set that repeats a scope.</summary>
     private const string ScopeDuplicateDetail =
@@ -795,20 +878,20 @@ public static class TokenEndpoints
         //    of this operation. All THREE non-trusted outcomes answer the same sentence for the same
         //    reason the two conditions above do: the response is not a probe.
         //
-        //    ⚠ BOTH SCHEMES ARE RESOLVED THROUGH ONE METHOD, AND THAT IS THE FIX RATHER THAN A TIDY-UP.
-        //    An earlier revision of this handler read the client certificate INLINE and never called
-        //    the resolver, so the shared-secret half of contract C-01 was unreachable: the published
-        //    document declared a `clientCredential` scheme, this file's own 401 sentence advertised it,
-        //    Gateway's options validator called it "the documented bring-up path", and
-        //    `orchestration/.env.example` made three secrets MANDATORY for it - while every request
-        //    presenting one was refused. Worse, Gateway's and DataServices' readiness checks are
-        //    satisfied by the secret alone, so both reported `credentials: Healthy` and Gateway's
-        //    aggregate opened the whole orchestration's dependency gate onto a stack in which no
-        //    service could obtain a token. Routing the decision through ResolvePresentedIdentity is
-        //    what makes the declared scheme, the advertised scheme and the enforced scheme one thing.
+        //    ⚠ BOTH SCHEMES ARE RESOLVED THROUGH ONE METHOD, AND THAT IS STRUCTURAL RATHER THAN A TIDY-UP.
+        //    Reading the client certificate INLINE here and never calling the resolver would leave the
+        //    shared-secret half of contract C-01 UNREACHABLE while every other artifact in the repository
+        //    advertised it: the published document declares a `clientCredential` scheme, this file's own
+        //    401 sentence names it, Gateway's options validator calls it "the documented bring-up path",
+        //    and `orchestration/.env.example` makes three secrets MANDATORY for it. Worse, Gateway's and
+        //    DataServices' readiness checks are satisfied by the secret ALONE, so both would report
+        //    `credentials: Healthy` and Gateway's aggregate would open the whole orchestration's dependency
+        //    gate onto a stack in which no service could obtain a token. Routing the decision through
+        //    ResolvePresentedIdentity is what keeps the declared scheme, the advertised scheme and the
+        //    enforced scheme one thing.
         //
         //    NOTHING IS WEAKENED BY ROUTING THROUGH IT. The certificate arm still evaluates trust before
-        //    reading a name, because the resolver now takes the trust decision itself and applies it -
+        //    reading a name, because the resolver takes the trust decision itself and applies it -
         //    which additionally makes it impossible for any future caller of the resolver to read an
         //    identity out of a certificate whose issuer was never established. Every failure under
         //    either scheme lands on the SAME sentence below, so the two schemes are not distinguishable
@@ -946,9 +1029,19 @@ public static class TokenEndpoints
             return Malformed(SubjectBlankDetail, loggerFactory);
         }
 
+        if (request.Subject.Length > MaximumSubjectLength)
+        {
+            return Malformed(SubjectTooLongDetail, loggerFactory);
+        }
+
         if (string.IsNullOrWhiteSpace(request.Audience))
         {
             return Malformed(AudienceBlankDetail, loggerFactory);
+        }
+
+        if (request.Audience.Length > MaximumAudienceLength)
+        {
+            return Malformed(AudienceTooLongDetail, loggerFactory);
         }
 
         IReadOnlyList<string>? scopes = request.Scopes;
@@ -956,6 +1049,15 @@ public static class TokenEndpoints
         if (scopes is null || scopes.Count == 0)
         {
             return Malformed(ScopeSetEmptyDetail, loggerFactory);
+        }
+
+        // THE COUNT IS SCREENED BEFORE THE PER-ENTRY WALK, AND THAT ORDER IS THE WHOLE POINT OF THE BOUND.
+        // Checked after the walk it would still refuse the request, having first hashed and scanned every
+        // entry - which is the work the bound exists to avoid spending on a request the contract already
+        // forbids.
+        if (scopes.Count > MaximumScopeCount)
+        {
+            return Malformed(ScopeSetTooLargeDetail, loggerFactory);
         }
 
         // Ordinal, because a scope is an opaque protocol token: two spellings that differ only by case
@@ -972,6 +1074,11 @@ public static class TokenEndpoints
 
             // White space is refused in EVERY form rather than only the delimiter, because a tab or a
             // line break inside a claim value is a hazard in its own right.
+            if (scope.Length > MaximumScopeLength)
+            {
+                return Malformed(ScopeTooLongDetail, loggerFactory);
+            }
+
             if (scope.Any(char.IsWhiteSpace))
             {
                 return Malformed(ScopeSpacedDetail, loggerFactory);
@@ -1526,14 +1633,15 @@ public static class TokenEndpoints
             loggerFactory: loggerFactory);
 
     /// <summary>
-    /// Refuses an accepted caller that claimed an identity the transport does not establish.
+    /// Refuses an accepted caller that claimed an identity its presented credential does not establish.
     /// </summary>
     /// <param name="loggerFactory">The logger factory the refusal is recorded through.</param>
     /// <returns>A forbidden response carrying the access-denied return code.</returns>
     /// <remarks>
     /// The status is the shared map's own arm for this code and needs no override: the caller IS
-    /// authenticated - it presented a certificate this service accepted - and is simply not permitted
-    /// the subject it asked for, which is precisely the distinction between the two statuses. The
+    /// authenticated - it presented a credential this service accepted, Basic or certificate - and is
+    /// simply not permitted the subject it asked for, which is precisely the distinction between the
+    /// two statuses. The
     /// response names neither the expected identity nor any part of the stored configuration.
     /// </remarks>
     private static ProblemHttpResult SubjectRefused(ILoggerFactory loggerFactory) =>
@@ -1971,12 +2079,14 @@ public sealed record TokenIssuanceResponse
     public required long ExpiresIn { get; init; }
 
     /// <summary>The GRANTED scope set as a space-delimited list.</summary>
-    /// <value>The granted scopes, delimited by single spaces. An empty string is legal.</value>
+    /// <value>The granted scopes, delimited by single spaces. Never empty on an issued token.</value>
     /// <remarks>
     /// BYTE-IDENTICAL TO THE TOKEN'S SCOPE CLAIM, because the claim and this member are the same string.
-    /// It MAY BE NARROWER than the requested set, and a caller must read this value: treating the
-    /// request as authoritative is the mistake this member exists to prevent. An empty string means no
-    /// requested scope was granted.
+    /// It is the INTERSECTION of the requested set with what the caller may hold for the requested
+    /// audience, so it MAY BE NARROWER than the requested set, and a caller must read this value:
+    /// treating the request as authoritative is the mistake this member exists to prevent. It is never
+    /// empty here - an empty intersection is refused with 403 rather than reported as a narrowing to
+    /// nothing, so this member always names at least one granted scope.
     /// </remarks>
     [JsonPropertyName("scope")]
     public required string Scope { get; init; }

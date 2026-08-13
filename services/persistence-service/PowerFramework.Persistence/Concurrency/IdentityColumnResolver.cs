@@ -194,10 +194,11 @@
 //  met a `repeated int64` and the null was coerced or dropped - which is exactly what review found.
 //
 //  So the single mapper sits next to the collector, for the same reason the sibling `CarrierValue`
-//  mapper sits next to the buffers it serves: one home means no consumer can invent a second,
-//  lossier one, and `Grpc/UpdateService.cs` - which does not exist yet - will find the projection
-//  already made rather than a decision waiting to be got wrong. It is a pure, allocation-only
-//  transform with no I/O, so it does not compromise this file's testability-without-a-database.
+//  mapper sits next to the buffers it serves: one home means no consumer can invent a second, lossier
+//  one. `Grpc/UpdateService.cs` now exists and does exactly what that placement was for - it calls
+//  `ResolvedIdentityColumnData.ToIdentityColumnData()` per block when filling the update response and
+//  makes no projection decision of its own. It is a pure, allocation-only transform with no I/O, so it
+//  does not compromise this file's testability-without-a-database.
 //
 //  ResolvedIdentityColumnData.ContainsNullValue survives as a cheap DETECTION for diagnostics and
 //  tests. It is no longer the mechanism that prevents loss - the wire type is - and nothing is

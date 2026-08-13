@@ -1830,9 +1830,9 @@ public static class FakeItemValue
 /// harmonised.
 /// </para>
 /// <para>
-/// IT HAS A CALL LOG, AND THAT IS A CORRECTION OF RECORD. This paragraph previously read "NO CALL LOG.
-/// This type is a pure value source: it records nothing, because nothing in the ported code mutates a
-/// child DataWindow." That was true only of the two sources measured at the time; it is FALSE for
+/// IT HAS A CALL LOG, AND "NO CALL LOG - THIS TYPE IS A PURE VALUE SOURCE BECAUSE NOTHING IN THE PORTED
+/// CODE MUTATES A CHILD DataWindow" IS THE READING TO REFUSE. That reading holds for two of the ported
+/// sources and is FALSE for
 /// <c>ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru</c>, which mutates its
 /// child at seven sites - <c>SetRedraw</c> [<c>:L387</c>, <c>:L410</c>], <c>SetFilter</c> [<c>:L389</c>],
 /// <c>Filter</c> [<c>:L390</c>], <c>Sort</c> [<c>:L391</c>], <c>SetSort</c> [<c>:L220</c>] and
@@ -2297,7 +2297,7 @@ public sealed class FakeDataWindowChild : IDataWindowChild
 /// the cursor moved. Those two properties are how that exact divergence is staged.
 /// </para>
 /// <para>
-/// WHAT IT DOES NOT DO. It does not filter when <see cref="Filter"/> succeeds, does not sort, does not
+/// WHAT IT DOES NOT DO. It does not filter when <c>Filter</c> succeeds, does not sort, does not
 /// evaluate an expression, does not validate a value against a column type and does not localize a
 /// message. Every one of those belongs to the code under test, and a double that did any of them would be
 /// asserting its own behaviour instead of the subject's (constraint C-B). The one exception is row
@@ -2514,10 +2514,10 @@ public class FakeDataWindowHost : DataWindowServiceHost
     /// TRAILING SPACE, which is part of the literal and is carried verbatim rather than trimmed.
     /// </para>
     /// <para>
-    /// NAMED FOR THE DESCRIBE PROPERTY IT BACKS, not <c>Sort</c>, because <c>Sort()</c> is now a member of
+    /// NAMED FOR THE DESCRIBE PROPERTY IT BACKS, not <c>Sort</c>, because <c>Sort()</c> is a member of
     /// the host contract itself [<c>n_cst_dwsvc_columnsort.sru:L415</c>] and a property may not share a
-    /// name with an inherited method. The two are genuinely different things and the rename makes that
-    /// legible: this is the sort expression the DataWindow REPORTS, whereas
+    /// name with an inherited method. The two are genuinely different things and the distinct name makes
+    /// that legible: this is the sort expression the DataWindow REPORTS, whereas
     /// <see cref="SetSort(string)"/> sets one and <see cref="Sort"/> applies it. It is deliberately NOT
     /// updated by <see cref="SetSort(string)"/> - see that member's remarks.
     /// </para>
@@ -4182,7 +4182,7 @@ public class FakeDataWindowHost : DataWindowServiceHost
     /// <exception cref="ArgumentNullException">Either argument is <see langword="null"/>.</exception>
     /// <remarks>
     /// TEST SETUP, SO IT IS NOT RECORDED - see the call-log policy in this file's header. It exists
-    /// because <see cref="AddCodeTableEntry"/> always composes <c>display + TAB + value</c>, which cannot
+    /// because <c>AddCodeTableEntry</c> always composes <c>display + TAB + value</c>, which cannot
     /// express AN ENTRY WITH NO TAB - and that case is live behaviour the drop-down search port must
     /// reproduce: <c>ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L123</c>
     /// takes <c>Left(sVal,Pos(sVal,"~t") - 1)</c>, so a missing tab makes <c>Pos</c> answer <c>0</c> and

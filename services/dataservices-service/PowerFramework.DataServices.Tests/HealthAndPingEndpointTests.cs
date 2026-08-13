@@ -72,14 +72,6 @@
 //  publishes no service-level agreement, no latency budget, no throughput target and no availability
 //  commitment, so no timing assertion is written and none may be (AAP 0.8.5).
 //
-//  RULES POSITION, STATED PLAINLY
-//  ------------------------------------------------------------------------------------------------
-//  The project's rules document was retrieved in full and contains exactly one statement: NO USER
-//  RULES WERE PROVIDED. That is a finding rather than latitude, and nothing is invented in its place.
-//  The binding constraints are the transformation plan's twelve non-rule constraints together with its
-//  enterprise baseline (AAP 0.7.2); the ones governing this file are C-B, C-F, C-G, C-I, C-J, C-K and
-//  C-L, and each is cited at its point of application below.
-//
 //  ONE NAMING CONSTRAINT, HONOURED BY REFERENCE ONLY
 //  ------------------------------------------------------------------------------------------------
 //  The legacy return-code identifiers keep their original screaming-snake spelling in C# because those

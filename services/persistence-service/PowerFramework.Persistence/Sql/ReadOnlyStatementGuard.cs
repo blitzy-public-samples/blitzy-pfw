@@ -70,11 +70,6 @@
 //  record the interpolated literals that Errors/SqlRedactor.cs exists to remove. It holds no mutable
 //  state, so every member is static and every call is independent and thread safe.
 //
-//  RULES POSITION. review_rules returns exactly one line, "No user rules provided.", so the
-//  enterprise-standard baseline applies. The constraints that bite here are C-G (least privilege: a
-//  credential minted for one contract must not reach another contract's capability), C-B (no legacy
-//  behaviour is corrected, which is why the emptiness and malformedness checks stay where they were),
-//  C-F (no caller value is echoed, logged or quoted) and C-E (no database is fabricated or reached).
 // ==================================================================================================
 
 using PowerFramework.Persistence.Data;

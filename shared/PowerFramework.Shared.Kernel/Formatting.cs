@@ -228,15 +228,15 @@ public static class Formatting
     // that could intercept a null before the fallback reaches `String`. The return type is
     // therefore `string?` and a null code returns null.
     //
-    // An earlier revision of this file returned the empty string here and recorded that as an
-    // inferred choice, on the reasoning that a null-returning `string` would push a null check
-    // onto every call site. That reasoning does not survive contact with the facts. Collapsing
-    // null to the empty string is exactly the null-flattening AAP 0.4.5.4 forbids - "Never
-    // collapse null to zero", whose string analogue is this - and it converts a value the oracle
-    // demonstrably produces into a different one. The cost it was avoiding is also not real:
-    // FormatRetCode has NO caller anywhere in this repository outside its own test suite, so
-    // widening the return type propagates a null check to nothing at all. If a caller is added
-    // later it must handle the null, because the legacy would have handed it one.
+    // RETURNING THE EMPTY STRING HERE is the tempting alternative, on the reasoning that a
+    // null-returning `string` pushes a null check onto every call site. That reasoning does not
+    // survive contact with the facts. Collapsing null to the empty string is exactly the
+    // null-flattening AAP 0.4.5.4 forbids - "Never collapse null to zero", whose string analogue
+    // is this - and it converts a value the oracle demonstrably produces into a different one. The
+    // cost it avoids is not real either: FormatRetCode has NO caller anywhere in this repository
+    // outside its own test suite, so the nullable return type propagates a null check to nothing
+    // at all. If a caller is added later it must handle the null, because the legacy would have
+    // handed it one.
     //
     // WHAT IS STILL NOT DETERMINED, stated so the boundary of the claim is exact: no call site in
     // the corpus passes a null code, so this trace establishes what the oracle WOULD return rather
@@ -606,11 +606,19 @@ public static class Formatting
     // long is interpreted as a STANDARD format specifier instead, so a single-character result is
     // prefixed with '%' to force the custom reading.
     //
-    // THE VERIFIED SUBSET, stated precisely as required: the only masks any call site in the
-    // repository uses are "YYYY-MM-DD", "YYYY-MM-DD HH:MM:SS" and the numeric "#.0#". Those three
-    // are the masks whose translation is verified against the corpus and pinned by test. Every
-    // other token rule above is a documented best effort at the general case, is not exercised by
-    // the oracle, and is listed in DECISION 13 accordingly.
+    // THE VERIFIED SUBSET, stated precisely as required and MEASURED rather than assumed. Every
+    // mask literal in the estate is one of nine, across three families:
+    //     date and time - "YYYY-MM-DD" [w_test_logger.srw:L107, and one more site],
+    //                     "YYYY-MM-DD HH:MM:SS" (two sites),
+    //                     "MMM-DDD-YY HH:MM:SS" [w_test_logger.srw:L171],
+    //                     "H:MM:SS AM/PM"       [w_test_logger.srw:L171]
+    //     numeric       - "#.0#", "###,###,##0" [w_test_logger.srw:L107],
+    //                     "###,###,##0.0"       [w_test_logger.srw:L171]
+    //     string ('@')  - "(@@@)-@@@@" [w_test_logger.srw:L107],
+    //                     "\{@@@\}-(@@@@@)"     [w_test_logger.srw:L171]
+    // All nine are pinned by test, so all nine are verified rather than best effort. Every token
+    // rule above that NO literal exercises remains a documented best effort at the general case and
+    // is listed in DECISION 13 CHOICE 12 accordingly.
     //
     // DECISION 11 - MASK DISPATCH IS TYPE-DIRECTED, AND A NUMERIC MASK IS PASSED THROUGH
     // ------------------------------------------------------------------------------------------
@@ -890,7 +898,7 @@ public static class Formatting
     //
     // CHOICE 10 - a mask with NO '@' placeholder applied to a value that cannot honour a .NET
     //             format string, such as a date or numeric mask landing on a string.
-    //     Narrowed from what this entry used to claim. A mask that DOES carry '@' is a
+    //     NARROWER THAN "ANY MASK ON A STRING". A mask that DOES carry '@' is a
     //     PowerBuilder String() display mask, the corpus applies one to a string at five call
     //     sites, and it is implemented as verified behaviour under DECISION 15. What is left
     //     unadjudicated is only the residue: a mask that is not a string mask and cannot be a
@@ -913,8 +921,8 @@ public static class Formatting
     //     build error text with this method.
     //     Pinned by: SprintfRejectedMaskIsAnInferredChoice
     //
-    // CHOICE 12 - every mask token beyond the three the corpus verifies, which are "YYYY-MM-DD",
-    //             "YYYY-MM-DD HH:MM:SS" and the numeric "#.0#".
+    // CHOICE 12 - every mask token beyond the nine mask literals the corpus verifies, enumerated in
+    //             DECISION 10's verified-subset note.
     //     Chosen: translated by the general token rules of DECISION 10.
     //     Pinned by: SprintfGeneralMaskTokensAreAnInferredChoice
     //
@@ -1381,8 +1389,9 @@ public static class Formatting
     /// in the minutes slot and produce a plausible-looking wrong timestamp.
     /// </para>
     /// <para>
-    /// Verified against the corpus for <c>YYYY-MM-DD</c> and <c>YYYY-MM-DD HH:MM:SS</c>, the only
-    /// date and time masks any call site uses. All other token rules are a documented best effort
+    /// Verified against the corpus for all four date and time masks any call site uses -
+    /// <c>YYYY-MM-DD</c>, <c>YYYY-MM-DD HH:MM:SS</c>, <c>MMM-DDD-YY HH:MM:SS</c> and
+    /// <c>H:MM:SS AM/PM</c>. Token rules no literal exercises are a documented best effort
     /// at the general case; see CHOICE 12 in DECISION 13.
     /// </para>
     /// </remarks>

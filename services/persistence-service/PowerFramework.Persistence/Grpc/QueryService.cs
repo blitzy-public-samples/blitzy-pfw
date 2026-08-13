@@ -1032,6 +1032,7 @@ internal sealed class QueryTaskRegistry
     /// <param name="sessionId">The session the task is bound to.</param>
     /// <param name="task">The worker task.</param>
     /// <param name="faults">The recorder wired into that task's failure events.</param>
+    /// <param name="diagnostic">Receives the diagnostic text when the call refuses; empty on success.</param>
     /// <returns>The registered entry, carrying the minted handle value.</returns>
     /// <exception cref="InvalidOperationException">
     /// The minted identifier collided with a live one. Unreachable in practice with a version-4 GUID and
@@ -1086,9 +1087,24 @@ internal sealed class QueryTaskRegistry
     /// <param name="entry">The entry when resolved; otherwise <see langword="null"/>.</param>
     /// <returns><see langword="true"/> when the handle names a live task.</returns>
     /// <remarks>
+    /// <para>
     /// A missing, blank, stale, foreign or unknown handle all answer the same way, and the caller turns
     /// that into <c>E_INVALID_HANDLE</c>. Discriminating between them would leak whether a value was
     /// ever valid.
+    /// </para>
+    /// <para>
+    /// <b>FOREIGN IS NOW ACTUALLY ONE OF THOSE OUTCOMES.</b> This remark claimed it before the ownership
+    /// comparison existed, and the claim was aspirational: a handle that leaked to another authenticated
+    /// caller resolved for that caller, who could then stream another principal's rows. The comparison is
+    /// against <see cref="HandlePrincipalResolver.IsCaller"/>, the same identity the quota attributed the
+    /// task to.
+    /// </para>
+    /// <para>
+    /// <b>THE STAMP IS NOT REFRESHED FOR A FOREIGN CALLER, AND THE ORDER IS THE REASON THE CHECK SITS
+    /// ABOVE IT.</b> Refreshing first would let a caller holding a leaked handle keep another principal's
+    /// task alive indefinitely - a resource it cannot use but can prevent the reclaim pass from
+    /// collecting.
+    /// </para>
     /// </remarks>
     internal bool TryResolve(TaskHandle? handle, out QueryTaskEntry? entry)
     {
@@ -1103,6 +1119,15 @@ internal sealed class QueryTaskRegistry
 
         if (!_tasks.TryGetValue(taskId, out entry))
         {
+            return false;
+        }
+
+        if (!_principals.IsCaller(entry.Principal))
+        {
+            // COLLAPSED INTO THE NOT-FOUND ANSWER, out-parameter and all, so a caller cannot tell a handle
+            // it does not own from one that never existed.
+            entry = null;
+
             return false;
         }
 
@@ -1135,6 +1160,37 @@ internal sealed class QueryTaskRegistry
             return false;
         }
 
+        // OWNERSHIP IS TESTED BEFORE THE REMOVAL, on the entry still in the table, and a foreign caller
+        // therefore removes nothing. This is the release path's own check rather than a reliance on a
+        // resolve above it: C-05's release names the handle directly, so there is no earlier lookup for the
+        // check to live in, and a foreign release would otherwise dispose a task another caller is using -
+        // a denial of service that needs only a leaked handle, no ability to read anything.
+        if (_tasks.TryGetValue(taskId, out entry) && !_principals.IsCaller(entry.Principal))
+        {
+            entry = null;
+
+            return false;
+        }
+
+        return TryRemoveUnchecked(taskId, out entry);
+    }
+
+    /// <summary>
+    /// Removes a handle WITHOUT testing ownership - the maintenance path.
+    /// </summary>
+    /// <param name="taskId">The identity to remove.</param>
+    /// <param name="entry">The removed entry when this call removed one.</param>
+    /// <returns><see langword="true"/> when this call is the one that removed it.</returns>
+    /// <remarks>
+    /// <b>UNCHECKED BY DESIGN, AND THE NAME SAYS SO SO THAT NO CALLER-FACING PATH REACHES IT BY
+    /// ACCIDENT.</b> The reclaim pass, the shutdown drain and the session purge all act on the SERVICE's
+    /// behalf, not a caller's: they run on a background thread or during host shutdown, where there is no
+    /// request and therefore no caller identity to compare against. An ownership test here would resolve
+    /// every stored principal against the unattributed sentinel and collect nothing, turning the abandoned
+    /// -handle ceiling into a leak. Private, so the boundary is enforced by the compiler.
+    /// </remarks>
+    private bool TryRemoveUnchecked(string taskId, out QueryTaskEntry? entry)
+    {
         if (!_tasks.TryRemove(taskId, out entry) || entry is null)
         {
             return false;
@@ -1175,7 +1231,7 @@ internal sealed class QueryTaskRegistry
         {
             if (candidate.IsRunning
                 || Volatile.Read(ref candidate.LastActivityTicks) > threshold
-                || !TryRemove(new TaskHandle { TaskId = candidate.TaskId }, out QueryTaskEntry? removed)
+                || !TryRemoveUnchecked(candidate.TaskId, out QueryTaskEntry? removed)
                 || removed is null)
             {
                 continue;
@@ -1213,8 +1269,7 @@ internal sealed class QueryTaskRegistry
 
         foreach (QueryTaskEntry candidate in _tasks.Values)
         {
-            if (!TryRemove(new TaskHandle { TaskId = candidate.TaskId }, out QueryTaskEntry? removed)
-                || removed is null)
+            if (!TryRemoveUnchecked(candidate.TaskId, out QueryTaskEntry? removed) || removed is null)
             {
                 continue;
             }
@@ -1262,13 +1317,13 @@ internal sealed class QueryTaskRegistry
                 continue;
             }
 
-            // THROUGH TryRemove, NOT THROUGH THE DICTIONARY, and the difference is a leaked quota. The
+            // THROUGH TryRemoveUnchecked, NOT THROUGH THE DICTIONARY, and the difference is a leaked
+            // quota. The
             // handle ceiling is reserved on registration and released by whichever call wins the removal
             // [HandleQuota], so a purge that reached past this member would retire the task and leave its
             // slot reserved forever - and the ceiling is per-principal, so the caller whose session ended
             // is exactly the caller that would eventually be refused a new handle it is entitled to.
-            if (!TryRemove(new TaskHandle { TaskId = candidate.TaskId }, out QueryTaskEntry? removed)
-                || removed is null)
+            if (!TryRemoveUnchecked(candidate.TaskId, out QueryTaskEntry? removed) || removed is null)
             {
                 continue;
             }
@@ -1973,7 +2028,7 @@ internal readonly record struct QuerySettingOutcome(long Code, string? ErrorText
 // none of them, because a library has no caller whose rights are narrower than the process's - and
 // across this boundary there is one. Left ungated, a credential minted for `persistence.read`
 // reached INSERT, DELETE, DDL, PRAGMA, ATTACH and, because the provider executes every statement in
-// a batch it is handed, whole batches spliced behind a semicolon. So the scope is now ENFORCED
+// a batch it is handed, whole batches spliced behind a semicolon. So the scope is ENFORCED
 // rather than assumed, at two named places:
 //
 //    * Sql/ReadOnlyStatementGuard.cs gates QuerySpec.sql and QuerySpec.sql_syntax, admitting ONE

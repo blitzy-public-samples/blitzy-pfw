@@ -4,7 +4,7 @@
 //  WHAT THIS FILE IS
 //  The REST projection of contract C-03 (dataservices.v1.DataWindowService) and contract C-04
 //  (dataservices.v1.ColumnExpressionService), declared on this service's REST listener - port 5102,
-//  inside the 5101-5105 band the environment fixes (constraint C-L). Forty operations under
+//  inside the 5101-5105 band the environment fixes (constraint C-L). Thirty-nine operations under
 //  /v1/datawindow/**, spelled exactly as shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml
 //  spells them, so that Gateway's documented /v1/datawindow/** ingress path and this projection
 //  correspond route for route.
@@ -27,18 +27,23 @@
 //       from one returning their string renderings.
 //    3. THE ORDERED CHAIN ITSELF, with a TRI-VALUED veto and a FOUR-VALUE item-change alphabet.
 //
-//  Protobuf over gRPC is the only transport in the mandated stack that carries all three. JSON over
-//  REST would lose both the ordering and the typed veto. So gRPC is primary, the protocol
-//  definitions in PowerFramework.Contracts are the authority, and this file exists so that Gateway
-//  can compose a REST ingress over them.
+//  Protobuf over gRPC carries all three NATIVELY, which is what AAP 0.1.5 decides this service on.
+//  JSON over REST can encode each of them by CONVENTION - a sequence member, an integer veto member, a
+//  tagged union for the `any` - but nothing in the format enforces the ordering or the veto's arity, so
+//  both stop being properties of the contract and become agreements between two codebases; and a
+//  request/response projection cannot carry a SERVER-INITIATED question at all, which items 1 and 2
+//  both are. So gRPC is primary, the protocol definitions in PowerFramework.Contracts are the
+//  authority, and this file exists so that Gateway can compose a REST ingress over them - which is
+//  possible precisely because the projection is over the eight-plus operations that ARE
+//  request/response, and excludes the streaming ones.
 //
 //  ------------------------------------------------------------------------------------------------
 //  THE CENTRAL RESPONSIBILITY: ONE SHARED STATUS MAPPING, AND `Aborted` BECOMES `409`
 //  ------------------------------------------------------------------------------------------------
 //  The status translation is the substantive part of a projection, and it is implemented EXACTLY
-//  ONCE here - `ProjectStatus` plus `ProjectAsync` - and used by every one of the forty
+//  ONCE here - `ProjectStatus` plus `ProjectAsync` - and used by every one of the thirty-nine
 //  routes. There is no per-endpoint `try`/`catch (RpcException)` anywhere in this file. One mapper
-//  is both the correctness property (forty copies would drift) and the coverage property
+//  is both the correctness property (thirty-nine copies would drift) and the coverage property
 //  (constraint C-H measures a line gate per service, and one well-tested mapper is reachable from
 //  every route).
 //
@@ -90,7 +95,7 @@
 //  ------------------------------------------------------------------------------------------------
 //  WHAT IS DELIBERATELY NOT PROJECTED - THREE STREAMS, AND THE REASON IS STRUCTURAL
 //  ------------------------------------------------------------------------------------------------
-//  C-03 declares sixteen methods and C-04 twenty-seven. Fifteen and twenty-five are projected. The
+//  C-03 declares sixteen methods and C-04 twenty-six. Fifteen and twenty-four are projected. The
 //  three exclusions are all BIDIRECTIONAL, and they are named individually so the boundary is
 //  checkable rather than asserted:
 //
@@ -239,13 +244,6 @@
 //  carries come from, they are read to understand what must survive it, and they are never ported
 //  here.
 //
-//  RULES POSITION
-//  `review_rules` returns exactly "No user rules provided.", so NO USER-SPECIFIED RULE governs this
-//  file. The enterprise-standard baseline applies in its place and is honoured: nullable reference
-//  types and warnings-as-errors inherited and never relaxed, no secret in source or in any response
-//  body, structured logging with the one interpolating field never recorded, and explicitly
-//  versioned contracts as the only cross-service coupling. The binding constraints are the Agent
-//  Action Plan's C-A through C-L, which the rules facility cannot surface.
 // ==================================================================================================
 
 using System.Diagnostics;
@@ -352,7 +350,7 @@ public static class RestProjectionEndpoints
     /// <summary>
     /// The nested prefix carrying C-04's operations, so that the contract's own
     /// <c>/v1/datawindow/expression/**</c> spelling is produced by composition rather than repeated
-    /// twenty-five times.
+    /// twenty-four times.
     /// </summary>
     private const string ExpressionGroupPrefix = "/expression";
 
@@ -532,7 +530,7 @@ public static class RestProjectionEndpoints
         "An ordinal in the request lies outside the range the target accepts. Legacy row and column "
         + "ordinals are ONE-BASED throughout this system.";
 
-    /// <summary>The detail for <see cref="StatusCode.Unauthenticated"/>.</summary>
+    // The detail for StatusCode.Unauthenticated.
     // ---------------------------------------------------------------------------------------------
     //  IN-BAND FAILURE PROSE - used ONLY when the contract left its own diagnostic empty
     // ---------------------------------------------------------------------------------------------
@@ -603,8 +601,20 @@ public static class RestProjectionEndpoints
     private const string InBandTimeoutDetail = "The operation did not complete within its budget.";
 
     /// <summary>Fallback prose for an unsupported or unimplemented outcome reported in band.</summary>
+    /// <remarks>
+    /// 500 rather than 501, and the sentence says so, because a caller reading only this response has to be
+    /// able to tell this apart from a reserved deferred-capability route. 501 belongs to those four routes on
+    /// Gateway alone (AAP 0.4.4, C-D); an implemented operation reporting that one cell of its surface has no
+    /// available implementation is a different statement, and the <c>retCode</c> member carries which of the
+    /// two legacy codes was reported. Stated identically on the ingress side, which is the equivalence this
+    /// pair of projections publishes.
+    /// </remarks>
     private const string InBandNotImplementedDetail =
-        "The operation is not supported for the arguments supplied.";
+        "The operation is implemented but reported that the specific capability this request asked for has "
+        + "no available implementation, so it was not performed. Re-sending the same request produces the "
+        + "same answer. This is NOT a reserved deferred-capability route - those are the only routes in this "
+        + "system that answer 501, and they live on Gateway. The retCode member carries this service's own "
+        + "code.";
 
     /// <summary>Fallback prose for a data-path failure reported in band.</summary>
     /// <remarks>
@@ -666,12 +676,14 @@ public static class RestProjectionEndpoints
     /// <remarks>
     /// It names no capability area and carries no reserved marker. This is a method that the
     /// contract publishes reporting itself unavailable, which is deployment or version skew - not a
-    /// capability boundary. The four reserved boundary declarations live on Gateway alone.
+    /// capability boundary. The four reserved boundary declarations live on Gateway alone, and they are the
+    /// only routes in the system that answer 501, which is why this is answered as 500.
     /// </remarks>
     private const string UnimplementedDetail =
         "This operation's method is not implemented by the deployment currently answering. The "
         + "published contract declares it, so this indicates a version skew rather than a "
-        + "capability boundary.";
+        + "capability boundary - which is why it is not answered as 501: that status identifies a reserved "
+        + "deferred-capability route on Gateway, and this operation is an implemented one.";
 
     /// <summary>The detail for <see cref="StatusCode.DeadlineExceeded"/>.</summary>
     private const string DeadlineExceededDetail =
@@ -951,7 +963,7 @@ public static class RestProjectionEndpoints
     // ==============================================================================================
 
     /// <summary>
-    /// Declares the forty <c>/v1/datawindow</c> operations on the supplied route builder.
+    /// Declares the thirty-nine <c>/v1/datawindow</c> operations on the supplied route builder.
     /// </summary>
     /// <param name="endpoints">The route builder the composition root is populating.</param>
     /// <returns>
@@ -974,7 +986,7 @@ public static class RestProjectionEndpoints
     /// <b>The return type is deliberately the route builder and not a route handler builder or a
     /// group.</b> Handing back either would let a caller append <c>AllowAnonymous</c>, which takes
     /// precedence over <c>RequireAuthorization</c> in endpoint metadata and would silently open
-    /// forty authenticated routes from a different file. Withholding it makes that impossible.
+    /// thirty-nine authenticated routes from a different file. Withholding it makes that impossible.
     /// </para>
     /// <para>
     /// Both groups are authorized by the parent group's single unconditional
@@ -986,7 +998,7 @@ public static class RestProjectionEndpoints
     /// This method registers nothing in the service collection and constructs no channel, no client
     /// and no options type. Registration is <c>Program.cs</c>'s responsibility, and the projected
     /// implementations are resolved per request with the same semantics the gRPC hosting layer uses -
-    /// see <see cref="ResolveDataWindowService"/>.
+    /// see <c>ResolveDataWindowService</c>.
     /// </para>
     /// </remarks>
     public static IEndpointRouteBuilder MapRestProjectionEndpoints(this IEndpointRouteBuilder endpoints)
@@ -994,9 +1006,9 @@ public static class RestProjectionEndpoints
         ArgumentNullException.ThrowIfNull(endpoints);
 
         // Constraint C-G, AND THE POLICY IS NAMED RATHER THAN LEFT AT THE DEFAULT. The parameterless form
-        // used to be here, which required an authenticated user and nothing more - so any holder of any
+        // requires an authenticated user and nothing more - so with it, any holder of any
         // token minted for this audience could drive every one of these routes, and a credential obtained
-        // to read a DataWindow could drive the expression engine (CWE-862, CWE-863). Each group now names
+        // to read a DataWindow could drive the expression engine (CWE-862, CWE-863). Each group therefore names
         // the policy its own contract is served under: the DataWindow scope on the parent, and the
         // expression scope on the nested group, which is the same split the two gRPC contracts are mapped
         // under and the same split Gateway requests its credential under. Each policy also requires the
@@ -1310,11 +1322,11 @@ public static class RestProjectionEndpoints
 
 
     // ==============================================================================================
-    //  C-04 - THE TWENTY-FIVE PROJECTED ColumnExpressionService OPERATIONS
+    //  C-04 - THE TWENTY-FOUR PROJECTED ColumnExpressionService OPERATIONS
     //
-    //  C-04 declares twenty-seven methods. The two exclusions are `InvokeMethodChannel` and
+    //  C-04 declares twenty-six methods. The two exclusions are `InvokeMethodChannel` and
     //  `TraceChannel`, both BIDIRECTIONAL and both INVERTED - the server asks and the client answers -
-    //  so neither has a request/response direction to project. Twenty-five are declared here.
+    //  so neither has a request/response direction to project. Twenty-four are declared here.
     //
     //  THE `$` VERSUS `$$` DISTINCTION IS THE REASON THIS SURFACE IS SO LARGE, and it does not
     //  survive naive serialization. Static expansion substitutes the variable's value AT THE MOMENT
@@ -1330,7 +1342,7 @@ public static class RestProjectionEndpoints
     // ==============================================================================================
 
     /// <summary>
-    /// Declares C-04's twenty-five projected operations: the session pair, the expression table, the
+    /// Declares C-04's twenty-four projected operations: the session pair, the expression table, the
     /// typed variable environment, the four calculation entry points, the two service switches and
     /// the two state reads, plus the projected event stream.
     /// </summary>
@@ -1962,13 +1974,16 @@ public static class RestProjectionEndpoints
         // all. 504 is the deadline this service sets on EVERY outbound call elapsing, so its expiry is an
         // ordinary outcome of a slow upstream rather than a hypothetical.
         //
-        // Two statuses the failure map also translates are deliberately NOT declared. AlreadyExists is
+        // One status the failure map also translates is deliberately NOT declared. AlreadyExists is
         // produced by exactly one method in the estate - the macro channel reporting an existing
         // attachment - and that method is bidirectional and unprojected, so no route here can return it.
-        // Unimplemented on a projected method would mean the upstream does not implement a method this
-        // projection publishes, which under explicitly versioned contracts is a deployment defect rather
-        // than an outcome; the 501 that this service does publish belongs to the reserved routes, which
-        // declare it themselves.
+        //
+        // 🔴 AND 501 IS DECLARED BY NO ROUTE HERE BECAUSE NO ROUTE HERE PRODUCES IT, WHICH IS NOW TRUE.
+        // It was not: the failure map sent an upstream Unimplemented, and the in-band pair E_NO_SUPPORT /
+        // E_NO_IMPLEMENTATION, to 501 - a status this document declared nowhere, on operations it publishes
+        // as implemented, and the status that identifies a RESERVED deferred-capability route on Gateway and
+        // nothing else (AAP 0.4.4, C-D). Both conditions now answer the 500 declared immediately below,
+        // carrying the originating legacy code on retCode, so the declared set and the reachable set agree.
         route.ProducesProblem(
             StatusCodes.Status429TooManyRequests,
             MediaTypeNames.Application.ProblemJson);
@@ -2086,7 +2101,7 @@ public static class RestProjectionEndpoints
     /// <para>
     /// EVERY ROUTE IN THIS FILE PASSES THROUGH HERE, so the status translation exists exactly once.
     /// There is no per-endpoint <c>try</c>/<c>catch</c> anywhere in this file, which is both the
-    /// correctness property - forty copies would drift apart - and the coverage property, since
+    /// correctness property - thirty-nine copies would drift apart - and the coverage property, since
     /// one mapper is reachable from every route.
     /// </para>
     /// <para>
@@ -2253,11 +2268,12 @@ public static class RestProjectionEndpoints
     /// <summary>
     /// Renders one response message as the canonical protobuf JSON mapping.
     /// </summary>
+    /// <param name="httpContext">The request being handled.</param>
     /// <param name="response">The message the projected method returned.</param>
     /// <returns>A <c>200</c> carrying the rendered message.</returns>
     private static IResult Render(HttpContext httpContext, IMessage response)
     {
-        // ============ THE IN-BAND STATUS DECIDES THE HTTP STATUS (F-06) ============================
+        // ============ THE IN-BAND STATUS DECIDES THE HTTP STATUS ===================================
         // A gRPC method can complete SUCCESSFULLY and still answer a failure: the transport says OK and
         // the message body says E_DB_ERROR, E_INVALID_ARGUMENT or E_BUSY. Rendering that as 200 because
         // no RpcException was thrown is the single most misleading thing this projection could do - an
@@ -2346,12 +2362,12 @@ public static class RestProjectionEndpoints
     /// <param name="elements">The elements, in the order the stream produced them.</param>
     /// <remarks>
     /// <para>
-    /// <b>ONE PASS OVER THE ELEMENTS AND NO SECOND FULL COPY OF THE PAYLOAD (F-15).</b> The previous
-    /// implementation built the entire array into a <see cref="StringBuilder"/>, called
-    /// <c>ToString</c> on it - a second complete copy - and handed that to a text result, which encoded a
+    /// <b>ONE PASS OVER THE ELEMENTS AND NO SECOND FULL COPY OF THE PAYLOAD.</b> Building the entire
+    /// array into a <see cref="StringBuilder"/>, calling
+    /// <c>ToString</c> on it - a second complete copy - and handing that to a text result encodes a
     /// third. For a large streamed response that is three simultaneous representations of the same data
-    /// where one is needed. Each element is now formatted and written straight to the response writer, so
-    /// only the collected messages and one element's JSON are live at a time.
+    /// where one is needed. Each element is instead formatted and written straight to the response writer,
+    /// so only the collected messages and one element's JSON are live at a time.
     /// </para>
     /// <para>
     /// <b>THE COLLECTED SEQUENCE IS STILL BUFFERED BEFORE ANYTHING IS WRITTEN, DELIBERATELY.</b> That is
@@ -2644,8 +2660,13 @@ public static class RestProjectionEndpoints
                     ConflictWithoutDetailProblemType,
                     ConflictWithoutDetailProblemTitle),
 
+            // 🔴 500 AND NOT 501, CORRECTED. Every operation this projection publishes is implemented, and
+            // 501 is reserved system-wide for Gateway's four deferred-capability routes (AAP 0.4.4, C-D) -
+            // so a 501 here presented an implemented surface as a placeholder, and did it with a status no
+            // operation of this document declares. A method that the contract publishes reporting itself
+            // unavailable is deployment or version skew, which the retCode member names precisely.
             StatusCode.Unimplemented => new(
-                StatusCodes.Status501NotImplemented,
+                StatusCodes.Status500InternalServerError,
                 RetCode.E_NO_IMPLEMENTATION,
                 UnimplementedDetail,
                 FromUpstream: false),
@@ -3105,7 +3126,7 @@ public static class RestProjectionEndpoints
     /// <param name="document">The document being built.</param>
     /// <remarks>
     /// Idempotent, so this composes with whatever document-wide security the host registers instead of
-    /// fighting it, and so forty operations describe ONE scheme rather than forty.
+    /// fighting it, and so thirty-nine operations describe ONE scheme rather than thirty-nine.
     /// </remarks>
     private static void EnsureBearerSecurityScheme(OpenApiDocument document)
     {
@@ -3490,22 +3511,18 @@ public static class RestProjectionEndpoints
             RpcName);
     }
 
-    /// <summary>One resolved HTTP answer: the status, the legacy code, the prose and the identity.</summary>
-    /// <param name="HttpStatus">The HTTP status to answer with.</param>
-    /// <param name="RetCode">
-    /// The legacy PowerFramework return code to surface. Carried verbatim from the rich-error trailer
-    /// when one arrived and otherwise the defined code for this status; never derived from a success
-    /// predicate, and never zero on a failure.
-    /// </param>
-    /// <param name="Detail">The FIXED prose for the problem body's <c>detail</c> member.</param>
-    /// <param name="FromUpstream">
-    /// Whether the failure demonstrably originated on the single outbound edge these operations
-    /// traverse, which is what licenses naming an upstream in the body.
-    /// </param>
-    /// <param name="Type">The problem type, where a more specific one than the default applies.</param>
-    /// <param name="Title">The problem title, where a more specific one than the reason phrase applies.</param>
+    // One resolved HTTP answer: the status, the legacy code, the prose and the identity.
+    // HttpStatus: The HTTP status to answer with.
+    // The legacy PowerFramework return code to surface. Carried verbatim from the rich-error trailer
+    // when one arrived and otherwise the defined code for this status; never derived from a success
+    // predicate, and never zero on a failure.
+    // Detail: The FIXED prose for the problem body's detail member.
+    // Whether the failure demonstrably originated on the single outbound edge these operations
+    // traverse, which is what licenses naming an upstream in the body.
+    // Type: The problem type, where a more specific one than the default applies.
+    // Title: The problem title, where a more specific one than the reason phrase applies.
     // ==============================================================================================
-    //  THE IN-BAND STATUS MAP - THE OTHER HALF OF THE PROJECTION (F-06)
+    //  THE IN-BAND STATUS MAP - THE OTHER HALF OF THE PROJECTION
     // ==============================================================================================
 
     /// <summary>
@@ -3667,11 +3684,11 @@ public static class RestProjectionEndpoints
         /// 🔴 <b>AND IT MIRRORS THE INGRESS'S MAP FOR THE SAME REFUSAL, WHICH IS A PUBLISHED PROPERTY
         /// RATHER THAN A COINCIDENCE.</b> The two surfaces are documented as equivalent, so the SAME
         /// refusal must carry the SAME status whether a caller reached it through the gateway or reached
-        /// this projection directly. Six codes broke that: <c>E_INVALID_DATA</c> and
-        /// <c>E_INVALID_DATAOBJECT</c> were 400 there and 500 here; <c>E_NOT_EXISTS</c>,
-        /// <c>E_VAR_NOT_FOUND</c> and <c>E_MEMBER_NOT_FOUND</c> were 404 there and 500 here; and
+        /// this projection directly. Six codes are where a default arm breaks that: <c>E_INVALID_DATA</c>
+        /// and <c>E_INVALID_DATAOBJECT</c> would be 400 there and 500 here; <c>E_NOT_EXISTS</c>,
+        /// <c>E_VAR_NOT_FOUND</c> and <c>E_MEMBER_NOT_FOUND</c> 404 there and 500 here; and
         /// <c>FAILED</c> - the oracle's own unspecific failure, which the projected methods really answer -
-        /// was 502 there and 500 here. Each is now an explicit arm, and each arm carries the reasoning that
+        /// 502 there and 500 here. Each is an explicit arm, and each arm carries the reasoning that
         /// chose its status rather than only the status. A table-driven test in this service's suite and its
         /// twin in the gateway's pin the whole published mapping on both sides, deliberately duplicated
         /// rather than hoisted into the contracts project, because no behaviour crosses a service boundary
@@ -3763,8 +3780,29 @@ public static class RestProjectionEndpoints
 
                 RetCode.E_TIME_OUT => (StatusCodes.Status504GatewayTimeout, InBandTimeoutDetail),
 
+                // ⚠ THE UNAVAILABLE-CAPABILITY PAIR IS 500 AND MUST NEVER BE 501. Both codes say "this
+                // operation exists and the specific cell it was asked for has no available
+                // implementation" - a pinyin comparison whose lookup table lives only inside the closed
+                // binary [Expressions/PinyinFirstLetterMatcher], a macro or foreign-variable arm the
+                // expression engine declines [Expressions/ColumnExpressionEngine], a pinyin flag mask that
+                // disagrees with the configured one [Grpc/DataWindowService.ApplyDropDownSearch]. Every one
+                // of those is reported by an operation this projection PUBLISHES AS IMPLEMENTED.
+                //
+                // 501 IS RESERVED SYSTEM-WIDE for Gateway's four deferred-capability routes, whose whole
+                // purpose is to declare that an entire capability area is unbuilt (AAP 0.4.4, C-D). A 501
+                // here would present an implemented operation as a placeholder and would leave a caller
+                // unable to tell a reserved route from a blocked cell inside a live service, using only
+                // the published contract - and no operation of this projection declares 501 at all, so the
+                // status was undeclared as well as wrong.
+                //
+                // 500 is the declared status every projected operation already publishes, and the legacy
+                // vocabulary carries the distinction the status cannot: the problem document's retCode
+                // member names E_NO_SUPPORT (-2000) or E_NO_IMPLEMENTATION (-2001) exactly as it arose.
+                // This is the SAME resolution Security applies to its two symmetric-cipher narrowings -
+                // see OpenApi/security.v1.yaml, CryptoSymCryptMode, and docs/CONTRACTS.md 14.4 - and the
+                // ingress projection states it identically, which is what keeps the two equivalent.
                 RetCode.E_NO_SUPPORT or RetCode.E_NO_IMPLEMENTATION =>
-                    (StatusCodes.Status501NotImplemented, InBandNotImplementedDetail),
+                    (StatusCodes.Status500InternalServerError, InBandNotImplementedDetail),
 
                 RetCode.E_DB_ERROR or RetCode.E_INVALID_TRANSACTION =>
                     (StatusCodes.Status502BadGateway, InBandDataPathDetail),
@@ -3788,10 +3826,35 @@ public static class RestProjectionEndpoints
                 _ => (StatusCodes.Status500InternalServerError, InBandUnclassifiedDetail),
             };
 
+            // ⚠ THE DETAIL IS ALWAYS THIS SERVICE'S OWN FIXED PROSE. THE IN-BAND TEXT IS NEVER RELAYED.
+            //
+            // This used to read `IsNullOrWhiteSpace(errorText) ? mapped.Detail : errorText`, preferring the
+            // contract's own diagnostic whenever one was present. The identical construction in Gateway's
+            // proxy was the reported disclosure, and it is the SAME root cause here rather than a separate
+            // issue: this projection sits one hop upstream of it, so its body reaches an external caller
+            // through the very proxy that fix was applied to, and leaving the text in place here would have
+            // reinstated the disclosure from behind.
+            //
+            // WHAT THE TEXT ACTUALLY CONTAINS IS WHY IT CANNOT CROSS A BOUNDARY. These are internal operator
+            // messages naming DataWindow objects, column identifiers and buffer positions, and where the
+            // outcome originated on the data path the legacy `sqlsyntax` field carries the complete
+            // generated statement including interpolated literal VALUES, with no redaction anywhere in the
+            // legacy logger (AAP 0.6.4). Relaying that makes a problem body an exfiltration channel for row
+            // data.
+            //
+            // THE NUMERIC CODE IS STILL CARRIED, which is what a caller branches on: `retCode` is the legacy
+            // return-code algebra's own published value, so no outcome becomes indistinguishable. What is
+            // withheld is prose a client could not parse. The fixed detail per arm above is the allow-list.
+            //
+            // C-B IS NOT ENGAGED. The legacy had no process boundary and no network caller - these
+            // diagnostics went to a MessageBox on the operator's own screen [AAP 0.6.1]. The message still
+            // reaches an operator, through this service's structured log.
+            _ = errorText;
+
             return new StatusProjection(
                 mapped.HttpStatus,
                 retCode,
-                string.IsNullOrWhiteSpace(errorText) ? mapped.Detail : errorText,
+                mapped.Detail,
                 FromUpstream: false);
         }
     }
@@ -3815,7 +3878,7 @@ public static class RestProjectionEndpoints
 /// <b>⚠ THIS TYPE IS A SUMMARY, AND THE PUBLISHED CONTRACT IS NOT.</b> The document served from
 /// <c>/openapi/v1.json</c> is a convenience mirror for whoever is holding this service; the CONTRACT a
 /// consumer is given is the authored <c>gateway.v1.yaml</c> in <c>PowerFramework.Contracts</c>, which
-/// publishes all 120 messages and 15 enums of the projected closure CONCRETELY - every member, its
+/// publishes all 118 messages and 15 enums of the projected closure CONCRETELY - every member, its
 /// canonical JSON name, its canonical scalar encoding, <c>additionalProperties: false</c>, and a
 /// <c>required</c> list that states what the wire actually carries. The sibling test project compares
 /// every one of those schemas against its compiled descriptor on each build, so it cannot drift from
@@ -3826,9 +3889,9 @@ public static class RestProjectionEndpoints
 /// this an open object in the generated document, and that openness describes THIS DOCUMENT'S SILENCE
 /// about the members - never a permissiveness in the projection. <see cref="RestProjectionEndpoints"/>
 /// binds with <c>JsonParser.Default</c>, whose <c>IgnoreUnknownFields</c> is false: a member the target
-/// message does not declare is answered with <c>400</c>, not discarded. An earlier revision of the
-/// authored contract carried the same open shape and that WAS a defect, because a contract's audience
-/// has nothing else to read; it was replaced by the concrete tier. This summary remains because
+/// message does not declare is answered with <c>400</c>, not discarded. The same open shape in the
+/// AUTHORED contract WOULD be a defect, because a contract's audience has nothing else to read - which
+/// is why that document carries the concrete tier instead. This summary stands here because
 /// reproducing the generator here would put a third derivation of the same descriptors in a third
 /// place, and constraint C-A leaves no shared home for one - a service may not reach into another
 /// service's code, and <c>PowerFramework.Contracts</c> carries no behaviour.

@@ -42,13 +42,13 @@
 //     configuration value, no host name, no other service's port, no exception text and no stack
 //     trace.
 //
-//     EVERY VALUE IN THE BODY IS AUTHORED IN THIS FILE. NOTHING A REGISTRATION SUPPLIED REACHES IT,
-//     AND THAT IS A CORRECTION RATHER THAN A REFINEMENT. An earlier form echoed each registered
-//     check's own Name and Description on the reasoning that the authored contract models those
+//     EVERY VALUE IN THE BODY IS AUTHORED IN THIS FILE. NOTHING A REGISTRATION SUPPLIES REACHES IT,
+//     AND THE TEMPTING ALTERNATIVE IS THE UNSAFE ONE. Echoing each registered check's own Name and
+//     Description looks defensible, on the reasoning that the authored contract models those
 //     members and requires their authors to keep them free of internal detail. That requirement is a
 //     rule on the author of each registration, which is not something this file can enforce - so a
 //     check named for a database host, or a description carrying a provider name, a URL, an
-//     exception summary or a configuration hint, would have been published to anything able to reach
+//     exception summary or a configuration hint, would be published to anything able to reach
 //     the port. The vocabulary is closed here instead, which IS enforceable. Component checks are
 //     aggregated into ONE entry rather than reported individually, because the count of registered
 //     checks is itself the shape of this service's dependency graph.
@@ -86,8 +86,10 @@
 //     and reported as Unhealthy. The one exception deliberately allowed to propagate is
 //     OperationCanceledException, which means the caller disconnected: there is no longer a response
 //     to write, and swallowing it would only produce a second failure while trying.
-//     The legacy analogue is REFERENCE ONLY and is not reproduced here. ws_objects/pfw.pbl.src/
-//     pfw.sra:L111-L144 unpacks a seven field assert payload split on a carriage return line feed
+//     The legacy analogue is REFERENCE ONLY and is not reproduced here.
+//     ws_objects/pfw.pbl.src/pfw.sra:L111-L144 - the framework application, not the same-named
+//     packager object at ws_objects/pfw.pack.pbl.src/pfw.sra - unpacks a seven field assert
+//     payload split on a carriage return line feed
 //     pair and then executes HALT CLOSE. That fail fast posture is real and is preserved - in
 //     Gateway's Diagnostics/SystemErrorHandler.cs, which owns it. This endpoint REPORTS unhealthy;
 //     it never terminates the process, and not one line of pfw.sra is ported into this file.
@@ -445,8 +447,8 @@ public static class HealthEndpoints
            // a problem document on 503. The handler returns IResult rather than a typed result union
            // for precisely this reason - a union would have the framework infer an additional 500
            // from ProblemHttpResult's own metadata, publishing a response this operation cannot
-           // produce. The SET is unchanged by decision record item 7; what changed is which verdicts
-           // reach which member of it.
+           // produce. Decision record item 7 governs which verdicts reach which member of that
+           // two-response set, never the set itself.
            .Produces<ServiceHealthReport>(StatusCodes.Status200OK)
            .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
@@ -1053,12 +1055,13 @@ internal sealed class TokenBootstrapHealthCheck : IHealthCheck
         // EITHER ACCEPTED SCHEME MAKES THIS HOST READY, AND DEMANDING THE CERTIFICATE PAIR WAS AN OUTAGE
         // RATHER THAN STRICTNESS. Contract C-01 accepts TWO caller credentials on POST /v1/tokens - a
         // shared secret presented as an HTTP Basic credential, or a client certificate - as alternatives.
-        // This check used to require BOTH HALVES OF THE CERTIFICATE PAIR and nothing else, so the
-        // documented bring-up, which supplies SECURITY_CLIENT_SECRET_DATASERVICES and leaves both
-        // certificate paths deliberately EMPTY ("this deployment presents no client certificate, which is
-        // a supported state" - orchestration/.env.example section 6.3), reported NOT READY forever. And
-        // this service's readiness is one of the three Gateway's own readiness gate waits on, so the
-        // consequence was not a misleading warning: it was a stack that never came up, under exactly the
+        // Requiring BOTH HALVES OF THE CERTIFICATE PAIR here and nothing else is the strict-looking
+        // reading, and under the documented bring-up it is an outage: that bring-up supplies
+        // SECURITY_CLIENT_SECRET_DATASERVICES and leaves both certificate paths deliberately EMPTY
+        // ("this deployment presents no client certificate, which is a supported state" -
+        // orchestration/.env.example section 6.3), so a certificate-only check reports NOT READY forever.
+        // And this service's readiness is one of the three Gateway's own readiness gate waits on, so the
+        // consequence is not a misleading warning: it is a stack that never comes up, under exactly the
         // configuration the orchestration layer documents.
         //
         // THE PAIR IS STILL TESTED AS A PAIR, because half a pair cannot complete a handshake: a

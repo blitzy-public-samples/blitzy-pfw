@@ -2,19 +2,19 @@
 //  SchemaProvisioner - THE CONFIGURATION-GATED, ADDITIVE-ONLY SCHEMA STEP THAT MAKES THE DOCUMENTED
 //  ONE-COMMAND BRING-UP REACH A HEALTHY STACK
 //  ------------------------------------------------------------------------------------------------
-//  WHAT WAS WRONG BEFORE THIS TYPE EXISTED, STATED AS THE OPERATOR EXPERIENCED IT. This service
-//  creates no schema of its own, so against a FRESH `persistence-db` volume its readiness probe found
-//  the COMPANY table absent, reported not-ready, and kept reporting not-ready for ever. The Compose
-//  health condition then correctly held DataServices and Gateway behind it - so the documented single
-//  command, `docker compose --env-file .env up --build -d`, brought up a stack in which three of four
-//  services never became healthy and nothing in the manifest could fix it. Reaching a healthy stack
-//  required `dotnet ef database update` run out of band, from a checkout, with the SDK and the
+//  WHY THIS TYPE EXISTS, STATED AS THE OPERATOR WOULD EXPERIENCE ITS ABSENCE. Without it this service
+//  creates no schema at all, so against a FRESH `persistence-db` volume its readiness probe finds
+//  the COMPANY table absent, reports not-ready, and keeps reporting not-ready for ever. The Compose
+//  health condition then correctly holds DataServices and Gateway behind it - so the documented single
+//  command, `docker compose --env-file .env up --build -d`, brings up a stack in which three of four
+//  services never become healthy and nothing in the manifest can fix it. Reaching a healthy stack
+//  then requires `dotnet ef database update` run out of band, from a checkout, with the SDK and the
 //  `dotnet-ef` tool installed - none of which the runtime image carries and none of which an operator
 //  following the documented bring-up has any reason to have.
 //
-//  That is a shortfall against constraint C-J (one local orchestration path bringing all four up
+//  That would be a shortfall against constraint C-J (one local orchestration path bringing all four up
 //  together) and constraint C-L (the attached environment's bring-up command and its readiness gates
-//  are binding). This type closes it.
+//  are binding). This type is what keeps it from arising.
 //
 //  THE FOUR THINGS THIS TYPE MAY NOT BE, EACH FOR A NAMED REASON
 //  ------------------------------------------------------------------------------------------------

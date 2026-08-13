@@ -631,7 +631,7 @@ public sealed class SystemErrorObservabilityTests
     /// THE ORIGINAL DEFECT, EXACTLY. With the write and the halt in sequence, an <c>IOException</c> from
     /// a broken socket propagated out of the handler and carried the termination request away with it, so
     /// a decoded assertion failure could leave the host running and the framework finalize step unrun.
-    /// The write fault is now recorded as its own secondary event and does not displace the primary one.
+    /// The write fault is instead recorded as its own secondary event and does not displace the primary one.
     /// </remarks>
     [Fact]
     public async Task AStructuralFaultTerminatesEvenWhenTheBodyWriteThrows()
@@ -782,9 +782,9 @@ public sealed class SystemErrorObservabilityTests
     // ----------------------------------------------------------------------------------------------
     //  CANCELLATION IS NOT A SERVER FAULT (DECISION 2 and DECISION 5).
     //
-    //  A caller that hangs up produces an OperationCanceledException on this path, and every one of
-    //  them used to be recorded at error and then handed to a body write against a socket that was no
-    //  longer there. The attribution test is the whole distinction, so both sides of it are pinned: a
+    //  A caller that hangs up produces an OperationCanceledException on this path, and treating every
+    //  one of them as a fault records it at error and then hands it to a body write against a socket that
+    //  is no longer there. The attribution test is the whole distinction, so both sides of it are pinned: a
     //  cancellation either token can account for is the caller's, and a cancellation neither can
     //  account for came from inside this process and IS a fault.
     // ----------------------------------------------------------------------------------------------

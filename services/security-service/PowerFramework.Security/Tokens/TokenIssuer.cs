@@ -186,13 +186,6 @@
 //        component library, no design tokens, no theming and no styling are in scope anywhere in the
 //        refactor, and none appears here.
 //
-//  RULES POSITION. The project's rules document contains exactly one line, stating that no user
-//  rules were provided, so NO user-specified rule governs this file. Nothing is invented or
-//  back-filled from convention in their place; the bar applied instead is the enterprise-standard
-//  baseline the migration plan states - nullable reference types with warnings as errors, no secret
-//  in source or settings or any container definition, structured logging that carries no credential,
-//  constructor injection throughout so the sibling test project can reach every branch, and the
-//  published contract as the only cross-service coupling.
 // ==================================================================================================
 
 using System.Collections.Frozen;
@@ -315,10 +308,11 @@ public enum TokenIssuanceOutcome
 /// <para>
 /// IT CARRIES NO CREDENTIAL, AND THERE IS NOWHERE TO PUT ONE. The published request schema declares
 /// no client secret, no password, no key reference, no assertion and no key material of any kind, and
-/// forbids undeclared members outright; caller identity is established by the TRANSPORT. This type
-/// mirrors that exactly - three members, none of which is a credential. The subject is a CLAIM the
-/// caller makes, and reconciling it with the identity the transport established belongs to the
-/// endpoint, which is the only layer that can see the connection.
+/// forbids undeclared members outright; caller identity is established by the CREDENTIAL THE REQUEST
+/// PRESENTS - a Basic header, or a trusted client certificate - never by the body. This type mirrors
+/// that exactly: three members, none of which is a credential. The subject is a CLAIM the caller makes,
+/// and reconciling it with the identity that presented credential establishes belongs to the endpoint,
+/// which is the only layer that can see either the header or the connection.
 /// </para>
 /// <para>
 /// IT IS A PLAIN SEALED CLASS RATHER THAN A RECORD. A record would generate a string rendering that
@@ -872,16 +866,15 @@ public static class ScopeClaim
 /// the same reason: a value that cannot be read cannot be logged by accident.
 /// </para>
 /// <para>
-/// 🔴 IT CARRIES NO PERMISSION SET, AND ITS ABSENCE IS THE FIX RATHER THAN AN OMISSION. This type used to
-/// publish <c>PermittedAudiences</c> and <c>PermittedScopes</c>, frozen from
-/// <c>Security:Clients[n]:Audiences</c> and <c>:Scopes</c> - and NOTHING CONSULTED THEM. The issuance
-/// decision is taken by <see cref="TokenIssuer.Issue"/> against the deployment-wide audience roster and
-/// the grant matrix folded from <c>Security:Callers</c> and <c>Security:CallerAuthorizations</c>, which is
-/// the single enforcement point. Two surfaces describing one decision is how the shipped configuration
-/// came to advertise permissions the matrix withholds, and how an operator could edit an authorization
-/// list and change nothing at all (CWE-16, CWE-863). The dead surface is removed rather than enforced:
-/// enforcing it would create a second gate able to refuse what the matrix grants, which is the divided
-/// authority the fold below rejects in terms.
+/// 🔴 IT CARRIES NO PERMISSION SET, AND ITS ABSENCE IS THE REQUIREMENT RATHER THAN AN OMISSION.
+/// <c>PermittedAudiences</c> and <c>PermittedScopes</c> members frozen from per-entry configuration would
+/// be consulted by NOTHING: the issuance decision is taken by <see cref="TokenIssuer.Issue"/> against the
+/// deployment-wide audience roster and the grant matrix folded from <c>Security:Callers</c> and
+/// <c>Security:CallerAuthorizations</c>, which is the single enforcement point. Two surfaces describing one
+/// decision is how a configuration comes to advertise permissions the matrix withholds, and how an operator
+/// edits an authorization list and changes nothing at all (CWE-16, CWE-863). Nor may such members be
+/// ENFORCED instead: that would create a second gate able to refuse what the matrix grants, which is the
+/// divided authority the fold below rejects in terms.
 /// </para>
 /// <para>
 /// SO THIS TYPE IS THE CREDENTIAL DIRECTORY ENTRY. It answers who may authenticate at the issuance edge
@@ -921,8 +914,8 @@ public sealed class RegisteredIssuanceClient
     public bool HasSecret => _secret is not null;
 
     /// <summary>
-    /// Reports whether a presented secret is this caller's, in time independent of how much of it
-    /// matches.
+    /// Reports whether a presented secret is this caller's, in time independent of how much of an
+    /// equal-length candidate matches.
     /// </summary>
     /// <param name="presented">The secret the caller presented, UTF-8 encoded.</param>
     /// <returns>
@@ -930,11 +923,19 @@ public sealed class RegisteredIssuanceClient
     /// </returns>
     /// <remarks>
     /// <para>
-    /// FIXED-TIME BY CONSTRUCTION. The platform's fixed-time comparison is used rather than an equality
-    /// operator or a string comparison, because an ordinary comparison returns as soon as two bytes
-    /// differ and therefore leaks the length of the matching prefix - which is enough to recover a secret
-    /// one byte at a time over enough requests. The platform primitive also answers false for a length
-    /// mismatch without a short-circuit that would leak the length.
+    /// FIXED-TIME FOR EQUAL-LENGTH INPUTS, WHICH IS EXACTLY WHAT THE PLATFORM GUARANTEES AND NO MORE. The
+    /// platform's fixed-time comparison is used rather than an equality operator or a string comparison,
+    /// because an ordinary comparison returns as soon as two bytes differ and therefore leaks the length
+    /// of the MATCHING PREFIX - which is enough to recover a secret one byte at a time over enough
+    /// requests. That prefix leak is what this primitive removes.
+    /// </para>
+    /// <para>
+    /// WHAT IT DOES NOT REMOVE: a LENGTH mismatch. The primitive compares the two lengths first and
+    /// returns immediately when they differ, so the length of the configured secret remains observable in
+    /// principle. That residual signal is accepted here rather than papered over: closing it would mean
+    /// comparing fixed-width digests of both sides instead of the raw bytes, which is a change to what
+    /// this method compares rather than a comment, and it is recorded as the semantic-security item it is
+    /// rather than claimed as already done.
     /// </para>
     /// <para>
     /// BYTES RATHER THAN STRINGS THROUGHOUT. A string comparison would additionally have to decide about
@@ -1106,9 +1107,12 @@ public sealed class IssuanceClientRegistry
     /// <para>
     /// THE NO-MATCH PATH STILL PERFORMS A FIXED-TIME COMPARISON, against a random decoy generated once
     /// per instance. Returning early would make "no such client" measurably faster than "wrong secret",
-    /// which is the same enumeration oracle arriving by a different route. The dictionary lookup itself
-    /// remains a timing signal that cannot be removed without scanning the whole roster; the decoy
-    /// removes the much larger signal, which is the comparison.
+    /// which is the same enumeration oracle arriving by a different route. The decoy removes the largest
+    /// signal, which is the comparison, and two smaller ones remain by acknowledged design: the
+    /// dictionary lookup, which cannot be removed without scanning the whole roster, and the platform
+    /// primitive's own immediate return when the two lengths differ - it is fixed-time across EQUAL-LENGTH
+    /// inputs only, so the decoy's fixed <see cref="DecoyLength"/> matches a presented secret of that
+    /// length in timing shape and not others.
     /// </para>
     /// </remarks>
     public RegisteredIssuanceClient? Authenticate(string clientId, string presentedSecret)
@@ -1493,10 +1497,10 @@ public sealed class TokenIssuer
     /// <remarks>
     /// <para>
     /// THE ROSTER ABOVE SAYS WHICH AUDIENCES EXIST; THIS SAYS WHO MAY ADDRESS THEM. Without it, any caller
-    /// whose certificate chained to the configured client authority could request a token for ANY service
-    /// in the system carrying ANY scope set it named, and every requested scope was granted verbatim - a
-    /// confused deputy in the middle of the token topology, and the reason the sole-issuer design exists at
-    /// all is that the issuer DECIDES (CWE-862, CWE-863).
+    /// whose credential this endpoint accepted could request a token for ANY service in the system
+    /// carrying ANY scope set it named, and every requested scope would be granted verbatim - a confused
+    /// deputy in the middle of the token topology, and the reason the sole-issuer design exists at all is
+    /// that the issuer DECIDES (CWE-862, CWE-863).
     /// </para>
     /// <para>
     /// KEYED ORDINALLY, like everything else identity-shaped in this service. The key is a caller identity
@@ -1765,12 +1769,12 @@ public sealed class TokenIssuer
     /// default audience and no inference of one: an unlisted audience is refused, never substituted.
     /// </para>
     /// <para>
-    /// THE GRANTED SET IS THE REQUESTED SET, and that is a reported fact rather than an assumption. The
-    /// published contract permits the granted set to be narrower and requires a caller to read it from
-    /// the response; no narrowing policy is configured anywhere in this service, so nothing is
-    /// narrowed, and inventing one would be a new capability. The result reports the granted set
-    /// either way, so a caller that reads it is correct now and stays correct if a policy is ever
-    /// introduced.
+    /// THE GRANTED SET IS THE INTERSECTION OF WHAT WAS ASKED FOR WITH WHAT THIS CALLER MAY HOLD, in the
+    /// requested order. One rule covers every case: a NON-EMPTY intersection succeeds and the result
+    /// reports that possibly narrower set, and an EMPTY intersection is refused as
+    /// <see cref="TokenIssuanceOutcome.ScopesNotPermitted"/> rather than minting a token that authorises
+    /// nothing. A caller must therefore read the granted set from the response, because a success does
+    /// not imply it received everything it asked for.
     /// </para>
     /// <para>
     /// WHAT IS LOGGED, AND WHAT DELIBERATELY IS NOT. A successful issuance records the key identifier,
@@ -1807,7 +1811,7 @@ public sealed class TokenIssuer
         // any scope set it cared to name, because the subject was reconciled against the presented
         // certificate and then never consulted again. A caller holding a valid DataServices certificate
         // could obtain a Gateway-audience token, or a Persistence-audience token carrying every scope
-        // Persistence publishes. The permission roster closes that: an authenticated identity is now an
+        // Persistence publishes. The permission roster closes that: an authenticated identity is an
         // authorised one only for what it is listed for (CWE-862, CWE-863; constraint C-G).
         //
         // Before any cryptographic work, for the same reason as the roster check - and answered with the
@@ -1840,20 +1844,17 @@ public sealed class TokenIssuer
         DateTimeOffset issuedAt = TruncateToWholeSecond(_timeProvider.GetUtcNow());
         DateTimeOffset expiresAt = issuedAt + _lifetime;
 
-        // THE GRANTED SET IS THE OVERLAP, NOT THE REQUEST. Every requested scope used to be granted
-        // verbatim, so the scope claim was whatever the caller wrote - which made the claim a restatement
-        // of the request rather than a decision by the issuer. It is now intersected with what this caller
-        // is permitted to hold, PRESERVING THE REQUESTED ORDER so that a caller comparing the granted set
-        // against its request reads them in the same sequence.
+        // THE GRANTED SET IS THE OVERLAP, NOT THE REQUEST. The requested scopes are intersected with what
+        // this caller is permitted to hold for this audience, so the scope claim is a decision by the
+        // issuer rather than a restatement of the request. The intersection PRESERVES THE REQUESTED ORDER,
+        // so a caller comparing the granted set against its request reads them in the same sequence.
         //
-        // A NARROWING IS A SUCCESS, INCLUDING A NARROWING TO NOTHING, and that is the contract's own rule
-        // rather than a lenient reading of it: the response schema states that the granted set "may be
-        // narrower than the requested set" and that "an empty string means no requested scope was granted"
-        // [security.v1.yaml TokenResponse.scope]. So a caller asking for one scope it may not hold receives
-        // a valid token that authorises nothing, reads the granted set as the contract instructs, and is
-        // refused by the receiver - rather than being handed a 403 the schema does not require here.
-        // Requesting at least one scope is guaranteed by the schema's own minItems, so the empty case can
-        // only ever be the result of this intersection.
+        // A NARROWING TO A NON-EMPTY SET IS A SUCCESS: the response schema states that the granted set
+        // "may be narrower than the requested set" [security.v1.yaml TokenResponse.scope], and the
+        // published 403 states that a PARTIALLY permitted set "SUCCEEDS with 200 and the response's scope
+        // member reports the narrower granted set". A narrowing to NOTHING is refused below. Requesting at
+        // least one scope is guaranteed by the schema's own minItems, so the empty case can only ever be
+        // the result of this intersection.
         //
         // One string serves both the claim and the reported granted set, so the two cannot differ.
         string grantedScope = string.Join(
@@ -2010,6 +2011,7 @@ public sealed class TokenIssuer
     /// Freezes the issuance permission roster, or refuses to construct.
     /// </summary>
     /// <param name="callers">The bound caller entries.</param>
+    /// <param name="rows">The rows the call operates on.</param>
     /// <returns>The permissions of each caller identity, keyed ordinally.</returns>
     /// <exception cref="InvalidOperationException">
     /// The roster is empty, or an entry is null, or an entry carries no identity, no permitted audience or
@@ -2519,13 +2521,12 @@ internal static partial class TokenIssuerLog
     /// </param>
     /// <remarks>
     /// <para>
-    /// THE THIRD OF THE THREE REFUSALS, AND IT SAYS SO. An earlier revision of this record was worded as an
-    /// ISSUANCE - "Issued a service token granting NO scope ... the token is valid and authorises nothing" -
-    /// because the design it was written for minted on an empty intersection and reported the emptiness in
-    /// the response. That design was superseded: the published contract settles an empty granted set as a
-    /// REFUSAL, and the call site records why at length. A log line claiming an issuance that did not happen
-    /// is worse than no line, because it is the record an operator would use to establish that a credential
-    /// WAS handed out.
+    /// THE THIRD OF THE THREE REFUSALS, AND IT SAYS SO IN AS MANY WORDS. Wording this record as an ISSUANCE
+    /// - "issued a service token granting no scope, valid and authorising nothing" - would belong to a design
+    /// that minted on an empty intersection and reported the emptiness in the response. That is not this
+    /// design: the published contract settles an empty granted set as a REFUSAL, and the call site records
+    /// why at length. A log line claiming an issuance that did not happen is worse than no line, because it
+    /// is the record an operator would use to establish that a credential WAS handed out.
     /// </para>
     /// <para>
     /// IT IS ALSO WHAT MAKES THE THREE REFUSALS DISTINGUISHABLE, which is a property with its own row: the
@@ -2656,9 +2657,8 @@ internal static class IssuanceRosterAuthority
     /// the enforcement point compares them: <c>IssuanceClientRegistry</c> keys the roster on the entry's
     /// <c>Subject</c> verbatim under <see cref="StringComparer.Ordinal"/> - the options type documents that
     /// a subject is neither trimmed nor repaired, since it reaches the token's subject claim as authored -
-    /// while the matrix is keyed on the trimmed identity. An earlier revision trimmed both sides and so
-    /// reported agreement where authentication sees none, which is the one reading this diagnostic must
-    /// never produce.
+    /// while the matrix is keyed on the trimmed identity. Trimming BOTH sides here would report agreement
+    /// where authentication sees none, which is the one reading this diagnostic must never produce.
     /// </para>
     /// </remarks>
     internal static IReadOnlyList<string> Describe(SecurityOptions security)

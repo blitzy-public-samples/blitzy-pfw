@@ -253,8 +253,8 @@ public sealed class UpdateRowValidatorTests
     /// <param name="text">The text the caller sent.</param>
     /// <param name="declaredType">The type the definition declares for it.</param>
     /// <remarks>
-    /// These four rows are the finding: each of them previously reached the provider. The two numeric
-    /// rows were the ones observed answering a 502 naming a database constraint; the two temporal rows
+    /// These four rows are the ones an unvalidated path lets reach the provider. The two numeric
+    /// rows are the pair observed answering a 502 naming a database constraint; the two temporal rows
     /// are the same fault in the family whose coercion genuinely throws.
     /// </remarks>
     [Theory]
@@ -303,9 +303,9 @@ public sealed class UpdateRowValidatorTests
     /// <param name="columnId">Its ordinal.</param>
     /// <param name="text">The text.</param>
     /// <remarks>
-    /// THE CONTROLS THAT STOP THE VALIDATOR BECOMING A BLANKET REFUSAL. Every row here previously
-    /// travelled to the provider and must continue to; a validator that refused any of them would break
-    /// the ordinary path while closing the finding. The leading- and trailing-space rows are deliberate:
+    /// THE CONTROLS THAT STOP THE VALIDATOR BECOMING A BLANKET REFUSAL. Every row here travels
+    /// to the provider and must continue to; a validator that refused any of them would break
+    /// the ordinary path while closing the hole. The leading- and trailing-space rows are deliberate:
     /// the numeric coercion styles allow surrounding whitespace around a number even though the name
     /// resolver allows none around an identifier, and those two answers are measured rather than assumed.
     /// </remarks>
@@ -544,32 +544,55 @@ public sealed class UpdateRowValidatorTests
     }
 
     /// <summary>
-    /// 🔴 A NON-FINITE <c>double</c> IS REFUSED BY EVERY NUMERIC COLUMN.
+    /// 🔴 A <c>NaN</c> IS REFUSED BY EVERY NUMERIC COLUMN - AND THE TWO INFINITIES ARE NOT, because the
+    /// published contract accepts them.
     /// </summary>
-    /// <param name="value">The non-finite value.</param>
     /// <remarks>
-    /// FITTING THE FAMILY USED TO BE THE WHOLE TEST, and these three fit it. <c>NaN</c>, <c>+∞</c> and
-    /// <c>-∞</c> are legal <c>double</c> values and no legal DataWindow numeric value: PowerBuilder has no
-    /// literal for any of them. The storage engine behind this contract records a non-finite REAL as
-    /// <c>NULL</c>, so accepting one turns a write into a null - or into a NOT NULL violation raised by the
-    /// driver and reported as a 502 naming a constraint - neither of which says what the caller actually
-    /// sent.
+    /// <para>
+    /// <b>THIS CASE USED TO REFUSE ALL THREE, AND THAT WAS THE DEFECT IT NOW GUARDS AGAINST.</b>
+    /// <c>common.v1.AnyValue.double_value</c> states the rule and Persistence implements exactly it: NaN is
+    /// answered with a defined refusal before a statement is generated, while both infinities bind and
+    /// store. Refusing an infinity HERE made acceptance depend on the route a value travelled - the same
+    /// <c>double_value</c> was admitted on a direct C-06 update and rejected through this service - which
+    /// is precisely the hop-dependent semantics a shared published contract exists to prevent.
+    /// </para>
+    /// <para>
+    /// <b>THE NaN REFUSAL IS NOT SYMMETRY WITH THE INFINITIES; IT IS THE PROVIDER'S OWN DISTINCTION,
+    /// MEASURED.</b> Binding <c>double.NaN</c> raises a provider FAULT rather than a database error, so it
+    /// would escape the update walk as an undiagnosed <c>Internal</c> and could half-apply a multi-row
+    /// payload; refusing it at this seam turns that into <c>E_INVALID_DATA</c> per column. A deliberate
+    /// contract narrowing, and the legacy has no NaN at all to preserve - PowerScript has no literal for
+    /// one.
+    /// </para>
+    /// <para>
+    /// The three columns are the fixture's own numeric ones, and all three are <c>Dec()</c> columns
+    /// [<c>dw_sqlite.srd:L8, L10, L12</c>]. An infinity into an INTEGRAL column is a different question and
+    /// is answered by the out-of-domain arm, which
+    /// <see cref="AnIntegralColumnRefusesAFractionalOrOutOfDomainValue"/> asserts.
+    /// </para>
     /// </remarks>
-    [Theory]
-    [InlineData(double.NaN)]
-    [InlineData(double.PositiveInfinity)]
-    [InlineData(double.NegativeInfinity)]
-    public void ANonFiniteDoubleIsRefusedByANumericColumn(double value)
+    [Fact]
+    public void ANotANumberDoubleIsRefusedByANumericColumnAndTheInfinitiesAreNot()
     {
         foreach ((string name, long ordinal) in ((string, long)[])
             [("id", IdColumn), ("age", AgeColumn), ("salary", SalaryColumn)])
         {
             UpdateRowValidationFailure failure = Assert.Single(Validate(Row(
                 1L,
-                Column(name, ordinal, new AnyValue { DoubleValue = value }))));
+                Column(name, ordinal, new AnyValue { DoubleValue = double.NaN }))));
 
             Assert.Equal(UpdateRowValidationKind.InvalidValue, failure.Kind);
             Assert.Equal(RetCode.E_INVALID_DATA, failure.ReturnCode);
+
+            // AND BOTH INFINITIES TRAVEL, on the very same column, so the refusal above is about NaN
+            // rather than about the arm or the column.
+            Assert.Empty(Validate(Row(
+                1L,
+                Column(name, ordinal, new AnyValue { DoubleValue = double.PositiveInfinity }))));
+
+            Assert.Empty(Validate(Row(
+                1L,
+                Column(name, ordinal, new AnyValue { DoubleValue = double.NegativeInfinity }))));
         }
 
         // THE NEGATIVE CONTROL FOR THE SAME COLUMNS: a finite double is accepted, including a fractional
@@ -698,6 +721,28 @@ public sealed class UpdateRowValidatorTests
             Assert.Single(Validate(host, Row(
                 1L,
                 Column("signed", Signed, new AnyValue { DoubleValue = 1e19d })))).Kind);
+
+        // 🔴 AND SO IS EITHER INFINITY, BY THE SAME DOMAIN TEST RATHER THAN BY A FAMILY RULE. The published
+        // contract accepts both on `double_value` and Persistence stores them, so this validator does not
+        // refuse them as a class - but no infinity is representable as a `long` or a `ulong`, so an
+        // INTEGRAL column refuses one exactly as it refuses 1e19. The paired assertion that a Dec() column
+        // ACCEPTS them is what makes this a subtype decision rather than a reinstated blanket refusal.
+        foreach (AnyValue unbounded in (AnyValue[])
+            [
+                new AnyValue { DoubleValue = double.PositiveInfinity },
+                new AnyValue { DoubleValue = double.NegativeInfinity },
+            ])
+        {
+            Assert.Equal(
+                UpdateRowValidationKind.InvalidValue,
+                Assert.Single(Validate(host, Row(1L, Column("signed", Signed, unbounded)))).Kind);
+
+            Assert.Equal(
+                UpdateRowValidationKind.InvalidValue,
+                Assert.Single(Validate(host, Row(1L, Column("unsigned", Unsigned, unbounded)))).Kind);
+
+            Assert.Empty(Validate(host, Row(1L, Column("fractional", Fractional, unbounded))));
+        }
 
         // AND WHOLE VALUES IN DOMAIN ARE ACCEPTED BY BOTH, so nothing above is a refusal of integers.
         Assert.Empty(Validate(

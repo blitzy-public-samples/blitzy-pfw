@@ -998,7 +998,7 @@ public static class Text
     /// </para>
     /// <para>
     /// The scrape depends on the exact wording of a PowerBuilder runtime error message and has no
-    /// .NET analogue, so it is substituted by <see cref="System.Type.Name"/>, which answers
+    /// .NET analogue, so it is substituted by <see cref="System.Reflection.MemberInfo.Name"/>, which answers
     /// uniformly for enums, primitives, boxed value types and reference types alike. Be aware that
     /// the substitute is therefore MORE reliable than the original: it succeeds in cases where the
     /// legacy's two stage attempt failed and returned the empty string. See DECISION 7.

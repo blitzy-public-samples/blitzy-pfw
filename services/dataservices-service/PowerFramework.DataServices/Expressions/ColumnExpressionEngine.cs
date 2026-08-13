@@ -12,16 +12,6 @@
 //  written with that file's name. All of those files are READ-ONLY (constraint C-C): they are the only
 //  specification that exists for this behaviour, and nothing here may be justified by anything else.
 //
-//  RULES POSITION. `review_rules` reports that NO USER RULES WERE PROVIDED for this project. Their
-//  absence is not latitude: this file is held to the enterprise-standard baseline the Agent Action Plan
-//  states in section 0.7.2 (nullable enabled, warnings as errors, no secret in source, no new package,
-//  a test per shippable behaviour) and to the twelve binding non-rule constraints of section 0.7.3. The
-//  ones that bite here are C-A/C-I (no coupling outside the shared libraries and this project), C-B
-//  (replicate defects verbatim and annotate each at its point of reproduction), C-C (the legacy tree is
-//  read-only), C-D (no deferred-service work: no UI, no DPI, no font, no window geometry, no Win32),
-//  C-H (the 80% per-service line-coverage gate, which this file dominates) and C-K (document every
-//  technology-specific and boundary-specific decision - hence the length of this banner).
-//
 // -----------------------------------------------------------------------------------------------------
 //  1. THE `@` SIGIL - A THIRD SIGIL THE PUBLISHED SPECIFICATION NEVER MENTIONS
 // -----------------------------------------------------------------------------------------------------
@@ -2024,7 +2014,7 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
     /// <remarks>
     /// THIS FLAG DISCARDS THE REVERSE INDEX AND THE OTHER THREE DO NOT [:L526 against :L921, :L968,
     /// :L1895]. That asymmetry is correct rather than an oversight: always-calculate changes which
-    /// expressions a column drives, so the cached graph is now wrong, whereas recursive, trigger-event and
+    /// expressions a column drives, so the cached graph becomes wrong, whereas recursive, trigger-event and
     /// cacheable change only what happens once an expression has already been selected. The no-change
     /// short-circuit [:L522] is what keeps a redundant set from throwing the graph away.
     /// </remarks>
@@ -2382,12 +2372,6 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
     /// <c>of_addvarexp(readonly string name, string exp)</c> [:L1584-L1630] - define a variable whose
     /// value IS a DataWindow expression, which may itself reference other variables.
     /// </summary>
-    /// <param name="name">
-    /// The variable name. CASE-SENSITIVE, as the oracle's own comment states [:L1587 "区分大小写"] and as
-    /// the lookup enforces by comparing without folding [:L997]. It may contain none of
-    /// <see cref="VariableNameDelimiters"/> [:L1612-L1617].
-    /// </param>
-    /// <param name="exp">The value expression. Parsed, and rewritten before storage.</param>
     /// <returns>
     /// <see cref="RetCode.OK"/>, <see cref="RetCode.E_INVALID_ARGUMENT"/> for an empty name, an empty
     /// expression, a name containing a delimiter or an unparseable expression, or
@@ -2422,6 +2406,7 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
     /// Mints a placeholder for a value and records it, so a name is never emitted without its value.
     /// </summary>
     /// <param name="value">The value.</param>
+    /// <param name="renderedFragment">The rendered parity text for the fragment.</param>
     /// <returns>The placeholder token.</returns>
     /// <remarks>
     /// MINTING AND RECORDING ARE ONE OPERATION. The Persistence update carrier learned the alternative the
@@ -4933,7 +4918,9 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
         if (!_globalVars.IsValidIndex(index))
         {
             // The oracle indexes GlobalVars unguarded [:L1036] and would raise a PowerBuilder runtime error,
-            // which the framework converts into an assert failure and a HALT [pfw.sra:L111-L144]. The
+            // which the framework converts into an assert failure and a HALT
+                // [ws_objects/pfw.pbl.src/pfw.sra:L111-L144 - the framework application, not the
+                // same-named packager object at ws_objects/pfw.pack.pbl.src/pfw.sra]. The
             // fail-fast posture is preserved by the environment's own indexer throwing; this test exists only
             // for the recursive call below, whose index always came from a live enumeration.
             return colExps.UpperBound;

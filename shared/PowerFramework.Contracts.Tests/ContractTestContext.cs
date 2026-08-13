@@ -92,13 +92,6 @@
 //  ws_objects/pfw.pbl.src/project.srj for the build intent - appear only as citations in comments.
 //  There is no file creation, no write, no move and no delete anywhere in this file, by construction.
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  review_rules returns exactly "No user rules provided.", so NO user-specified rule governs this
-//  file. Its absence is not licence: the enterprise-standard baseline of AAP 0.7.2 applies in its
-//  place - nullable enabled and warnings as errors inherited and never relaxed, no NoWarn and no
-//  #pragma, no secret of any kind in source (nothing here needs one, per C-F's never-replicate
-//  posture), and versioned contracts as the only cross-service coupling.
 // ==================================================================================================
 
 using System.Globalization;
@@ -179,8 +172,9 @@ public static class ContractDescriptors
 {
     /// <summary>How many suggestions a lookup-failure message lists at most.</summary>
     /// <remarks>
-    /// Capped because there are 247 messages and 300 enum values in the three files; a failure message
-    /// that printed all of them would bury the one line the reader needs.
+    /// Capped because the three files carry 251 message descriptors - 248 authored plus the three synthetic
+    /// map entries - and 263 enum values; a failure message that printed all of them would bury the one line
+    /// the reader needs.
     /// </remarks>
     private const int MaxSuggestions = 12;
 

@@ -162,13 +162,6 @@
 //     tokens and the pragma texts below are STRING LITERALS, not C# identifiers, so preserving their
 //     legacy spellings raises nothing.
 //
-//  RULES POSITION
-//  No user rules were provided for this project: the rules document contains exactly one line saying
-//  so, and re-reading it returns the same. Nothing is invented or back-filled from convention in
-//  their place. The binding constraints are the enterprise-standard baseline - nullable enabled,
-//  warnings as errors, no secret in source, parameterized SQL, structured logging with no credential
-//  and no statement - plus the named non-rule constraints C-B, C-C, C-D, C-E, C-F, C-G, C-H, C-I,
-//  C-J, C-K and C-L, each cited above and below at the point it applies, as C-K requires.
 // ==================================================================================================
 
 using System.Data;

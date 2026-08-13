@@ -95,7 +95,7 @@
 # THE BUILD IMAGE IS PINNED TO A PATCH REVISION, NOT TO THE 10.0 FAMILY TAG, AND THE DIFFERENCE IS A
 # SECURITY PROPERTY RATHER THAN A STYLE ONE. `mcr.microsoft.com/dotnet/sdk:10.0.400` is the SDK of the
 # 2026-08-11 security release of the 10.0 channel (runtime 10.0.11, ten CVEs fixed against 10.0.10).
-# An earlier revision used the family tag `sdk:10.0` on the reasoning that a rebuild would then pick a
+# The family tag `sdk:10.0` is the tempting choice, on the reasoning that a rebuild then picks a
 # security patch up by itself. IT DOES NOT: a family tag that is already present locally is reused as
 # it stands, so a builder holding a pre-patch `10.0` layer rebuilds on the vulnerable base and reports
 # success. A patch revision cannot go stale silently - advancing it is a diff a reviewer sees - and CI
@@ -106,7 +106,21 @@
 # pins SDK 10.0.303 with rollForward: latestFeature, and 10.0.400 satisfies that pin by rolling
 # forward one feature band within 10.0 - both are the same 10.0.11 platform release.
 # --------------------------------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/sdk:10.0.400 AS build
+#
+# ⚠ PINNED BY DIGEST, NOT BY TAG, AND THE `pinned-tag:` LINE ABOVE THE `FROM` IS LOAD BEARING. A
+# tag is a NAME a registry may republish over: `mcr.microsoft.com/dotnet/sdk:10.0.400` resolved to different content the
+# day MCR rebuilt the OS layer, so a build that reported success could silently be building on content
+# nobody reviewed (CWE-1104, CWE-494). The digest below is the content itself.
+#
+# THE COMMENT IS NOT DECORATION - THE CI IMAGE LEG PARSES IT. Dockerfile has no inline comment syntax,
+# so the tag the digest was taken from is recorded on its own line immediately above. Before every
+# build, .github/workflows/ci.yml reads that pair out of this file, asks the registry what the tag
+# resolves to NOW, and fails the leg when it has moved - naming the new digest to adopt. Drift is
+# therefore the signal that a patched base image exists, which is the OS-image freshness control.
+# Both halves must stay together and stay adjacent: the digest alone cannot be re-checked, and the tag
+# alone is not a pin.
+# pinned-tag: mcr.microsoft.com/dotnet/sdk:10.0.400
+FROM mcr.microsoft.com/dotnet/sdk@sha256:e1fc6e423f543119c406d24e2e687d67c569f18f04a37a8b0005d80ad0dcee80 AS build
 
 WORKDIR /src
 
@@ -196,7 +210,21 @@ RUN dotnet publish services/persistence-service/PowerFramework.Persistence/Power
 # service has no use for. NOT the non-ASP.NET `runtime` image either: this service hosts gRPC over
 # Kestrel and would fail to start without the shared framework this image provides.
 # --------------------------------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/aspnet:10.0.11 AS final
+#
+# ⚠ PINNED BY DIGEST, NOT BY TAG, AND THE `pinned-tag:` LINE ABOVE THE `FROM` IS LOAD BEARING. A
+# tag is a NAME a registry may republish over: `mcr.microsoft.com/dotnet/aspnet:10.0.11` resolved to different content the
+# day MCR rebuilt the OS layer, so a build that reported success could silently be building on content
+# nobody reviewed (CWE-1104, CWE-494). The digest below is the content itself.
+#
+# THE COMMENT IS NOT DECORATION - THE CI IMAGE LEG PARSES IT. Dockerfile has no inline comment syntax,
+# so the tag the digest was taken from is recorded on its own line immediately above. Before every
+# build, .github/workflows/ci.yml reads that pair out of this file, asks the registry what the tag
+# resolves to NOW, and fails the leg when it has moved - naming the new digest to adopt. Drift is
+# therefore the signal that a patched base image exists, which is the OS-image freshness control.
+# Both halves must stay together and stay adjacent: the digest alone cannot be re-checked, and the tag
+# alone is not a pin.
+# pinned-tag: mcr.microsoft.com/dotnet/aspnet:10.0.11
+FROM mcr.microsoft.com/dotnet/aspnet@sha256:207cc51496778557731c81ff670333d8ade4a4fec22768fd1be8e78474a84ecf AS final
 
 # NOTHING IS INSTALLED IN THIS STAGE, AND THIS PARAGRAPH SAYS WHY. It sits here deliberately, because
 # this is precisely the line at which a future maintainer reaches for a package manager.
@@ -206,14 +234,14 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0.11 AS final
 # curl NOR wget. The readiness probe at the foot of this file is built from that set alone, so no
 # package is required for it; the probe's own comment documents the pipeline clause by clause.
 #
-# AN EARLIER REVISION OF THIS FILE INSTALLED curl FOR THE PROBE, AND THAT WAS WITHDRAWN. The base image
-# is referenced by FAMILY tag on purpose, so that a security-patched rebuild picks the fix up - which
+# INSTALLING curl FOR THE PROBE IS THE OBVIOUS MOVE AND IT IS REFUSED HERE. The base image is
+# referenced by FAMILY tag on purpose, so that a security-patched rebuild picks the fix up - which
 # means its package set advances. An apt version pinned against a moving base fails the build the moment
 # the archive supersedes it, and an unpinned one is a floating dependency, which collides with the
 # baseline this refactor holds itself to: no floating version, no wildcard and no "latest" anywhere. The
-# identical revision was made and withdrawn for the identical reason in the Security definition. All
-# four images now share one probe idiom and install nothing, which also removes a runtime package from
-# the one service in the system that holds a storage provider.
+# Security definition refuses it for the identical reason. All four images share one probe idiom and
+# install nothing, which also keeps a runtime package out of the one service in the system that holds a
+# storage provider.
 #
 # NO SQLite PACKAGE, SPECIFICALLY - the tempting one, because this is the only service with a storage
 # provider, and wrong twice over. The native engine is already placed beside the managed assemblies by
@@ -275,10 +303,10 @@ VOLUME ["/var/lib/powerframework"]
 #
 # BOTH VERSIONS ON ONE PORT, BECAUSE AAP 0.3.2.2 ASSIGNS THIS SERVICE ONE: "gRPC, plus REST /health
 # and /v1/ping". The endpoint terminates TLS, which is what makes that work - ALPN negotiates between
-# the versions per connection, measured on this toolchain rather than assumed. An earlier revision bound
-# a second HTTP/2-only listener so that a misaddressed client failed at negotiation rather than later;
-# that diagnostic gain published C-05..C-08 at an address the plan does not assign, and the plan's port
-# map is what the manifest, the probes and the e2e fixture all address.
+# the versions per connection, measured on this toolchain rather than assumed. Binding a SECOND,
+# HTTP/2-only listener would make a misaddressed client fail at negotiation rather than later, which is
+# a real diagnostic gain and is still refused: it would publish C-05..C-08 at an address the plan does
+# not assign, and the plan's port map is what the manifest, the probes and the e2e fixture all address.
 #
 # Leaving ASPNETCORE_HTTP_PORTS populated, including with the base image's own 8080, would add a
 # SECOND, PLAINTEXT listener beside the configured one, so it is emptied. EXPOSE therefore DOCUMENTS
@@ -323,7 +351,7 @@ USER $APP_UID
 # hand. Nothing is installed and nothing is skipped, and this is the same pipeline the Gateway,
 # DataServices and Security definitions use, so one idiom covers all four.
 #
-# A RAW /dev/tcp SOCKET IS NOT AN ALTERNATIVE HERE. Both of this service's listeners terminate TLS, so a
+# A RAW /dev/tcp SOCKET IS NOT AN ALTERNATIVE HERE. This service's single listener terminates TLS, so a
 # socket redirection writes plaintext bytes into a TLS endpoint: it never produces a status line, so it
 # fails PERMANENTLY rather than intermittently. A probe that can only ever fail leaves a compose
 # `depends_on: condition: service_healthy` gate shut for ever, which from the outside is

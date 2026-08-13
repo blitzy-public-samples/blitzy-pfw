@@ -6,9 +6,9 @@
 //    1. A REFUSAL'S STATUS SURVIVES A MALFORMED OR UNREADABLE RESPONSE BODY. The problem-details body
 //       on a refusal is OPTIONAL enrichment: the status code is the substantive answer, and the caller
 //       must receive it whatever the body turns out to be. Three failure shapes are absorbed, and the
-//       third - a response declaring a charset that resolves to no encoding - was not, so a 401 or a
-//       503 was replaced by an unrelated encoding complaint and the caller was told the wrong thing
-//       about its own request.
+//       third - a response declaring a charset that resolves to no encoding - is the one a two-shape
+//       catch list omits, which replaces a 401 or a 503 with an unrelated encoding complaint and tells
+//       the caller the wrong thing about its own request.
 //
 //    2. THE CREDENTIAL CACHE KEY IS INJECTIVE FOR ARBITRARY COMPONENT CONTENT. Two distinct token
 //       requests must never resolve to one key. A collision is not a cache inefficiency: it hands one
@@ -17,12 +17,12 @@
 //
 //  WHY THE COLLISION TEST LOOKS ODD
 //  ------------------------------------------------------------------------------------------------
-//  It sends a subject and an audience carrying U+001F. That is deliberate, and it is the point: the
-//  previous key joined the components with that character on the stated ground that no subject,
-//  audience or scope could contain it - a claim that was true of this service's own fixed call sites
-//  but was never CHECKED anywhere, so it was a convention rather than a control. The two requests below
-//  are the minimal pair that collided under it, and they now do not. A test written only against
-//  ordinary values would pass against both encodings and prove nothing.
+//  It sends a subject and an audience carrying U+001F. That is deliberate, and it is the point: joining
+//  the key's components with that character rests on the ground that no subject,
+//  audience or scope can contain it - a claim that holds for this service's own fixed call sites
+//  and is CHECKED nowhere, so it is a convention rather than a control. The two requests below
+//  are the minimal pair that collide under such a key, and they do not collide under this one. A test
+//  written only against ordinary values would pass against both encodings and prove nothing.
 //
 //  NO CREDENTIAL, KEY OR SECRET IN THIS FILE IS REAL, and none is copied from anywhere in the
 //  repository.
@@ -443,6 +443,126 @@ public sealed class SecurityClientBoundaryTests
     }
 
     // ----------------------------------------------------------------------------------------------
+    //  THE RENEWAL BOUNDARY - when a held credential stops being offered for reuse
+    //
+    //  The row above decides reuse by the KEY, against a clock that does not move. These three decide
+    //  it by ELAPSED TIME, which is the axis the cache used to get wrong: the comparison was exact
+    //  (`ExpiresAt > now`), so a credential still valid by a microsecond was handed out and attached to
+    //  a new call. It could then lapse IN TRANSIT and reach the verifier expired, and the caller met a
+    //  401 indistinguishable from a genuine authorization failure on a call that was correctly
+    //  authorized when it was made.
+    //
+    //  The margin that fixes it is DERIVED rather than invented - it is this client's own configured
+    //  outbound request timeout, the longest a call carrying the credential can still be in flight -
+    //  and the third row below is the one that pins that derivation on THIS side of the boundary.
+    // ----------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// A credential well inside its window is still served from cache, so the margin has not been
+    /// widened into "never reuse anything".
+    /// </summary>
+    [Fact]
+    public async Task TheHeldCredentialIsReusedWhileItRemainsComfortablyValid()
+    {
+        // THE POSITIVE ARM ON THE TIME AXIS, AND IT IS WHAT STOPS THE FIX OVERSHOOTING. A margin too wide
+        // would send every call to the issuance edge - a worse failure than the one it prevents, and one a
+        // renewal-only assertion would happily pass.
+        QueuedResponseHandler handler = new();
+        handler.EnqueueJson(HttpStatusCode.OK, TokenJson(FirstCredential));
+
+        MovableClock clock = new();
+        SecurityClient client = CreateClient(handler, clock);
+        ServiceTokenRequest request = new("subject", "audience", ["read"]);
+
+        ServiceToken first = await client.GetTokenAsync(request, TestContext.Current.CancellationToken);
+
+        // 200s into a 300s credential. The margin is 30s, so the boundary sits at 270s and is not reached.
+        clock.UtcNow = clock.UtcNow.AddSeconds(200);
+
+        ServiceToken second = await client.GetTokenAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Same(first, second);
+        Assert.Single(handler.Requests);
+    }
+
+    /// <summary>
+    /// A credential inside the renewal margin is replaced even though it has not yet expired.
+    /// </summary>
+    [Fact]
+    public async Task TheHeldCredentialIsRenewedBeforeExpiryRatherThanAtIt()
+    {
+        QueuedResponseHandler handler = new();
+        handler.EnqueueJson(HttpStatusCode.OK, TokenJson(FirstCredential));
+        handler.EnqueueJson(HttpStatusCode.OK, TokenJson(SecondCredential));
+
+        MovableClock clock = new();
+        SecurityClient client = CreateClient(handler, clock);
+        ServiceTokenRequest request = new("subject", "audience", ["read"]);
+
+        ServiceToken first = await client.GetTokenAsync(request, TestContext.Current.CancellationToken);
+
+        // One second INSIDE the 30s margin: still valid for 29 more seconds, and no longer offered.
+        clock.UtcNow = first.ExpiresAt.AddSeconds(-29);
+
+        ServiceToken renewed = await client.GetTokenAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.NotSame(first, renewed);
+        Assert.Equal(SecondCredential, renewed.AccessToken);
+        Assert.Equal(2, handler.Requests.Count);
+
+        // AND THE CREDENTIAL IT REPLACED WAS GENUINELY STILL VALID, which is the entire distinction being
+        // drawn: this is renewal ahead of expiry, not recovery after it.
+        Assert.True(first.ExpiresAt > clock.UtcNow);
+    }
+
+    /// <summary>
+    /// The renewal boundary moves with Gateway's own configured outbound request timeout, so the margin
+    /// is a deployment setting rather than a constant chosen in this client.
+    /// </summary>
+    [Fact]
+    public async Task TheRenewalMarginIsGatewaysOwnConfiguredOutboundRequestTimeout()
+    {
+        // 🔴 THE ROW THAT PROVES THE DERIVATION RATHER THAN THE NUMBER. Both rows above would pass against
+        // a hardcoded 30 seconds. This one configures a DIFFERENT timeout and shows the boundary follows
+        // it - which is what makes the margin defensible: no duration originates in this client, and the
+        // one it uses is the same published setting that already bounds the resilience pipeline.
+        QueuedResponseHandler handler = new();
+        handler.EnqueueJson(HttpStatusCode.OK, TokenJson(FirstCredential));
+        handler.EnqueueJson(HttpStatusCode.OK, TokenJson(SecondCredential));
+
+        MovableClock clock = new();
+
+        // 90s, deliberately three times the default, so a boundary computed from the default would still
+        // be reusing the credential at the instant this test asserts it is not.
+        SecurityClient client = CreateClient(
+            handler,
+            clock,
+            Options.Create(new GatewayOptions
+            {
+                Outbound = new GatewayOptions.OutboundCallOptions
+                {
+                    RequestTimeout = TimeSpan.FromSeconds(90),
+                },
+            }));
+
+        ServiceTokenRequest request = new("subject", "audience", ["read"]);
+
+        ServiceToken first = await client.GetTokenAsync(request, TestContext.Current.CancellationToken);
+
+        // 80s before expiry of a 300s credential: outside the 30s default, INSIDE the configured 90s.
+        clock.UtcNow = first.ExpiresAt.AddSeconds(-80);
+
+        ServiceToken renewed = await client.GetTokenAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.NotSame(first, renewed);
+        Assert.Equal(2, handler.Requests.Count);
+
+        // AND THE CAP STILL APPLIES ON TOP OF THE CONFIGURED VALUE. Half of a 300s lifetime is 150s, which
+        // exceeds 90s, so the configured margin is the operative one here and the boundary is at 210s.
+        Assert.Equal(first.ExpiresAt.AddSeconds(-90), first.RenewAt(TimeSpan.FromSeconds(90)));
+    }
+
+    // ----------------------------------------------------------------------------------------------
     //  FIXTURE CONSTRUCTION.
     // ----------------------------------------------------------------------------------------------
 
@@ -460,6 +580,31 @@ public sealed class SecurityClientBoundaryTests
             httpClient,
             NullLogger<SecurityClient>.Instance,
             new FrozenClock());
+    }
+
+    /// <summary>Builds the client over the handler against a clock the test advances itself.</summary>
+    /// <param name="handler">The handler to answer from.</param>
+    /// <param name="clock">The clock the test drives.</param>
+    /// <param name="options">
+    /// The bound options, or <see langword="null"/> to take the declared outbound defaults - which is
+    /// also the shape a host takes when the configuration carries no outbound section.
+    /// </param>
+    /// <returns>The client.</returns>
+    private static SecurityClient CreateClient(
+        QueuedResponseHandler handler,
+        MovableClock clock,
+        IOptions<GatewayOptions>? options = null)
+    {
+        HttpClient httpClient = new(handler, disposeHandler: false)
+        {
+            BaseAddress = new Uri("https://security.invalid/", UriKind.Absolute),
+        };
+
+        return new SecurityClient(
+            httpClient,
+            NullLogger<SecurityClient>.Instance,
+            clock,
+            options);
     }
 
     /// <summary>
@@ -501,5 +646,23 @@ public sealed class SecurityClientBoundaryTests
     private sealed class FrozenClock : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+    }
+
+    /// <summary>
+    /// A clock the test moves, so the renewal boundary can be crossed deliberately rather than waited
+    /// for.
+    /// </summary>
+    /// <remarks>
+    /// Starts at the same instant as <see cref="FrozenClock"/> so the two fixtures are directly
+    /// comparable, and every advance in a test is expressed relative to a token's own issuance or expiry
+    /// rather than to this literal.
+    /// </remarks>
+    private sealed class MovableClock : TimeProvider
+    {
+        /// <summary>The current instant, which the test assigns.</summary>
+        internal DateTimeOffset UtcNow { get; set; } = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        /// <inheritdoc/>
+        public override DateTimeOffset GetUtcNow() => UtcNow;
     }
 }

@@ -289,9 +289,11 @@ public static class ScopeAuthorizationExtensions
 
         foreach (string scope in SecurityScopes.All)
         {
-            // REGISTERED UNDER THE NAME THE ROUTES ACTUALLY REQUIRE. This used to register under the bare
-            // scope string while every route composed the prefixed one, so no route ever reached one of
-            // these policies and the probe route reached no policy at all.
+            // REGISTERED UNDER THE NAME THE ROUTES ACTUALLY REQUIRE, WHICH IS THE PREFIXED ONE. Registering
+            // under the bare scope string instead would leave every route composing a name no policy is
+            // registered under, so no route would reach one of these policies and the probe route would
+            // reach no policy at all - a silent failure, because an unmatched policy name is not a
+            // compile-time error.
             builder.AddPolicy(
                 SecurityScopes.PolicyNameFor(scope),
                 policy => policy

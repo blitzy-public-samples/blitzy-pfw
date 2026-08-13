@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  F-15 - Retry-After ON A CAPACITY REFUSAL
+//  Retry-After ON A CAPACITY REFUSAL
 // =====================================================================================================
 //
 //  WHY THIS FILE EXISTS. A 429 tells a caller that a ceiling was reached; Retry-After is the only part of
@@ -92,8 +92,12 @@ public sealed class RetryAfterHeaderTests
     /// an availability commitment, and the plan states plainly that none may be asserted (AAP 0.8.5).
     /// </para>
     /// <para>
-    /// The remaining rows are the other statuses the projection actually produces, so that a future change
-    /// which widened the condition to "any 4xx" or "any 5xx" fails here rather than in production.
+    /// The remaining rows are the other statuses the projection produces, so that a future change which
+    /// widened the condition to "any 4xx" or "any 5xx" fails here rather than in production. <c>501</c> is
+    /// the one row this projection no longer produces at all - it belongs to Gateway's four reserved
+    /// deferred-capability routes alone, which build their own body rather than a problem document - and the
+    /// row is kept deliberately: it is the assertion that a status arriving here by any future route still
+    /// carries no delta, since a reserved route clears on no schedule this service can know.
     /// </para>
     /// </remarks>
     [Theory]

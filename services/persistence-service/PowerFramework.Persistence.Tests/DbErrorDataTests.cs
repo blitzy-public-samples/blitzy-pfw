@@ -56,14 +56,6 @@
 //  used as a fixture - which matters here because DbErrorData.SqlSyntax is precisely the member
 //  that carries interpolated literals in the legacy.
 //
-//  RULES POSITION: review_rules returns exactly one line, "No user rules provided.", so no
-//  user-specified rule governs this file and none is invented. The enterprise-standard baseline
-//  applies instead: deterministic, no I/O, no clock, no shared mutable state, and every test
-//  independent of every other.
-//
-//  No performance property is asserted anywhere in this suite: the repository publishes no latency,
-//  throughput or availability target, so there is no baseline any such assertion could be made
-//  against.
 // ==============================================================================================
 
 using System.Text.Json;
@@ -678,12 +670,6 @@ public sealed class DbErrorDataTests
         Assert.DoesNotContain("_sqlSyntax", rendered, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// Mirrors the shape of <c>of_gettransobject(ref …, ref dberrordata)</c>
-    /// [n_cst_thread_task_sqlbase.sru:L148] and the partial population at :L175-L176. Returns the
-    /// numeric value of <c>RetCode.E_INVALID_TRANSACTION</c> to mirror :L177 without restating the
-    /// preserved constant spelling in this file.
-    /// </summary>
     // ==========================================================================================
     //  THE CONTAINMENT OF THE RAW PAYLOAD - three doors, each closed and each tested
     // ==========================================================================================
@@ -851,6 +837,18 @@ public sealed class DbErrorDataTests
         Assert.Equal("synthetic", wire.Sqlerrtext);
     }
 
+    /// <summary>
+    /// Mirrors the shape of <c>of_gettransobject(ref …, ref dberrordata)</c>
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L148</c>] and the partial
+    /// population at <c>:L175-L176</c>.
+    /// </summary>
+    /// <param name="dbErrData">The payload the failure populates, passed by reference as the oracle does.</param>
+    /// <param name="code">The provider code to record.</param>
+    /// <param name="text">The provider message text to record.</param>
+    /// <returns>
+    /// The numeric value of <c>RetCode.E_INVALID_TRANSACTION</c>, mirroring <c>:L177</c> without
+    /// restating the preserved constant spelling in this file.
+    /// </returns>
     private static long PopulateOnConnectFailure(ref DbErrorData dbErrData, long code, string text)
     {
         dbErrData = dbErrData with { SqlDbCode = code, SqlErrText = text };

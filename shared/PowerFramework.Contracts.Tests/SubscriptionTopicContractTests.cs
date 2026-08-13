@@ -70,7 +70,7 @@
 //  from the descriptor graph. The claim "`name` is the UNPREFIXED logical name" is consequently made
 //  STRUCTURALLY instead of from prose, by three independent mechanical assertions, and the limitation
 //  itself is asserted so that it starts failing usefully if source info is ever emitted. See
-//  <see cref="SubscriptionTopicContractTests.TheDescriptorGraphDoesNotSurfaceProtoComments"/>.
+//  SubscriptionTopicContractTests.TheDescriptorGraphDoesNotSurfaceProtoComments.
 // ==================================================================================================
 
 using Google.Protobuf.Reflection;
@@ -1425,7 +1425,7 @@ public sealed class SubscriptionTopicContractTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <see cref="FieldDescriptor.Declaration"/> is the accessor for a field's leading proto comments,
+    /// <c>FieldDescriptor.Declaration</c> is the accessor for a field's leading proto comments,
     /// and it is populated only when the embedded <c>FileDescriptorProto</c> carries
     /// <c>SourceCodeInfo</c>. Grpc.Tools does not emit it for the C# projection, so the property is null
     /// for every field here and the contract's own documentation is unreachable from a test.

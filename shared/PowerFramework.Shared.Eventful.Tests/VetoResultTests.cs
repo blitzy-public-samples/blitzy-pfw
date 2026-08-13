@@ -25,9 +25,6 @@
 //  The three names, the three values, that the set is exactly three wide, that the default is Continue,
 //  and - the point of the file - that the type cannot be collapsed to two states without a test failing.
 //
-//  RULES POSITION
-//  review_rules returns "No user rules provided.". Constraints cited inline: C-B (replicate the
-//  behaviour, including the tri-valued shape), AAP 0.4.5.3 (constant values survive verbatim).
 // ==================================================================================================
 
 using System;

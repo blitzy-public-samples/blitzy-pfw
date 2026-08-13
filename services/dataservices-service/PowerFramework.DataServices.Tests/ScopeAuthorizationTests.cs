@@ -20,10 +20,10 @@
 //  BOTH directions.
 //
 //  THE STRUCTURAL CHANGE THESE ROWS GUARD
-//  The REST projection's expression group used to be declared ON the DataWindow group. That produced the
+//  Declaring the REST projection's expression group ON the DataWindow group produces the
 //  right route prefix and the wrong authorization: group conventions are INHERITED AND CANNOT BE REMOVED,
-//  so a nested expression group would demand the C-03 scope in addition to its own, and a caller holding
-//  only the C-04 scope would be refused the very contract it was granted. The two groups are now siblings
+//  so a nested expression group demands the C-03 scope in addition to its own, and a caller holding
+//  only the C-04 scope is refused the very contract it was granted. The two groups are therefore siblings
 //  with an explicitly composed prefix - identical URLs, independent policies - and the rows below assert
 //  both halves of that: the URLs did not move, and the policies are separate.
 //

@@ -38,8 +38,8 @@
 //                         the language and the source text are compared as DATA against attribute
 //                         values and the category is resolved as an XName rather than spliced into
 //                         a query string. Correction 6 names XPathSelectElements as the
-//                         substitute, and that WAS the mechanism here until it was replaced; the
-//                         reason it could not stay, and the proof that the swap is behaviour
+//                         substitute, and it is the obvious mechanism here; the
+//                         reason it cannot stay, and the proof that the traversal is behaviour
 //                         preserving over the whole shipped table, are recorded at Lookup. The
 //                         framework XML API is still the substitute, which is what Correction 6
 //                         requires of this file; only the query spelling changed.
@@ -91,7 +91,8 @@
 //     That is reproduced here verbatim, and it is the ONE place in this refactor where the
 //     fail-fast posture of AAP 0.1.4 deliberately does NOT apply. Fail-fast is correct for
 //     Gateway's composition root, where pfwinitialize/pfwfinalize pairing is structural and
-//     pfw.sra's systemerror event ends in HALT CLOSE. It is wrong here, because the legacy
+//     ws_objects/pfw.pbl.src/pfw.sra's systemerror event - the framework application, not the
+//     same-named packager object - ends in HALT CLOSE. It is wrong here, because the legacy
 //     demonstrably does not fail fast on this path, and turning a documented silent degradation
 //     into a startup fault would be a behavioural change dressed up as robustness. Construction
 //     therefore never throws for a data condition, and neither does a lookup.

@@ -19,7 +19,9 @@
                                   TreatWarningsAsErrors, .NET analyzers, central package
                                   management, deterministic build, shared assembly metadata.
       * Directory.Packages.props  every package version.
-      * global.json               the SDK pin (10.0.302, rollForward latestFeature).
+      * global.json               the SDK pin and rollForward latestFeature. The version is read
+                                  there rather than copied here, so this comment cannot go stale
+                                  the way it once did.
 
     Consequence worth internalising rather than rediscovering: TreatWarningsAsErrors is inherited
     here too, so a warning in any test file in this folder is a build failure. Fix the warning in

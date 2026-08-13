@@ -9,15 +9,14 @@
 //  that document with zero bespoke code, so a value that cannot be composed into a fetchable address
 //  breaks every verifier in the system while breaking nothing locally.
 //
-//  THE DEFECT THESE ROWS PIN CLOSED. An earlier revision validated this setting for BLANKNESS ONLY,
-//  on the stated reasoning that its format was a deployment decision. The measured consequence was
-//  that `not-a-uri`, `javascript:alert(1)`, `file:///etc/passwd`, `ftp://h/p`, a whitespace-padded
-//  value and a value carrying a query and a fragment ALL STARTED THE HOST. Readiness then opened on a
-//  service whose `/health` answered 200 and whose key set answered 200 while its discovery document
-//  answered 500 - the one artifact every verifier must fetch was the only one that failed, and the
-//  probe every orchestrator gates on said nothing. A merely MISTYPED but absolute issuer was worse
-//  still: the document published cleanly and made every issued token unverifiable, with no signal
-//  anywhere in the system.
+//  THE DEFECT THESE ROWS PIN CLOSED. Validating this setting for BLANKNESS ONLY - on the reasoning that
+//  its format is a deployment decision - lets `not-a-uri`, `javascript:alert(1)`, `file:///etc/passwd`,
+//  `ftp://h/p`, a whitespace-padded value and a value carrying a query and a fragment ALL START THE HOST.
+//  That is measured, not hypothesised. Readiness then opens on a service whose `/health` answers 200 and
+//  whose key set answers 200 while its discovery document answers 500 - the one artifact every verifier
+//  must fetch is the only one that fails, and the probe every orchestrator gates on says nothing. A merely
+//  MISTYPED but absolute issuer is worse still: the document publishes cleanly and makes every issued
+//  token unverifiable, with no signal anywhere in the system.
 //
 //  THE SHAPE OF THE ASSERTIONS, AND WHY IT IS THIS SHAPE.
 //

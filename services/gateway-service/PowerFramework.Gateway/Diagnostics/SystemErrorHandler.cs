@@ -493,9 +493,9 @@ public sealed record SystemErrorReport
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>THIS TYPE EXISTS BECAUSE THE LEGACY DECODE IS LOSSY BY DESIGN AND THE LOSS WAS PREVIOUSLY
-/// SILENT.</b> Two legacy behaviours combine to discard fields, and both are reproduced verbatim
-/// rather than corrected (C-B):
+/// <b>THIS TYPE EXISTS BECAUSE THE LEGACY DECODE IS LOSSY BY DESIGN AND THE LOSS IS SILENT UNLESS
+/// SOMETHING REPORTS IT.</b> Two legacy behaviours combine to discard fields, and both are reproduced
+/// verbatim rather than corrected (C-B):
 /// </para>
 /// <list type="number">
 ///   <item>
@@ -1768,15 +1768,15 @@ public sealed class SystemErrorHandler : IExceptionHandler
         //
         //  The framework raises BadHttpRequestException for a request IT could not accept - a required
         //  query parameter that is absent, a route value that will not convert, a body over the
-        //  configured size - and that exception carries the status the framework intended. This handler
-        //  discarded it and answered 500 with UNKNOWN, so a caller that omitted a query parameter was
-        //  told THIS SERVICE had failed. Measured: GET /v1/datawindow/event-gate with no sessionId
-        //  answered 500 / -4000, while the same route with an EMPTY sessionId answered 400 / -3 - two
-        //  spellings of one mistake, one of them blamed on the wrong party.
+        //  configured size - and that exception carries the status the framework intended. Discarding it
+        //  here and answering 500 with UNKNOWN tells a caller that omitted a query parameter that
+        //  THIS SERVICE failed. Measured on a handler without this arm: GET /v1/datawindow/event-gate with
+        //  no sessionId answers 500 / -4000, while the same route with an EMPTY sessionId answers 400 / -3 -
+        //  two spellings of one mistake, one of them blamed on the wrong party.
         //
-        //  IT IS A DEFENCE IN DEPTH RATHER THAN THE PRIMARY FIX. The projection now binds that
+        //  IT IS A DEFENCE IN DEPTH RATHER THAN THE PRIMARY GUARD. The projection binds that
         //  parameter nullable and applies the operation's own declared parameter contract, so the
-        //  measured case no longer reaches this handler at all. This arm is what makes every OTHER
+        //  measured case does not reach this handler at all. This arm is what makes every OTHER
         //  binding refusal - present and future, on any route - answer the caller's own status instead
         //  of a server fault.
         //
@@ -1802,12 +1802,12 @@ public sealed class SystemErrorHandler : IExceptionHandler
 
         // ---- CANCELLATION, CLASSIFIED BEFORE THE GENERIC PATH AND NOT INSIDE IT.
         //
-        // A caller that hangs up produces an OperationCanceledException here, and every one of them
-        // used to fall through to the request-fault path: recorded at error as a server fault, and
-        // then handed to a body write against a socket that is no longer there. Both halves are wrong.
+        // A caller that hangs up produces an OperationCanceledException here, and letting every one of
+        // them fall through to the request-fault path records it at error as a server fault and
+        // then hands it to a body write against a socket that is no longer there. Both halves are wrong.
         // A cancellation is not this service's fault, and a service whose error rate tracks how often
-        // callers navigate away cannot be monitored; and the write can only fault, which before the
-        // structural path was made finally-safe was enough to skip termination altogether.
+        // callers navigate away cannot be monitored; and the write can only fault, which on a structural
+        // path that is not finally-safe is enough to skip termination altogether.
         //
         // THE ATTRIBUTION TEST IS THE WHOLE DISTINCTION, and it is deliberately not "is this an
         // OperationCanceledException". A cancellation with NEITHER the request's own abort token nor
@@ -1898,7 +1898,7 @@ public sealed class SystemErrorHandler : IExceptionHandler
             // THE LEVEL FOLLOWS THE CLASSIFICATION, and it has to: a service whose error rate tracks how
             // often callers send malformed requests cannot be monitored, which is the same reasoning the
             // cancellation arm above already applies. A client error is recorded at warning, a server
-            // fault at error, and the STATUS is now the one the caller actually receives rather than a
+            // fault at error, and the STATUS is the one the caller actually receives rather than a
             // hardcoded 500 that could disagree with the response.
             _logger.Log(
                 responseStatus >= StatusCodes.Status500InternalServerError
@@ -1978,6 +1978,7 @@ public sealed class SystemErrorHandler : IExceptionHandler
     /// <c>shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml</c>.
     /// </summary>
     /// <param name="httpContext">The request context.</param>
+    /// <param name="responseStatus">The status the response carries.</param>
     /// <param name="wireRetCode">The return code chosen by <see cref="ResolveRetCode"/>.</param>
     /// <param name="correlationId">
     /// The correlation identifier already written to the operator record, passed in rather than

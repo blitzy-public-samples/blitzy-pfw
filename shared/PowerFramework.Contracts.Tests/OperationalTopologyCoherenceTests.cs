@@ -18,10 +18,10 @@
 //      * services/persistence-service/Dockerfile declared `EXPOSE 5101` while the service bound 5101 AND
 //        a second gRPC port. The endpoint the C-05..C-08 contracts lived on was undocumented at the image
 //        boundary - which is the half of the review finding that says "expose all required container
-//        ports". (That second port has since been withdrawn entirely: each gRPC-serving service now binds
-//        ONE `Http1AndHttp2` endpoint on the port AAP 0.3.2.2 assigns it, so the equality assertion below
-//        now reads one port per definition. It still discriminates - it is the assertion that fails if a
-//        definition and a listener ever disagree in either direction.)
+//        ports". (There is no such second port: each gRPC-serving service binds ONE `Http1AndHttp2`
+//        endpoint on the port AAP 0.3.2.2 assigns it, so the equality assertion below reads one port per
+//        definition. It still discriminates - it is the assertion that fails if a definition and a
+//        listener ever disagree in either direction.)
 //      * tests/e2e/fixtures/service-endpoints.ts printed `http, Http1` for three ports whose exported
 //        defaults in the same file are `https`, and described Security as `Http1AndHttp2`.
 //
@@ -589,10 +589,10 @@ public sealed class OperationalTopologyCoherenceTests
     /// reader or an orchestrator consulting it would have concluded the service serves one port.
     /// </para>
     /// <para>
-    /// THE COLLAPSE ONTO ONE ENDPOINT PER SERVICE DID NOT MAKE THIS ASSERTION IDLE, IT INVERTED WHICH HALF
-    /// BITES. Every service now binds one port, so under-declaration is unlikely and OVER-declaration is
-    /// the live risk: a definition still carrying the withdrawn second <c>EXPOSE</c> line would advertise
-    /// a listener the host no longer binds, and a published mapping or probe aimed at it would fail in a
+    /// ONE ENDPOINT PER SERVICE DOES NOT MAKE THIS ASSERTION IDLE, IT DECIDES WHICH HALF BITES. Every
+    /// service binds one port, so under-declaration is unlikely and OVER-declaration is
+    /// the live risk: a definition carrying a second <c>EXPOSE</c> line advertises
+    /// a listener the host does not bind, and a published mapping or probe aimed at it fails in a
     /// way that reads as the service being down.
     /// </para>
     /// <para>
@@ -907,18 +907,18 @@ public sealed class OperationalTopologyCoherenceTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>⚠ THIS IS THE ASSERTION THAT WOULD HAVE CAUGHT A DEFECT THAT MADE THE DOCUMENTED BRING-UP
-    /// IMPOSSIBLE.</b> An earlier revision of the manifest passed three CONTAINER paths to all four
-    /// services - the Kestrel certificate pair and the internal trust anchor - and all four Dockerfile
-    /// <c>HEALTHCHECK</c>s read the anchor path, while the manifest mounted NOTHING at any of them. The
-    /// paths were individually correct and every existing guard passed. But every listener in the stack
+    /// <b>⚠ THIS ASSERTION CATCHES A DEFECT THAT MAKES THE DOCUMENTED BRING-UP IMPOSSIBLE.</b> The
+    /// defect: a manifest that passes three CONTAINER paths to all four services - the Kestrel
+    /// certificate pair and the internal trust anchor - with all four Dockerfile <c>HEALTHCHECK</c>s
+    /// reading the anchor path, while the manifest mounts NOTHING at any of them. Every path is
+    /// individually correct and every other guard passes. But every listener in the stack
     /// is <c>https</c>, and Kestrel REFUSES TO START an HTTPS endpoint whose certificate it cannot
-    /// resolve rather than downgrading to plaintext, so all four services crash-looped, no
-    /// <c>/health</c> ever answered, and the <c>depends_on: service_healthy</c> chain could never open.
+    /// resolve rather than downgrading to plaintext, so all four services crash-loop, no
+    /// <c>/health</c> ever answers, and the <c>depends_on: service_healthy</c> chain never opens.
     /// </para>
     /// <para>
-    /// THE DEFECT LIVED BETWEEN TWO CORRECT HALVES, which is why no test of either half could see it: a
-    /// configuration key naming a path, and a manifest declaring mounts. Nothing compared them. This row
+    /// THE DEFECT LIVES BETWEEN TWO CORRECT HALVES, which is why no test of either half can see it: a
+    /// configuration key naming a path, and a manifest declaring mounts. Nothing else compares them. This row
     /// is that comparison, and it is stated as a rule rather than as a list - EVERY service, and EVERY
     /// configured path - so that a fifth service, or a fourth path, is covered the moment it is added.
     /// </para>
@@ -935,8 +935,8 @@ public sealed class OperationalTopologyCoherenceTests
     /// so a grant of <c>internal-tls/server.crt</c> places the file at
     /// <c>/run/secrets/internal-tls/server.crt</c> - which is what the configured paths name. A secret
     /// projection is read-only by definition, so the read-only half needs no separate flag to assert;
-    /// that is the one respect in which it is stronger than the bind mount an earlier revision used, where
-    /// omitting <c>read_only</c> silently yielded a writable private key. The three host-side sources are
+    /// that is the one respect in which it is stronger than a bind mount, where omitting <c>read_only</c>
+    /// silently yields a writable private key. The three host-side sources are
     /// declared once at the foot of the manifest and are asserted by
     /// <see cref="TheTlsMaterialSourceVariablesAreDeclaredAndDocumented"/>.
     /// </para>
@@ -1081,20 +1081,74 @@ public sealed class OperationalTopologyCoherenceTests
             $"'{manifestPath}' declares no top-level 'secrets:' block, so the projections asserted above "
                 + "have no source and bring-up cannot supply the material.");
 
-        foreach (string secretName in (string[])
-            ["tls-server-certificate", "tls-server-private-key", "internal-tls-ca-certificate"])
-        {
-            Assert.Contains(
-                $"  {secretName}:",
-                manifestText[declarations..],
-                StringComparison.Ordinal);
+        // THE ANCHOR IS SHARED BY ALL FOUR, AND SHARING IT IS CORRECT. It is the PUBLIC certificate of the
+        // authority that signed every leaf: it carries no private material, and every service must verify
+        // against the same authority or the mesh cannot form.
+        Assert.Contains(
+            "  internal-tls-ca-certificate:",
+            manifestText[declarations..],
+            StringComparison.Ordinal);
 
-            Assert.Equal(
-                Services.Length,
-                lines.Count(line => string.Equals(
+        Assert.Equal(
+            Services.Length,
+            lines.Count(line => string.Equals(
+                line.TrimEnd('\r').Trim(),
+                "- source: internal-tls-ca-certificate",
+                StringComparison.Ordinal)));
+
+        // ⚠ BUT THE SERVER PAIR IS PER-SERVICE, AND THIS IS THE ROW THAT KEEPS IT THAT WAY.
+        //
+        // An earlier revision declared ONE `tls-server-certificate` and ONE `tls-server-private-key` and
+        // granted each to all four services, and this assertion REQUIRED that - it pinned both names at a
+        // grant count of four. That made the four services cryptographically indistinguishable: one key
+        // read out of any container was the key every other service presented, the shared certificate had
+        // to carry subject alternative names for every origin so it validated as any peer, and mutual TLS
+        // between two internal services proved only that the peer held THE key rather than that it was
+        // the peer it claimed to be. Compromise had no blast radius short of the whole estate.
+        //
+        // So each service now declares its own pair and is granted only its own. The assertion is
+        // inverted accordingly: each name must be granted EXACTLY ONCE, and the four sources must be
+        // four DISTINCT names. Counting is what makes a regression detectable - re-pointing two services
+        // at one source is a two-line edit that reads as a simplification.
+        foreach ((string prefix, _, _) in Services)
+        {
+            foreach (string half in (string[])["certificate", "private-key"])
+            {
+                string secretName = $"{prefix}-tls-server-{half}";
+
+                Assert.Contains(
+                    $"  {secretName}:",
+                    manifestText[declarations..],
+                    StringComparison.Ordinal);
+
+                int grants = lines.Count(line => string.Equals(
                     line.TrimEnd('\r').Trim(),
                     "- source: " + secretName,
-                    StringComparison.Ordinal)));
+                    StringComparison.Ordinal));
+
+                Assert.True(
+                    grants == 1,
+                    $"'{manifestPath}' grants '{secretName}' to {grants} services and exactly 1 was "
+                        + "expected. A server key granted to more than one service gives those services "
+                        + "the same cryptographic identity, so either can present itself as the other and "
+                        + "a compromise of one is a compromise of both.");
+            }
+        }
+
+        // AND NO SHARED SERVER-PAIR SECRET SURVIVES ANYWHERE, so the old names cannot be reintroduced
+        // beside the new ones and quietly re-shared.
+        foreach (string retired in (string[])["tls-server-certificate", "tls-server-private-key"])
+        {
+            Assert.DoesNotContain(
+                $"\n  {retired}:",
+                manifestText[declarations..]);
+
+            Assert.DoesNotContain(
+                lines,
+                line => string.Equals(
+                    line.TrimEnd('\r').Trim(),
+                    "- source: " + retired,
+                    StringComparison.Ordinal));
         }
     }
 
@@ -1126,11 +1180,32 @@ public sealed class OperationalTopologyCoherenceTests
         string manifest = ReadRepositoryFile("orchestration/docker-compose.yml");
         string[] template = ReadRepositoryFile("orchestration/.env.example").Split('\n');
 
-        foreach (string variable in (string[])
-            ["TLS_CERTIFICATE_PATH", "TLS_CERTIFICATE_KEY_PATH", "INTERNAL_TLS_CA_PATH"])
+        // THE PER-SERVICE PAIRS PLUS THE ONE SHARED ANCHOR. Nine variables, and the count is the point:
+        // eight of them exist BECAUSE each service carries its own server identity rather than sharing
+        // one key with the other three.
+        //
+        // ⚠ AND EVERY MATCH BELOW IS ANCHORED, WHICH FIXED A VACUOUS PASS. This row used to iterate the
+        // shared names `TLS_CERTIFICATE_PATH` and `TLS_CERTIFICATE_KEY_PATH` with an unanchored
+        // `Assert.Contains`. When the manifest moved to per-service pairs those two variables stopped
+        // existing entirely - and the row still PASSED, because `SECURITY_TLS_CERTIFICATE_PATH:?`
+        // contains `TLS_CERTIFICATE_PATH:?` as a substring. A guard that cannot tell a variable from the
+        // tail of a longer one is not guarding the variable, so each match is now pinned to a position
+        // where only the whole name can satisfy it.
+        string[] expected =
+        [
+            .. Services.SelectMany(static service => (string[])
+            [
+                $"{service.Key.ToUpperInvariant()}_TLS_CERTIFICATE_PATH",
+                $"{service.Key.ToUpperInvariant()}_TLS_CERTIFICATE_KEY_PATH",
+            ]),
+            "INTERNAL_TLS_CA_PATH",
+        ];
+
+        foreach (string variable in expected)
         {
-            // The `:?` form, so an unset value aborts bring-up instead of resolving to empty.
-            Assert.Contains(variable + ":?", manifest, StringComparison.Ordinal);
+            // The `:?` form, so an unset value aborts bring-up instead of resolving to empty. Anchored on
+            // the opening brace so a longer variable ending in this name cannot satisfy it.
+            Assert.Contains("${" + variable + ":?", manifest, StringComparison.Ordinal);
 
             // Declared as an assignable line in the template, not merely mentioned in its prose.
             Assert.Contains(
@@ -1146,23 +1221,95 @@ public sealed class OperationalTopologyCoherenceTests
     }
 
     /// <summary>
+    /// Asserts that the two certificate-strictness variables are projected by the manifest, assignable in
+    /// the template, and documented on all three operational surfaces.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THESE TWO SETTINGS REPLACED A HARDCODED VALUE, WHICH IS WHY BEING DISCOVERABLE IS PART OF THE
+    /// FIX RATHER THAN POLISH ON TOP OF IT.</b> Revocation checking used to be
+    /// <c>X509RevocationMode.NoCheck</c> written into four call sites with a comment explaining it, so the
+    /// weakest posture was not merely the default - it was the only reachable one, and no deployment could
+    /// change it without editing code. Making it a setting is only half the remedy: a setting an operator
+    /// cannot find is not meaningfully configurable either, and this failure mode is silent, because the
+    /// shipped default IS the permissive value and a deployment that never discovers the key keeps it.
+    /// </para>
+    /// <para>
+    /// <b>THE `:-` FORM RATHER THAN THE `:?` FORM, AND THAT DIFFERENCE IS ASSERTED DELIBERATELY.</b> The
+    /// TLS material above uses <c>:?</c> because there is no sane default for a path only the operator
+    /// knows - bring-up must abort. These two DO have a defensible default, and it is the same value the
+    /// settings files ship, so a template copied unedited must behave identically to one that sets
+    /// neither. A <c>:?</c> here would break the documented bring-up for every deployment that does not
+    /// care about the setting.
+    /// </para>
+    /// <para>
+    /// <b>WHY THE DOCUMENTATION HALF IS ENFORCED.</b> The shipped mode is <c>NoCheck</c> because the local
+    /// authority the documentation tells an operator to build publishes neither a CRL distribution point
+    /// nor an OCSP responder - measured, not assumed: both stricter modes fail the chain with
+    /// <c>RevocationStatusUnknown | OfflineRevocation</c>. An operator who sets a stricter mode against
+    /// that PKI refuses every internal peer and every caller certificate, which presents as a broken
+    /// deployment rather than as a rejected setting. Requiring the reason on all three surfaces is what
+    /// stops that being rediscovered, and requiring the LIFETIME variable beside it is what stops the
+    /// compensating control being documented as a claim - which is the state it was in before, asserted
+    /// in a code comment and enforced nowhere.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheCertificateStrictnessVariablesAreProjectedDeclaredAndDocumented()
+    {
+        string manifest = ReadRepositoryFile("orchestration/docker-compose.yml");
+        string[] template = ReadRepositoryFile("orchestration/.env.example").Split('\n');
+
+        foreach (string variable in (string[])
+            ["INTERNAL_TLS_REVOCATION_MODE", "SECURITY_MTLS_CLIENT_MAX_LIFETIME_DAYS"])
+        {
+            // Projected WITH a default, so an unset value takes the shipped posture rather than aborting.
+            Assert.Contains(variable + ":-", manifest, StringComparison.Ordinal);
+
+            Assert.DoesNotContain(variable + ":?", manifest);
+
+            // Assignable in the template, not merely described in its prose.
+            Assert.Contains(
+                template,
+                line => line.TrimEnd('\r').StartsWith(variable + "=", StringComparison.Ordinal));
+
+            foreach (string surface in (string[])
+                ["orchestration/README.md", "docs/ARCHITECTURE.md", "docs/BUILD.md"])
+            {
+                Assert.Contains(variable, ReadRepositoryFile(surface), StringComparison.Ordinal);
+            }
+        }
+
+        // AND THE MEASUREMENT ITSELF IS ON THE RECORD, on the surface an architect reads. Without it the
+        // permissive default reads as carelessness, and the next reader's instinct is to "harden" it into
+        // a posture that refuses every peer in the estate.
+        string architecture = ReadRepositoryFile("docs/ARCHITECTURE.md");
+
+        foreach (string evidence in (string[])
+            ["RevocationStatusUnknown", "OfflineRevocation", "MaxCallerCertificateLifetimeDays"])
+        {
+            Assert.Contains(evidence, architecture, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
     /// Asserts that each service's container definition copies every project its application actually
     /// references, transitively.
     /// </summary>
     /// <param name="serviceKey">The service under test.</param>
     /// <remarks>
     /// <para>
-    /// <b>⚠ THIS ROW EXISTS BECAUSE THE DEFECT IT CATCHES HAPPENED, AND ONLY A REAL `docker build`
-    /// REVEALED IT.</b> Persistence acquired a <c>ProjectReference</c> to
-    /// <c>PowerFramework.Shared.Eventful</c> and its <c>Dockerfile</c>'s two <c>COPY</c> lists were not
-    /// updated with it. The host build stayed green - the whole tree is present there, so the reference
-    /// resolved - while the image build failed with <c>CS0234</c>, "the type or namespace name 'Eventful'
-    /// does not exist in the namespace 'PowerFramework.Shared'". Every existing guard passed, the whole
-    /// solution built and 21,573 tests were green, and the service simply could not be containerised.
+    /// <b>⚠ THE DEFECT THIS ROW CATCHES IS INVISIBLE TO EVERY OTHER GUARD AND TO THE HOST BUILD - ONLY A
+    /// REAL `docker build` SEES IT.</b> Let a service acquire a <c>ProjectReference</c> - say Persistence to
+    /// <c>PowerFramework.Shared.Eventful</c> - without adding it to the <c>Dockerfile</c>'s two <c>COPY</c>
+    /// lists, and the host build stays green, because the whole tree is present there and the reference
+    /// resolves. The image build then fails with <c>CS0234</c>, "the type or namespace name 'Eventful'
+    /// does not exist in the namespace 'PowerFramework.Shared'": every other guard passes, the whole
+    /// solution builds, every test is green, and the service simply cannot be containerised.
     /// </para>
     /// <para>
-    /// THE TWO HALVES ARE BOTH CORRECT IN ISOLATION, which is what made it invisible: a project file
-    /// declaring its references, and a Dockerfile declaring its build context. Nothing compared them.
+    /// THE TWO HALVES ARE BOTH CORRECT IN ISOLATION, which is what makes it invisible: a project file
+    /// declaring its references, and a Dockerfile declaring its build context. Nothing else compares them.
     /// This row is that comparison, and it derives the expected set from the PROJECT FILES rather than
     /// from a list written here, so a reference added tomorrow is covered without editing this suite.
     /// </para>

@@ -350,8 +350,11 @@ public sealed class SecurityClientTests
     }
 
     [Fact]
-    public async Task GetTokenAsync_ReusesTheHeldCredentialWhileItRemainsValid()
+    public async Task GetTokenAsync_ReusesTheHeldCredentialWhileItRemainsComfortablyValid()
     {
+        // THE POSITIVE ARM, AND IT MATTERS THAT IT IS STILL HERE. A renewal margin that was too wide would
+        // make the cache serve nothing and send every single call to the issuance edge - a worse failure
+        // than the one the margin prevents - so reuse well inside the window has to keep working.
         RecordingHandler handler = new RecordingHandler()
             .Enqueue(HttpStatusCode.OK, TokenResponseJson(expiresIn: 300));
         (SecurityClient client, _, MutableClock clock) = CreateClient(handler);
@@ -360,7 +363,8 @@ public sealed class SecurityClientTests
             SampleRequest(),
             TestContext.Current.CancellationToken);
 
-        clock.UtcNow = clock.UtcNow.AddSeconds(299);
+        // 200s into a 300s token, with a 30s margin, so the renewal boundary at 270s is not yet reached.
+        clock.UtcNow = clock.UtcNow.AddSeconds(200);
 
         ServiceToken second = await client.GetTokenAsync(
             SampleRequest(),
@@ -368,6 +372,83 @@ public sealed class SecurityClientTests
 
         Assert.Same(first, second);
         Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_RenewsBeforeExpiryRatherThanAtIt()
+    {
+        // 🔴 THE ROW THAT PINS THE FIX, AND THE OLD BEHAVIOUR IT REPLACES WAS A REAL FAILURE MODE. The
+        // cache used to serve any token still valid by a microsecond - a sibling row asserted reuse at
+        // 299s of a 300s lifetime - so a credential could be attached to a call and lapse IN TRANSIT,
+        // reaching the verifier expired. The caller then meets a 401 indistinguishable from a genuine
+        // authorization failure, on a call that was correctly authorized when it was made, and the only
+        // remedy is the retry a cache exists to avoid.
+        //
+        // THE MARGIN IS DERIVED, NOT PICKED: it is this client's own configured outbound request timeout
+        // (Resilience:Security:RequestTimeout, 30s by the options type's declared default), which is the
+        // longest a call carrying the credential can still be in flight.
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(expiresIn: 300))
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(expiresIn: 300, accessToken: "fake.renewed"));
+        (SecurityClient client, _, MutableClock clock) = CreateClient(handler);
+
+        ServiceToken first = await client.GetTokenAsync(
+            SampleRequest(),
+            TestContext.Current.CancellationToken);
+
+        // One second INSIDE the margin - still valid for 29 more seconds, and no longer offered for reuse.
+        clock.UtcNow = first.ExpiresAt.AddSeconds(-29);
+
+        ServiceToken renewed = await client.GetTokenAsync(
+            SampleRequest(),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotSame(first, renewed);
+        Assert.Equal("fake.renewed", renewed.AccessToken);
+        Assert.Equal(2, handler.Requests.Count);
+
+        // AND THE TOKEN IT REPLACED WAS GENUINELY STILL VALID, which is the whole point: this is renewal
+        // ahead of expiry, not recovery after it.
+        Assert.True(first.ExpiresAt > clock.UtcNow);
+    }
+
+    [Fact]
+    public void RenewAt_CapsTheMarginAtHalfTheLifetimeSoAShortTokenIsStillCacheable()
+    {
+        // WITHOUT THE CAP A SHORT-LIVED TOKEN WOULD NEVER BE REUSED ONCE. An issuer minting 20-second
+        // tokens against a 30-second margin would put the renewal boundary BEFORE issuance, so every call
+        // would mint and the issuance edge would take the entire load - the failure the margin was added
+        // to prevent, arrived at from the other direction.
+        DateTimeOffset issued = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        ServiceToken shortLived = new(
+            "fake.token",
+            "Bearer",
+            issued.AddSeconds(20),
+            [],
+            issued);
+
+        // Half of 20s is 10s, so the boundary is 10s in - not 30s before expiry, which would be earlier
+        // than the token existed.
+        Assert.Equal(issued.AddSeconds(10), shortLived.RenewAt(TimeSpan.FromSeconds(30)));
+
+        // A token whose lifetime comfortably exceeds the margin takes the margin unchanged.
+        ServiceToken longLived = new(
+            "fake.token",
+            "Bearer",
+            issued.AddSeconds(300),
+            [],
+            issued);
+
+        Assert.Equal(issued.AddSeconds(270), longLived.RenewAt(TimeSpan.FromSeconds(30)));
+
+        // AND AN UNKNOWN ISSUANCE INSTANT TAKES THE MARGIN UNBOUNDED, because there is no lifetime to
+        // take a fraction of. Null means "unknown", never "zero".
+        ServiceToken withoutIssuedAt = new("fake.token", "Bearer", issued.AddSeconds(300), []);
+
+        Assert.Equal(issued.AddSeconds(270), withoutIssuedAt.RenewAt(TimeSpan.FromSeconds(30)));
+
+        // A non-positive margin disables renewal-ahead entirely and falls back to exact expiry.
+        Assert.Equal(longLived.ExpiresAt, longLived.RenewAt(TimeSpan.Zero));
     }
 
     [Fact]
@@ -382,7 +463,8 @@ public sealed class SecurityClientTests
             SampleRequest(),
             TestContext.Current.CancellationToken);
 
-        // Exactly at expiry, because the comparison is strict and no skew margin is subtracted.
+        // Exactly at expiry, which is past the renewal boundary either way - this row is about the
+        // lapsed case, and GetTokenAsync_RenewsBeforeExpiryRatherThanAtIt covers the margin itself.
         clock.UtcNow = first.ExpiresAt;
 
         ServiceToken second = await client.GetTokenAsync(

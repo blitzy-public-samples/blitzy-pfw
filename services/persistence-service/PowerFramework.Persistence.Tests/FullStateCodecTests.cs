@@ -1982,7 +1982,7 @@ public sealed class FullStateCodecTests
     /// <summary>
     /// AN IMAGE BELONGING TO THE OTHER CODEC IS REJECTED rather than restored. This is the one way the two
     /// codecs can be crossed: a CHANGESET image - one whose processing kind selects the changeset arm -
-    /// delivered with the full-state flag set. It is now a SEMANTIC rejection rather than a framing one,
+    /// delivered with the full-state flag set. It is a SEMANTIC rejection rather than a framing one,
     /// because both codecs publish the same message type and only the processing kind separates them.
     /// </summary>
     /// <param name="changesetKind">A processing kind that selects the changeset arm.</param>
@@ -2592,8 +2592,8 @@ public sealed class FullStateCodecTests
     /// <remarks>
     /// <para>
     /// 🔴 <b>THE BASELINE TRAVELS ON EVERY ROW NOW, INCLUDING THE ROW THAT DID NOT MOVE.</b> This theory
-    /// used to assert the opposite - that a blob whose content still matched its baseline carried NO
-    /// original - and the omission was defended as keeping a WHERE-clause term off a column that did not
+    /// deliberately does not assert the opposite - that a blob whose content still matches its baseline
+    /// carries NO original - which is defensible as keeping a WHERE-clause term off a column that did not
     /// change. It cannot be defended against AAP 0.6.3.2, which requires both the current and the original
     /// value of every marked column per row with no exemption: applied to a FRESHLY RETRIEVED image, where
     /// every column agrees by construction, the omission left the consumer with no baseline at all.
@@ -2692,22 +2692,22 @@ public sealed class FullStateCodecTests
     #region Malformed-image rejection - every defensive decode path
 
     // ==========================================================================================
-    //  WHAT THIS REGION USED TO ASSERT, AND WHY IT NO LONGER DOES.
+    //  WHAT THIS REGION DELIBERATELY DOES NOT ASSERT, AND WHY.
     //  ----------------------------------------------------------------------------------------
-    //  It was written against a private binary image owned by this assembly, so it worked from
+    //  A suite written against a private binary image owned by this assembly works from
     //  DOCUMENTED BYTE OFFSETS: a format version byte, a buffer tag byte, little-endian row and column
     //  counts, an original-value presence flag, a value tag byte, a seven-bit string length, a
-    //  DateTimeKind byte, and three hand-built maximal counts that proved a length was bounded before
-    //  it reached `new byte[length]`. Every one of those tested a FRAMING LAYER that no longer exists.
+    //  DateTimeKind byte, and three hand-built maximal counts proving a length is bounded before
+    //  it reaches `new byte[length]`. Every one of those tests a FRAMING LAYER that does not exist here.
     //
-    //  The image is now `persistence.v1.CarrierState`, a published message (constraint C-A), because
-    //  the review found what the private format cost: `QueryDataChunk.data` was an opaque `bytes` field
-    //  described as the codecs' own concern, and DataServices - which references the contracts project
-    //  and nothing else - could therefore neither produce nor consume the payload the C-05 and C-06
-    //  contracts hand it. Framing, truncation, length bounding and UTF-8 validity are now the generated
+    //  The image is `persistence.v1.CarrierState`, a published message (constraint C-A), because of what
+    //  a private format costs: an opaque `bytes` `QueryDataChunk.data`
+    //  described as the codecs' own concern leaves DataServices - which references the contracts project
+    //  and nothing else - able neither to produce nor to consume the payload the C-05 and C-06
+    //  contracts hand it. Framing, truncation, length bounding and UTF-8 validity are the generated
     //  parser's concern, and a malformed frame never reaches this codec at all.
     //
-    //  WHAT REPLACED THEM IS NOT A REDUCTION. A well-formed protobuf message can still be a nonsense
+    //  WHAT STANDS IN THEIR PLACE IS NOT A REDUCTION. A well-formed protobuf message can still be a nonsense
     //  image, and every semantic check the byte-level tests were mixed in with is still asserted here,
     //  several of them for the first time: a segment roster that is not exactly one per buffer in
     //  canonical order, a row filed under the wrong buffer, a non-positive row ordinal, an undeclared

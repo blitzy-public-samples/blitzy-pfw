@@ -185,12 +185,13 @@
 //        so that rotation is EXPRESSIBLE - the published set's shape admits more than one entry and a
 //        verifier selects by identifier - not so that rotation is IMPLEMENTED. Implementing it would
 //        be a new capability, which this refactor does not add.
-//      * NO KEY-SIZE FLOOR. The oracle keeps 1024-bit RSA as a first-class legal size
-//        [enums.sru:L965], so refusing a short key here would be a silent correction of legacy
-//        behaviour dressed up as a security fix. Structural USABILITY is what is validated: can this
-//        material be imported, and can it sign. A size the minting library itself refuses is that
-//        library's report to make at the moment it makes it, not a policy for this file to invent -
-//        which is the position the options validator takes as well, so the two agree.
+//      * NO CONFIGURABLE KEY-SIZE POLICY. There IS a floor - a modulus below
+//        SecurityOptions.MinimumSigningKeySizeBits refuses construction, so the host refuses to start -
+//        but it is a CONSTANT rather than a setting, because a floor an operator can lower is not a
+//        floor. The oracle's 1024-bit allowance [enums.sru:L965] belongs to the C-02 cryptographic
+//        surface it actually published and stays there, on Crypto/RsaProvider.GenRSAKey; the legacy has
+//        no token issuer, so this key is a boundary the decomposition created and C-G governs it rather
+//        than C-B. The options validator applies the same floor from the same constant, so the two agree.
 //      * NO CLOCK. Token lifetime belongs to the issuer, and taking a clock here would invite
 //        time-dependent key behaviour, which is rotation by another name.
 //      * NO OUTBOUND EDGE. There is no reference to, and no client for, any other service: this
@@ -201,13 +202,6 @@
 //        component library, no design tokens, no theming and no styling are in scope anywhere, and
 //        none appears here.
 //
-//  RULES POSITION. The project's rules document contains exactly one line, stating that no user
-//  rules were provided, so NO user-specified rule governs this file. Nothing is invented or
-//  back-filled from convention in their place: the bar applied instead is the enterprise-standard
-//  baseline the migration plan states - nullable reference types with warnings as errors, no secret
-//  in source or settings or any container definition, constructor injection throughout so the
-//  sibling test project can reach every branch, and the published contract as the only cross-service
-//  coupling.
 // ==================================================================================================
 
 using System.Buffers.Text;
@@ -443,6 +437,24 @@ public sealed class SigningKeyProvider : IDisposable
     private readonly RsaSecurityKey _publicVerificationKey;
 
     /// <summary>
+    /// The imported RETIRING private key, or <see langword="null"/> when no rollover is in progress.
+    /// </summary>
+    /// <remarks>
+    /// HELD ONLY SO ITS PUBLIC HALF CAN BE PUBLISHED, and never paired with a credential: minting always
+    /// uses the active key. Imported rather than accepting a public key from configuration because the
+    /// deployment already holds the private material it is retiring, and asking for a second, separately
+    /// configured public half is how a key set comes to publish something that does not verify what was
+    /// signed. Owned, so <see cref="Dispose"/> releases it.
+    /// </remarks>
+    private readonly RSA? _retiringPrivateKey;
+
+    /// <summary>
+    /// Every public key a token this service minted may be verified against: the active key, plus the
+    /// retiring key while a rollover is in progress.
+    /// </summary>
+    private readonly ImmutableArray<SecurityKey> _publicVerificationKeys;
+
+    /// <summary>
     /// The immutable published projection, built once during construction.
     /// </summary>
     private readonly PublishedJsonWebKeySet _publishedKeySet;
@@ -459,6 +471,7 @@ public sealed class SigningKeyProvider : IDisposable
     /// The bound security configuration. THE ONLY INGRESS FOR THE SIGNING MATERIAL, by constructor
     /// injection.
     /// </param>
+    /// <param name="logger">The logger, or <see langword="null"/> to record nothing.</param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="options"/> is <see langword="null"/>, which can only mean the composition root
     /// is miswired.
@@ -493,35 +506,37 @@ public sealed class SigningKeyProvider : IDisposable
     /// is no size rule anywhere for the two to disagree about either.
     /// </para>
     /// <para>
-    /// NO KEY IS REFUSED FOR BEING SHORT, AND THAT IS THE REQUIREMENT RATHER THAN AN OVERSIGHT. An
-    /// earlier revision enforced a configurable 2048-bit floor here and failed construction below it.
-    /// AAP 0.6.6.4 keeps 1024-bit RSA a legal size across this estate - the oracle's own catalogue lists
-    /// it as first class [<c>ws_objects/pfw.shared.pbl.src/enums.sru:L965</c>] - and requires every weak
-    /// cryptographic default to be replicated as an ANNOTATED default rather than corrected, so a
-    /// rejection would be a behaviour change dressed as robustness (C-B). The modulus is therefore
-    /// MEASURED and REPORTED: <see cref="SigningKeySizeBits"/> publishes it,
-    /// <see cref="SigningKeyIsLegacyWeak"/> compares it against
-    /// <see cref="SecurityOptions.LegacyWeakSigningKeySizeBits"/>, and a warning naming the measured
-    /// size is logged once at construction when the comparison holds. The same allowance is untouched on
-    /// the neighbouring C-02 surface, <c>Crypto/RsaProvider.GenRSAKey</c>, where a caller names the size
-    /// and byte-for-byte parity is the obligation.
+    /// 🔴 A KEY BELOW <see cref="SecurityOptions.MinimumSigningKeySizeBits"/> IS REFUSED, AND THIS IS THE
+    /// PLACE THAT REFUSES IT. An intermediate revision measured the modulus, warned below 2048 and signed
+    /// anyway, citing AAP 0.6.6.4; a security review found that reading misapplies the legacy allowance.
+    /// AAP 0.6.6.4 governs the <b>C-02 cryptographic surface</b>, whose weak defaults a caller can observe
+    /// today and which C-B forbids correcting. The legacy has <b>no token issuer, no JWT and no signing
+    /// identity of any kind</b> - it opens no listening socket at all [AAP 0.1.4] - so there is no legacy
+    /// behaviour here to preserve, and what governs a boundary the decomposition CREATED is AAP G7 and
+    /// constraint C-G. The legacy allowance is untouched where it belongs:
+    /// <c>Crypto/RsaProvider.GenRSAKey</c> still accepts 1024 bits, a caller names the size there, and
+    /// byte-for-byte parity is the obligation on that surface
+    /// [<c>ws_objects/pfw.shared.pbl.src/enums.sru:L965</c>].
     /// </para>
     /// <para>
-    /// WHAT IS STILL FATAL. Material that is absent, unreadable, or public-only fails construction, and
-    /// the host therefore refuses to start: an issuer that cannot sign is a broken configuration rather
-    /// than a weak one, and the fail-fast posture reproduced from
-    /// <c>ws_objects/pfw.pbl.src/pfw.sra:L143</c> applies to it.
+    /// WHY REFUSING HERE AND NOT ONLY IN THE VALIDATOR. This constructor is the one place standing between
+    /// the import and the point at which <see cref="SigningCredentials"/> become reachable, so a key that
+    /// arrived by any path the options validator did not screen is still refused. The two read the same
+    /// constant.
     /// </para>
     /// <para>
-    /// NO CLEAN-UP ARM WRAPS THE STEPS AFTER THE IMPORT, and that is reasoned rather than overlooked.
-    /// NO step after the import can fail for a configuration reason at all, now that no key is refused for
-    /// its length: measuring the modulus, logging the annotation when it is short, exporting the public
-    /// parameters, encoding two public members, and pairing the key with its algorithm all operate on a
-    /// key that has just imported successfully. Were one of
-    /// them to fail anyway, this constructor throws, so the host refuses to start and the process ends;
-    /// there is no arm in which a leaked key handle outlives the failure, because there is no arm in
-    /// which anything outlives it. Wrapping them would add a recovery path that only an
-    /// already-terminating process could ever reach.
+    /// WHAT ELSE IS FATAL. Material that is absent, unreadable, or public-only fails construction too, and
+    /// the host therefore refuses to start: an issuer that cannot sign is a broken configuration, and the
+    /// fail-fast posture reproduced from <c>ws_objects/pfw.pbl.src/pfw.sra:L143</c> applies to it.
+    /// </para>
+    /// <para>
+    /// THE KEY HANDLE IS DISPOSED ON THE SIZE-REFUSAL ARM, and only on that one. It is the single arm that
+    /// throws AFTER a successful import, so it is the single arm with an owned unmanaged resource to
+    /// release; every other failure throws before the import or is a fault no configuration can produce.
+    /// The remaining steps - measuring the modulus, exporting the public parameters, encoding two public
+    /// members and pairing the key with its algorithm - all operate on a key that has just imported
+    /// successfully, and a fault in any of them throws out of a host that is refusing to start, so
+    /// nothing outlives it.
     /// </para>
     /// </remarks>
     public SigningKeyProvider(IOptions<SecurityOptions> options, ILogger<SigningKeyProvider>? logger = null)
@@ -540,40 +555,51 @@ public sealed class SigningKeyProvider : IDisposable
         _privateKey = ImportPrivateKey(material);
 
         // --------------------------------------------------------------------------------------------
-        // THE MODULUS IS MEASURED AND ANNOTATED HERE, AND NOTHING IS REFUSED FOR ITS SIZE
+        // 🔴 THE MODULUS IS MEASURED AND A SHORT KEY IS REFUSED
         //
         // Placed immediately after the import because that is the first line at which the size is
-        // knowable, and before any credential exists so that both projections below carry a key whose
-        // measurement has already been published.
+        // knowable, and BEFORE any credential exists so that a refused key never produces one.
         //
-        // A SHORT KEY IS USED, NOT REJECTED. AAP 0.6.6.4 keeps 1024-bit RSA legal across this estate and
-        // requires each weak cryptographic default to be replicated as an ANNOTATED default; C-B forbids
-        // correcting it. The annotation is therefore the whole mechanism: the measured size is published
-        // on SigningKeySizeBits, the verdict on SigningKeyIsLegacyWeak, and a warning naming the measured
-        // size is logged once here so an operator learns of the weakness from the service itself rather
-        // than only from docs/SECRETS.md 4.1.
+        // A SHORT KEY IS REJECTED, NOT ANNOTATED. See this constructor's remarks and
+        // SecurityOptions.MinimumSigningKeySizeBits for the argument: AAP 0.6.6.4's 1024-bit allowance
+        // governs the C-02 cryptographic surface the oracle actually published, and the legacy has no
+        // token issuer at all, so a boundary this decomposition created is governed by C-G rather than
+        // by C-B. Crypto/RsaProvider.GenRSAKey still accepts 1024 bits, and a test pins the two
+        // surfaces APART so neither can be harmonised into the other.
         //
-        // THE SAME ALLOWANCE IS UNTOUCHED WHERE IT IS THE LEGACY'S. Crypto/RsaProvider's GenRSAKey
-        // enforces no minimum either, preserving the catalogue's 1024-bit entry
-        // [ws_objects/pfw.shared.pbl.src/enums.sru:L965], and a test pins the two surfaces together
-        // rather than apart.
-        //
-        // A SIZE IS NOT A SECRET, so logging it discloses nothing: the modulus itself is published in
-        // the key set this service serves anonymously at /.well-known/jwks.json.
+        // A SIZE IS NOT A SECRET, so naming it discloses nothing: the modulus itself is published in
+        // the key set this service serves anonymously at /.well-known/jwks.json. The MATERIAL is never
+        // named, here or in the exception.
         // --------------------------------------------------------------------------------------------
         SigningKeySizeBits = _privateKey.KeySize;
-        SigningKeyIsLegacyWeak = SigningKeySizeBits < SecurityOptions.LegacyWeakSigningKeySizeBits;
 
-        if (SigningKeyIsLegacyWeak)
+        if (SigningKeySizeBits < SecurityOptions.MinimumSigningKeySizeBits)
         {
-            logger?.LogWarning(
+            // The key handle is disposed before the throw, because this constructor is the only owner
+            // of it and a throw from here leaves no instance for a finalizer to reach.
+            int measured = SigningKeySizeBits;
+
+            _privateKey.Dispose();
+
+            logger?.LogCritical(
                 "The configured signing key has a {SigningKeySizeBits}-bit RSA modulus, below the "
-                + "{LegacyWeakSigningKeySizeBits}-bit size at which this service stops remarking on it. "
-                + "The key is accepted and used: AAP 0.6.6.4 keeps 1024-bit RSA a legal size in this "
-                + "estate and requires the weakness to be annotated rather than corrected. Rotate the "
-                + "issuer key to a longer modulus when the deployment can.",
-                SigningKeySizeBits,
-                SecurityOptions.LegacyWeakSigningKeySizeBits);
+                + "{MinimumSigningKeySizeBits}-bit minimum this service requires of its own signing "
+                + "identity. The host is refusing to start rather than issuing credentials the whole "
+                + "estate would trust on a weak key.",
+                measured,
+                SecurityOptions.MinimumSigningKeySizeBits);
+
+            throw new InvalidOperationException(
+                $"The signing key supplied through '{SecurityOptions.SigningKeyEnvironmentVariableName}' "
+                + $"has a {measured}-bit RSA modulus, below the "
+                + $"{SecurityOptions.MinimumSigningKeySizeBits}-bit minimum this service requires. That "
+                + "key signs every credential every service in this estate accepts, so it is the one "
+                + "modulus in the system that may not be weak. This floor does not correct the legacy "
+                + "1024-bit allowance: AAP 0.6.6.4 governs the C-02 cryptographic surface, where "
+                + "Crypto/RsaProvider.GenRSAKey still accepts 1024 bits, whereas the legacy has no token "
+                + "issuer at all and constraint C-G governs a boundary this decomposition created. "
+                + "Generate a longer key with the procedure in docs/ARCHITECTURE.md. The configured "
+                + "material is deliberately not quoted here.");
         }
 
         // THE FALSE IS LOAD BEARING. Exporting WITHOUT the private parameters is what makes both
@@ -587,14 +613,86 @@ public sealed class SigningKeyProvider : IDisposable
             KeyId = keyId,
         };
 
-        _publishedKeySet = new PublishedJsonWebKeySet(
-            new PublishedJsonWebKey(
-                keyType: PublishedKeyType,
-                use: PublishedKeyUse,
-                algorithm: algorithm,
-                keyId: keyId,
-                modulus: EncodePublicComponent(publicParameters.Modulus),
-                exponent: EncodePublicComponent(publicParameters.Exponent)));
+        // ------------------------------------------------------------------------------------------
+        // 🔴 THE RETIRING HALF OF THE KEY RING. Absent in the steady state; present only while a rollover
+        // is in progress, in which case the published set carries TWO keys under two identifiers and a
+        // verifier selects by `kid`. See SecurityOptions.RetiringSigningKey for why this exists: without
+        // it, replacing the signing material is a hard cutover in which one generation of token is
+        // unverifiable at every service that cached the other key set - which meant the key was, in
+        // practice, never rotated.
+        //
+        // MINTING NEVER TOUCHES IT. No SigningCredentials is built from it, so there is no path by which
+        // a token could be signed with the key being withdrawn.
+        //
+        // THE SAME FLOOR APPLIES, ENFORCED BY THE OPTIONS VALIDATOR AND AGAIN HERE for the same reason
+        // the active key's is enforced in both places.
+        // ------------------------------------------------------------------------------------------
+        PublishedJsonWebKey activeKey = new(
+            keyType: PublishedKeyType,
+            use: PublishedKeyUse,
+            algorithm: algorithm,
+            keyId: keyId,
+            modulus: EncodePublicComponent(publicParameters.Modulus),
+            exponent: EncodePublicComponent(publicParameters.Exponent));
+
+        if (string.IsNullOrWhiteSpace(security.RetiringSigningKey))
+        {
+            _retiringPrivateKey = null;
+            _publicVerificationKeys = [_publicVerificationKey];
+            _publishedKeySet = new PublishedJsonWebKeySet(activeKey);
+        }
+        else
+        {
+            string retiringKeyId = ResolveRetiringKeyId(security.RetiringSigningKeyId);
+
+            _retiringPrivateKey = ImportPrivateKey(security.RetiringSigningKey);
+
+            if (_retiringPrivateKey.KeySize < SecurityOptions.MinimumSigningKeySizeBits)
+            {
+                int measured = _retiringPrivateKey.KeySize;
+
+                _retiringPrivateKey.Dispose();
+                _privateKey.Dispose();
+
+                throw new InvalidOperationException(
+                    "The retiring signing key supplied through "
+                    + $"'{SecurityOptions.RetiringSigningKeyEnvironmentVariableName}' has a "
+                    + $"{measured}-bit RSA modulus, below the "
+                    + $"{SecurityOptions.MinimumSigningKeySizeBits}-bit minimum. A retiring key is still "
+                    + "published as verification material every service in this estate trusts, so it is "
+                    + "held to the same floor as the active key. The configured material is deliberately "
+                    + "not quoted here.");
+            }
+
+            RSAParameters retiringPublicParameters =
+                _retiringPrivateKey.ExportParameters(includePrivateParameters: false);
+
+            _publicVerificationKeys =
+            [
+                _publicVerificationKey,
+                new RsaSecurityKey(retiringPublicParameters)
+                {
+                    KeyId = retiringKeyId,
+                },
+            ];
+
+            _publishedKeySet = new PublishedJsonWebKeySet(
+                activeKey,
+                new PublishedJsonWebKey(
+                    keyType: PublishedKeyType,
+                    use: PublishedKeyUse,
+                    algorithm: algorithm,
+                    keyId: retiringKeyId,
+                    modulus: EncodePublicComponent(retiringPublicParameters.Modulus),
+                    exponent: EncodePublicComponent(retiringPublicParameters.Exponent)));
+
+            logger?.LogInformation(
+                "A signing-key rollover is in progress: the key set publishes the active key and one "
+                + "retiring key under distinct identifiers, and minting uses the active key only. Clear "
+                + "'{RetiringSigningKeyVariable}' once the overlap has elapsed - at least the configured "
+                + "token lifetime plus each verifier's clock skew plus its key-set refresh interval.",
+                SecurityOptions.RetiringSigningKeyEnvironmentVariableName);
+        }
 
         // The identifier is set ON THE KEY rather than restated by the issuer, which is what makes
         // the token header and the published key agree structurally: the minting library reads it
@@ -610,35 +708,19 @@ public sealed class SigningKeyProvider : IDisposable
     /// <summary>
     /// The RSA modulus size, in bits, of the signing key this instance imported.
     /// </summary>
-    /// <value>The measured modulus size. Always positive, because a key that did not import throws.</value>
+    /// <value>
+    /// The measured modulus size. Always at least
+    /// <see cref="SecurityOptions.MinimumSigningKeySizeBits"/>, because a key that did not import and a
+    /// key below the floor both throw.
+    /// </value>
     /// <remarks>
     /// NOT A SECRET, WHICH IS WHY IT MAY BE PUBLISHED AND LOGGED. The modulus itself is served
     /// anonymously in the key set at <c>/.well-known/jwks.json</c>, so its length discloses nothing an
     /// unauthenticated caller could not already read. It is exposed so that a deployment, a diagnostic
-    /// and a test can all see the same number the construction-time warning names, rather than each
+    /// and a test can all see the same number the floor is measured against, rather than each
     /// re-deriving it from the key.
     /// </remarks>
     public int SigningKeySizeBits { get; }
-
-    /// <summary>
-    /// Whether the signing key's modulus is shorter than
-    /// <see cref="SecurityOptions.LegacyWeakSigningKeySizeBits"/>, and is therefore reported as a
-    /// preserved legacy weakness.
-    /// </summary>
-    /// <value>
-    /// <see langword="true"/> when the measured modulus is below the annotation threshold; otherwise
-    /// <see langword="false"/>.
-    /// </value>
-    /// <remarks>
-    /// AN ANNOTATION, NEVER A REFUSAL. A key this flags is still imported, still paired with its
-    /// algorithm and still used to mint every token this service issues: AAP 0.6.6.4 keeps 1024-bit RSA
-    /// a legal size across this estate and requires each weak cryptographic default to be replicated as
-    /// an annotated default rather than corrected (C-B). Construction logs a warning naming the measured
-    /// size when this is <see langword="true"/>, and <c>docs/SECRETS.md</c> 4.1 states the same position
-    /// in prose. Nothing in this service branches on it beyond that warning, and nothing may be added
-    /// that turns it into a rejection.
-    /// </remarks>
-    public bool SigningKeyIsLegacyWeak { get; }
 
     /// <summary>
     /// The credential the token issuer signs with: the private key paired with the resolved
@@ -703,6 +785,40 @@ public sealed class SigningKeyProvider : IDisposable
     }
 
     /// <summary>
+    /// Every public key a token this service minted may be verified against: the ACTIVE key, plus the
+    /// RETIRING key while a rollover is in progress.
+    /// </summary>
+    /// <value>
+    /// One key in the steady state, two during a rollover. Never empty, and never carrying a private
+    /// component - every entry is built from parameters exported with the private components excluded.
+    /// </value>
+    /// <exception cref="ObjectDisposedException">This instance has been disposed.</exception>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THIS IS WHAT THE INBOUND HANDLER IS GIVEN, AND <see cref="PublicVerificationKey"/> IS NOT.
+    /// Handing the handler the active key alone would make this service - alone in the estate - refuse
+    /// every token minted under the retiring key, during exactly the window the rollover exists to keep
+    /// working. The other three services fetch the published set over HTTP and get both entries; this one
+    /// validates in process, so it needs the ring rather than the key.
+    /// </para>
+    /// <para>
+    /// <see cref="PublicVerificationKey"/> is retained beside it because a caller that genuinely wants
+    /// "the key tokens are being minted under" - a signature round-trip assertion, say - wants the active
+    /// key specifically, and picking element zero out of this ring would be a positional dependency the
+    /// published order explicitly does not offer.
+    /// </para>
+    /// </remarks>
+    public ImmutableArray<SecurityKey> PublicVerificationKeys
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
+            return _publicVerificationKeys;
+        }
+    }
+
+    /// <summary>
     /// The key set published anonymously as this service's verification material. Public parameters
     /// only.
     /// </summary>
@@ -756,6 +872,7 @@ public sealed class SigningKeyProvider : IDisposable
         _disposed = true;
 
         _privateKey.Dispose();
+        _retiringPrivateKey?.Dispose();
     }
 
     /// <summary>
@@ -775,6 +892,34 @@ public sealed class SigningKeyProvider : IDisposable
         if (string.IsNullOrWhiteSpace(keyId))
         {
             throw new InvalidOperationException(SigningKeyIdAbsentMessage);
+        }
+
+        return keyId;
+    }
+
+    /// <summary>
+    /// Requires a non-blank identifier for the retiring key.
+    /// </summary>
+    /// <param name="keyId">The configured identifier.</param>
+    /// <returns>The identifier, VERBATIM, for the reason given on <see cref="ResolveKeyId"/>.</returns>
+    /// <exception cref="InvalidOperationException">The identifier is blank.</exception>
+    /// <remarks>
+    /// Reached only when retiring MATERIAL is present, so this is the half-configured-pair case: material
+    /// with no identifier cannot be published at all, because a key set entry has to carry a <c>kid</c> and
+    /// a verifier has nothing else to select by. The options validator reports the same condition as a
+    /// configuration failure; this is the refusal that makes it unreachable by any other path.
+    /// </remarks>
+    private static string ResolveRetiringKeyId(string keyId)
+    {
+        if (string.IsNullOrWhiteSpace(keyId))
+        {
+            throw new InvalidOperationException(
+                $"Configuration key '{SecurityOptions.SectionName}:RetiringSigningKeyId' is required "
+                + "whenever "
+                + $"'{SecurityOptions.RetiringSigningKeyEnvironmentVariableName}' carries material. A "
+                + "published key set entry must name a 'kid' - it is the only thing a verifier has to "
+                + "select by - so retiring material with no identifier cannot be published at all. Set "
+                + "both or neither.");
         }
 
         return keyId;
@@ -1142,12 +1287,30 @@ public sealed class PublishedJsonWebKeySet
     }
 
     /// <summary>
+    /// Wraps the active key and the retiring key as a key set, in that order.
+    /// </summary>
+    /// <param name="activeKey">The key every token is currently minted under.</param>
+    /// <param name="retiringKey">The previous key, published for verification only.</param>
+    /// <remarks>
+    /// ORDER IS PRESENTATIONAL AND NOT SEMANTIC. RFC 7517 gives a key set no ordering rule, and a
+    /// verifier selects by <c>kid</c> rather than by position; the active key is written first so a human
+    /// reading the document sees the current one at the top. No consumer may depend on the position, and
+    /// nothing in this estate does.
+    /// </remarks>
+    internal PublishedJsonWebKeySet(
+        PublishedJsonWebKey activeKey,
+        PublishedJsonWebKey retiringKey)
+    {
+        Keys = [activeKey, retiringKey];
+    }
+
+    /// <summary>
     /// The published keys. Public parameters only.
     /// </summary>
     /// <value>
-    /// Exactly one key in this phase. The set's shape admits more so that a rollover is EXPRESSIBLE
-    /// and a consumer can select by identifier, but rotation is not implemented and one configured key
-    /// yields one entry.
+    /// One key in the steady state; TWO during a signing-key rollover - the active key and the retiring
+    /// one, under distinct identifiers, so both generations of token verify while the three verifiers'
+    /// cached copies converge. A consumer selects by identifier and must not depend on the count.
     /// </value>
     [JsonPropertyName("keys")]
     public ImmutableArray<PublishedJsonWebKey> Keys { get; }

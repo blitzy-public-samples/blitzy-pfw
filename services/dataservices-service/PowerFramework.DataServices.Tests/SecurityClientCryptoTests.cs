@@ -1046,7 +1046,7 @@ public sealed class SecurityClientCryptoTests
         // signing provider ALWAYS refused it. The client was therefore asserted to send a request that
         // could only ever fail, one network round trip later, and the contract advertised it as legal.
         //
-        // What is asserted now is the refusal, raised locally before anything is sent. The weak-but-real
+        // What is asserted here is the refusal, raised locally before anything is sent. The weak-but-real
         // selector is asserted alongside it, because the narrowing must be exactly one identifier wide:
         // MD5 is a preserved legacy weakness and must still go through (C-B).
         RecordingHandler handler = new RecordingHandler().Enqueue(
@@ -1962,10 +1962,10 @@ public sealed class SecurityClientCryptoTests
     //  row that could only fail once the first control had already been removed would prove nothing
     //  about the second.
     //
-    //  WHAT THE REFUSAL PROTECTS. The superseded code read `form == STRING ? text : blob`, so every
-    //  value that was not the string member - including every value the contract never declared -
-    //  was decoded as base64. A payload the service described in no family would therefore have been
-    //  returned as bytes, and a caller would have consumed a reinterpretation as though it were the
+    //  WHAT THE REFUSAL PROTECTS. The tempting spelling is `form == STRING ? text : blob`, under which
+    //  every value that is not the string member - including every value the contract never declared -
+    //  is decoded as base64. A payload the service described in no family would then be
+    //  returned as bytes, and a caller would consume a reinterpretation as though it were the
     //  answer.
     // ==============================================================================================
 

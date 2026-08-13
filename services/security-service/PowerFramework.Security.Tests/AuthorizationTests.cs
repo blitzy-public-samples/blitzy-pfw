@@ -72,14 +72,7 @@
 //  CONSTRAINT COMPLIANCE - WHAT EACH GOVERNING CONSTRAINT REQUIRES OF THIS FILE SPECIFICALLY
 //  ==================================================================================================
 //
-//  RULES POSITION, STATED EXPLICITLY BECAUSE ITS ABSENCE IS ITSELF A FINDING. The project's rules
-//  document contains exactly one line: no user rules were provided. Nothing is invented in their
-//  place, no convention is back-filled as though it had been a rule, and their absence is NOT treated
-//  as licence to lower the bar. The enterprise-standard baseline applies instead, and for a test file
-//  that means: warning-clean under warnings-as-errors, correct nullable annotations, every disposable
-//  disposed, no secret in a fixture, no package added for convenience, no performance property
-//  asserted - the repository publishes none - and no assertion that cannot fail.
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  C-G  NO NEW ATTACK SURFACE: EVERY NEW BOUNDARY AUTHENTICATED. This file IS the C-G proof for
 //       Security, so it honours the constraint in its most literal form. NOTHING below disables
 //       authentication, stubs the authentication handler into always succeeding, registers an
@@ -433,7 +426,7 @@ public sealed class AuthorizationTests
     /// <remarks>
     /// <para>
     /// THE TWO SCOPES THIS SERVICE'S PROTECTED ROUTES REQUIRE, read from the routes' own declarations
-    /// rather than invented. Each protected route now carries a named scope policy, so a token that
+    /// rather than invented. Each protected route carries a named scope policy, so a token that
     /// carried an arbitrary scope would be authenticated and then FORBIDDEN - and every row in this file
     /// asserting a successful authenticated call would fail with a 403 that has nothing to do with the
     /// credential it was testing.
@@ -1520,8 +1513,8 @@ public sealed class AuthorizationTests
     {
         string accepted = primary.ResolveInboundAudience();
 
-        // THE CANDIDATE MUST BE GRANTED TO THE MINTING SUBJECT, NOT MERELY SERVED BY THE DEPLOYMENT, and
-        // that is the whole of what changed here. The issuer applies two gates: the deployment-wide
+        // THE CANDIDATE MUST BE GRANTED TO THE MINTING SUBJECT, NOT MERELY SERVED BY THE DEPLOYMENT.
+        // The issuer applies two gates: the deployment-wide
         // audience roster and then the GRANT MATRIX. Taking the first audience the deployment serves would
         // name one this file's subject may not address, and the issuer would refuse to mint at all - so the
         // row would fail during its own SETUP, before reaching the replay it exists to assert. Reading the

@@ -37,13 +37,6 @@
 //  is no schema, no changelog entry and no other document that could adjudicate a disagreement.
 //  Where the source and any secondary description differ, THE SOURCE WINS.
 //
-//  RULES POSITION. No user rules were provided for this repository: the rules document contains
-//  exactly one line saying so, and it was read to its end. Nothing is invented or back-filled from
-//  convention in their place, and the absence is not treated as licence to lower the bar. What
-//  governs this file is the enterprise-standard baseline - nullable reference types on, warnings as
-//  errors, ordinal comparison, no ambient state - together with the named non-rule constraints, and
-//  each non-obvious decision below cites the constraint that drives it as C-K requires.
-//
 //  --------------------------------------------------------------------------------------------
 //  WHY THIS SUITE EXISTS AND WHAT IT ADDS OVER ITS SIBLING
 //  --------------------------------------------------------------------------------------------

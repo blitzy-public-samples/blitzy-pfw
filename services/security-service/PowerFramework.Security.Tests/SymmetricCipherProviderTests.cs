@@ -28,7 +28,8 @@
 //        instead is the resolved width per cipher type, so that a change is visible in a diff.
 //      * the payload encoding of the string-shaped family (DECISION D4)
 //      * the text encoding of a string payload and of string key material (DECISION D1)
-//      * the zero initialization vector of the eight mode-without-IV arms (DECISION D3)
+//      * the REFUSAL of the eight mode-without-IV arms for a vector-consuming mode, and of CFB
+//        entirely, because neither the vector nor the feedback width is provable (DECISION D3)
 //
 //  Each is asserted here as THE DOCUMENTED DECISION, not as legacy-verified truth. Adjudicating any
 //  of them requires the behavioural oracle.
@@ -585,18 +586,18 @@ public sealed class SymmetricCipherProviderTests
     /// <param name="ntype">The cipher type.</param>
     /// <remarks>
     /// <para>
-    /// THIS TEST REPLACES ONE THAT ASSERTED A GUESS AS CORRECTNESS, and the difference is the point.
-    /// Its predecessor checked that the vector-less arm produced the same ciphertext as an explicit
-    /// all-zero vector - a statement about two code paths in THIS port agreeing with each other,
-    /// which they trivially did because one called the other. It said nothing about what the closed
-    /// binary produced, yet it read like a parity assertion.
+    /// ASSERTING THE REFUSAL IS THE ONLY THING HERE THAT IS NOT A GUESS ASSERTED AS CORRECTNESS. A row
+    /// checking that the vector-less arm produced the same ciphertext as an explicit all-zero vector
+    /// would be a statement about two code paths in THIS port agreeing with each other - trivially true
+    /// if one derived that vector and called the other - and would say nothing about what the closed
+    /// binary produces while reading like a parity assertion.
     /// </para>
     /// <para>
-    /// What the oracle substituted is unobservable: <c>n_crypto</c> is declared
+    /// What the oracle uses is unobservable: <c>n_crypto</c> is declared
     /// <c>native "pfw.dll"</c> [n_crypto.sru:L8] with no PowerScript body for any of the 32 symmetric
     /// overloads. A wrong vector round-trips perfectly against itself, so no test here could ever
-    /// have caught it, while the ciphertext would be undecryptable by the legacy. Refusing is the
-    /// correct behaviour, and this asserts it.
+    /// catch it, while the ciphertext would be undecryptable by the legacy. Refusing is the correct
+    /// behaviour, and this asserts it.
     /// </para>
     /// <para>
     /// ECB IS ASSERTED TO STILL WORK IN THE SAME TEST, because a refusal that caught the default mode

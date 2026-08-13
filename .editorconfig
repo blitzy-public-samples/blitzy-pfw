@@ -348,8 +348,9 @@ trim_trailing_whitespace = true
 #
 # WHY A SUPPRESSION IS NEEDED AT ALL
 # Directory.Build.props sets TreatWarningsAsErrors=true, so any naming diagnostic raised against
-# these identifiers is a build failure rather than advice. Measured on this toolchain, SDK 10.0.302
-# at AnalysisLevel=latest:
+# these identifiers is a build failure rather than advice. Measured on the SDK global.json pins, at
+# AnalysisLevel=latest - the matrix below is a property of the analyzer set, not of an SDK patch
+# level, so it is stated against the pin rather than against a patch number that would drift:
 #
 #     default AnalysisMode        CA1707 is off; the preserved identifiers build clean today
 #     AnalysisMode=Recommended    CA1707 is ON
@@ -417,12 +418,10 @@ trim_trailing_whitespace = true
 # diagnostics the moment the analysis mode is raised, and the obvious repair under time pressure is a
 # broadened glob, which would suppress the diagnostic for files that have no exception to claim.
 #
-# ENTRY 7 WAS THE PENDING ONE AND IS NOW EFFECTIVE. ColumnExpressionEngine.cs was enumerated in the
-# target-structure specification before it was authored, and its section was carried inert on the
-# strength of the maintenance rule above; the file has since landed, so the section now suppresses
-# what it was written for. The `_of_calcitem` entry point it exists for - public despite its legacy
-# underscore prefix - is the one member in the whole port that trips IDE1006 rather than CA1707, so
-# it remains the least reconstructible entry in the band.
+# ENTRY 7 IS THE LEAST RECONSTRUCTIBLE ENTRY IN THE BAND. The `_of_calcitem` entry point
+# ColumnExpressionEngine.cs exists for - public despite its legacy underscore prefix - is the one
+# member in the whole port that trips IDE1006 rather than CA1707, so a reader deriving this section
+# from the naming diagnostics alone would not arrive at it.
 #
 # THE THREE HEADLESS DATAWINDOW SERVICE MODELS EACH EARNED THEIR OWN SECTION as they were ported:
 # ColumnSortModel.cs for SORT_*/ARROWSUFFIX, ContextMenuModel.cs for the nine reserved MID_* command

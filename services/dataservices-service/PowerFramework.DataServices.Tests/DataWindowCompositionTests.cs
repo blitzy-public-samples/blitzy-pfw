@@ -2,21 +2,21 @@
 //  DataWindowCompositionTests.cs - THE PROVISIONED WIRING, ASSERTED
 //  ------------------------------------------------------------------------------------------------
 //  WHY THIS FILE EXISTS
-//  Two production seams of this service were previously wired to implementations that refused, and both
-//  refusals were defended in comments rather than caught by a test - which is exactly why they survived.
+//  Two production seams of this service are easily wired to implementations that refuse, and such a
+//  refusal is defended in a comment rather than caught by a test - which is exactly how it survives.
 //  These cases assert the wiring itself, so a regression to either shape fails the build:
 //
 //    1. THE MUTUAL-TLS CLIENT IDENTITY. Binding and validating the configured certificate pair is not
-//       the same as PRESENTING it. An earlier revision did the first two and never attached the
-//       certificate to a handler, so a deployment that mounted key material still handshook
-//       anonymously - configured, validated, and inert (constraint C-G).
-//    2. THE THREE HOST-BINDING SEAMS. All three returned null, which made eight C-03 operations and the
+//       the same as PRESENTING it. Doing only the first two - never attaching the certificate to a
+//       handler - leaves a deployment that mounted key material handshaking anonymously: configured,
+//       validated, and inert (constraint C-G).
+//    2. THE THREE HOST-BINDING SEAMS. Returning null from all three makes eight C-03 operations and the
 //       whole of C-04 unreachable. AAP 0.2.1.3 Correction 3 and AAP 0.3.5 both require a bound headless
-//       host in DataServices, so the refusal was an AAP-compliance failure rather than a documented gap.
+//       host in DataServices, so such a refusal is an AAP-compliance failure rather than a documented gap.
 //    3. THE HOST'S OWN DESCRIBE SURFACE, EXERCISED THROUGH THE ENGINE THAT READS IT. A bound host is not
-//       the same as a USABLE one: once the seams above were provisioned, the whole of C-04 still refused
-//       every bind, because two properties the ported engine reads off the host - a column's ordinal and
-//       the positional `#n` address - were the only two the Describe surface did not answer. Every
+//       the same as a USABLE one: with the seams above provisioned, the whole of C-04 still refuses every
+//       bind unless two further properties the ported engine reads off the host answer - a column's
+//       ordinal and the positional `#n` address, the two most easily left out of a Describe surface. Every
 //       C-04 case in this suite passed throughout, because each supplies its own host double which does
 //       answer them. That is the shape this section exists to make impossible: a test double that is more
 //       capable than the shipped host cannot catch a shipped host that is less capable than the engine
@@ -24,8 +24,8 @@
 //
 //  WHAT IS NOT ASSERTED HERE, AND WHY. No case opens a socket or completes a TLS handshake. Proving that
 //  a client certificate is presented on the wire needs a listener that requests one, which is an
-//  orchestration-level check rather than a unit-level one. What IS provable here is the part that was
-//  actually broken: that the identity is LOADED, that it is REACHABLE from the container, and that
+//  orchestration-level check rather than a unit-level one. What IS provable here is the part that
+//  breaks silently: that the identity is LOADED, that it is REACHABLE from the container, and that
 //  unreadable configured material fails rather than being silently dropped.
 // ==================================================================================================
 
@@ -743,8 +743,9 @@ public sealed class DataWindowCompositionTests
         // to the caller verbatim - the {0,1,2,3} alphabet travels rather than being reinterpreted.
         Assert.Equal(3L, chain.OnDoItemChange(1L, column, "Ada"));
 
-        // The drop-down filter arrives through the ref out-parameter, which has no asynchronous form and
-        // is why AAP 0.6.1.4 assigns that pair pattern (b), strictly synchronous.
+        // The drop-down filter arrives through the ref out-parameter. It projects onto a wire field
+        // without difficulty; what it cannot be is fire-and-forget, because the caller cannot proceed
+        // without it - which is why AAP 0.6.1.4 assigns that pair pattern (b), strictly synchronous.
         string filter = "untouched";
         chain.OnDDSGetFilter(1L, column, "Ada", ref filter);
         Assert.Equal("name = 'Ada'", filter);

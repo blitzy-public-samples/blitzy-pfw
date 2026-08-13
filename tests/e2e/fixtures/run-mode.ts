@@ -32,7 +32,7 @@
  * --------------------------------------------------
  * That module already applies this exact shape to the OTHER precondition this suite
  * has — a missing caller credential — with its own opt-in variable, its own
- * accepted values, and a setup failure by default. The stack precondition is now
+ * accepted values, and a setup failure by default. The stack precondition is
  * expressed the same way rather than in a second idiom, because two preconditions
  * that behave differently is how a reader comes to believe the strict one is the
  * exception. The two variables are separate on purpose: acknowledging that no

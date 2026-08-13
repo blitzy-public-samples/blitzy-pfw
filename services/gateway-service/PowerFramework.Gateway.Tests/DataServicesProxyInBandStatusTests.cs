@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  F-06 - IN-BAND OUTCOME TO HTTP STATUS PROJECTION
+//  IN-BAND OUTCOME TO HTTP STATUS PROJECTION
 // =====================================================================================================
 //
 //  WHY THIS FILE EXISTS. Both REST projections answer a gRPC method whose failures arrive IN BAND: the
@@ -91,8 +91,17 @@ public sealed class DataServicesProxyInBandStatusTests(GatewayTestHostFixture ho
     [InlineData(RetCode.E_RETRY, StatusCodes.Status409Conflict)]
     [InlineData(RetCode.E_BUSY, StatusCodes.Status429TooManyRequests)]
     [InlineData(RetCode.E_TIME_OUT, StatusCodes.Status504GatewayTimeout)]
-    [InlineData(RetCode.E_NO_SUPPORT, StatusCodes.Status501NotImplemented)]
-    [InlineData(RetCode.E_NO_IMPLEMENTATION, StatusCodes.Status501NotImplemented)]
+    // 🔴 THE UNAVAILABLE-CAPABILITY PAIR IS 500, AND THESE TWO ROWS ARE THE C-D AUDIT MADE EXECUTABLE.
+    // They answered 501 and that broke the published contract twice: gateway.v1.yaml declares 501 on the
+    // eight reserved deferred-capability operations and on NO other, so the status was undeclared on the
+    // implemented operations that produce it; and it erased the one distinction those reserved routes exist
+    // to draw - "this whole capability area is unbuilt" (AAP 0.4.4, C-D) versus "this implemented operation
+    // has no implementation for the cell you asked for", which is what the pinyin matcher, the expression
+    // engine's macro and foreign-variable arms, and a disagreeing pinyin flag mask all report. 500 is the
+    // status every projected operation already declares, and the retCode member carries which code arose -
+    // exactly as Security answers its two symmetric-cipher narrowings (docs/CONTRACTS.md 14.4).
+    [InlineData(RetCode.E_NO_SUPPORT, StatusCodes.Status500InternalServerError)]
+    [InlineData(RetCode.E_NO_IMPLEMENTATION, StatusCodes.Status500InternalServerError)]
     [InlineData(RetCode.E_DB_ERROR, StatusCodes.Status502BadGateway)]
     [InlineData(RetCode.E_INVALID_TRANSACTION, StatusCodes.Status502BadGateway)]
 
@@ -103,7 +112,7 @@ public sealed class DataServicesProxyInBandStatusTests(GatewayTestHostFixture ho
     //   E_INVALID_DATA is what the update path answers when the carrier it was handed cannot be applied
     //     [n_cst_thread_task_sqlupdate.sru], so the caller's PAYLOAD is at fault: 400.
     //   E_NOT_EXISTS names something the upstream could not find, exactly as its two siblings above do: 404.
-    //   FAILED is the oracle's unspecific failure [retcode.sru:L311] and is RECOGNISED - so the default's
+    //   FAILED is the oracle's unspecific failure [retcode.sru:L43] and is RECOGNISED - so the default's
     //     own reasoning ("a code this projection has not been taught is a fault on THIS side") does not
     //     apply to it. 502 is the declared status meaning the service behind this gateway failed, and it is
     //     what sends an operator to the right service. 422 is forbidden - the status surface is closed.
@@ -203,16 +212,35 @@ public sealed class DataServicesProxyInBandStatusTests(GatewayTestHostFixture ho
     }
 
     /// <summary>
-    /// The upstream's own diagnostic is carried through when it sent one, and a fallback stands in when it
-    /// did not.
+    /// The upstream's own diagnostic is NEVER relayed: the detail is this gateway's own fixed prose
+    /// whether the upstream sent text or not.
     /// </summary>
     /// <remarks>
-    /// THE LEGACY TEXT MUST REACH THE CALLER (C-B). The diagnostic is the legacy's own message and is
-    /// relayed verbatim rather than replaced by a generic sentence; the built-in prose exists only for the
-    /// case where the upstream sent none, so the body is never empty.
+    /// <para>
+    /// 🔴 THIS ROW USED TO ASSERT THE OPPOSITE, AND THE BEHAVIOUR IT PINNED WAS THE DEFECT. It required
+    /// the upstream's diagnostic to be relayed verbatim, citing C-B - preserve legacy behaviour. That
+    /// reading of C-B does not hold here, and the reason is what the constraint is actually about: the
+    /// legacy had NO process boundary and no external caller, so these diagnostics went to a MessageBox on
+    /// the operator's own screen (AAP 0.6.1). There is no legacy behaviour in which an anonymous network
+    /// caller receives them, so declining to forward them preserves nothing and changes nothing the legacy
+    /// could observe.
+    /// </para>
+    /// <para>
+    /// WHAT RELAYING THEM COST. Gateway is the system's only external ingress. The legacy diagnostics name
+    /// DataWindow objects, column identifiers and buffer positions, and the SQL error path's own
+    /// <c>sqlsyntax</c> field carries the complete generated statement including interpolated literal
+    /// VALUES, with no redaction anywhere in the legacy logger (AAP 0.6.4). Relaying that text made the
+    /// response body a disclosure channel for internal structure and row data.
+    /// </para>
+    /// <para>
+    /// THE CALLER LOSES NOTHING IT COULD ACT ON. The numeric <c>retCode</c> is the legacy return-code
+    /// algebra's own value, it is published in the contract, and it is what a client branches on - it is
+    /// carried unchanged and is asserted below. What is withheld is prose no client could parse. The
+    /// operator still receives the diagnostic, through this gateway's structured log.
+    /// </para>
     /// </remarks>
     [Fact]
-    public void TheUpstreamDiagnosticIsCarriedThroughAndAFallbackStandsInWhenAbsent()
+    public void TheUpstreamDiagnosticIsNeverRelayedAndTheFixedDetailStandsInEitherWay()
     {
         OperationStatus carried = new()
         {
@@ -220,18 +248,121 @@ public sealed class DataServicesProxyInBandStatusTests(GatewayTestHostFixture ho
             ErrorText = "检索失败",
         };
 
-        PowerFramework.Gateway.Endpoints.DataServicesProxyEndpoints.StatusProjection withText = AssertProjects(new UpdateResponse { Status = carried });
+        PowerFramework.Gateway.Endpoints.DataServicesProxyEndpoints.StatusProjection withText =
+            AssertProjects(new UpdateResponse { Status = carried });
 
-        Assert.Equal("检索失败", withText.Detail);
+        // THE UPSTREAM TEXT DOES NOT APPEAR - not as the whole detail, and not embedded in it.
+        Assert.DoesNotContain("检索失败", withText.Detail, StringComparison.Ordinal);
+        Assert.False(string.IsNullOrWhiteSpace(withText.Detail));
 
-        PowerFramework.Gateway.Endpoints.DataServicesProxyEndpoints.StatusProjection withoutText = AssertProjects(Failing(RetCode.E_DB_ERROR));
+        PowerFramework.Gateway.Endpoints.DataServicesProxyEndpoints.StatusProjection withoutText =
+            AssertProjects(Failing(RetCode.E_DB_ERROR));
 
-        Assert.NotEqual("检索失败", withoutText.Detail);
-        Assert.False(string.IsNullOrWhiteSpace(withoutText.Detail));
+        // AND THE ANSWER IS THE SAME EITHER WAY, which is the property that makes the detail an
+        // allow-list rather than a preference: whether the upstream sent prose is not observable from
+        // outside, so no upstream text can be inferred from the shape of the response.
+        Assert.Equal(withoutText.Detail, withText.Detail);
+
+        // The numeric outcome is preserved on both, because that is what a client branches on.
+        Assert.Equal(withoutText.RetCode, withText.RetCode);
+        Assert.Equal((long)RetCode.E_DB_ERROR, withText.RetCode);
+    }
+
+    /// <summary>
+    /// The whole upstream message is never attached to a problem body.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THE SECOND HALF OF THE SAME DISCLOSURE, AND THE SHARPER HALF. Withholding the upstream's
+    /// <c>detail</c> prose achieves nothing if the entire upstream response is serialised into the same
+    /// body under a <c>response</c> extension - which is what the in-band failure renderer used to do. A
+    /// relayed <c>db_error</c> carries <c>sqlsyntax</c>, the complete generated statement, and the legacy
+    /// interpolates literal VALUES into it with no redaction anywhere in its logger (AAP 0.6.4). So the
+    /// extension was an unbounded channel through which row data and internal structure could leave the
+    /// system in a body nobody had screened.
+    /// </para>
+    /// <para>
+    /// THE OLD JUSTIFICATION WAS THAT THE FIELD IS REDACTED BEFORE IT ARRIVES. That was doing all the work
+    /// in the argument, and a disclosure control that depends on another service having got it right is not
+    /// a control at this boundary - Gateway is the system's only external ingress and owns what crosses it.
+    /// </para>
+    /// <para>
+    /// A SOURCE GUARD RATHER THAN A RENDERED-BODY ASSERTION, and the choice is deliberate. What must hold
+    /// is that NO in-band failure path attaches the message, for every outcome and every operation; a
+    /// rendered check would cover only whichever failure a test could provoke, which is precisely how the
+    /// extension survived unnoticed. The member name is still declared on <c>InBandStatus</c> so this row
+    /// can name what must not appear. The conflict path is untouched and is asserted elsewhere: its
+    /// <c>conflict</c> extension carries the current row state AAP 0.6.3.8 requires, which is a reviewed,
+    /// bounded payload rather than a whole relayed message.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheWholeUpstreamMessageIsNeverAttachedToAProblemBody()
+    {
+        string? source = LocateProxyEndpointSource();
+
+        if (source is null)
+        {
+            // Out-of-tree artifacts path: the production sources are not there, and a locator failure
+            // would report a test-environment problem as a code defect.
+            return;
+        }
+
+        string text = File.ReadAllText(source);
+
+        Assert.DoesNotContain(
+            "Extensions[InBandStatus.ResponseExtensionMember]",
+            text,
+            StringComparison.Ordinal);
+
+        // AND THE FORMATTER IS NOT REACHED FROM THE FAILURE RENDERER AT ALL, which is what stops the same
+        // payload being attached under a different member name. `ResponseFormatter.Format` legitimately
+        // serves the SUCCESS paths, so its presence in the file is expected; what must not exist is a call
+        // inside the in-band failure renderer.
+        int renderer = text.IndexOf("private static IResult RenderInBandFailure", StringComparison.Ordinal);
+
+        Assert.True(renderer >= 0, "RenderInBandFailure was not found, so this guard is reading nothing.");
+
+        int rendererEnd = text.IndexOf("\n    }", renderer, StringComparison.Ordinal);
+
+        Assert.True(rendererEnd > renderer, "The renderer's body could not be delimited.");
+
+        Assert.DoesNotContain(
+            "ResponseFormatter.Format",
+            text[renderer..rendererEnd],
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>Locates the proxy endpoint source file, or null when no source tree is reachable.</summary>
+    /// <returns>The absolute path, or <see langword="null"/>.</returns>
+    private static string? LocateProxyEndpointSource()
+    {
+        DirectoryInfo? directory = new(AppContext.BaseDirectory);
+
+        while (directory is not null
+            && !File.Exists(Path.Combine(directory.FullName, "PowerFramework.slnx")))
+        {
+            directory = directory.Parent;
+        }
+
+        if (directory is null)
+        {
+            return null;
+        }
+
+        string candidate = Path.Combine(
+            directory.FullName,
+            "services",
+            "gateway-service",
+            "PowerFramework.Gateway",
+            "Endpoints",
+            "DataServicesProxyEndpoints.cs");
+
+        return File.Exists(candidate) ? candidate : null;
     }
 
     // ==============================================================================================
-    //  F-22 - THE REVERSE DIRECTION, WHICH HAS TO AGREE WITH THE FORWARD ONE
+    //  THE REVERSE DIRECTION, WHICH HAS TO AGREE WITH THE FORWARD ONE
     //  --------------------------------------------------------------------------------------------
     //  The map at the top of this file sends an in-band outcome TO an HTTP status. The composition root
     //  carries the opposite map, classifying a FRAMEWORK-GENERATED status back into an outcome code so

@@ -480,7 +480,8 @@ public sealed class GatewayContractTests
         // THE OMISSION IS PRESERVED, NOT CORRECTED (C-B). blink.dll and blinkfast.dll are alternative
         // builds of ONE engine, so enabling both is meaningless. A future reader "tidying" this to 3855
         // would be making the framework's own initialization flag disagree with the framework, and this
-        // assertion is what stops that being a silent change. pfw.sra:L91 initializes with exactly this
+        // assertion is what stops that being a silent change. ws_objects/pfw.pbl.src/pfw.sra:L91 - the
+        // framework application, not the same-named packager object - initializes with exactly this
         // constant, so it is the runtime-effective capability set rather than a documented ideal.
         // NOTE ON THE COMPARISON TYPE: Microsoft.OpenApi 2.x models a JSON Schema `const` as a STRING,
         // for the same reason it models a numeric bound as one - a JSON Schema value has no precision
@@ -888,7 +889,7 @@ public sealed class GatewayContractTests
         //
         // 429, 503 AND 504 ARE IN THE SET BECAUSE THE RUNTIME REALLY EMITS THEM, and they were absent
         // from it while it did. A capacity ceiling in a handle registry answers ResourceExhausted, an
-        // upstream that is not serving answers Unavailable, and every outbound call now carries a
+        // upstream that is not serving answers Unavailable, and every outbound call carries a
         // deadline whose expiry answers DeadlineExceeded. A status the runtime can produce and the
         // document does not declare is the same defect as its opposite, read from the other side: a
         // generated client has no branch for it.
@@ -925,6 +926,68 @@ public sealed class GatewayContractTests
                 Assert.Contains(status, sanctioned);
             }
         }
+    }
+
+    /// <summary>
+    /// <c>501</c> is declared by the reserved deferred-capability operations and by nothing else.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THE EXCLUSIVITY WAS DOCUMENTED AND NOT CHECKED, AND THE RUNTIME HAD ALREADY BROKEN IT. Both REST
+    /// projections mapped the legacy pair <c>E_NO_SUPPORT</c> / <c>E_NO_IMPLEMENTATION</c> - and an upstream
+    /// <c>Unimplemented</c> - onto <c>501</c> on operations this document publishes as IMPLEMENTED, which is
+    /// reachable in ordinary operation: the pinyin comparison is blocked, the column-expression engine
+    /// declines a macro or foreign-variable arm, a supplied <c>pinyinFlags</c> mask disagrees with the
+    /// configured one. Two things were wrong at once. The status was UNDECLARED on those operations, so an
+    /// OpenAPI-generated client had no branch for a response it could really receive; and it erased the one
+    /// distinction the reserved routes exist to draw, leaving a caller unable to tell "this whole capability
+    /// area is unbuilt" (AAP 0.4.4, C-D) from "the implemented operation you called has no implementation for
+    /// the cell you asked for" using the published contract alone.
+    /// </para>
+    /// <para>
+    /// THE SIBLING TEST ASSERTS THE OTHER HALF AND NEITHER IS SUFFICIENT ALONE.
+    /// <see cref="EveryReservedRouteReturnsNotImplementedAndNothingElseSucceeds"/> asserts that every
+    /// reserved operation DOES declare <c>501</c>; the closed-status test above admits <c>501</c> for the
+    /// whole document because those operations need it. Nothing asserted that no OTHER operation declares it,
+    /// which is the half that turns "reserved" into a property rather than a convention. Both projections now
+    /// answer <c>500</c> with the legacy code on <c>retCode</c>, which is how Security answers its two
+    /// symmetric-cipher narrowings, so the exclusivity holds in the runtime as well as in the document.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void NotImplementedIsDeclaredOnlyByTheReservedDeferredCapabilityOperations()
+    {
+        OpenApiDocument document = Document;
+
+        int reservedDeclaring = 0;
+
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in Operations(document))
+        {
+            bool reserved = Extension(operation, "x-deferred-service") is not null;
+            bool declares = operation.Responses!.ContainsKey("501");
+
+            if (reserved)
+            {
+                Assert.True(
+                    declares,
+                    $"Reserved route {method} {route} does not declare 501, which is the only outcome its "
+                        + "handler produces.");
+
+                reservedDeclaring++;
+                continue;
+            }
+
+            Assert.False(
+                declares,
+                $"{method} {route} declares 501 without carrying x-deferred-service. 501 identifies a "
+                    + "RESERVED deferred-capability route and nothing else (AAP 0.4.4, C-D); an implemented "
+                    + "operation whose specific capability has no available implementation answers 500 with "
+                    + "the legacy code on retCode - see the InternalError response component.");
+        }
+
+        // The eight reserved operations - four routes, two declared methods each - and the census is
+        // asserted so that this test cannot pass by finding no reserved operation at all.
+        Assert.Equal(8, reservedDeclaring);
     }
 
     // ==============================================================================================
@@ -1134,12 +1197,11 @@ public sealed class GatewayContractTests
         // EVERY COUNT THIS DOCUMENT AND ITS SIBLING PROSE STATE IS COMPUTED HERE FROM THE COMPILED
         // DESCRIPTORS, so a method added to either service cannot leave a number behind.
         //
-        // The counts have drifted exactly that way TWICE, in opposite directions. `LoadRows` was added
-        // to C-04, taking it from 26 methods to 27 and the projection from 39 operations to 40, and
-        // roughly forty prose statements across both services, their tests, this document and
-        // docs/CONTRACTS.md went on saying 26, 24 and 39; the method was then withdrawn, and the same
-        // forty statements went on saying 27, 25 and 40. A count restated in prose is a fact with no
-        // owner; this test is the owner.
+        // THE FAILURE MODE THIS OWNS, CONCRETELY: adding one rpc to C-04 moves it from 26 methods to 27
+        // and the projection from 39 operations to 40, and every prose statement across both services,
+        // their tests, this document and docs/CONTRACTS.md goes on saying 26, 24 and 39 - and removing it
+        // again inverts the same silence. A count restated in prose is a fact with no owner; this test is
+        // the owner.
         OpenApiDocument document = Document;
 
         Dictionary<string, int> declaredByService = DataservicesV1Reflection.Descriptor.Services
@@ -1541,13 +1603,13 @@ public sealed class GatewayContractTests
             // `ProblemDetails` MUST be open - RFC 9457 defines extension members and `retCode` is one.
             // `ConflictProblemDetails` composes it through allOf and inherits that openness.
             //
-            // THOSE TWO ARE THE WHOLE EXEMPTION LIST, AND IT USED TO HAVE A THIRD ENTRY. `ProtoPayload`
-            // was one open object standing in for every projected request and response body, exempted
-            // here on the grounds that its authority was the .proto. That was the defect: the projection
+            // THOSE TWO ARE THE WHOLE EXEMPTION LIST, AND A THIRD ENTRY IS THE ONE TO REFUSE. That entry
+            // is a `ProtoPayload` - one open object standing in for every projected request and response
+            // body, exempted on the grounds that its authority is the .proto. It is a defect: the projection
             // binds every request with the STRICT canonical parser, which REJECTS a member the target
-            // message does not declare, so an open schema published a permissiveness the runtime does not
-            // have. It is gone, replaced by concrete generated schemas for the complete closure - which
-            // is why the reached count below rose from 32 to 125.
+            // message does not declare, so an open schema publishes a permissiveness the runtime does not
+            // have. Concrete generated schemas for the complete closure are published instead, which is
+            // what makes the reached count below as large as it is.
             if (name is "ProblemDetails" or "ConflictProblemDetails")
             {
                 continue;
@@ -1658,7 +1720,7 @@ public sealed class GatewayContractTests
     //  and a narrowing is a success - and then every route the caller reached answered 403. Nothing
     //  refused at provisioning time and the symptom appeared three layers away from its cause.
     //
-    //  So the requirement is now stated per operation as `x-required-scope`, over a CLOSED set of four
+    //  So the requirement is stated per operation as `x-required-scope`, over a CLOSED set of four
     //  values, and the assertions below hold the document to it. The binding to the code that enforces
     //  it - the three RequiredScope constants on the Gateway endpoint files - is asserted in
     //  ServiceConfigurationCoherenceTests, which is the file in this project that may read service

@@ -65,11 +65,6 @@
 //        Directory.Build.props. No SCREAMING_SNAKE identifier is declared here: the AAP 0.4.5.3
 //        preservation rule applies to PORTED CONSTANTS, and this file ports none.
 //
-//  RULES POSITION (UR4). review_rules returns exactly one line - "No user rules provided." - so no
-//  user-specified rule governs this file and none is invented. The enterprise-standard baseline
-//  applies in their place, and the binding constraints are the refactor plan's non-rule inventory
-//  cited above.
-//
 //  ============================================================================================
 //  THE THREE SHARED HELPERS BELOW ARE A CONTRACT WITH TWO OTHER FILES - DO NOT NARROW THEM
 //  ============================================================================================

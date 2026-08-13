@@ -89,20 +89,6 @@
 //  Each is annotated at the point it is asserted, with the oracle line it came from, so that a future
 //  reader cannot mistake any of them for a defect in this suite.
 //
-//  RULES POSITION
-//  --------------------------------------------------------------------------------------------
-//  review_rules returns exactly one line, "No user rules provided.", so NO user-specified rule
-//  governs this file. That is a FINDING, not latitude: nothing is invented or back-filled from
-//  convention in its place, no assertion here exists because a coding guideline demanded it, and the
-//  absence is not treated as permission to test less. The enterprise-standard baseline applies
-//  instead - nullable reference types on, warnings as errors in test code exactly as in application
-//  code, no secret in source, every claim deterministic and reproducible with no clock, no network
-//  and no database - and the binding constraints are the refactor plan's own non-rule inventory, of
-//  which C-B, C-E, C-F, C-H and C-K bite on this file and are each discharged at the point they are
-//  cited above. The sibling GlobalUsings.cs, TransactionData.cs and persistence-service.slnx record
-//  the identical position, and this file states it too rather than relying on theirs, because a
-//  reader auditing THIS file should not have to open another to learn which rules applied.
-//
 //  ORACLE STATUS
 //  --------------------------------------------------------------------------------------------
 //  Every ws_objects/** path named in this file is READ ONLY (constraint C-C). Each was read as
@@ -474,7 +460,7 @@ public sealed class TransactionDataTests
         Assert.Equal(string.Empty, subject.Database);
         Assert.Equal(string.Empty, subject.LogId);
 
-        // THE CREDENTIAL IS READ THROUGH THE NAMED DOOR, because the property has no getter any more.
+        // THE CREDENTIAL IS READ THROUGH THE NAMED DOOR, because the property has no getter at all.
         // The test assembly can reach it only because the csproj grants InternalsVisibleTo, which is what
         // keeps the write-only posture testable instead of merely asserted.
         Assert.Equal(string.Empty, subject.RevealLogPassForConnect());
@@ -833,7 +819,7 @@ public sealed class TransactionDataTests
     /// <summary>
     /// The POSITIVE control for suite 1. Rendering discloses exactly the six permitted members, in
     /// the declared order, in the record-shaped envelope - asserted as one exact string. Without
-    /// this, every "does not contain" above would also pass for a <see cref="ToString"/> that
+    /// this, every "does not contain" above would also pass for a <c>ToString</c> that
     /// returned the empty string.
     /// </summary>
     [Fact]
@@ -1356,11 +1342,11 @@ public sealed class TransactionDataTests
     /// <param name="source">The descriptor the six were supposed to come from.</param>
     /// <param name="keeper">The descriptor the three were supposed to be kept from.</param>
     /// <remarks>
-    /// SEPARATE FROM THE INBOUND AUDIT, AND THAT SEPARATION IS THE FINDING EXPRESSED AS A TEST. One audit
-    /// used to serve both directions because the legacy's two accessors move the same seven fields - and
+    /// SEPARATE FROM THE INBOUND AUDIT, AND THE SEPARATION IS THE POINT. One audit serving both directions
+    /// is the tempting economy, because the legacy's two accessors move the same seven fields - and
     /// the legacy really does move the password outbound [n_cst_thread_trans.sru:L414]. AAP 0.4.2.6 makes
     /// LogPass write-only: never echoed in a response, and an outbound accessor that returns it to its
-    /// caller IS that echo. So the two directions are no longer symmetric, and using one helper for both
+    /// caller IS that echo. So the two directions are NOT symmetric here, and one helper for both
     /// would make the asymmetry invisible.
     /// </remarks>
     private static void AssertSixMovedAndThreeKept(

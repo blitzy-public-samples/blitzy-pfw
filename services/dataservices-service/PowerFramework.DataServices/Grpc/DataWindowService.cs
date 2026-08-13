@@ -23,20 +23,46 @@
 //  Fixed by AAP 0.1.5 FROM THE SHAPE OF THE LEGACY INTERFACE, not from preference, and the reasoning
 //  is not re-opened here. Three properties of that interface drove it, all verified at source:
 //
-//    1. A 22-EVENT ORDERED CHAIN WITH VETO SEMANTICS [se_cst_dw.sru:L11-L32], in which each raw event
-//       delegates to a semantic one and then to the broker, and BOTH delegations can stop the dispatch
-//       [:L115-L117].
+//    1. A 22-EVENT ORDERED CHAIN WITH VETO SEMANTICS [se_cst_dw.sru:L11-L32], whose dispatch shape is
+//       NOT uniform - see the delegation table below - and in which a raw event's two edges can EACH
+//       stop it [:L115-L117].
 //    2. A `ref string` OUT-PARAMETER - `onddsgetfilter(long row, dwobject dwo, string data,
 //       ref string filter)` [:L13] - which declares NO RETURN TYPE AT ALL and produces its result by
-//       mutating the argument. There is no asynchronous representation of that: the caller blocks on
-//       the produced filter because the filter is the only thing the call exists to obtain.
+//       mutating the argument, so the contract has to carry a produced value for an event that
+//       returns nothing AND keep "assigned empty" distinct from "not touched".
 //    3. An `any` RETURN OVER A `string[]` ARGUMENT - `oncolumnexpinvokemethod(long row, dwobject dwo,
 //       string name, string args[]) -> any` [:L14].
 //
 //  That shape needs compile-time contract enforcement, BIDIRECTIONAL streaming to carry the ordered
 //  chain in both directions, and a status model rich enough for a four-value alphabet AND a tri-valued
-//  veto. Protobuf over gRPC is the only transport in the mandated stack that carries all three. JSON
-//  over REST would lose both the ordering and the typed veto, and would flatten the veto to a boolean.
+//  veto. Protobuf over gRPC carries all three natively. JSON over REST can encode any of them with
+//  hand-written convention - a sequence member, an integer veto member - but nothing in the format
+//  ENFORCES the ordering or the veto's arity, so both become agreements between two codebases rather
+//  than properties of the contract; and a request/response projection cannot carry a server-initiated
+//  question at all, which item 2 and item 3 both are.
+//
+//  ==================== THE RAW-EVENT DELEGATION TABLE, WHICH IS NOT UNIFORM ====================
+//  "Each raw event calls a semantic handler and then the broker" is the shape of only SOME of the
+//  thirteen, and four classes falsify it. The chain reproduces each case as written, so the table is
+//  the contract rather than a summary of it:
+//
+//    * BROKER ONLY, no partner call at all: `ondwnrbuttonup` [:L120-L122], `ondwnlbuttonup`
+//      [:L395-L397].
+//    * BROKER FIRST, PARTNER SECOND - the order INVERTED against the majority: `ondwnkillfocus`
+//      [:L387-L393] and `ondwnsetfocus` [:L399-L401] both trigger the broker and then RETURN the
+//      partner's result.
+//    * BROKER RESULT DISCARDED: `ondwnrowchange` [:L124-L128] triggers EVT_ROWFOCUSCHANGED and then
+//      unconditionally `return 0`, so the broker cannot veto there even though it can on its
+//      `ondwnrowchanging` sibling [:L130-L134].
+//    * EXTRA WORK BEYOND THE TWO EDGES: `ondwnlbuttonclk` adds focus-less row repositioning
+//      [:L152-L159]; `ondwnchanging` gates the broker behind `of_IsSubscribed` and then makes a THIRD
+//      delegation, to DropdownSearch's OnEditChanged [:L164-L174]; `ondwnlbuttondblclk` and
+//      `ondwnlbuttonclk` guard the broker edge with `IsValid(this)` [:L138-L140, :L147-L149].
+//
+//  AND THE "SEMANTIC" PARTNER IS USUALLY NOT ONE OF THE NINE DECLARED SEMANTIC EVENTS. Eleven of the
+//  thirteen call a STANDARD DataWindow ancestor event - RButtonDown, RowFocusChanged, RowFocusChanging,
+//  DoubleClicked, Clicked, EditChanged, ItemFocusChanged, LoseFocus, GetFocus, ItemError. Only
+//  `ondwnitemchange` calls a declared one, `OnDoItemChange` [:L182-L253].
 //
 //  ==================== SIXTEEN METHODS, AND WHY THAT IS NOT SCOPE CREEP =======================
 //  The contract declares SIXTEEN rpcs on this service, and the contract is authoritative on its own
@@ -54,11 +80,25 @@
 //
 //  ======================== WHY THE EVENT STREAM NEEDS NO ROUTER ================================
 //  The sibling C-04 service reaches its client through a singleton `MacroInvocationRouter`, because
-//  its inverted question is raised by an ENGINE that has no stream in hand. THIS service's nine
-//  semantic questions are different: every one of them is raised BY THE CHAIN, INSIDE the synchronous
-//  scope of handling an inbound notification that arrived ON THE SAME STREAM. A per-stream
-//  conversation is therefore sufficient and a router would be a lifetime with no owner. See
+//  its inverted question is raised by an ENGINE that has no stream in hand. THIS service's semantic
+//  invocations are different: every one is raised BY THE CHAIN, INSIDE the synchronous scope of
+//  handling an inbound notification that arrived ON THE SAME STREAM. A per-stream conversation is
+//  therefore sufficient and a router would be a lifetime with no owner. See
 //  DataWindowEventConversation.
+//
+//  NINE SEMANTIC INVOCATIONS, OF WHICH FIVE ARE ANSWER-BEARING. `se_cst_dw` declares nine semantic
+//  events [:L11-L14, :L24-L26, :L28, :L32]. Only five produce a value the chain must wait for, and one
+//  of those five does it without a return type:
+//
+//    ANSWER-BEARING (5)  oninitcontextmenu -> long [:L11]; oncontextmenu -> long [:L12];
+//                        ondoitemchange -> long [:L24]; oncolumnexpinvokemethod -> any [:L14]; and
+//                        onddsgetfilter [:L13], which declares NO return type and answers through its
+//                        `ref string` out-parameter instead.
+//    VOID NOTIFICATION (4)  onitemchanged [:L25]; ondoitemchanged [:L26]; onddsfiltered [:L28];
+//                           oncolumnexptrace [:L32].
+//
+//  The distinction is load-bearing on this boundary: only the five need a correlated response, so
+//  calling all nine "questions" would imply four round trips the contract does not make.
 //
 //  =========================== WHY `Aborted` IS THE CONFLICT STATUS (C-K) =======================
 //  gRPC `Aborted` (code 10) is THE CANONICAL MAPPING TO HTTP 409, which is what lets Gateway's REST
@@ -104,13 +144,7 @@
 //  (Grpc/ColumnExpressionService.cs, Expressions/ParseErrorFormatter.cs) and nothing here localizes
 //  them by accident, because nothing here handles them at all.
 //
-//  ======================================== RULES POSITION ======================================
-//  `review_rules` returns exactly "No user rules provided." - one line, nothing to page through. NO
-//  user-specified rule governs this file, none is invented here, and the absence is NOT treated as
-//  permission to lower the bar. The enterprise-standard baseline (AAP 0.7.2) applies in their place
-//  and the binding constraints are AAP 0.7.3's non-rule inventory. Those that govern this file are
-//  discharged at the point of use and audited here:
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  C-A SELF-AUDIT: every `using` below names either `PowerFramework.Contracts.*`, a folder of THIS
 //      service, or a `PowerFramework.Shared.*` library. NOT ONE type from `PowerFramework.Gateway.*`,
 //      `PowerFramework.Persistence.*` or `PowerFramework.Security.*` is referenced, and none can be -
@@ -1174,17 +1208,21 @@ internal static class DataWindowWireProjection
     /// <remarks>
     /// <para>
     /// A RENAME AND NOTHING MORE. Every field below was decided inside the chain; none is computed here.
-    /// The two vetoes stay SEPARATE because the raw event consults the semantic handler and then the
-    /// broker, and both edges can stop the dispatch [<c>se_cst_dw.sru:L115-L117</c>] - merging them would
-    /// leave a consumer unable to say which one did.
+    /// The two vetoes stay SEPARATE because a raw event has two independent edges - a partner call and a
+    /// broker trigger - and either can stop the dispatch [<c>se_cst_dw.sru:L115-L117</c>], so merging them
+    /// would leave a consumer unable to say which one did. Which edges exist, and in which order, VARIES
+    /// BY EVENT: two raw events have no partner call at all, two invert the order, and one discards the
+    /// broker's answer. This projection reports whichever edges the event in flight actually has, and
+    /// reports an absent edge as no veto rather than as a permit.
     /// </para>
     /// <para>
     /// TWO DOMAIN OBSERVATIONS ARE DELIBERATELY NOT PROJECTED, because <c>EventResult</c> declares no
     /// field for either and inventing one would widen a published contract. <c>RowSwitchAttempted</c> -
     /// the focus-less row switch at <c>:L152-L159</c> - is a domain detail with no wire twin.
-    /// <c>DeferredAcceptQueued</c> IS observable, through <c>state.deferred_accept_pending</c>, which is
-    /// the same fact read from the session rather than from the dispatch; the notification side carries it
-    /// too, on <c>DwnKillFocusEvent</c>.
+    /// <c>DeferredAcceptQueued</c> IS observable, through <c>state.deferred_accept_pending</c>, which is the
+    /// same fact read from the session rather than from the dispatch. <c>DwnKillFocusEvent</c> declares a
+    /// same-named field, but that message travels INBOUND and the server ignores it, so it is not a second
+    /// place to read this.
     /// </para>
     /// </remarks>
     internal static EventResult ToWireResult(DataWindowEventOutcome outcome, string correlationId)
@@ -1252,7 +1290,7 @@ internal static class DataWindowWireProjection
 /// <para>
 /// WHY NO SINGLETON ROUTER, unlike the sibling C-04 service's macro channel (C-K). C-04's inverted
 /// question is raised by an ENGINE that holds no stream, so it needs a registry to find one. Every one
-/// of this chain's nine semantic questions is raised BY THE CHAIN, INSIDE the synchronous scope of
+/// of this chain's nine semantic invocations is raised BY THE CHAIN, INSIDE the synchronous scope of
 /// handling an inbound notification that arrived on THIS stream. The stream is therefore already in
 /// hand, and a registry would be a lifetime with no owner and a second place for the correlation to go
 /// wrong.
@@ -1268,12 +1306,12 @@ internal static class DataWindowWireProjection
 /// BUFFERS A SYNCHRONOUS MESSAGE, in either strictness mode.
 /// </para>
 /// <para>
-/// INSIDE A SEQUENCED GROUP THE RULE IS LOOSER BUT IT IS STILL ENFORCED, AND THAT ENFORCEMENT IS NEW.
+/// INSIDE A SEQUENCED GROUP THE RULE IS LOOSER BUT IT IS STILL ENFORCED, AND ENFORCING IT IS THE POINT.
 /// Those events carry no cross-event state, so a GAP is admitted: the counter is shared with the outbound
 /// direction, a client's token is one past the highest it has SEEN, and the numbers this server consumed
-/// are numbers the client never sends. A REVERSAL OR A DUPLICATE IS REFUSED. Previously the sequenced arm
-/// accepted every positive token including those two, so the ordering information was recorded and never
-/// acted on - which left pattern (a) indistinguishable from arrival order.
+/// are numbers the client never sends. A REVERSAL OR A DUPLICATE IS REFUSED. A sequenced arm that
+/// accepts every positive token including those two records the ordering information and never
+/// acts on it - which leaves pattern (a) indistinguishable from arrival order.
 /// </para>
 /// <para>
 /// WHY NOT REORDER, GIVEN THAT AAP 0.6.1.4 SAYS THE TOKEN IS SUFFICIENT FOR IT. Because on this contract
@@ -1435,11 +1473,13 @@ internal sealed class DataWindowEventConversation
     /// <param name="eventId">The event.</param>
     /// <returns>The assigned discipline.</returns>
     /// <remarks>
-    /// Delegates to the domain assignment. <c>ondwnkillfocus</c> belongs to BOTH groups and that is not a
-    /// contradiction - as the tail of the item-change chain it is synchronous, as pure focus notification
-    /// it is sequenced - so the flagless overload is used here deliberately: this boundary classifies a
-    /// bare event identifier arriving from a client, and the domain's own note records that the flagless
-    /// answer is exactly the one for that case.
+    /// Delegates to the domain assignment, THROUGH THE FLAGLESS OVERLOAD, and that choice is what the wire
+    /// token then reports. <c>ondwnkillfocus</c> belongs to both ordering groups - synchronous as the tail of
+    /// the item-change chain, sequenced as pure focus notification - and only the item-change chain holds the
+    /// re-entrancy state that separates them. This boundary classifies a BARE EVENT IDENTIFIER arriving from
+    /// a client, which is the flagless case, so the discipline stamped on the token for this event ALWAYS
+    /// reads sequenced. That is correct for what the token is for, and it means the token does not report
+    /// which role an occurrence played; <c>state.deferred_accept_pending</c> is where that is observable.
     /// </remarks>
     internal static OrderingDiscipline DisciplineOf(EventId eventId) =>
         DataWindowEventOrdering.DisciplineOf(eventId);
@@ -1865,7 +1905,7 @@ internal sealed class DataWindowEventConversation
 /// </summary>
 /// <remarks>
 /// <para>
-/// 🔴 <b>WHY A TYPE OF ITS OWN RATHER THAN A CANCELLATION.</b> The nine semantic events are questions the
+/// 🔴 <b>WHY A TYPE OF ITS OWN RATHER THAN A CANCELLATION.</b> The five answer-bearing semantic events ask the
 /// chain asks BACK, and under the synchronous discipline the dispatch that raised one BLOCKS on the answer
 /// - which is the oracle's own shape, because in process the handler simply returned a value
 /// [<c>se_cst_dw.sru:L194</c>]. Across a wire the answer may never arrive, and the three ways that can
@@ -2191,13 +2231,13 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// connection-parameter string", which is the only reading with one authority.
     /// </para>
     /// <para>
-    /// <b>WHAT THAT FIXED.</b> The flags used to be sent from independently settable
-    /// <c>DisableBind</c>/<c>NCharBind</c> options beside <c>DbParm</c>. Because the oracle reads
-    /// <c>NCharBind</c> only INSIDE the <c>DisableBind</c> branch, the obvious operator configuration -
-    /// <c>DbParm="DisableBind=1"</c> with both flags set true - resolves to <c>nchar_bind=false</c> and
-    /// therefore DISAGREED. And a disagreement is not a per-request error: it refuses the SESSION, so
-    /// every retrieval and every update failed until the configuration was corrected. One input cannot
-    /// disagree with itself.
+    /// <b>WHAT THE SECOND AUTHORITY WOULD COST.</b> Sending the flags from independently settable
+    /// <c>DisableBind</c>/<c>NCharBind</c> options beside <c>DbParm</c> is the tempting shape. Because the
+    /// oracle reads <c>NCharBind</c> only INSIDE the <c>DisableBind</c> branch, the obvious operator
+    /// configuration - <c>DbParm="DisableBind=1"</c> with both flags set true - resolves to
+    /// <c>nchar_bind=false</c> and therefore DISAGREES. And a disagreement is not a per-request error: it
+    /// refuses the SESSION, so every retrieval and every update fails until the configuration is
+    /// corrected. One input cannot disagree with itself.
     /// </para>
     /// <para>
     /// AN UNCONFIGURED DEPLOYMENT SENDS AN EMPTY DESCRIPTOR, which is the default and is deliberate: it
@@ -2291,7 +2331,7 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
 
             // ---- The caller's own request is at fault: 400 at the ingress ----
             //
-            // 🔴 FOUR OF THESE SIX WERE FALLING TO THE DEFAULT, AND THAT IS THE DEFECT THIS ARM CLOSES.
+            // 🔴 WITHOUT THIS ARM FOUR OF THESE SIX FALL TO THE DEFAULT, AND THAT IS THE DEFECT IT CLOSES.
             // An unresolvable DataObject name, a rejected clause, a carrier that cannot be applied and an
             // out-of-range page index are every one of them a value the CALLER supplied - and every one of
             // them reached the caller as HTTP 500 or 502, which says this service failed. The spellings are
@@ -2308,21 +2348,22 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
 
             // ---- The caller named something that does not exist: 404 ----
             //
-            // 🔴 ALSO PREVIOUSLY UNCLASSIFIED. E_OBJECT_NOT_FOUND and E_NOT_EXISTS name a thing the
+            // 🔴 THE FOUR MOST EASILY LEFT UNCLASSIFIED. E_OBJECT_NOT_FOUND and E_NOT_EXISTS name a thing the
             // upstream could not find; E_VAR_NOT_FOUND and E_MEMBER_NOT_FOUND are the expression engine's
             // own not-found codes - a variable no global table carries, a member it cannot bind. All four
             // are the same situation and take the same status, matching MapOutcomeToStatus for the first
             // and Gateway's in-band projection for all four.
             //
-            // 🔴 E_INVALID_HANDLE JOINS THIS GROUP, WHICH SETTLES A DIVERGENCE THAT WAS PREVIOUSLY ONLY
-            // RECORDED. It used to sit on FailedPrecondition below, on the reasoning that both statuses
-            // reach the caller as a 4xx - which understated what the difference costs. Gateway's published
+            // 🔴 E_INVALID_HANDLE BELONGS IN THIS GROUP AND NOT ON FailedPrecondition BELOW, WHICH SETTLES
+            // A DIVERGENCE THE CONTRACTS ONLY RECORD. FailedPrecondition is defensible on the reasoning
+            // that both statuses reach the caller as a 4xx - which understates what the difference costs.
+            // Gateway's published
             // projection declares NO FailedPrecondition row [docs/CONTRACTS.md, C-09 status table], so that
             // status falls to the canonical mapping and reaches the caller as 400 CARRYING
             // E_INVALID_ARGUMENT: the originating code is not re-spelled, it is REPLACED, and a caller who
-            // named a handle the upstream no longer holds is told its argument was malformed. NotFound is
-            // published, projects to 404, and is already what MapOutcomeToStatus in this same file and the
-            // REST projection's in-band map give this code - so all three now agree, which is what makes a
+            // named a handle the upstream no longer holds would be told its argument was malformed. NotFound
+            // is published, projects to 404, and is what MapOutcomeToStatus in this same file and the
+            // REST projection's in-band map give this code - so all three agree, which is what makes a
             // caller's retry-or-surface policy writable at all.
             RetCode.E_INVALID_HANDLE
                 or RetCode.E_OBJECT_NOT_FOUND
@@ -2368,12 +2409,12 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
             _ => StatusCode.Internal,
         };
 
-        // 🔴 THE HANDLE IS CALLER-CHOSEN TEXT AND USED TO BE WRITTEN VERBATIM. The empty case was already
-        // handled, which is what made the omission easy to miss: everything ELSE about the value was taken
+        // 🔴 THE HANDLE IS CALLER-CHOSEN TEXT AND MUST NOT BE WRITTEN VERBATIM. Handling the empty case
+        // alone is what makes the omission easy to miss: everything ELSE about the value is then taken
         // on trust. A record is still rendered to a LINE by every console, file and syslog provider, so a
-        // handle carrying a line break appended a complete fabricated record after this one - same shape,
+        // handle carrying a line break appends a complete fabricated record after this one - same shape,
         // same channel, whatever severity and outcome the caller wrote into it - and a multi-megabyte handle
-        // produced a multi-megabyte record on demand. LogSafeText escapes and bounds it, and answers the
+        // produces a multi-megabyte record on demand. LogSafeText escapes and bounds it, and answers the
         // same "(none)" for an empty value so this record's shape does not change.
         _logger?.LogWarning(
             "Persistence could not {Attempted} for DataWindow handle {DataWindowHandle}: return code "
@@ -2774,7 +2815,7 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// three: the database error travels on the error chunk exactly as C-03 prescribes ("present only on a
     /// failure that the legacy would have surfaced through its error event; a chunk carrying an error
     /// carries no rows"), and the return code and error text travel in the RPC status that follows it.
-    /// Writing an empty final chunk instead - which is what this used to do for a non-database failure -
+    /// Writing an empty final chunk instead - the tempting shortcut for a non-database failure -
     /// makes a failed retrieval indistinguishable from an empty successful one, and a caller cannot
     /// recover a fact it was never told.
     /// </para>
@@ -2859,10 +2900,10 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                         //  RetrieveChunk carries a database error and NOTHING ELSE that can express an
                         //  outcome, so a failing status that brought no DbError - which is what a
                         //  rejected clause, an invalid paging request or a bad chunk size produces -
-                        //  has no field to occupy. Writing the plain final marker instead, which is
-                        //  what this arm used to do unconditionally, DELIVERED A FAILURE AS A
+                        //  has no field to occupy. Writing the plain final marker instead - the
+                        //  unconditional shape this arm attracts - DELIVERS A FAILURE AS A
                         //  SUCCESSFUL EMPTY RETRIEVAL: byte for byte the same answer a DataWindow with
-                        //  no matching rows produces, so no caller could tell a refused query from an
+                        //  no matching rows produces, so no caller can tell a refused query from an
                         //  empty one.
                         //
                         //  Raising after chunks have already been written is deliberate and correct on
@@ -2991,7 +3032,7 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// C-05's chunk-size guard is deliberately not reproduced at this boundary (C-B) - "the size is
     /// forwarded and Persistence adjudicates it" - so adding a range check here would invent the very
     /// validation that paragraph declines to invent. Forwarding a stated negative instead lets the SAME
-    /// guard adjudicate it, so <c>-5</c> and <c>500</c> are now refused identically, by the layer that owns
+    /// guard adjudicate it, so <c>-5</c> and <c>500</c> are refused identically, by the layer that owns
     /// the rule, with the legacy's own return code.
     /// </para>
     /// </remarks>
@@ -3024,6 +3065,7 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// </summary>
     /// <param name="dataChunk">The upstream chunk.</param>
     /// <param name="requested">The buffers the caller asked for.</param>
+    /// <param name="dataWindowHandle">The session-scoped DataWindow handle.</param>
     /// <param name="chunkIndex">The ONE-BASED ordinal of this delivery.</param>
     /// <param name="cumulative">Running total of rows delivered on this stream.</param>
     /// <returns>The wire chunk.</returns>
@@ -4060,7 +4102,7 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
             {
                 // ⚠ IN-BAND, NOT A CALL STATUS, AND FOR THE SAME REASON THE ACQUISITION REFUSAL IS ⚠
                 //
-                // This arm used to raise the upstream failure as an RPC status. That is the correct shape on
+                // Raising the upstream failure as an RPC status is the correct shape on
                 // Retrieve, where RetrieveChunk declares no outcome field and a refusal has nowhere else to
                 // go - and it is the wrong shape here, because UpdateResponse DOES declare one. Every other
                 // non-success outcome of this operation travels there: a refused acquisition above, a
@@ -4182,7 +4224,6 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// <summary>
     /// Groups the submitted rows into the buffer segments C-06 consumes.
     /// </summary>
-    /// <param name="rows">The rows, each already carrying its own buffer tag and item status.</param>
     /// <returns>The carrier state.</returns>
     /// <remarks>
     /// <para>
@@ -4201,7 +4242,7 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// <c>Segments.Count</c> against the canonical length and then requires segment n to be buffer n
     /// [<c>Buffers/ChangesetCodec.cs</c> - <c>SerializedBuffers</c>, <c>TryValidateSegments</c>], and
     /// Persistence's own encoder emits all three unconditionally. Emitting only the buffers a request
-    /// happened to mention - which is what this method used to do - therefore produced a payload the
+    /// happened to mention - the obvious economy - therefore produces a payload the
     /// receiver REJECTS outright for any request that did not touch all three, which is nearly every
     /// request: an update of one row would send a single Primary segment and be refused. Segment order is
     /// the CANONICAL order for the same reason and not the caller's order of appearance.
@@ -4542,14 +4583,18 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// </exception>
     /// <remarks>
     /// <para>
-    /// ALL 22 EVENTS TRAVEL, AND NO RAW EVENT IS COLLAPSED INTO THE SEMANTIC ONE IT DELEGATES TO. The split
-    /// is 13 raw <c>pbm_dwn*</c> against 9 semantic [<c>se_cst_dw.sru:L11-L32</c>], and each raw event
-    /// delegates first to its semantic counterpart and then to the broker, with BOTH edges able to stop the
-    /// dispatch - <c>ondwnrbuttondown</c> returns 1 if the semantic handler returns 1 and otherwise consults
-    /// the broker [<c>:L115-L117</c>], while <c>ondwnrbuttonup</c> consults only the broker
-    /// [<c>:L120-L121</c>]. Collapsing the pair would erase the two-stage veto and a consumer could no
-    /// longer say which edge stopped it. THAT DELEGATION LIVES IN THE CHAIN; this method transports it and
-    /// neither re-implements nor reorders it.
+    /// ALL 22 EVENTS TRAVEL, AND NO RAW EVENT IS COLLAPSED INTO THE PARTNER IT DELEGATES TO. The split is
+    /// 13 raw <c>pbm_dwn*</c> against 9 semantic [<c>se_cst_dw.sru:L11-L32</c>], and the delegation shape
+    /// VARIES BY EVENT rather than following one rule. The majority call a partner and then the broker with
+    /// both edges able to stop the dispatch - <c>ondwnrbuttondown</c> returns 1 if the partner returns 1 and
+    /// otherwise consults the broker [<c>:L115-L117</c>]. Four classes depart from it: <c>ondwnrbuttonup</c>
+    /// and <c>ondwnlbuttonup</c> consult ONLY the broker [<c>:L120-L122</c>, <c>:L395-L397</c>];
+    /// <c>ondwnkillfocus</c> and <c>ondwnsetfocus</c> trigger the broker FIRST and return the partner's
+    /// result second [<c>:L387-L393</c>, <c>:L399-L401</c>]; <c>ondwnrowchange</c> DISCARDS the broker's
+    /// answer and always returns 0 [<c>:L124-L128</c>]; and <c>ondwnlbuttonclk</c> and <c>ondwnchanging</c>
+    /// do further work beyond the two edges [<c>:L152-L159</c>, <c>:L164-L174</c>]. Collapsing any pair
+    /// would erase a veto edge and a consumer could no longer say which one stopped it. THAT DELEGATION
+    /// LIVES IN THE CHAIN; this method transports it and neither re-implements nor reorders it.
     /// </para>
     /// <para>
     /// BOTH ORDERING PATTERNS ARE IMPLEMENTED, PER CAPABILITY AREA, AND NEITHER IS APPLIED GLOBALLY. The
@@ -4649,20 +4694,20 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                     switch (request.PayloadCase)
                     {
                         case EventChainRequest.PayloadOneofCase.Notify:
-                            // 🔴 HANDED OVER, NEVER AWAITED HERE - THE WHOLE CORRECTION. Awaiting the
-                            // dispatch on this loop DEADLOCKED the stream: nine of the 22 events are
+                            // 🔴 HANDED OVER, NEVER AWAITED HERE - AND THE REASON IS A DEADLOCK. Awaiting the
+                            // dispatch on this loop DEADLOCKS the stream: nine of the 22 events are
                             // questions the chain asks BACK and blocks on, and the only thing that can
                             // answer one is a `Result` message read by THIS loop - so a loop waiting on
-                            // the dispatch was waiting on itself. The queue is FIFO with ONE consumer, so
+                            // the dispatch waits on itself. The queue is FIFO with ONE consumer, so
                             // arrival order is preserved exactly and nothing is buffered past its turn or
-                            // re-sorted: the ordering check itself still runs on the consumer, in arrival
-                            // order, so the token arithmetic is unchanged.
+                            // re-sorted: the ordering check itself runs on the consumer, in arrival
+                            // order, so the token arithmetic is untouched by the handover.
                             //
-                            // 🔴 AND THE HANDOVER IS BOUNDED, WHICH THE FIRST VERSION OF IT WAS NOT. The
+                            // 🔴 AND THE HANDOVER IS BOUNDED, WHICH AN UNBOUNDED QUEUE IS NOT. The
                             // acceptance is O(1) while a dispatch may be blocked on an answer for as long
-                            // as AnswerTimeout allows, so the ONLY thing that previously bounded the queue
-                            // was the synchronous discipline's promise that a client cannot pipeline. A
-                            // client that declined the promise grew it without limit. The ceiling is
+                            // as AnswerTimeout allows, so without a ceiling the ONLY thing bounding the queue
+                            // is the synchronous discipline's promise that a client cannot pipeline. A
+                            // client that declines the promise grows it without limit. The ceiling is
                             // COUNTED rather than imposed by a bounded channel, because a full channel
                             // would stall THIS loop - and this loop is what delivers the answer the
                             // consumer is waiting for, which is the deadlock the handover exists to break.
@@ -4960,11 +5005,11 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         /// </para>
         /// <para>
         /// WHY A CEILING IS NEEDED AT ALL, given the discipline. The synchronous protocol says a client
-        /// cannot pipeline - it must read a response to learn its next token - and that was previously the
-        /// ONLY thing bounding the depth. It is a promise made by the client, and this server accepted a
-        /// notification in constant time while its consumer could be blocked on one answer for as long as
+        /// cannot pipeline - it must read a response to learn its next token - and without a ceiling that is
+        /// the ONLY thing bounding the depth. It is a promise made by the client, and this server accepts a
+        /// notification in constant time while its consumer may be blocked on one answer for as long as
         /// <c>DataServices:EventChain:AnswerTimeout</c> permits. An authenticated client that simply
-        /// declined the promise therefore grew this queue without limit. The ceiling makes the bound the
+        /// declines the promise would then grow this queue without limit. The ceiling makes the bound the
         /// SERVER's.
         /// </para>
         /// <para>
@@ -5006,7 +5051,7 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         /// IDEMPOTENT, AND CALLED FROM THREE PLACES ON PURPOSE - the read loop's own <c>finally</c>, the
         /// abnormal-exit <c>finally</c>, and <see cref="DisposeAsync"/> - because each is a path on which
         /// the stream can end and the consumer must be allowed to finish on all of them. The flag is set
-        /// BEFORE the writer is completed so that a concurrent <see cref="Enqueue"/> can never see a refused
+        /// BEFORE the writer is completed so that a concurrent <c>Enqueue</c> can never see a refused
         /// write without also seeing the reason for it.
         /// </remarks>
         internal void CompleteAdding()
@@ -5104,14 +5149,14 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
             {
                 _fault = ExceptionDispatchInfo.Capture(Translate(failure));
 
-                // 🔴 THE EXCEPTION OBJECT USED TO BE ATTACHED, AND THIS CATCH TAKES EVERYTHING. Dispatch
-                // runs the event chain, which reaches the expression engine and the Persistence client, so
-                // the fault arriving here can be an upstream DbError carrying a generated statement, a
-                // caller's expression text, or an arbitrary host fault holding this session's variable
-                // VALUES. Every provider renders an attached exception with ToString(), which prints the
-                // whole message chain and the stack, so none of that was bounded.
+                // 🔴 THE EXCEPTION OBJECT IS DELIBERATELY NOT ATTACHED, AND THIS CATCH TAKES EVERYTHING.
+                // Dispatch runs the event chain, which reaches the expression engine and the Persistence
+                // client, so the fault arriving here can be an upstream DbError carrying a generated
+                // statement, a caller's expression text, or an arbitrary host fault holding this session's
+                // variable VALUES. Every provider renders an attached exception with ToString(), which
+                // prints the whole message chain and the stack, so none of that would be bounded.
                 //
-                // THE TYPE CHAIN IS WHAT REPLACES IT and it is enough to act on: it names which failure
+                // THE TYPE CHAIN IS WHAT TRAVELS INSTEAD and it is enough to act on: it names which failure
                 // occurred and where it came from, every name in it belongs to this codebase, the framework
                 // or a package, and the caller receives the translated status separately. No message is
                 // read at all - this service holds no redaction policy of its own, and inventing one here
@@ -5627,9 +5672,10 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
 
             // ---- :L29  event ondwnkillfocus pbm_dwnkillfocus ----
             case EventNotification.BodyOneofCase.DwnKillFocus:
-                // Takes no argument at source. The request's `deferred_accept_queued` is what the SERVER
-                // reports back through the session state, not an input: the queueing decision is the
-                // oracle's, gated on the item-change re-entrancy flag being clear [:L388-L390].
+                // Takes no argument at source, and the request's `deferred_accept_queued` is deliberately
+                // NOT read: the queueing decision is the oracle's, gated on the item-change re-entrancy flag
+                // being clear [:L388-L390], which only this server holds. What actually happened is reported
+                // back on `EventResult.state.deferred_accept_pending`.
                 return chain.OnDwnKillFocus();
 
             // ---- :L30  event ondwnlbuttonup pbm_dwnlbuttonup ----

@@ -1338,7 +1338,7 @@ the per-arity detail behind it is [§7.9](#79-the-contract-covers-the-source-sur
 | 25 | `InvokeMethodChannel` | **stream** `InvokeMethodResponse` → **stream** `InvokeMethodRequest` | **bidirectional streaming** | **Inverted stream 1 — macro invocation.** Note the message names look backwards and are not: DataServices asks its *client* to evaluate a macro, because the legacy expects the **application** to implement the macro switch [`docs/n_cst_dwsvc_columnexp.md:L106`; source at `:L2263`, `:L2287`]. Synchronous within the stream — the calculation cannot proceed without the value ([§7.6](#76-two-inverted-streams-structurally-required)) |
 | 26 | `TraceChannel` | **stream** `TraceChannelRequest` → **stream** `TraceRecord` | **bidirectional streaming** | **Inverted stream 2 — the expression trace**, including the call stack the recursion vector builds [`:L110`, `:L296-L297`, `:L318`, `:L753-L757`, emitted at `:L758`]. Server-initiated and fire-and-forget, so it carries a **sequencing token** rather than strict ordering. Gated on `#Trace` [`:L98`] |
 
-**Twenty-seven RPCs cover roughly sixty legacy entry points**, and the collapse is deliberate: what
+**Twenty-six RPCs cover roughly sixty legacy entry points**, and the collapse is deliberate: what
 varies across a legacy overload group — index versus name addressing, the arity of the recalculate and
 force flags, which of seven scalar types a variable holds — becomes **fields of one request** rather
 than separate RPCs. Preserving one RPC per overload would have produced a contract nobody could
@@ -1539,8 +1539,15 @@ wrong in a way no test would obviously catch: the expression would evaluate, ret
 right type in the right range, and be silently stale. A defined error is worse ergonomics and better
 engineering.
 
-It is also the **only** place in this inventory where the narrowing principle of
-[§1.2](#12-the-governing-principle-for-anything-that-cannot-cross) has to be applied.
+It is also the **only** place in this inventory where a legacy *behaviour* cannot cross, and therefore
+the only place the narrowing principle of
+[§1.2](#12-the-governing-principle-for-anything-that-cannot-cross) is applied to a behaviour. The
+principle is applied five further times, each to a *field* or a *domain* rather than to a behaviour, and
+[§14.4](#144-narrow-with-a-defined-error-never-widen-with-a-guess) is the canonical register of all six
+— one behavioural, five field or domain. The distinction is the whole point of the register: a
+behavioural narrowing changes what a caller can accomplish, while a field or domain narrowing changes
+what a caller may put on the wire to accomplish it, and only the first is a capability the legacy had
+and this system does not.
 
 ### 7.8 Parse errors carry a caret position and bypass localization
 
@@ -1621,7 +1628,7 @@ subtly wrong.
 
 ### 7.10 The wire method surface, enumerated
 
-**Twenty-seven methods.** The table is derived from the generated file descriptor, so it is what
+**Twenty-six methods.** The table is derived from the generated file descriptor, so it is what
 `Proto/dataservices.v1.proto` compiles to rather than a summary of intent. Note the relationship to
 §7.9: the legacy's *arities* do not become separate RPCs. A legacy method that exists in four arities
 becomes **one** RPC whose request carries the optional fields those arities differ by, because an
@@ -2480,7 +2487,7 @@ thirteen RPCs the service declares**, in definition order, with locators into th
 | 1 | `BeginSession` | `BeginSessionRequest` → `BeginSessionResponse` | `of_connect` [`:L73`, `:L111`] | Resolves the descriptor **through the reference-counted pool** and returns a session handle. **A broken session is rejected up front with `RetCode.E_INVALID_TRANSACTION`** [`:L113`] |
 | 2 | `EndSession` | `EndSessionRequest` → `EndSessionResponse` | `of_disconnect` [`:L74`] | Releases the pool reference. **Whether the session is parked or closed is the pool's decision, not the caller's** — see [§11.3](#113-pool-lifecycle-reference-counting-and-a-seamed-clock) |
 | 3 | `GetTransactionData` | `GetTransactionDataRequest` → `GetTransactionDataResponse` | `of_gettransdata`, both overloads [`:L92`, `:L93`] | **Returns the view type, which has no password field at all** — this is the mechanism enforcing the write-only rule of [§11.2](#112-the-transaction-descriptor-mirrors-the-legacy-structure-field-for-field), rather than a redaction applied on the way out |
-| 4 | `SetAutoCommit` | `SetTransactionAutoCommitRequest` → `SetTransactionAutoCommitResponse` | the session autocommit flag [`:L88`] | **A plain boolean — not C-07's three-valued commit mode.** The two must not be conflated: the same words name different types on the two contracts |
+| 4 | `SetAutoCommit` | `SetTransactionAutoCommitRequest` → `SetTransactionAutoCommitResponse` | the session autocommit flag [`:L88`] | **A plain boolean — not C-07's three-valued commit mode.** The two must not be conflated: the same words name different types on the two contracts. **And it can answer `E_DB_ERROR`, which is a port-created arm rather than a legacy one:** moving out of autocommit obliges the server to open an *explicit* transaction, because .NET has no implicit one after connecting, so the provider can refuse the transition — `OK` therefore means the mode is in force **and** a transaction is open, and the statement doors refuse rather than apply a write outside the transaction the mode promised |
 | 5 | `AutoCommit` | `AutoCommitRequest` → `AutoCommitResponse` | `of_autocommit` [`:L88`, `:L370-L380`] | Commit-or-rollback decided **by statement status**, preserved as three arms |
 | 6 | `Commit` | `CommitRequest` → `CommitResponse` | `of_commit`, both overloads [`:L79`, `:L89`, `:L240-L257`] | **Auto-rollback defaults to TRUE when unset.** **Returns `RetCode.FAILED` when autocommit is already on** [`:L240`] and `E_INVALID_TRANSACTION` when broken; on failure it rolls back if the auto-rollback flag is set [`:L250-L252`] |
 | 7 | `Rollback` | `RollbackRequest` → `RollbackResponse` | `of_rollback` [`:L76`] | **The same two guards as `Commit`, returning different codes** — the asymmetry is legacy behaviour and is preserved |
@@ -2654,7 +2661,7 @@ statuses back. The status mapping is the substantive part:
 | `NotFound` | `404` | |
 | `Unauthenticated` | `401` | |
 | `PermissionDenied` | `403` | |
-| `Unimplemented` | `501` | Including the four reserved routes of [§13](#13-the-four-reserved-gateway-extension-points) |
+| `Unimplemented` | `500` | An upstream reporting a method its own contract publishes as unimplemented — deployment or version skew, carrying `E_NO_IMPLEMENTATION` on `retCode`. **Never `501`**: that status belongs exclusively to the four reserved routes of [§13](#13-the-four-reserved-gateway-extension-points), and no projected operation declares it |
 | `ResourceExhausted` | `429` | A capacity ceiling declining to take more work, carrying the legacy `E_BUSY` code. A refusal rather than a fault |
 | `Unavailable` | `503` | The upstream answered that it is not currently serving — distinct from `502`, where it answered nothing at all |
 | `DeadlineExceeded` | `504` | The deadline this service sets on the outbound call elapsed |
@@ -2689,15 +2696,39 @@ strict ordering, an unknown validation session, a transaction the upstream will 
 400-class group DataServices' unary outcome map spells that way — and still projects to `400` through the
 canonical mapping.
 
-**Two rows are translated but declared nowhere, each for a checkable reason.** `AlreadyExists` is produced
+**One row is translated but declared nowhere, for a checkable reason.** `AlreadyExists` is produced
 by exactly one method in the estate — the macro channel reporting that a channel is already attached — and
 that method is bidirectional and therefore **not projected**, so no REST operation can return it; the
-translation arm exists so a future projection could not fall through to `500`. `Unimplemented` from a
-projected method would mean an upstream does not implement a method the projection publishes, which under
-explicitly versioned contracts is a deployment defect rather than an outcome; the `501` that does appear
-belongs to the four reserved routes, which produce it deliberately. `503` additionally appears on `/health`
-on C-10's own account rather than from this mapping, and carries the aggregate report rather than a problem
-document.
+translation arm exists so a future projection could not fall through to `500`. `503` additionally appears on
+`/health` on C-10's own account rather than from this mapping, and carries the aggregate report rather than a
+problem document.
+
+**`501` is not in the projected mapping at all, and the reason is a constraint rather than an omission.**
+It belongs exclusively to the four reserved routes of [§13](#13-the-four-reserved-gateway-extension-points),
+whose whole purpose is to declare that an entire capability area is unbuilt (**C-D**) — so it must not be
+reachable from an operation this document publishes as implemented, and
+`gateway.v1.yaml` declares it on the eight reserved-route operations and on no other. Two conditions were
+answering it and now answer `500`:
+
+- **An upstream `Unimplemented`.** A method the projection publishes reported unimplemented by the
+  deployment answering is deployment or version skew, not a capability boundary.
+- **The in-band legacy pair `E_NO_SUPPORT` (−2000) and `E_NO_IMPLEMENTATION` (−2001).** These are reachable
+  in ordinary operation, which is what makes the distinction matter rather than being academic: the pinyin
+  comparison is blocked because its lookup table exists only inside the closed binary
+  ([§14.4](#144-narrow-with-a-defined-error-never-widen-with-a-guess)), the column-expression engine
+  declines a macro or foreign-variable arm, and a supplied `pinyinFlags` mask that disagrees with the
+  deployment's configured one is refused rather than silently ignored.
+
+Both now answer **`500` with a `ProblemDetails` body carrying the originating legacy code on `retCode`** —
+the status every projected operation already declares, so a generated client has a branch for it. This is
+the identical resolution [§5.3](#53-the-eight-weak-defaults-are-preserved-and-annotated-never-corrected)
+applies to C-02's two symmetric-cipher narrowings, and for the identical reason: the legacy vocabulary
+carries the distinction the status cannot. It is not `400`, because the request is well formed and the
+limitation is this port's rather than the caller's. It is not `502`, because no upstream failed — it
+answered normally and reported a capability it does not have.
+`GatewayContractTests.NotImplementedIsDeclaredOnlyByTheReservedDeferredCapabilityOperations` asserts the
+exclusivity in both directions, and the two projections' in-band suites pin the `500`, so this paragraph is
+checkable rather than a convention.
 
 **Every unary and every server-streaming method of C-03 and C-04 is projected, and the three
 bidirectional ones are not.** That is thirty-nine projected operations: fifteen of C-03's sixteen and
@@ -3177,8 +3208,13 @@ vetoable chain is worse than none, because a consumer cannot tell what it did no
   C-09 and C-10 are the external surface; C-01 through C-08 are internal edges, and Gateway's projection
   is the shock absorber between them.
 - **A narrowing is a breaking change and requires a version bump**, even when it removes only a field.
-  The three narrowings of [§14.4](#144-narrow-with-a-defined-error-never-widen-with-a-guess) are baked
-  into `v1` for exactly this reason: they are established before anything consumes it.
+  The six narrowings of [§14.4](#144-narrow-with-a-defined-error-never-widen-with-a-guess) — the one
+  behavioural narrowing and the five that narrow a field or a domain — are baked into `v1` for exactly
+  this reason: they are established before anything consumes it. Do not confuse that register with the
+  **three** C-02 capability narrowings N1 to N3 of
+  [§5.3](#53-the-eight-weak-defaults-are-preserved-and-annotated-never-corrected)'s neighbouring
+  subsection, which are a different thing counted separately: those are cells the legacy *declared* and
+  whose parameters live only inside the closed binary, not decisions this boundary took.
 
 ### 16.2 Reviewer checklist
 
@@ -3212,6 +3248,15 @@ worth answering first, in the order in which getting them wrong is most expensiv
    ([§13.1](#131-the-compliance-note-stated-so-it-is-auditable-rather-than-argued))?
 
 ### 16.3 Regenerating the counts, because a hand-maintained inventory has already drifted once
+
+**The gRPC half of that regeneration is now also enforced mechanically**, because a recipe only runs
+when somebody remembers to run it. `DocumentationCoherenceTests` in
+`shared/PowerFramework.Contracts.Tests` reads §2's register and compares every gRPC row against the
+compiled descriptor, asserts that no row is missing and none is invented, and separately asserts that
+every total this document states as a service's *complete* surface is a total some service actually has
+— which is what makes a stale restatement in prose fail a build rather than wait for a reviewer. The
+same suite holds §14.4's narrowing count to the register §14.4 itself enumerates. The commands below
+remain the way to produce the corrected numbers; the tests are what make their absence visible.
 
 Every method and route count in this document is a **derived** figure, and a derived figure written by
 hand goes stale silently. This document has drifted on the same four totals TWICE and in opposite
@@ -3318,10 +3363,15 @@ this document, and each of those changed the schema, this document, or both:
 
 Stated plainly, because a reference document that overclaims is worse than one with gaps:
 
-- **It does not claim the container bring-up was verified.** Whether the orchestrated stack starts, and
-  whether the readiness gate of [§12.2](#122-c-10--health-and-readiness) fires in the documented order,
-  is asserted by container-definition and manifest review plus CI. See
-  [`ARCHITECTURE.md`](ARCHITECTURE.md) §10.6, which records what was and was not exercised.
+- **It makes no execution claim of its own, in either direction.** One document reports execution status
+  for this repository and this is not it:
+  [`../orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised)
+  records the bring-up gate by gate and is equally explicit about what that run did not cover. This
+  document therefore neither asserts nor denies that the orchestrated stack starts or that the readiness
+  gate of [§12.2](#122-c-10--health-and-readiness) fires in the documented order — it defers, because an
+  execution claim restated in a second document is a second claim to keep true and an earlier revision of
+  this section carried one that had already gone stale: it stated that no `orchestration/docker-compose.yml`
+  existed to assemble the four images, which stopped being true when the manifest landed.
 - **It does not claim that any of these ten contracts has been exercised across a live network
   boundary.** Three states have to be separated, because they are three different amounts of evidence:
   - **Specified and expressed as a schema — all ten.** Five definition files exist —
@@ -3338,14 +3388,21 @@ Stated plainly, because a reference document that overclaims is worse than one w
     documents and the C-02 crypto surface; DataServices carries the two C-03/C-04 gRPC services;
     Persistence carries the four C-05..C-08 gRPC services. All four applications build with zero
     warnings, and each has a test project that exercises its handlers against an in-process host.
-  - **Not executed as a running four-service stack, and therefore not demonstrated end to end.** This is
-    the state that matters for a contract inventory and it is the one still open. All four container
-    definitions exist and so does `.github/workflows/ci.yml`, but no `orchestration/docker-compose.yml`
-    exists to assemble them — so no request has ever crossed a real network boundary between two of these
-    services, no aggregated `/health` has answered against three live upstreams,
-    and **no characterization parity result exists** ([`docs/PARITY.md`](PARITY.md)). Every statement in
-    this document about what happens *between* services is target semantics verified in-process, not an
-    observation of the deployed system.
+  - **Assembled and brought up as a four-service stack — but not one of C-03 to C-08 has been invoked
+    across it.** This is the state that matters for a contract inventory and it is the one still open, and
+    it is now open for a narrower reason than it once was. All four container definitions exist, so does
+    `.github/workflows/ci.yml`, and so does `orchestration/docker-compose.yml`; the bring-up recorded by
+    [`../orchestration/README.md` §10.1](../orchestration/README.md#101-the-stack-has-been-brought-up-and-here-is-exactly-what-was-observed)
+    reached all four services healthy in the documented order, answered the four `/health` gates over TLS,
+    saw Gateway's aggregate report healthy against its three live upstreams, and exercised C-01 issuance
+    and C-10 on the shared-secret scheme. What has **not** happened is the part this document is about:
+    [§10.2](../orchestration/README.md#102-what-has-not-been-exercised-and-none-of-it-is-glossed) records
+    that **no gRPC RPC has been invoked** — every listener was proven reachable at the TLS layer from its
+    legitimate in-network caller, and no C-03 to C-08 call has crossed a container boundary. **No
+    characterization parity result exists** either ([`docs/PARITY.md`](PARITY.md)). So every statement in
+    this document about the *content* of what passes between services is target semantics verified
+    in-process rather than an observation of the deployed system, even though the boundary those messages
+    would cross has now been stood up and probed.
 - **It does not claim byte-exact parity has been achieved anywhere.** It states where byte-exactness is
   the *criterion* — the paging output of [§8.4](#84-paging-parity-is-byte-exact-generated-sql) and the
   count wrapper of [§8.5](#85-the-count-wrapper-and-its-short-circuit) — and leaves the demonstration to

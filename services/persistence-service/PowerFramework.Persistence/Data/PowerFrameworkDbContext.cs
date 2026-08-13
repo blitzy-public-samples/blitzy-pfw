@@ -166,7 +166,7 @@
 //  THE THREE DIFFERENCES BETWEEN THIS SCHEMA AND THE LEGACY DDL, CLASSIFIED (C-K)
 //  ------------------------------------------------------------------------------------------------
 //  Recognising which differences are OBSERVABLE and which are not is the whole job on this file. All
-//  three below were MEASURED on SDK 10.0.302 with EF Core 10.0.10 by generating the migration and
+//  three below were MEASURED on the pinned SDK with EF Core 10.0.11 by generating the migration and
 //  reading the SQL, not reasoned about:
 //
 //    1. AUTOINCREMENT - OBSERVABLE, THEREFORE SUPPRESSED. Detail at the Id configuration below.
@@ -199,7 +199,7 @@
 //  public class:
 //
 //    * A PUBLIC type here would FAIL AN EXISTING TEST.
-//      services/persistence-service/PowerFramework.Persistence.Tests/CompanyEntityTests.cs:483-493
+//      CompanyEntityTests.TheDataNamespace_HoldsExactlyOneEntityBecauseOnlyOneTableHasDdlEvidence
 //      asserts by reflection that the public, non-abstract classes of namespace
 //      PowerFramework.Persistence.Data are EXACTLY [CompanyEntity] - the no-fabricated-database
 //      constraint expressed as an enforceable census rather than an aspiration (C-E). Making this
@@ -453,7 +453,7 @@ namespace PowerFramework.Persistence.Data
             //  implicit INTEGER PRIMARY KEY rowid aliasing to assign values.
             //
             //  EF Core's SQLite provider, BY CONVENTION, emits AUTOINCREMENT for an integer key with
-            //  generated values - measured on EF Core 10.0.10, where the default value-generation
+            //  generated values - measured on EF Core 10.0.11, where the default value-generation
             //  strategy for this property resolves to Autoincrement. That is an OBSERVABLE
             //  divergence on two counts, not a cosmetic one:
             //
@@ -482,6 +482,18 @@ namespace PowerFramework.Persistence.Data
             //  call naming the provider's autoincrement or value-generation annotation is ignored
             //  here, and ValueGeneratedNever would remove the keyword only by also giving up the
             //  identity round trip, which dw_sqlite.srd:L8 requires.
+            //
+            //  THE CALL MUST ALSO SURVIVE IN THE GENERATED SNAPSHOT AND DESIGNER FILES, AND A
+            //  REGENERATION DOES NOT PUT IT THERE. EF's snapshot WRITER treats
+            //  SqliteValueGenerationStrategy.None as a default and omits it, while the snapshot
+            //  READER interprets that same absence as Sqlite:Autoincrement = true. Measured both ways
+            //  against this model: with the call present in Data/Migrations, `migrations add` yields
+            //  an empty Up and Down; with it absent, `migrations add` yields
+            //  AlterColumn "ID" ... OldAnnotation("Sqlite:Autoincrement", true) and the next migration
+            //  reintroduces the keyword. So after any regeneration the line has to be restored by hand
+            //  in Data/Migrations/PowerFrameworkDbContextModelSnapshot.cs and
+            //  Data/Migrations/20260101000000_InitialCreate.Designer.cs, and it must never be deleted
+            //  from either as redundant.
             // ------------------------------------------------------------------------------------
             id.Metadata.SetValueGenerationStrategy(SqliteValueGenerationStrategy.None);
 

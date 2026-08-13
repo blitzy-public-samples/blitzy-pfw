@@ -176,8 +176,8 @@
 //
 //  NO JSON AND NO XML (C-D). The changeset payload is the PUBLISHED persistence.v1.CarrierState
 //  message, and re-expressing it as document serialization would reach into the deferred Documents
-//  parser family, which is forbidden outright. It used to be an opaque binary blob written with
-//  BinaryWriter, and that was the defect a review found: a format owned privately here cannot be
+//  parser family, which is forbidden outright. An opaque binary blob written with BinaryWriter is the
+//  tempting shape and it is a defect: a format owned privately here cannot be
 //  implemented by a consumer that references only the contracts project. Protobuf's own canonical
 //  encoding is deterministic byte-for-byte for equal input, which is what a golden-master comparison
 //  requires, and it is a published format rather than a private one.
@@ -229,16 +229,7 @@
 //        end is the last valid row, not one past it. Passed through unchanged.
 //
 //  ============================================================================================
-//  RULES POSITION
-//  ============================================================================================
-//  review_rules returns exactly one line, "No user rules provided.", so NO user-specified rule
-//  governs this file, none is invented here, and the absence is not treated as licence to lower the
-//  bar. The enterprise-standard baseline applies in their place and the binding constraints are the
-//  refactor plan's own non-rule inventory. Those bearing on this file are cited inline where each is
-//  discharged: C-B, C-C, C-D, C-E, C-H, C-I, C-K and risk R9 are each cited at the site that
-//  satisfies them, and C-A, C-F, C-G, C-J and C-L in the self-audits that follow. All twelve
-//  constraints are accounted for; none is skipped and none is invented.
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  C-F / C-G SELF-AUDIT: no key, credential, token, password, connection string, statement text or
 //  secret-shaped literal appears anywhere in this file. The payload is opaque application data and
 //  is never logged - there is no logger here at all.
@@ -474,10 +465,7 @@ internal sealed class ChangesetChunk
     /// <summary>
     /// Creates a chunk.
     /// </summary>
-    /// <param name="payload">
-    /// The serialized changeset. Empty is legal and MEANS "clear the target" on the receiving side;
-    /// see <c>ws_objects/pfw.thread.ext.pbl.src/n_cst_threading_task_sqlquery.sru:L207-L210</c>.
-    /// </param>
+    /// <param name="state">The carrier state travelling with the payload, or <see langword="null"/> when none is carried.</param>
     /// <param name="chunkCount">The total number of chunks in this sequence. One-based domain.</param>
     /// <param name="chunkIndex">This chunk's ONE-BASED index; the first chunk is 1, never 0.</param>
     /// <exception cref="ArgumentOutOfRangeException">
@@ -508,8 +496,8 @@ internal sealed class ChangesetChunk
     /// <remarks>
     /// <para>
     /// TYPED RATHER THAN OPAQUE BYTES, AND THE CHANGE IS NOT INTERNAL TIDYING. The published
-    /// <c>persistence.v1.QueryDataChunk.state</c> used to be a <c>bytes</c> field whose format was
-    /// declared the codecs' private concern on both sides, which left DataServices - which references
+    /// <c>persistence.v1.QueryDataChunk.state</c> is deliberately not a <c>bytes</c> field whose format is
+    /// the codecs' private concern on both sides: that shape leaves DataServices - which references
     /// only the contracts project - unable to decode it without duplicating this file or taking a
     /// project reference on Persistence internals. Section 2b of <c>persistence.v1.proto</c> records
     /// the full reasoning.
@@ -995,13 +983,13 @@ internal interface IChangesetPayloadCodec
 /// </summary>
 /// <remarks>
 /// <para>
-/// WHY THIS IS A PROJECTION AND NOT A SERIALIZER ANY MORE. This type used to write an opaque
-/// little-endian byte format of its own invention, and the published contract described the resulting
-/// field as "opaque - its internal format is the changeset and full-state codecs' concern on both
-/// sides". That is not implementable across the boundary it sat on: DataServices references ONLY
-/// <c>shared/PowerFramework.Contracts</c> (constraint C-A), so a format owned privately here left the
+/// WHY THIS IS A PROJECTION AND NOT A SERIALIZER. Writing an opaque
+/// little-endian byte format of its own invention here, with the published contract describing the
+/// resulting field as "opaque - its internal format is the changeset and full-state codecs' concern on
+/// both sides", is not implementable across the boundary this type sits on: DataServices references ONLY
+/// <c>shared/PowerFramework.Contracts</c> (constraint C-A), so a format owned privately here leaves the
 /// consumer with two choices, both forbidden - duplicate this file, or take a project reference on
-/// Persistence internals. Section 2b of <c>persistence.v1.proto</c> records the finding and the
+/// Persistence internals. Section 2b of <c>persistence.v1.proto</c> records the reasoning and the
 /// resolution; this type is the send-and-receive half of it.
 /// </para>
 /// <para>
@@ -1140,8 +1128,9 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
         //  INVERTED relative to the source [n_cst_thread_task_sqlupdate.sru:L235-L238], so a mis-filed
         //  row is read in the wrong direction and pairs with the wrong data.
         //
-        //  AND THE PROCESSING KIND IS RECONCILED RATHER THAN ADOPTED. It used to be read and discarded
-        //  under the reading that "detection is the caller's business". It is not: the two sides built
+        //  AND THE PROCESSING KIND IS RECONCILED RATHER THAN ADOPTED. Reading and discarding it under the
+        //  reading that "detection is the caller's business" is the tempting shortcut. It is not the
+        //  caller's business: the two sides build
         //  their carriers from their own definitions, so a disagreement means they disagree about which
         //  serialization is even applicable, and merging a crosstab image into a tabular carrier is the
         //  outcome of trusting the sender. An UNASSIGNED target - a carrier whose data object has not
@@ -1418,6 +1407,7 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
     /// Reads one inbound row's columns into carrier values, rejecting a malformed one.
     /// </summary>
     /// <param name="row">The inbound row.</param>
+    /// <param name="baselineTrust">Whether the baseline values carried by the row may be trusted.</param>
     /// <param name="columns">The columns, in payload order.</param>
     /// <returns><see langword="false"/> when the row is structurally invalid.</returns>
     /// <remarks>
@@ -1473,14 +1463,15 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
     /// </para>
     /// <para>
     /// 🔴 <b>AND WHERE NO ORIGINAL WAS STATED THE COLUMN READS UNCHANGED, UNLESS THE ROW IS
-    /// INSERT-SHAPED.</b> The row's statement used to stand for such a column on the reasoning that a
-    /// column with no baseline cannot be measured against one. The premise is true and the conclusion was
-    /// backwards for an update: the column was stamped modified, so it entered the generated SET list,
-    /// while the predicate beside it compared that column against the value being written - so a caller
+    /// INSERT-SHAPED.</b> Letting the row's statement stand for such a column is the tempting reading, on
+    /// the grounds that a column with no baseline cannot be measured against one. The premise is true and
+    /// the conclusion is backwards for an update: the column is stamped modified, so it enters the
+    /// generated SET list, while the predicate beside it compares that column against the value being
+    /// written - so a caller
     /// that changed a value and omitted its original wrote to whichever row held the NEW value, and a
     /// caller that changed a KEY that way bypassed the <c>updatekeyinplace=no</c> DELETE-plus-INSERT path
     /// entirely. Absence of an original is the contract's own encoding of "unchanged since the baseline",
-    /// and that is now what it reads as.
+    /// and that is what it reads as.
     /// </para>
     /// <para>
     /// THE INSERT-SHAPED ARM KEEPS THE ONE CASE WHERE ADOPTING IS RIGHT. A row whose own status is
@@ -2336,7 +2327,7 @@ internal sealed class ChangesetCodec
     /// <remarks>
     /// <para>
     /// Reproduces <c>data.SetSort("")</c> and <c>data.SetFilter("")</c>
-    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L579-L580</c]. BOTH ARE
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L579-L580</c>]. BOTH ARE
     /// SET TO EMPTY, not to the not-applicable marker: an empty expression is a real answer meaning
     /// "no condition", which is exactly what the legacy installs.
     /// </para>

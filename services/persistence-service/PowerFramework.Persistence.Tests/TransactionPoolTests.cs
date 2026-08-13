@@ -98,12 +98,6 @@
 //  declared beside the suite that needs them, both named so that no reader could mistake either for a
 //  live secret, and both used only to be searched FOR in output and never disclosed by it.
 //
-//  RULES POSITION. review_rules returns exactly one line, "No user rules provided.", so no
-//  user-specified rule governs this file - stated as a finding rather than as latitude. The
-//  enterprise-standard baseline applies in their place (AAP 0.7.2): nullable and warnings-as-errors
-//  inherited from Directory.Build.props, no secret in source, and no identifier declared here departs
-//  from C# naming convention. The binding constraints are the refactor plan's own non-rule inventory -
-//  C-B, C-C, C-E, C-F, C-H and C-K bite here and each is cited at the point it applies.
 // ==================================================================================================
 
 // System.Reflection is imported LOCALLY and deliberately: GlobalUsings.cs states that it is not made
@@ -2550,6 +2544,89 @@ public sealed class TransactionPoolTests
     }
 
     /// <summary>
+    /// 🔴 THE MODE TRANSITION REPORTS THE ENGINE'S OUTCOME instead of answering success regardless, and a
+    /// failure arrives with the provider's own code and text on the statement state.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>WHAT THE SILENT VERSION COST.</b> Moving out of auto-commit obliges the engine to open an
+    /// explicit transaction - .NET has no implicit one after connecting the way PowerBuilder does - and the
+    /// failure of that begin used to be dropped. A caller then held a session that REPORTED
+    /// non-auto-commit mode while every write applied itself immediately and a later rollback undid
+    /// nothing, with every response saying success. Reporting it is therefore not extra diagnostics; it is
+    /// the difference between a transactional promise and a false one.
+    /// </para>
+    /// <para>
+    /// <b>THE STAMP IS ASSERTED, NOT JUST THE CODE.</b> <c>E_DB_ERROR</c> travels to the wire with a driver
+    /// payload that the handler reads from <see cref="IPooledTransaction.CaptureError"/>, which reads the
+    /// five statement status values - so a code returned without stamping would publish a database error
+    /// whose payload was two zeroes and an empty string. <c>SQLDBCode</c> and <c>SQLErrText</c> are the two
+    /// the oracle copies [<c>n_cst_thread_task_sqlbase.sru:L175-L176</c>].
+    /// </para>
+    /// <para>
+    /// <b>AND A SUCCESS LEAVES THE STATE ALONE</b>, because <c>SQLCode</c> describes the last SQL
+    /// OPERATION and a mode change is not one: overwriting it would erase the row count a caller's own
+    /// preceding statement had just reported, which is the same defect the commit path's row-count
+    /// preservation exists to avoid.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheModeTransitionProjectsTheEnginesOutcomeAndStampsAFailure()
+    {
+        FakeTimeProvider clock = new(ClockStart);
+
+        // A SUCCESS FIRST, over a state a preceding statement left behind, so the no-touch half is
+        // observable rather than assumed.
+        FakeEngine succeeding = new();
+        using PooledTransaction moved = new(succeeding, clock);
+
+        SqlState preceding = new(0, 0, 7, string.Empty, string.Empty);
+        moved.StampSqlState(in preceding);
+
+        Assert.Equal(RetCode.OK, moved.TrySetAutoCommit(true));
+        Assert.True(moved.AutoCommit);
+        Assert.True(succeeding.AutoCommit);
+        Assert.Equal(7L, moved.SqlNRows);
+        Assert.Equal(0L, moved.SqlCode);
+
+        // AND A FAILURE, which the engine can only be driven to through a scripted double: the shipped
+        // engine's begin is DEFERRED precisely so that a second session does not invent a lock conflict the
+        // oracle never had, and a deferred begin has nothing left to fail on.
+        FakeEngine refusing = new()
+        {
+            // STARTED IN AUTO-COMMIT so the call below is a genuine switch OUT of it, which is the
+            // direction that has to open a transaction and therefore the direction that can fail.
+            AutoCommit = true,
+            SetAutoCommitResult = SqlState.Failed(RetCode.SQLITE_BUSY, "database is locked"),
+        };
+
+        using PooledTransaction refused = new(refusing, clock);
+
+        Assert.Equal(RetCode.E_DB_ERROR, refused.TrySetAutoCommit(false));
+
+        // The provider's own values reached the statement state, so the driver payload is real.
+        Assert.Equal(-1L, refused.SqlCode);
+        Assert.Equal(RetCode.SQLITE_BUSY, refused.SqlDbCode);
+        Assert.Equal("database is locked", refused.SqlErrText);
+
+        DbErrorData captured = refused.CaptureError();
+
+        Assert.Equal(RetCode.SQLITE_BUSY, captured.SqlDbCode);
+        Assert.Equal("database is locked", captured.SqlErrText);
+
+        // THE ENTRY IS NOT CONDEMNED. A refused begin says nothing about the connection's health, and
+        // breaking the transaction would evict a connection the pool can still serve - so the verbs that
+        // answer E_INVALID_TRANSACTION for a broken entry must not start doing so here. The mode the caller
+        // asked for is also in force, which is why this rollback is not the auto-commit refusal either.
+        Assert.False(refused.AutoCommit);
+        Assert.Equal(RetCode.OK, refused.Rollback());
+
+        // And the state-preserving rollback left the fault visible, so the stamped payload is not erased by
+        // the very next verb [trans :L176-L180].
+        Assert.Equal(RetCode.SQLITE_BUSY, refused.SqlDbCode);
+    }
+
+    /// <summary>
     /// ⚠ THE LAST STATEMENT'S ROW COUNT SURVIVES A COMMIT, because a commit affects no rows and therefore
     /// has no row count of its own to publish.
     /// </summary>
@@ -2950,8 +3027,8 @@ public sealed class TransactionPoolTests
     }
 
     /// <summary>
-    /// THE FINDING ITSELF. An earlier entry's removal renumbers a later one's position, and the lease
-    /// still addresses the entry it was issued for while the stored POSITION no longer does.
+    /// THE HAZARD ITSELF. An earlier entry's removal renumbers a later one's position, so a lease
+    /// still addresses the entry it was issued for while a stored POSITION addresses a different one.
     /// </summary>
     [Fact]
     public void ALeaseSurvivesTheRenumberingThatAStoredPositionDoesNot()
@@ -4234,6 +4311,20 @@ public sealed class TransactionPoolTests
 
         public bool AutoCommit { get; set; }
 
+        /// <summary>Moves the auto-commit mode and answers <see cref="RetCode.OK"/>.</summary>
+        /// <param name="autoCommit">The mode to put in force.</param>
+        /// <returns>Always <see cref="RetCode.OK"/>.</returns>
+        /// <remarks>
+        /// ROUTED THROUGH THE PROPERTY, so this double moves exactly the state the assignment moves. There is
+        /// no engine beneath it whose begin could fail, which is the contract's own nothing-to-do case.
+        /// </remarks>
+        public long TrySetAutoCommit(bool autoCommit)
+        {
+            AutoCommit = autoCommit;
+
+            return RetCode.OK;
+        }
+
         public long Connect(CancellationToken cancellationToken = default)
         {
             ConnectCalls++;
@@ -4419,6 +4510,32 @@ public sealed class TransactionPoolTests
         public string Dbms { get; set; } = "SQLITE";
 
         public bool AutoCommit { get; set; }
+
+        /// <summary>What <see cref="TrySetAutoCommit(bool)"/> answers - the C-08 mode transition's outcome.</summary>
+        /// <remarks>
+        /// SCRIPTABLE BECAUSE THE REAL ENGINE'S FAILURE ARM IS NOT REACHABLE THROUGH ITS OWN SURFACE. Its
+        /// begin is deferred, which is what keeps a second session from inventing a lock conflict the oracle
+        /// does not have - and a deferred begin has nothing left to fail on. Scripting it here is the only way
+        /// to drive the projection a failed transition must produce.
+        /// </remarks>
+        internal SqlState SetAutoCommitResult { get; init; } = SqlState.Succeeded();
+
+        /// <summary>
+        /// Moves the auto-commit mode and answers <see cref="SetAutoCommitResult"/>.
+        /// </summary>
+        /// <param name="autoCommit">The mode to put in force.</param>
+        /// <returns>Whatever this double was scripted to answer.</returns>
+        /// <remarks>
+        /// THE MODE IS STILL RECORDED ON THE FAILURE PATH, deliberately: the real engine keeps the mode the
+        /// caller asked for and refuses to execute a statement until the transaction it promises exists, so a
+        /// double that skipped the assignment when it failed would model a state the engine cannot be in.
+        /// </remarks>
+        public SqlState TrySetAutoCommit(bool autoCommit)
+        {
+            AutoCommit = autoCommit;
+
+            return SetAutoCommitResult;
+        }
 
         public void ApplyConnectionFields(in TransactionData descriptor)
         {
@@ -4618,6 +4735,20 @@ public sealed class TransactionPoolTests
         public string SqlReturnData => string.Empty;
 
         public bool AutoCommit { get; set; }
+
+        /// <summary>Moves the auto-commit mode and answers <see cref="RetCode.OK"/>.</summary>
+        /// <param name="autoCommit">The mode to put in force.</param>
+        /// <returns>Always <see cref="RetCode.OK"/>.</returns>
+        /// <remarks>
+        /// ROUTED THROUGH THE PROPERTY, so this double moves exactly the state the assignment moves. There is
+        /// no engine beneath it whose begin could fail, which is the contract's own nothing-to-do case.
+        /// </remarks>
+        public long TrySetAutoCommit(bool autoCommit)
+        {
+            AutoCommit = autoCommit;
+
+            return RetCode.OK;
+        }
 
         public void StampSqlState(in SqlState state) => _ = state;
 

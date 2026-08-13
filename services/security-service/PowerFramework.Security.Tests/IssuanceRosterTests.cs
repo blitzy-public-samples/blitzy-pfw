@@ -106,9 +106,9 @@ internal static class RosterFixture
 
         options.Audiences.Add(GrantedAudience);
 
-        // NO PERMISSION IS DECLARED ON THE ENTRY, because the type no longer carries one: the per-entry
-        // Audiences and Scopes lists it used to have were never consulted by any decision and are gone.
-        // GrantedAudience and GrantedScope survive as the values the MATRIX rows in the sibling
+        // NO PERMISSION IS DECLARED ON THE ENTRY, because the type carries no member for one: a
+        // credential-directory entry names a subject and a secret key and nothing a decision reads as a
+        // permission. GrantedAudience and GrantedScope are the values the MATRIX rows in the sibling
         // authorization tests grant, which is the surface that decides.
         options.Clients.Add(new SecurityClientOptions
         {
@@ -307,11 +307,11 @@ public sealed class IssuanceRosterValidationTests
                 client.SecretConfigurationKey = "TEST:ROSTER:SECRET";
                 break;
 
-            // THERE ARE NO PERMISSION ROWS HERE ANY MORE. The eight this theory used to carry - an empty
-            // audience set, a blank audience, an empty scope set, a blank, spaced, quoted, over-long or
-            // duplicated scope - were rules about `Security:Clients[n]:Audiences` and `:Scopes`, lists no
-            // decision ever read. The lists are gone and the rules moved with the permission they govern:
-            // CallerAuthorizationTests asserts every one of them on the matrix.
+            // THERE ARE DELIBERATELY NO PERMISSION ROWS HERE. Eight belong to this shape by appearance - an
+            // empty audience set, a blank audience, an empty scope set, a blank, spaced, quoted, over-long or
+            // duplicated scope - and every one of them is a rule about a PERMISSION, which this surface does
+            // not state. They live with the permission they govern: CallerAuthorizationTests asserts all
+            // eight on the matrix.
 
             default:
                 Assert.Fail($"The row '{fault}' names no fault this test knows how to apply.");
@@ -355,8 +355,8 @@ public sealed class IssuanceRosterValidationTests
         Assert.Empty(RosterFixture.Validate(shipped));
 
         // EVERY ENTRY DECLARES A SUBJECT AND A SECRET KEY NAME AND NOTHING ELSE, which is the whole of
-        // what this section is now. There is no per-entry permission list to cross-check against the
-        // deployment-wide audience roster, because that cross-check was between two copies of one
+        // what this section is. There is no per-entry permission list to cross-check against the
+        // deployment-wide audience roster, because such a cross-check compares two copies of one
         // statement; the matrix carries the statement once and its own shipped rows are asserted by
         // CallerAuthorizationTests.
         Assert.All(shipped.Clients, client => Assert.False(string.IsNullOrWhiteSpace(client.Subject)));
@@ -391,11 +391,10 @@ public sealed class IssuanceClientRegistryTests
 {
     /// <summary>A correct credential authenticates and resolves to the caller's own identity.</summary>
     /// <remarks>
-    /// AN IDENTITY, AND DELIBERATELY NOTHING MORE. The resolved entry used to carry frozen
-    /// <c>PermittedAudiences</c> and <c>PermittedScopes</c> sets that no decision read; authentication
-    /// answers who the caller is, and what that caller may obtain is the matrix's answer. So the
-    /// assertions here are the subject, the fact that a secret was resolved for it, and nothing that
-    /// would read as a permission.
+    /// AN IDENTITY, AND DELIBERATELY NOTHING MORE. Authentication answers who the caller is; what that
+    /// caller may obtain is the matrix's answer. Frozen <c>PermittedAudiences</c> and <c>PermittedScopes</c>
+    /// sets on the resolved entry would be read by no decision, so the assertions here are the subject, the
+    /// fact that a secret was resolved for it, and nothing that would read as a permission.
     /// </remarks>
     [Fact]
     public void ACorrectCredentialAuthenticates()
@@ -412,8 +411,8 @@ public sealed class IssuanceClientRegistryTests
 
         // AND IT CARRIES NO PERMISSION, WHICH IS ASSERTED RATHER THAN ASSUMED. A resolved credential entry
         // publishes a subject and whether it has a secret, and nothing else: the permission decision belongs
-        // to the grant matrix alone, and a second surface here is what previously let the roster advertise
-        // audiences the issuer refused.
+        // to the grant matrix alone, and a second surface here is what would let the directory advertise
+        // audiences the issuer refuses.
         Assert.Equal(
             ["HasSecret", "Subject"],
             typeof(RegisteredIssuanceClient)
@@ -1164,6 +1163,7 @@ public sealed class PerCallerAuthorizationTests
     /// Every refusal outcome projects onto the contract's forbidden status with its own sentence.
     /// </summary>
     /// <param name="outcome">The outcome to drive.</param>
+    /// <param name="shape">The shape being asserted.</param>
     /// <remarks>
     /// DRIVEN THROUGH THE HANDLER rather than through the pipeline, so every arm of its switch is
     /// reachable by a row - which is what makes the per-service coverage gate attainable on logic that a

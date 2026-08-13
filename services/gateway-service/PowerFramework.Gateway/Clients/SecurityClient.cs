@@ -264,13 +264,14 @@ public interface IServiceTokenProvider
 /// secret, no password, no API key, no client assertion, no passphrase and no key material of any
 /// kind, and there is no member one could be smuggled into either - the schema sets
 /// <c>additionalProperties: false</c> and this type has no extension bag. Caller identity is
-/// established by the TRANSPORT, through the client certificate the issuance operation requires, and
-/// never by a credential in a request body.
+/// established by the CREDENTIAL THE REQUEST PRESENTS - an HTTP Basic credential, or a trusted client
+/// certificate where a deployment terminates TLS at the issuer - and never by a credential in a
+/// request body.
 /// </para>
 /// <para>
 /// The <see cref="Subject"/> below is a CLAIM rather than a credential. The identity actually
-/// honoured is the one the presented client certificate establishes, and a mismatch between the two
-/// is refused by the service.
+/// honoured is the one the presented Basic credential or client certificate establishes, and a
+/// mismatch between the two is refused by the service.
 /// </para>
 /// <para>
 /// This is a sealed class rather than a record, deliberately. A record's compiler-generated equality
@@ -357,7 +358,7 @@ public sealed class ServiceTokenRequest
 
     /// <summary>
     /// The identity the caller is requesting a token for - a claim, checked by the service against the
-    /// identity the presented client certificate establishes.
+    /// identity the presented Basic credential or client certificate establishes.
     /// </summary>
     public string Subject { get; }
 
@@ -391,11 +392,11 @@ public sealed class ServiceTokenRequest
 /// It is a sealed class rather than a record because a record's compiler-generated
 /// <see cref="object.ToString"/> prints every member it declares. That would place the raw token in
 /// any log entry, exception message or diagnostic string that happened to format the object - the
-/// most ordinary way a credential leaks. <see cref="ToString"/> is overridden below to describe the
+/// most ordinary way a credential leaks. <c>ToString</c> is overridden below to describe the
 /// token without disclosing it, and no member of this type is ever logged by this file.
 /// </para>
 /// <para>
-/// <see cref="ExpiresAt"/> is an ABSOLUTE instant rather than the lifetime-in-seconds the wire
+/// <c>ExpiresAt</c> is an ABSOLUTE instant rather than the lifetime-in-seconds the wire
 /// carries. The conversion is done once, here, at the moment the response is read, because doing it
 /// at each point of use would re-anchor a relative value to a later clock reading every time and
 /// steadily overstate how long the credential remains valid.
@@ -456,11 +457,16 @@ public sealed class ServiceToken
     /// <paramref name="accessToken"/>, <paramref name="tokenType"/> or <paramref name="grantedScopes"/>
     /// is <see langword="null"/>.
     /// </exception>
+    /// <param name="issuedAt">
+    /// The instant this token was issued, when known. Supplied so <see cref="RenewAt"/> can bound its
+    /// margin by the token's own lifetime; omitted, the margin is applied unbounded.
+    /// </param>
     public ServiceToken(
         string accessToken,
         string tokenType,
         DateTimeOffset expiresAt,
-        IEnumerable<string> grantedScopes)
+        IEnumerable<string> grantedScopes,
+        DateTimeOffset? issuedAt = null)
     {
         ArgumentNullException.ThrowIfNull(accessToken);
         ArgumentNullException.ThrowIfNull(tokenType);
@@ -469,7 +475,73 @@ public sealed class ServiceToken
         AccessToken = accessToken;
         TokenType = tokenType;
         ExpiresAt = expiresAt;
+        IssuedAt = issuedAt;
         GrantedScopes = [.. grantedScopes];
+    }
+
+    /// <summary>
+    /// The instant this token was issued, when the issuance path knew it.
+    /// </summary>
+    /// <remarks>
+    /// Present so that <see cref="RenewAt"/> can express its margin as a fraction of the token's own
+    /// lifetime rather than as an absolute duration that a short-lived token could not afford. Null
+    /// means the lifetime is unknown, which is a legitimate state for a token reconstructed from
+    /// nothing but its expiry.
+    /// </remarks>
+    public DateTimeOffset? IssuedAt { get; }
+
+    /// <summary>
+    /// The instant from which this token should be replaced rather than reused.
+    /// </summary>
+    /// <param name="margin">
+    /// How long before expiry the token stops being offered for reuse. Bounded below by zero and, when
+    /// <see cref="IssuedAt"/> is known, above by half the token's own lifetime.
+    /// </param>
+    /// <returns>The instant at which a cached copy of this token stops being served.</returns>
+    /// <remarks>
+    /// <para>
+    /// WHY A MARGIN AT ALL, AND WHY THIS IS NOT AN INVENTED DURATION. A cache that served any token
+    /// still valid by a microsecond would attach credentials that expire IN TRANSIT: valid when read,
+    /// lapsed by the time the verifier evaluates them. The caller then meets a 401 it cannot distinguish
+    /// from a genuine authorization failure, on a call that was correctly authorized when it was made -
+    /// and retrying is the only remedy, which is exactly what a cache exists to avoid.
+    /// </para>
+    /// <para>
+    /// The margin is therefore the caller's own configured OUTBOUND REQUEST TIMEOUT: the longest a call
+    /// carrying this credential can still be in flight. A token that would not survive that window
+    /// cannot safely be attached to a new call, and one that would is safe. Nothing here is chosen - the
+    /// duration is a published setting the resilience pipeline already uses, so it is derived rather
+    /// than picked, which is the objection an earlier revision recorded against having any margin at all.
+    /// </para>
+    /// <para>
+    /// AND IT IS CAPPED AT HALF THE LIFETIME, which is what stops the margin swallowing a short-lived
+    /// token. With a 30-second margin an issuer minting 20-second tokens would produce credentials that
+    /// were never once reusable: every call would mint, the cache would serve nothing, and the issuance
+    /// edge would take the entire load - a worse failure than the one being prevented. Capping
+    /// guarantees at least the first half of every token's life is served from cache whatever the
+    /// issuer's lifetime policy is.
+    /// </para>
+    /// </remarks>
+    public DateTimeOffset RenewAt(TimeSpan margin)
+    {
+        if (margin <= TimeSpan.Zero)
+        {
+            return ExpiresAt;
+        }
+
+        TimeSpan applied = margin;
+
+        if (IssuedAt is { } issued && ExpiresAt > issued)
+        {
+            TimeSpan half = (ExpiresAt - issued) / 2;
+
+            if (applied > half)
+            {
+                applied = half;
+            }
+        }
+
+        return ExpiresAt - applied;
     }
 
     /// <summary>
@@ -504,9 +576,10 @@ public sealed class ServiceToken
     /// The scopes actually granted.
     /// </summary>
     /// <remarks>
-    /// This may be NARROWER than the requested set, and an empty set is a legitimate, successful
-    /// outcome meaning no requested scope was granted - not an error and not a malformed response.
-    /// Treating the request as authoritative is the mistake this member exists to prevent.
+    /// This is the INTERSECTION of what was requested with what the caller may hold, so it may be
+    /// NARROWER than the requested set - a normal, successful outcome rather than an error. It is never
+    /// empty: the issuer refuses an empty intersection with 403 instead of granting nothing. Treating
+    /// the request as authoritative is the mistake this member exists to prevent.
     /// </remarks>
     public IReadOnlyList<string> GrantedScopes { get; }
 
@@ -796,6 +869,29 @@ public sealed class SecurityClient : IServiceTokenProvider
     private readonly ServiceTokenCache _tokenCache;
 
     /// <summary>
+    /// How long before expiry a held token stops being offered for reuse.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE CALLER'S OWN OUTBOUND REQUEST TIMEOUT, WHICH IS WHY THIS IS A DERIVATION RATHER THAN A
+    /// CHOICE. It is the longest a call carrying this credential can still be in flight, so a token that
+    /// would not survive that window cannot safely be attached to a new call and one that would is safe.
+    /// The same setting already bounds the resilience pipeline, so no duration originates here - which
+    /// was the objection the previous no-margin comparison recorded, and it was a fair objection to an
+    /// invented number.
+    /// </para>
+    /// <para>
+    /// <see cref="ServiceToken.RenewAt"/> caps it at half the token's own lifetime, so an issuer minting
+    /// tokens shorter than this window still gets cache reuse for the first half of each one instead of
+    /// minting on every single call.
+    /// </para>
+    /// </remarks>
+    private TimeSpan RenewalMargin =>
+        _options?.Value.Outbound.RequestTimeout
+            ?? GatewayOptions.OutboundCallOptions.DefaultRequestTimeout;
+
+
+    /// <summary>
     /// Creates the client against the system clock.
     /// </summary>
     /// <param name="httpClient">
@@ -828,6 +924,7 @@ public sealed class SecurityClient : IServiceTokenProvider
     /// a test substitutes it so that expiry and reuse are exercised without waiting for real time to
     /// pass, which is what makes the behaviour reproducible rather than schedule-dependent.
     /// </param>
+    /// <param name="options">The bound options instance.</param>
     /// <param name="tokenCache">
     /// The credential store this client reads and writes. SUPPLIED BY THE COMPOSITION ROOT AS A
     /// SINGLETON, so a credential minted once is reused for as long as it is valid rather than re-minted
@@ -871,10 +968,23 @@ public sealed class SecurityClient : IServiceTokenProvider
         string cacheKey = BuildCacheKey(request);
         DateTimeOffset now = _timeProvider.GetUtcNow();
 
-        // Strictly in the future. The comparison is deliberately exact, with no margin subtracted: any
-        // margin would be an invented duration, and the contract's remedy for a credential that has
-        // lapsed is simply to ask for another - which is the branch below.
-        if (_tokenCache.Entries.TryGetValue(cacheKey, out ServiceToken? held) && held.ExpiresAt > now)
+        // RENEWED BEFORE IT LAPSES, NOT AFTER, AND THE MARGIN IS DERIVED RATHER THAN CHOSEN.
+        //
+        // This comparison used to be `held.ExpiresAt > now` - exact, with an explicit note that any
+        // margin would be an invented duration. The objection was right about invented durations and
+        // wrong about the consequence: a token still valid by a microsecond was served and attached to a
+        // new call, so it could lapse IN TRANSIT and reach the verifier expired. The caller then meets a
+        // 401 indistinguishable from a genuine authorization failure, on a call that was correctly
+        // authorized when it was made - and the only remedy is the retry a cache exists to avoid.
+        //
+        // The margin is the caller's own configured outbound request timeout: the longest a call
+        // carrying this credential can still be in flight. That is a published setting the resilience
+        // pipeline already uses, so it is derived from the deployment rather than picked here.
+        // ServiceToken.RenewAt additionally caps it at half the token's own lifetime, so a short-lived
+        // token is still served from cache for the first half of its life instead of never being
+        // reusable at all.
+        if (_tokenCache.Entries.TryGetValue(cacheKey, out ServiceToken? held)
+            && held.RenewAt(RenewalMargin) > now)
         {
             _logger.LogTrace(
                 "Reusing the held service token for subject {Subject} and audience {Audience}; it "
@@ -1145,11 +1255,16 @@ public sealed class SecurityClient : IServiceTokenProvider
             };
         }
 
+        // ISSUED-AT IS CARRIED, NOT DISCARDED, so the renewal margin can be expressed as a fraction of
+        // this token's own lifetime. Without it a fixed margin would be applied to a token of unknown
+        // length, and an issuer minting tokens shorter than the margin would produce credentials that
+        // were never once reusable.
         return new ServiceToken(
             payload.AccessToken,
             payload.TokenType,
             expiresAt,
-            ParseGrantedScopes(payload.Scope));
+            ParseGrantedScopes(payload.Scope),
+            issuedAt);
     }
 
     /// <summary>
@@ -1209,13 +1324,13 @@ public sealed class SecurityClient : IServiceTokenProvider
     /// caller already has the refusal, and everything read here only adds detail to it.
     /// </para>
     /// <para>
-    /// THREE FAILURE SHAPES ARE ABSORBED, AND THE THIRD IS THE ONE THAT WAS MISSING. A malformed body
+    /// THREE FAILURE SHAPES ARE ABSORBED, AND THE THIRD IS THE ONE A TWO-SHAPE LIST OMITS. A malformed body
     /// raises a JSON fault; a body whose declared media type has no reader raises an unsupported-type
     /// fault; and A BODY WHOSE CHARSET PARAMETER CANNOT BE RESOLVED RAISES AN INVALID-OPERATION FAULT
     /// FROM THE CONTENT READER ITSELF, before any JSON is looked at. That third shape is not exotic -
     /// a proxy or a misconfigured upstream emitting <c>charset=utf8x</c> is enough to produce it - and
-    /// leaving it unabsorbed meant a 401 or a 503 was REPLACED by an unrelated encoding complaint, so
-    /// the caller was told the wrong thing about its own request. All three now degrade identically,
+    /// leaving it unabsorbed REPLACES a 401 or a 503 with an unrelated encoding complaint, telling
+    /// the caller the wrong thing about its own request. All three degrade identically,
     /// for the same reason: none of them changes what the status code already said.
     /// </para>
     /// <para>

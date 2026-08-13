@@ -99,15 +99,10 @@
 //       the consumer's numeric parse [pfw.sra:L117], so non-assignability to PfwException is asserted
 //       as parity, not as preference.
 //
-//  RULES POSITION
-//  review_rules returns "No user rules provided." - so NO user rule governs this file, none was
-//  invented, and the absence is not read as licence to lower the bar. AAP 0.7.2 (the enterprise
-//  baseline) and AAP 0.7.3 (the twelve binding non-rule constraints) apply in their place. Cited
-//  inline where each applies: C-B (replicate behaviour and defects), C-H (every member read, both
-//  composition paths covered, warning-clean), C-K (document boundary decisions), C-C (ws_objects/**
-//  read as specification only, never opened at run time), AAP 0.4.5.3 (identifier spellings survive
-//  verbatim), AAP 0.4.5.4 (the one-based to zero-based hazard). No path under services/ is referenced
-//  and no deferred capability is named anywhere in this file (C-A, C-D).
+//  BINDING CONSTRAINTS AT THIS SITE
+//  LOCATOR CONVENTION: every bare `pfw.sra:L...` in this file means ws_objects/pfw.pbl.src/pfw.sra,
+//  the framework application - never the same-named packager object at
+//  ws_objects/pfw.pack.pbl.src/pfw.sra (AAP 0.8.6 R7).
 // ==================================================================================================
 
 using System;

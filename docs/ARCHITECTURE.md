@@ -389,6 +389,15 @@ auditor should be able to check without ambiguity.
 
 ## 4. Port, transport and endpoint map
 
+> **The host-side publication is loopback-only.** The ports below are what each service BINDS inside the
+> orchestration network, and they are unchanged. What changed is which host interface the local manifest
+> offers them on: a two-field Compose `ports:` mapping binds the host half to `0.0.0.0`, so all four were
+> previously reachable from any host on the operator's network — going around Gateway and defeating the
+> sole-ingress topology at the network layer. Each mapping now names its interface through
+> `<SERVICE>_HOST_BIND`, defaulting to `127.0.0.1` on all four including Gateway. Every access route this
+> documentation publishes is a `localhost` one, so nothing documented changes; widening is a deliberate act.
+> See [`orchestration/README.md`](../orchestration/README.md) §5.
+
 ### 4.1 The map
 
 The attached environment fixes a 5101–5105 band and publishes the composition root at port 5105. That
@@ -421,19 +430,19 @@ plaintext URL would take every gRPC contract off the air while `/health` kept an
 available failure shape, since the readiness gate would open onto a service that can serve nothing. That is
 why §4.1's TLS requirement is a functional dependency here and not only a hardening choice.
 
-**A previous revision split each of those two services across two endpoints, and it was withdrawn.**
-Persistence bound `https://+:5101` as `Http1` plus a second `Http2`-only listener above the band, and
-DataServices did the same, so that each listener accepted only what it was for and a client arriving with
-the wrong protocol version failed at negotiation rather than at the wrong surface. That diagnostic property
-was real, but its cost was that C-05..C-08 and C-03/C-04 answered on ports AAP 0.3.2.2 never names while
-the ports it does name carried only the probe. The assignment governs, so the surfaces were collapsed onto
-the assigned ports; nothing was moved into 5103, and no documented address changed.
+**Splitting each of those two services across two endpoints is the tempting shape, and it is not
+available.** It would have Persistence bind `https://+:5101` as `Http1` plus a second `Http2`-only listener
+above the band, and DataServices do the same, so that each listener accepted only what it was for and a
+client arriving with the wrong protocol version failed at negotiation rather than at the wrong surface. That
+diagnostic property is real, but its cost is that C-05..C-08 and C-03/C-04 would answer on ports AAP 0.3.2.2
+never names while the ports it does name carried only the probe. The assignment governs, so both surfaces
+share the assigned port; nothing occupies 5103, and every documented address is the assigned one.
 
-**All four services declare their own listener, Gateway included — and Gateway's is a correction.** An
-earlier revision left the ingress address to the orchestration layer on the reasoning that the published
-address belongs to whatever fronts it. The reasoning is defensible; its consequence was not. No Compose
-manifest exists yet, and the orchestration template's variable roster carries no `ASPNETCORE_URLS`, so
-**nothing in the repository bound 5105**: a plain `dotnet run` bound Kestrel's own default of 5000
+**All four services declare their own listener, Gateway included — and Gateway's is load-bearing.**
+Leaving the ingress address to the orchestration layer is the tempting reading, on the reasoning that the
+published address belongs to whatever fronts it. The reasoning is defensible; its consequence is not. The
+orchestration template's variable roster carries no `ASPNETCORE_URLS`, so
+**nothing in the repository would bind 5105**: a plain `dotnet run` binds Kestrel's own default of 5000
 — measured directly — and the one address this document, the attached environment and the end-to-end
 suite all name as the composition root was reachable by no means the repository provided. A documented
 address that nothing binds is worse than an undocumented one, because a reader has no reason to doubt it.
@@ -454,13 +463,14 @@ The attached environment gates readiness on `curl -sf http://localhost:<port>/he
 certificate material. Neither fact is a licence to ship cleartext: the gate is a *probe shape*, and the
 corrected form below is the same probe with the trust anchor named, while the absent material is
 supplied the same way every other secret is — from the deployment's own secret layer through
-`TLS_CERTIFICATE_PATH` and `TLS_CERTIFICATE_KEY_PATH` (§9.3.1), with nothing committed here (C-F).
+the four per-service `<SERVICE>_TLS_CERTIFICATE_PATH` / `_KEY_PATH` pairs (§9.3.1), with nothing
+committed here (C-F).
 
 **Why Persistence and DataServices each declare `Http1AndHttp2` on one endpoint.** Both serve gRPC, which
 **requires HTTP/2**, and both serve REST `/health` and `/v1/ping`, which are probed with **HTTP/1.1**. On a
 cleartext endpoint those two cannot share a port, because HTTP/2 negotiation is an ALPN feature of the
 TLS handshake — which is why the single-endpoint arrangement depends on the TLS decision above rather
-than merely coexisting with it. Measured, not assumed, on SDK 10.0.302:
+than merely coexisting with it. Measured, not assumed, on the pinned SDK:
 
 - A **cleartext** endpoint with `Protocols: Http1AndHttp2` disables HTTP/2 outright and says so at
   startup — *"HTTP/2 is not enabled … TLS is not enabled. HTTP/2 requires TLS application protocol
@@ -482,22 +492,22 @@ avoid the question is not available either: AAP 0.1.5 decides the transport per 
 and C-03/C-04 are gRPC. Security and Gateway publish no gRPC contract and so declare a single `Http1`
 endpoint each.
 
-**The split that was withdrawn, and what replaced the property it provided.** A previous revision pinned
-ONE protocol version per endpoint — 5101 and 5102 as `Http1`, plus a second `Http2`-only port each — and
-its motive was real: a probe and a gRPC channel then addressed listeners that could only answer the thing
-they were for, so a gRPC channel aimed at the REST port failed with `HTTP_1_1_REQUIRED` before the request
-arrived and an HTTP/1.1 probe aimed at the gRPC port got a `400`, both mistakes failing loudly rather than
-later and less attributably. What it also did was answer published contracts at addresses the plan does
+**The split that is not available, and how the property it would provide is recovered.** Pinning
+ONE protocol version per endpoint — 5101 and 5102 as `Http1`, plus a second `Http2`-only port each — has a
+real motive: a probe and a gRPC channel would then address listeners that could only answer the thing
+they were for, so a gRPC channel aimed at the REST port fails with `HTTP_1_1_REQUIRED` before the request
+arrives and an HTTP/1.1 probe aimed at the gRPC port gets a `400`, both mistakes failing loudly rather than
+later and less attributably. What it also does is answer published contracts at addresses the plan does
 not assign them, and the plan's port map is what this document, the manifest, the readiness gates,
 Gateway's upstream setting and the end-to-end fixture all have to agree on. Under `Http1AndHttp2` a
-misaddressed call no longer fails at the transport, so the property is recovered statically instead:
+misaddressed call does not fail at the transport, so the property is recovered statically instead:
 `ServiceConfigurationCoherenceTests` asserts every caller address against the listener its target actually
 declares, and `OperationalTopologyCoherenceTests` asserts every port table, `EXPOSE` line and end-to-end
-fixture row against the same source. A wrong address is now a build failure naming the offending key rather
-than a runtime negotiation error — earlier and more attributable than what was given up.
+fixture row against the same source. A wrong address is therefore a build failure naming the offending key
+rather than a runtime negotiation error — earlier and more attributable than the alternative.
 
-**What the collapse costs, and where.** Persistence and DataServices no longer have two addresses a caller
-must keep straight, so the `_GRPC_URL` and `_BASE_URL` variables of §4.2 now default to the SAME value per
+**What the collapse costs, and where.** Persistence and DataServices do not present two addresses a caller
+must keep straight, so the `_GRPC_URL` and `_BASE_URL` variables of §4.2 default to the SAME value per
 service. They are deliberately kept as separate variables even so, because each names a distinct **edge**
 rather than a distinct listener: `_GRPC_URL` is what a *service* dials for a contract call and `_BASE_URL` is
 what a *probe* and the end-to-end suite read, and they bind different service settings. Collapsing them into
@@ -596,11 +606,11 @@ mounted read-only.
   property a trust bootstrap cannot afford to lose. `ClientCertificateMode` is `AllowCertificate`
   precisely so that this probe stays anonymous on the same listener that carries the mutual-TLS
   issuance edge — a certificate is requested but not demanded, so a probe presenting none still
-  completes the handshake and receives its `200`. An earlier revision answered the same constraint
-  with a second, development-only cleartext listener on an undeclared port; it was **withdrawn**,
-  because it contradicted the one-port-per-service map of §4.1, it put an unauthenticated listener in
-  the one service that holds the signing key, and it made the local gate address a port that no
-  deployment ever serves. Security now declares exactly ONE Kestrel endpoint,
+  completes the handshake and receives its `200`. A second, development-only cleartext listener on an
+  undeclared port answers the same constraint and is **not available**,
+  because it contradicts the one-port-per-service map of §4.1, it puts an unauthenticated listener in
+  the one service that holds the signing key, and it makes the local gate address a port that no
+  deployment ever serves. Security declares exactly ONE Kestrel endpoint,
   `https://+:5104`, `Http1` — `Http1` rather than `Http1AndHttp2` because this service publishes no gRPC
   contract — and `security.v1.yaml` publishes exactly one `servers` entry to match. §9.4 records why TLS
   on 5104 is functional rather than a preference.
@@ -709,7 +719,7 @@ where the ingress answered `400`, `404` or `502`: `E_INVALID_DATA` and `E_INVALI
 payload, or a DataWindow name in the body that resolves to nothing), `E_NOT_EXISTS`, `E_VAR_NOT_FOUND` and
 `E_MEMBER_NOT_FOUND` (a name with nothing behind it), and `FAILED` — the oracle's own unspecific failure
 [`retcode.sru`], which a completed operation really answers and which therefore describes the path behind
-the surface rather than the surface itself. Each is now an explicit arm on both sides, and each side's test
+the surface rather than the surface itself. Each is an explicit arm on both sides, and each side's test
 suite pins the whole table and walks the kernel's failure codes for anything the table forgot. The tables
 are **duplicated deliberately** and not hoisted into `PowerFramework.Contracts`: that project carries no
 behaviour, and a shared mapping table would be behaviour crossing a service boundary. What is *not*
@@ -732,14 +742,15 @@ subscription. A caller needing continuous delivery uses the gRPC stream, which n
 
 **Every projected payload is published concretely, and the mechanism that keeps it honest is a build
 failure rather than a review habit.** `gateway.v1.yaml` declares the complete transitive closure of the
-projected surface — 120 messages and 15 enums, 135 of its 146 schemas — member by member, closed to
+projected surface — 118 messages and 15 enums, 133 of its 144 schemas — member by member, closed to
 unknown members, with the canonical protobuf JSON encodings and a `required` list stating what the wire
-carries. It previously delegated all 72 projected bodies to one open schema and pointed a consumer at an
-extension naming the real message, which published a permissiveness the strict binder does not have: an
-unrecognised member is answered `400`, not discarded, and a consumer could not see a member it was
-obliged to send. The schemas are *generated* from the compiled descriptors rather than transcribed, and
-the contracts test project cross-checks all 135 against their descriptors on every build, which is the
-compile-time edge whose absence had justified delegating in the first place. The two runtime-generated
+carries. Delegating every projected body to one open schema and pointing a consumer at an extension
+naming the real message is the cheaper document to write, and it publishes a permissiveness the strict
+binder does not have: an unrecognised member is answered `400`, not discarded, and a consumer could not
+see a member it was obliged to send. The schemas are *generated* from the compiled descriptors rather
+than transcribed, and the contracts test project cross-checks all 133 against their descriptors on every
+build, which is the compile-time edge that keeps a concrete declaration honest and is exactly what a
+delegating document has no way to provide. The two runtime-generated
 documents at `/openapi/v1.json` remain summaries of the same shapes and say so: building the schemas
 there too would be a third and fourth derivation of the same descriptors, and no shared home for one
 exists — a service may not reach into another's code, and `PowerFramework.Contracts` carries no
@@ -897,15 +908,15 @@ a number nobody chose.
 
 **That one value is bounded at both ends, and both bounds were paid for.** `MaxRetryAttempts` accepts an
 integer from **0 to 10 inclusive**; anything else stops the service starting, naming the key. *Zero* means
-one attempt with an immediately surfaced failure — a policy, not a misconfiguration — and it now behaves as
-one: both layers previously consumed the value unconditionally and neither accepts zero, so the resilience
-package's own range (1 to `int.MaxValue`) made a configured zero a **startup failure**, while the channel's
-`retries + 1` became an attempt count of one that its retry policy rejects. Zero therefore installs *no*
-gRPC service configuration at all and takes a never-retry predicate at the HTTP layer — an absence at one
-layer and a predicate at the other, because that is what the two layers permit. The *ceiling* replaced an
-unbounded range because unbounded silently broke retry: `int.MaxValue` incremented into an attempt count
-wrapped to a negative number that the channel *and* its retry policy both accepted, leaving retry
-mis-configured on a service that started and reported itself healthy. Ten is not a tuning recommendation —
+one attempt with an immediately surfaced failure — a policy, not a misconfiguration — and making it behave as
+one takes work: neither layer accepts zero if handed the value unconditionally, because the resilience
+package's own range is 1 to `int.MaxValue`, which makes a configured zero a **startup failure**, while the
+channel's `retries + 1` becomes an attempt count of one that its retry policy rejects. Zero therefore installs
+*no* gRPC service configuration at all and takes a never-retry predicate at the HTTP layer — an absence at one
+layer and a predicate at the other, because that is what the two layers permit. The *ceiling* exists because
+an unbounded range silently breaks retry: `int.MaxValue` increments into an attempt count that
+wraps to a negative number the channel *and* its retry policy both accept, leaving retry
+mis-configured on a service that starts and reports itself healthy. Ten is not a tuning recommendation —
 `RequestTimeout` bounds how many attempts can occur at all, since a 2-second base growing exponentially
 means a fourth retry cannot fit a 30-second total — so a larger value expresses a mistake rather than a
 policy. The conversion to an attempt count is `checked`, so the wrap cannot return even if the bound is
@@ -1444,8 +1455,13 @@ implementation detail:
 this boundary contingent on Security terminating its own TLS handshake — which holds on the shipped
 topology and stops holding behind a terminating proxy, and that is how an authenticated edge quietly
 becomes an unauthenticated one in the deployment that actually runs. Naming only the credential would
-have discarded the per-pair mutual-TLS fallback the plan explicitly sanctions. **Both are live here**:
-each has minted a token against the running stack — see §10.6.
+have discarded the per-pair mutual-TLS fallback the plan explicitly sanctions. **Both are implemented
+and either satisfies the operation — but only the credential arm has been exercised against a running
+stack.** The certificate arm is implemented and configurable and its refusals are covered in-process;
+what has not happened is a mint across a real TLS handshake. §9.3.1 part 3 states that status once, with
+the exact evidence that would promote it, and
+[`orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised) is
+this repository's only execution-status record.
 Publishing both, with the operation refusing a request that carries neither, is what makes C-G hold on
 the topology the environment documents *and* on the one a hardened deployment would choose.
 
@@ -1466,11 +1482,11 @@ configuration; parts 3 to 6 name where each remaining piece lands and its state.
 
 | # | Part | Where it is expressed | State |
 | --- | --- | --- | --- |
-| 1 | **The TLS listener.** `Kestrel:Endpoints:Default`, `https://+:5104`, `Http1`, `ClientCertificateMode: AllowCertificate` — and **no `SslProtocols`**, deliberately: a committed protocol floor is a hardening declaration with no observable behaviour on this platform, since the default already excludes everything below TLS 1.2, and pinning one here takes the choice from the deployment that owns the risk while adding a second place for the transport story to disagree with itself. It is the service's ONLY endpoint and it carries every route: `POST /v1/tokens`, the C-02 crypto operations, the anonymous key set and discovery documents, and the anonymous `GET /health` | `services/security-service/PowerFramework.Security/appsettings.json` | **Present and statically verified** — `Url`, `Protocols` and `ClientCertificateMode` are all real `KestrelServerOptions` endpoint keys, confirmed by reflecting over the shared framework's `EndpointConfig` on SDK 10.0.302. `ServiceConfigurationCoherenceTests.NoListenerDeclaresTransportSecuritySettings` asserts both halves: Security declares `ClientCertificateMode` and the other three do not, and no listener anywhere declares `SslProtocols` |
-| 2 | **The server certificate.** `Kestrel:Certificates:Default:Path` and `:KeyPath` — **one pair for the whole stack, and therefore a pair that MUST carry subject alternative names for every origin it is presented under**: `persistence-service`, `dataservices-service`, `security-service` and `localhost`, plus the loopback IP entries. Current TLS stacks ignore the common name for host matching and read `subjectAltName` only, so a single-CN certificate matches none of the four and every internal channel fails name validation. Per-service certificates are the equally correct alternative — see the recipe below. **`TLS_CERTIFICATE_PATH` / `TLS_CERTIFICATE_KEY_PATH` are paths ON THE OPERATOR'S HOST, and they are consumed as Compose *secret sources* rather than injected into a container:** each service reads the fixed projected path `/run/secrets/internal-tls/server.crt` and `…/server.key`. An earlier revision interpolated the host paths straight into the two Kestrel keys, which handed a containerised process a path that existed only outside it and crash-looped all four services | `orchestration/.env.example` §5 declares the two host-path variables; `orchestration/docker-compose.yml` declares the projection and states the container paths literally; no settings file declares either, because both carry a path to key material (C-F) | **Present as the declared contract** (paths only — no material, here or anywhere). Absence is fail-fast twice over: Compose aborts bring-up by name on an unset or non-existent source path, and Kestrel refuses to start an HTTPS endpoint whose certificate it cannot resolve rather than downgrading to plaintext |
-| 3 | **Client-certificate trust.** `ClientCertificateMode` `AllowCertificate` makes Kestrel **request** a certificate and hand it to the application without demanding one, so the token operation can require it per operation while `/health`, the key set and the discovery document stay anonymously reachable. *Which* issuers may have signed that certificate is decided by `Security:MutualTls:ClientCaPath`: the anchor is loaded at startup and installed as Kestrel's `ClientCertificateValidation` callback, which builds the caller's chain under `X509ChainTrustMode.CustomRootTrust` against that anchor alone. Unset defers to the platform's verdict; set-but-unreadable refuses to start. `AllowAnyClientCertificate` is never called. **Completing the handshake and establishing an identity are two decisions taken by two anchors, and only the first has a published variable:** `Security:ClientCertificateAuthorityPath` is the ISSUANCE anchor read by `Tokens/ClientCertificateTrust`, and with it unset a certificate that had just completed the handshake was refused `401 E_ACCESS_DENIED` while `Basic` callers kept minting — so the documented bootstrap could not work. The composition root now ADOPTS `Security:MutualTls:ClientCaPath` as the issuance anchor when the issuance key is unset, which makes `SECURITY_MTLS_CLIENT_CA_PATH` sufficient on its own; an explicitly configured issuance anchor still wins, because a deployment may complete handshakes for a broader authority than issuance honours | `services/security-service/PowerFramework.Security/Program.cs` (`CallerCertificateTrust`, and the `PostConfigure` on `AddOptions<SecurityOptions>()` that performs the adoption), configured from `SECURITY_MTLS_CLIENT_CA_PATH` | **Present, and exercised end to end.** A caller certificate issued by the documented local authority is minted a token by a Security instance configured with `SECURITY_MTLS_CLIENT_CA_PATH` alone; a certificate whose common name names a different roster subject is refused `403`, and a self-signed certificate spoofing a roster name is refused during the handshake and never reaches the operation. An OS-trust-store mount is not required, which is what makes it operable without a root-privileged step in the runtime image |
+| 1 | **The TLS listener.** `Kestrel:Endpoints:Default`, `https://+:5104`, `Http1`, `ClientCertificateMode: AllowCertificate` — and **no `SslProtocols`**, deliberately: a committed protocol floor is a hardening declaration with no observable behaviour on this platform, since the default already excludes everything below TLS 1.2, and pinning one here takes the choice from the deployment that owns the risk while adding a second place for the transport story to disagree with itself. It is the service's ONLY endpoint and it carries every route: `POST /v1/tokens`, the C-02 crypto operations, the anonymous key set and discovery documents, and the anonymous `GET /health` | `services/security-service/PowerFramework.Security/appsettings.json` | **Present and statically verified** — `Url`, `Protocols` and `ClientCertificateMode` are all real `KestrelServerOptions` endpoint keys, confirmed by reflecting over the shared framework's `EndpointConfig` on the pinned SDK. `ServiceConfigurationCoherenceTests.NoListenerDeclaresTransportSecuritySettings` asserts both halves: Security declares `ClientCertificateMode` and the other three do not, and no listener anywhere declares `SslProtocols` |
+| 2 | **The server certificate.** `Kestrel:Certificates:Default:Path` and `:KeyPath` — **ONE PAIR PER SERVICE, each carrying only its OWN origins**: its Compose service name, `localhost`, and the loopback IP entries. A single shared pair was the earlier arrangement and was the defect: it gave the four services no distinct cryptographic identity, so a key read out of any one container was the key every other service presented, and the certificate had to name every origin — which made it validate as any peer and reduced mutual TLS between two internal services to proof that the peer held *the* key rather than that it was the peer it claimed to be. Current TLS stacks ignore the common name for host matching and read `subjectAltName` only, so a single-CN certificate matches nothing at all, including the name it appears to carry. **The four `<SERVICE>_TLS_CERTIFICATE_PATH` / `_KEY_PATH` pairs are paths ON THE OPERATOR'S HOST, and they are consumed as Compose *secret sources* rather than injected into a container:** every service reads the same fixed projected path `/run/secrets/internal-tls/server.crt` and `…/server.key`, and only the host file behind it differs — which is why moving to per-service material changed no service setting. An earlier revision interpolated the host paths straight into the two Kestrel keys, which handed a containerised process a path that existed only outside it and crash-looped all four services | `orchestration/.env.example` §5 declares the eight host-path variables; `orchestration/docker-compose.yml` declares the projection and states the container paths literally; no settings file declares either, because both carry a path to key material (C-F) | **Present as the declared contract** (paths only — no material, here or anywhere). Absence is fail-fast twice over: Compose aborts bring-up by name on an unset or non-existent source path, and Kestrel refuses to start an HTTPS endpoint whose certificate it cannot resolve rather than downgrading to plaintext |
+| 3 | **Client-certificate trust.** `ClientCertificateMode` `AllowCertificate` makes Kestrel **request** a certificate and hand it to the application without demanding one, so the token operation can require it per operation while `/health`, the key set and the discovery document stay anonymously reachable. *Which* issuers may have signed that certificate is decided by `Security:MutualTls:ClientCaPath`: the anchor is loaded at startup and installed as Kestrel's `ClientCertificateValidation` callback, which builds the caller's chain under `X509ChainTrustMode.CustomRootTrust` against that anchor alone. Unset defers to the platform's verdict; set-but-unreadable refuses to start. `AllowAnyClientCertificate` is never called. **Completing the handshake and establishing an identity are two decisions taken by two anchors, and only the first has a published variable:** `Security:ClientCertificateAuthorityPath` is the ISSUANCE anchor read by `Tokens/ClientCertificateTrust`, and with it unset a certificate that had just completed the handshake was refused `401 E_ACCESS_DENIED` while `Basic` callers kept minting — so the documented bootstrap could not work. The composition root now ADOPTS `Security:MutualTls:ClientCaPath` as the issuance anchor when the issuance key is unset, which makes `SECURITY_MTLS_CLIENT_CA_PATH` sufficient on its own; an explicitly configured issuance anchor still wins, because a deployment may complete handshakes for a broader authority than issuance honours | `services/security-service/PowerFramework.Security/Program.cs` (`CallerCertificateTrust`, and the `PostConfigure` on `AddOptions<SecurityOptions>()` that performs the adoption), configured from `SECURITY_MTLS_CLIENT_CA_PATH` | **Present and configurable; exercised IN-PROCESS, and NOT end to end — this is the single status statement for the certificate arm, and every other mention of it in this document defers here.** What is exercised: with a Security instance configured by `SECURITY_MTLS_CLIENT_CA_PATH` alone, a caller certificate issued by the documented local authority is minted a token, a certificate whose common name names a different roster subject is refused `403`, a self-signed certificate spoofing a roster name is refused, and an unreadable anchor refuses startup — all against an in-process host that presents the certificate through a **stubbed** `ITlsConnectionFeature`, because an in-process host performs no handshake to carry a real one. What is therefore NOT exercised: the handshake itself, and consequently a mint against a certificate that a running Kestrel listener actually negotiated. **The exact evidence that would promote this to end-to-end**, in the order it has to be obtained: (1) a bring-up with `SECURITY_MTLS_CLIENT_CA_PATH` projected as a Compose secret rather than left empty, which the documented bring-up does not do; (2) a `POST /v1/tokens` from a caller presenting the issued client certificate over TLS to Security's own listener, returning `200` and a token; (3) the same call with a certificate naming a different roster subject, returning `403`; (4) the same call with a self-signed certificate, failing in the handshake rather than at the operation. Until all four are recorded in [`orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised), the arm stays marked unexercised here. An OS-trust-store mount is not required either way, which is what makes it operable without a root-privileged step in the runtime image |
 | 4 | **Subject-to-caller mapping.** The certificate establishes the identity; a `subject` in the request body that disagrees with it is refused `403`, per the table above. The certificate's common name is compared ordinally against the claimed subject, and the refusal names neither the expected identity nor any stored configuration | `Endpoints/TokenEndpoints.cs` | **Present** |
-| 5 | **The caller side.** Gateway and DataServices present a client certificate when they call the issuance endpoint, from `Gateway:MutualTls:{CertificatePath, CertificateKeyPath}` and `DataServices:Security:MutualTls:{CertificatePath, CertificateKeyPath}` respectively, supplied by the four `*_MTLS_CERT_PATH` / `*_MTLS_KEY_PATH` variables. Each pair is **both-or-neither and that is enforced rather than documented**: half-configured fails startup with a names-only message, entirely unset is a legitimate state meaning that service cannot reach the issuance edge in this run | `Clients/SecurityClient.cs` in both services; the two settings groups and the four variables | **Present, and the certificate is genuinely attached in both services**: each loads the PEM pair once at startup as a singleton and presents it on the primary handler of its Security channel, so a configured-but-unreadable pair is a refusal to start rather than a first-request failure. What remains undemonstrated is an end-to-end handshake against a running Security instance, which is different from being callable without authentication — nothing anywhere in this repository offers an unauthenticated mint |
+| 5 | **The caller side.** Gateway and DataServices present a client certificate when they call the issuance endpoint, from `Gateway:MutualTls:{CertificatePath, CertificateKeyPath}` and `DataServices:Security:MutualTls:{CertificatePath, CertificateKeyPath}` respectively, supplied by the four `*_MTLS_CERT_PATH` / `*_MTLS_KEY_PATH` variables. Each pair is **both-or-neither and that is enforced rather than documented**: half-configured fails startup with a names-only message, entirely unset is a legitimate state meaning that service cannot reach the issuance edge in this run | `Clients/SecurityClient.cs` in both services; the two settings groups and the four variables | **Present, and the certificate is genuinely attached in both services**: each loads the PEM pair once at startup as a singleton and presents it on the primary handler of its Security channel, so a configured-but-unreadable pair is a refusal to start rather than a first-request failure. What remains undemonstrated is narrower than it was: the issuance endpoint HAS now accepted a chain-verified caller certificate and minted from its common name against a running instance, so what is still unexercised is these two services presenting **their own** configured pair, which the documented bring-up leaves empty. Either way it is different from being callable without authentication — nothing anywhere in this repository offers an unauthenticated mint |
 | 6 | **JWKS and discovery transport.** Both documents are anonymous and public by design, and they are the *verification* half rather than the issuance half — so they are served by the SAME single listener as the issuance edge, alongside `/health` and `/v1/ping`, and stay anonymous on it because `AllowCertificate` does not demand a certificate. Over HTTPS in every environment; behind the terminating proxy of §9.4 in a deployed topology, with the one exception §9.4 names | each service's bearer authority settings | **Present and verified.** Both documents answered `200` anonymously over TLS against the running stack, and the three verifiers self-configured from them well enough that a token minted by Security was accepted on another service's `/v1/ping` — see §10.6 |
 
 **What a developer generates locally.** On the documented topology there are **two kinds** of required
@@ -1497,30 +1513,35 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=powerframework-loc
 
 # 3. THE SERVER CERTIFICATE, AND IT MUST CARRY SUBJECT ALTERNATIVE NAMES.
 #
-#    ONE certificate serves ALL FOUR SERVICES and every one of the FOUR ports they bind - Persistence
-#    5101, DataServices 5102, Security 5104, Gateway 5105, one listener each - because
-#    TLS_CERTIFICATE_PATH is one pair for the whole stack (part 2 above) and the Compose manifest
-#    injects it into all four service definitions. A certificate is therefore presented under FIVE
-#    different names depending on which listener a caller reached and from where:
-#    `persistence-service`, `dataservices-service`, `security-service` and `gateway-service` inside
-#    a Compose network, and `localhost` from the host during a loopback bring-up or an end-to-end
-#    run. Gateway is included for exactly the same reason as the other three and is easy to forget
-#    because it is the only one nothing else calls: an end-to-end suite and an operator both reach
-#    it by name, and a certificate that omits it fails name validation on the ingress.
+#    ONE PAIR PER SERVICE, AND THAT REPLACED ONE SHARED PAIR - the shared arrangement was the defect
+#    rather than a simplification. A single key projected into all four containers gives the four
+#    services no distinct cryptographic identity at all: reading it out of any one container (Gateway
+#    being the one with the widest attack surface, since it is the sole ingress) yields the key every
+#    other service presents; the shared certificate had to name every origin, so it validated as
+#    `persistence-service` even when presented by Gateway, which means mutual TLS between two internal
+#    services proved only that the peer held THE key and never that it was the peer it claimed to be;
+#    and there was no per-service half of a multi-SAN certificate to revoke, shorten or re-scope.
+#
+#    So each service gets its own pair, carrying ITS OWN service name plus the loopback entries and
+#    nothing else - which is what makes the identity mean something. Each is granted only to its own
+#    container. The PROJECTED paths are identical everywhere
+#    (`/run/secrets/internal-tls/server.{crt,key}`), so only the host file behind them differs and no
+#    service setting changed when this moved.
 #
 #    A common name alone will not do, and this is not a style point. RFC 6125 deprecated deriving a
 #    host identity from the common name, and every current TLS stack - including the one .NET uses -
-#    IGNORES CN for name validation and reads subjectAltName only. A certificate with `CN=security-
-#    service` and no SAN extension therefore matches NOTHING: it fails name validation on all four
-#    names, including the one it appears to carry. An earlier revision of this recipe issued exactly
-#    that certificate, which made every internal channel unusable while looking correct.
+#    IGNORES CN for name validation and reads subjectAltName only. A certificate with
+#    `CN=security-service` and no SAN extension therefore matches NOTHING: it fails name validation
+#    even on the name it appears to carry. An earlier revision of this recipe issued exactly that
+#    certificate, which made every internal channel unusable while looking correct.
 #
-#    So the SAN list below names every origin a caller may legitimately address, and the loopback
-#    addresses are included as IP entries because an IP literal is matched from `IP:` and never from
-#    `DNS:`. Per-service certificates are the alternative and are equally correct; if you take that
-#    route, issue one certificate per service with that service's DNS name plus the loopback entries,
-#    and point each container's TLS_CERTIFICATE_PATH at its own pair instead of at a shared one.
-cat > server-san.cnf <<'SAN'
+#    Each SAN list therefore names that service's own Compose name plus `localhost` - an operator and
+#    the end-to-end suite both reach a service that way - with the loopback addresses as `IP:` entries,
+#    because an IP literal is matched from `IP:` and never from `DNS:`. Gateway is easy to forget
+#    because it is the only service nothing else calls; it needs a certificate for exactly the same
+#    reason, since a caller reaches the ingress by name.
+for svc in persistence dataservices security gateway; do
+  cat > "$svc-san.cnf" <<SAN
 [req]
 distinguished_name = dn
 [dn]
@@ -1528,12 +1549,13 @@ distinguished_name = dn
 basicConstraints = critical, CA:FALSE
 keyUsage         = critical, digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
-subjectAltName   = DNS:persistence-service, DNS:dataservices-service, DNS:security-service, DNS:gateway-service, DNS:localhost, IP:127.0.0.1, IP:::1
+subjectAltName   = DNS:$svc-service, DNS:localhost, IP:127.0.0.1, IP:::1
 SAN
-openssl req -newkey rsa:2048 -nodes -subj "/CN=powerframework-internal" \
-        -keyout server.key -out server.csr
-openssl x509 -req -in server.csr -CA mtls-ca.crt -CAkey mtls-ca.key -days 30 \
-        -extfile server-san.cnf -extensions ext -out server.crt
+  openssl req -newkey rsa:2048 -nodes -subj "/CN=$svc-service" \
+          -keyout "$svc-server.key" -out "$svc-server.csr"
+  openssl x509 -req -in "$svc-server.csr" -CA mtls-ca.crt -CAkey mtls-ca.key -days 30 \
+          -extfile "$svc-san.cnf" -extensions ext -out "$svc-server.crt"
+done
 
 # 4. The CALLER certificates - one per service that calls the issuance endpoint, which is two.
 #    These need NO subjectAltName: they are validated as CLIENT identities, so their common name is
@@ -1558,8 +1580,8 @@ done
 #     this machine and nothing reads them but you and, for the caller pairs, a deployment that chooses
 #     mutual TLS and declares its own projection for them.
 #
-#     server.key IS 0644, AND THAT IS REQUIRED RATHER THAN LAX. It is the one key
-#     orchestration/docker-compose.yml PROJECTS, as a Compose secret, into all four containers - and
+#     THE FOUR *-server.key FILES ARE 0644, AND THAT IS REQUIRED RATHER THAN LAX. They are the keys
+#     orchestration/docker-compose.yml PROJECTS, as Compose secrets, each into its own container - and
 #     Compose accepts `mode:`, `uid:` and `gid:` on a secret and IGNORES ALL THREE outside Swarm. This
 #     was measured, not assumed: a host file at 0600 arrives inside the container as
 #     `-rw------- root root`, every image runs as the unprivileged `app` account (uid 1654), and
@@ -1570,15 +1592,28 @@ done
 #     THE DIRECTORY IS THE REAL HOST CONTROL, which is why this is not the weakening it looks like.
 #     The enclosing directory is 0700 from the first command in this recipe, so no other account on
 #     this machine can traverse to the file whatever its own mode says. A deployment that would rather
-#     keep 0600 owns the alternative: `sudo chown 1654 server.key` and leave the mode alone, which
+#     keep 0600 owns the alternative: `sudo chown 1654 *-server.key` and leave the mode alone, which
 #     needs privilege here and is why it is not the documented default.
 chmod 600 mtls-ca.key powerframework-gateway.key powerframework-dataservices.key
-chmod 644 server.key
+chmod 644 persistence-server.key dataservices-server.key security-server.key gateway-server.key
 
 # 5. Verify before deploying, because a name mismatch is silent until the first connection and then
 #    presents as an unreachable upstream rather than as a certificate problem.
-for name in persistence-service dataservices-service security-service gateway-service localhost; do
-  openssl verify -CAfile mtls-ca.crt -verify_hostname "$name" server.crt
+#    Each certificate must match its OWN service name and `localhost`, and MUST NOT match any sibling's
+#    name - that last check is the one per-service material exists to make possible, and a pair that
+#    still validated as a sibling would mean a shared certificate had been reintroduced under four
+#    filenames.
+for svc in persistence dataservices security gateway; do
+  openssl verify -CAfile mtls-ca.crt -verify_hostname "$svc-service" "$svc-server.crt"
+  openssl verify -CAfile mtls-ca.crt -verify_hostname localhost      "$svc-server.crt"
+  for other in persistence dataservices security gateway; do
+    [ "$other" = "$svc" ] && continue
+    if openssl verify -CAfile mtls-ca.crt -verify_hostname "$other-service" "$svc-server.crt" \
+         >/dev/null 2>&1; then
+      echo "FAIL: $svc-server.crt also validates as $other-service - the pairs are not distinct" >&2
+      exit 1
+    fi
+  done
 done
 openssl verify -CAfile mtls-ca.crt -purpose sslclient powerframework-gateway.crt
 openssl verify -CAfile mtls-ca.crt -purpose sslclient powerframework-dataservices.crt
@@ -1589,8 +1624,17 @@ openssl verify -CAfile mtls-ca.crt -purpose sslclient powerframework-dataservice
 #    four services at three FIXED container paths - /run/secrets/internal-tls/server.crt, .../server.key
 #    and .../ca.crt. The container-side names are `target:` entries in the manifest and are literals
 #    there, so the only decision left to the operator is which host file feeds each one:
-echo "TLS_CERTIFICATE_PATH=$PWD/server.crt"
-echo "TLS_CERTIFICATE_KEY_PATH=$PWD/server.key"
+for svc in persistence dataservices security gateway; do
+  upper=$(printf '%s' "$svc" | tr '[:lower:]' '[:upper:]')
+  echo "${upper}_TLS_CERTIFICATE_PATH=$PWD/$svc-server.crt"
+  echo "${upper}_TLS_CERTIFICATE_KEY_PATH=$PWD/$svc-server.key"
+done
+# ... which expands to exactly these eight assignments, plus the one shared anchor:
+#      SECURITY_TLS_CERTIFICATE_PATH        SECURITY_TLS_CERTIFICATE_KEY_PATH
+#      PERSISTENCE_TLS_CERTIFICATE_PATH     PERSISTENCE_TLS_CERTIFICATE_KEY_PATH
+#      DATASERVICES_TLS_CERTIFICATE_PATH    DATASERVICES_TLS_CERTIFICATE_KEY_PATH
+#      GATEWAY_TLS_CERTIFICATE_PATH         GATEWAY_TLS_CERTIFICATE_KEY_PATH
+#      INTERNAL_TLS_CA_PATH  (shared - the PUBLIC anchor, and sharing a public anchor is correct)
 echo "INTERNAL_TLS_CA_PATH=$PWD/mtls-ca.crt"
 
 #    THIS STEP IS NOT OPTIONAL FOR A COMPOSE BRING-UP, and it fails by name rather than subtly. Each
@@ -1653,7 +1697,7 @@ for a lookup that must fail. The 30-day certificate lifetime above is the contro
 it. A deployment whose authority does publish revocation information leaves these paths unset and uses
 platform trust, where the platform's own revocation behaviour applies.
 
-Point `SECURITY_JWT_SIGNING_KEY`, `TLS_CERTIFICATE_PATH`, `TLS_CERTIFICATE_KEY_PATH`,
+Point `SECURITY_JWT_SIGNING_KEY`, the four `<SERVICE>_TLS_CERTIFICATE_PATH` / `_KEY_PATH` pairs,
 `INTERNAL_TLS_CA_PATH` and `SECURITY_MTLS_CLIENT_CA_PATH` at those files from the environment file —
 those five are the names `orchestration/.env.example` actually declares — plus the two client pairs,
 `GATEWAY_MTLS_CERT_PATH` / `GATEWAY_MTLS_KEY_PATH` and `DATASERVICES_MTLS_CERT_PATH` /
@@ -1666,7 +1710,7 @@ never paths any container is told about.
 **One naming hazard, stated because the failure it produces looks like something else.** The two
 `SECURITY_MTLS_*` certificate names above are the **server** half — they record where Security's own
 certificate went, and `orchestration/.env.example` declares neither, because the server material is
-supplied once for the whole stack through `TLS_CERTIFICATE_PATH` / `TLS_CERTIFICATE_KEY_PATH`. The
+supplied per service through `<SERVICE>_TLS_CERTIFICATE_PATH` / `_KEY_PATH`. The
 end-to-end suite reads *the same two names* for its **client** pair
 (`tests/e2e/fixtures/service-endpoints.ts`). Server and client are opposite halves of one handshake: the
 server certificate identifies Security to its callers, a client certificate identifies a caller to
@@ -1678,8 +1722,8 @@ refusal that is entirely correct and resembles nothing about its cause. Point th
 `orchestration/.env.example` §1 and §5 declare the variables; the three must agree word for word, and a
 change to one is a change to all three.
 
-> **The trust half of part 3 IS implemented, by the second of the two options that were open, and the
-> mount that used to be the one piece outstanding is now in the manifest.** `SECURITY_MTLS_CLIENT_CA_PATH` above names `mtls-ca.crt`, and
+> **The trust half of part 3 IS implemented, by the second of the two options that were open.**
+> `SECURITY_MTLS_CLIENT_CA_PATH` above names the public half of `mtls-ca.crt`, and
 > `Security:MutualTls:ClientCaPath` is **read at startup**, before `Build()`, by
 > `CallerCertificateTrust.Load` in `services/security-service/PowerFramework.Security/Program.cs`; the
 > loaded anchor is then installed as Kestrel's `ClientCertificateValidation` callback, which builds a
@@ -1864,11 +1908,153 @@ floor is also the only rate limit on the fetch a **rejected** token can provoke,
 would make a forged `kid` a request amplifier aimed at Security's published key set.
 
 **Security configures neither**, and that is not an omission: it builds no configuration manager at all,
-because it validates the tokens it minted itself and takes its verification key in process from its own
+because it validates the tokens it minted itself and takes its verification keys in process from its own
 signing-key layer. It therefore converges immediately on restart while the three verifiers converge on the
-intervals above. [`SECRETS.md`](SECRETS.md) §4.2.1 carries the rotation runbook that follows from this —
-what each boundary does at the instant of rotation, the order to rotate in, and why an overlapping key set
-is not the answer here (AAP §0.6.6.3 fixes exactly one signing secret in the estate).
+intervals above. [`SECRETS.md`](SECRETS.md) §4.2.1 carries the runbook that follows from this — what each
+boundary does at the instant of a hard cutover, and the order to do it in.
+
+**And the overlapping key set IS now the answer, which reverses an earlier reading of AAP §0.6.6.3.** That
+clause fixes one signing secret in the estate and forbids the other three services holding an independent
+signing authority; what it protects against is a second ISSUER. Publishing the OUTGOING key beside the
+incoming one for the length of a rollover creates no second issuer — minting uses the active key only, the
+retiring key is verification material exactly like the active key's public half, both are held by the same
+sole issuer, and the retiring slot is empty outside a rollover. So Security carries a two-entry key ring,
+each entry under its own `kid`, and the intervals above stop being the only thing standing between a
+rotation and an estate-wide `401`. [`SECRETS.md`](SECRETS.md) §4.1.2 is the procedure and
+[`orchestration/README.md`](../orchestration/README.md) §8.1.1 is the operator's copy of it.
+
+### 9.7 Certificate revocation: a setting, a measurement, and the procedure that replaces it
+
+Every place this estate judges a certificate now reads its revocation posture from configuration. Four of
+them used to hardcode `X509RevocationMode.NoCheck` with a comment explaining why, which meant the weakest
+posture was not merely the default — it was the only reachable one, and no deployment could change it
+without a code edit.
+
+| Setting | Judges | Default |
+| --- | --- | --- |
+| `Gateway:InternalTls:RevocationMode` | The **server** certificate of each peer Gateway calls | `NoCheck` |
+| `DataServices:InternalTls:RevocationMode` | The **server** certificate of each peer DataServices calls | `NoCheck` |
+| `InternalTls:RevocationMode` | The **server** certificate of each peer Persistence calls | `NoCheck` |
+| `Security:ClientCertificateRevocationMode` | The **client** certificate a caller presents at the issuance edge | `NoCheck` |
+
+The three internal settings are projected from one variable, `INTERNAL_TLS_REVOCATION_MODE`, because all
+three verify against the single authority `INTERNAL_TLS_CA_PATH` names; a posture that differed between
+them would leave the estate holding the weaker guarantee while appearing to hold the stronger. Each accepts
+`NoCheck`, `Offline` or `Online`. **An unrecognised value refuses startup**, naming the key and the accepted
+set — it does not fall back, because a security setting that quietly selects its weakest value on a
+misspelling is worse than one that stops.
+
+#### 9.7.1 Why the default is `NoCheck`, and why that sentence is a measurement rather than a preference
+
+The authority §9.3.1 tells an operator to build is a local one created with `openssl`, and that recipe adds
+**no CRL distribution point and no OCSP responder**. There is consequently nothing anywhere for a revocation
+check to consult. That was measured directly against the certificate shape this documentation produces,
+across both stricter modes and both chain flags:
+
+| Mode | Chain builds | Status |
+| --- | --- | --- |
+| `NoCheck` | yes | — |
+| `Offline` | **no** | `RevocationStatusUnknown \| OfflineRevocation` |
+| `Online` | **no** | `RevocationStatusUnknown \| OfflineRevocation` |
+
+So naming `Offline` or `Online` against the documented PKI does not harden the estate — it **refuses every
+internal peer and every caller certificate**, and because each service's `/health` reports on its upstreams,
+it leaves the readiness gates in [`orchestration/README.md`](../orchestration/README.md) permanently
+unsatisfiable. The failure presents as a broken deployment rather than as a rejected setting, which is why
+the measurement is recorded here, in the four settings files, and in the manifest, instead of being
+rediscovered. **Set a stricter mode once your internal authority publishes reachable revocation data**; the
+setting exists for exactly that deployment.
+
+#### 9.7.2 The compensating control, which is now enforced rather than claimed
+
+While nothing consults a CRL, the only bound on how long a compromised caller certificate stays usable is
+its own validity window. That window is therefore bounded:
+`Security:MaxCallerCertificateLifetimeDays` — supplied by `SECURITY_MTLS_CLIENT_MAX_LIFETIME_DAYS` in the
+orchestration template, default **90**, range 1–3650 — refuses a caller certificate
+whose **declared** window — `notAfter - notBefore` — exceeds it, at **both** places a caller certificate is
+judged: the listener that accepts the connection and the issuance check that authorizes the token request.
+Enforcing it at one and not the other would let a certificate complete a TLS handshake the service is about
+to refuse to honour.
+
+Two properties of that check are deliberate:
+
+- **It measures the declared window, not the remaining one.** A declared window is a fixed property of the
+  certificate, so a caller cannot wait the check out, re-present the same identity later, or re-issue around
+  it. A check on *remaining* validity would refuse a freshly issued certificate and admit an almost-expired
+  one, which is exactly backwards.
+- **It disarms itself under `Online`.** A deployment that can genuinely revoke needs no lifetime ceiling
+  invented for it, and leaving one armed there would refuse long-lived certificates whose revocation status
+  is actually being checked.
+
+The default of 90 days is three times the `-days 30` that every issuance recipe in this estate uses — §9.3.1
+here, [`BUILD.md`](BUILD.md) §8, and `tests/e2e/scripts/provision-e2e-client-identity.sh`. It bounds the
+careless case (a `-days 3650` certificate pasted from an unrelated recipe) without refusing anything this
+documentation tells an operator to create. Lower it to 30 to hold a deployment to the published recipe
+exactly.
+
+#### 9.7.3 Emergency procedure: withdrawing a compromised certificate while revocation is unchecked
+
+Under `NoCheck` a compromised certificate cannot be revoked, so it must be made **unverifiable** instead.
+The lever is the trust anchor, not a revocation list: every internal channel and every caller certificate is
+judged against one authority, so replacing that authority withdraws every certificate it ever issued at
+once. In order:
+
+1. **Re-key the authority.** Generate a new CA key and certificate per §9.3.1. Do not reuse the compromised
+   authority's key material.
+2. **Re-issue every leaf from the new authority** — the four server certificates behind
+   the four `<SERVICE>_TLS_CERTIFICATE_PATH` pairs, and any client pair behind the `*_MTLS_CERT_PATH`
+   variables. Keep `-days 30`.
+3. **Replace the projected anchor** at `INTERNAL_TLS_CA_PATH` and the server material at
+   each `<SERVICE>_TLS_CERTIFICATE_PATH` / `_KEY_PATH`.
+4. **Restart all four services.** The anchor is read at startup and the client pair is loaded eagerly, so a
+   restart is what adopts the new authority. Expect the estate to be unavailable for the restart: the old
+   and new authorities are not cross-signed, so there is no overlap window here — unlike a signing-key
+   rotation (§9.6), which has one by design.
+5. **Confirm withdrawal** by re-running the readiness gates. A service presenting a certificate from the
+   retired authority now fails chain building at its peer, which is the withdrawal taking effect.
+
+**Rotating a JWT signing key does not withdraw a certificate, and rotating the authority does not withdraw a
+token.** They are independent credentials on independent schedules: §9.6 covers the first, this section the
+second. A response to a compromise that reached both must perform both.
+
+### 9.8 Ingress bounds: what each listener refuses before it does any work
+
+Each of the four listeners is bounded. This is not a performance objective — AAP §0.8.5 forbids asserting
+one, and none is claimed here — nor is it a behaviour improvement, which C-B forbids. **It is a failure mode
+the decomposition itself created.** The legacy was an in-process library with no listener, no route table and
+no unsolicited request (AAP §0.1.4); an unbounded request rate was not a state it could reach. These four
+listeners are the system's first, so bounding them is required *by* the transition rather than layered on
+top of it, exactly as the resilience handlers on the new network edges are.
+
+Every bound is a setting under a top-level `Ingress` section, is applied at composition time, and carries a
+default that is a real bound rather than the framework's unlimited. The nine common keys are
+`MaxRequestBodyBytes`, `MaxRequestHeadersTotalBytes`, `MaxConcurrentConnections`,
+`MaxHttp2StreamsPerConnection`, `RequestHeadersTimeoutSeconds`, `MaxConcurrentRequests`,
+`RateLimitPermitsPerWindow`, `RateLimitWindowSeconds` and `RateLimitQueueLimit`; the two gRPC-carrying
+services add `MaxReceiveMessageBytes` and `MaxSendMessageBytes`. [`BUILD.md`](BUILD.md) §15 carries the
+per-service values.
+
+Four properties a reader needs:
+
+- **The limiter is global middleware, not a per-path policy**, and it runs after authentication so a
+  partition key can name the authenticated principal rather than only an address. Callers therefore cannot
+  consume each other's budget.
+- **`/health` is exempt**, deliberately: a saturated service must still be able to report its own readiness,
+  because the compose health gate and Gateway's upstream aggregation both depend on that answer. It is the
+  only exemption, and it is asserted as the only one.
+- **A refusal is a `429`** carrying `application/problem+json` and an optional `Retry-After`. It is published
+  on every operation that computes something — 41 of Gateway's 50 and 22 of Security's 23 — and reconciled
+  at document level for the four reserved route families, whose response sets stay closed at `{401, 501}`
+  because C-D makes that closedness the deferred-service compliance position.
+- **The gRPC surfaces are bounded by their own interceptor**, which answers `ResourceExhausted` rather than
+  a `429`, because a gRPC client cannot read an HTTP status. `MaxSendMessageBytes` is the sharper of the two
+  message bounds: the framework default for the send direction is **unlimited**.
+
+Work budgets sit behind the transport bounds, because a request small enough to accept can still be
+expensive to serve: the token request bounds its scope count and string lengths, RSA generation is capped at
+the largest published modulus, file digesting is capped by size, and the update carrier is capped on rows
+and on values per row. Each answers the legacy return-code algebra's own refusal rather than a new
+vocabulary, and each is published in the contract that carries the operation.
 
 ---
 
@@ -1903,8 +2089,8 @@ and holds by construction; it is not a measured result, and no throughput figure
 published ports rather than of the architecture.** Each service publishes a fixed host port, because the
 5101–5105 band and the per-service `/health` addresses are the attached environment's readiness gates (C-L)
 — and a host port can be bound once, so `docker compose up --scale <service>=N` for N>1 fails at the second
-replica's start with `port is already allocated`. That was measured on this manifest. An earlier revision of
-the manifest asserted the opposite, on the grounds that it sets no `container_name:`; omitting the container
+replica's start with `port is already allocated`. That was measured on this manifest. The opposite
+conclusion follows from noting that the manifest sets no `container_name:`; omitting the container
 name is necessary for scaling and is not sufficient for it.
 
 **Replicating a service therefore means taking its host publish away, which needs an override and nothing
@@ -1960,21 +2146,19 @@ plaintext socket write.
 | --- | --- | --- | --- |
 | `gateway-service` | `openssl s_client` piped a hand-written request, matching the status line | **No** | The 5105 ingress is **TLS-terminated**, so a `/dev/tcp` socket redirection writes plaintext bytes into a TLS endpoint, never produces a status line, and fails **permanently** — leaving the `service_healthy` chain closed for ever. `openssl`, `bash` and `printf` are already in the image |
 | `dataservices-service` | `openssl s_client` piped a hand-written request | **No** | The 5102 listener is TLS-terminated, for the same reason and with the same consequence |
-| `security-service` | `openssl s_client`, likewise from the base image alone | **No** | The 5104 listener is TLS too. An earlier revision installed `curl` here with an unpinnable apt version; using the `openssl` already present adds no package and no layer |
-| `persistence-service` | `openssl s_client`, the same way, against 5101 | **No** | Its listener is TLS. An earlier revision installed `curl` here and it was **withdrawn** for the reason already recorded against Security — an apt version cannot be pinned against a family-tagged base without breaking the build when the archive moves on, and leaving it unpinned is a floating dependency that collides with the baseline of [`BUILD.md`](BUILD.md) §1.1. Removing it also takes a runtime package out of the one image that holds a storage provider. There is no second listener to probe: 5101 carries the gRPC contracts and the probe alike, so the one address answering proves the whole inbound surface is up |
+| `security-service` | `openssl s_client`, likewise from the base image alone | **No** | The 5104 listener is TLS too. Installing `curl` here means an unpinnable apt version; using the `openssl` already present adds no package and no layer |
+| `persistence-service` | `openssl s_client`, the same way, against 5101 | **No** | Its listener is TLS. Installing `curl` here is ruled out for the reason already recorded against Security — an apt version cannot be pinned against a family-tagged base without breaking the build when the archive moves on, and leaving it unpinned is a floating dependency that collides with the baseline of [`BUILD.md`](BUILD.md) §1.1. Removing it also takes a runtime package out of the one image that holds a storage provider. There is no second listener to probe: 5101 carries the gRPC contracts and the probe alike, so the one address answering proves the whole inbound surface is up |
 
 Every one of the four **verifies the presented chain against the mounted anchor**; none passes `-k`,
 `--insecure` or `-noverify`, because a probe that skips verification reports healthy for a listener the rest
 of the stack cannot talk to.
 
-> ⚠ **CORRECTED — this subsection previously described the Gateway probe as a `/dev/tcp` socket write and
-> called the 5105 ingress "plaintext".** Neither is true: `services/gateway-service/Dockerfile` uses
-> `openssl s_client`, and its own comments explain why a raw socket cannot work against a TLS listener. The
-> error mattered beyond this table, because "the ingress is plaintext" is the premise behind every
-> documented `http://localhost:5105` probe — see [`BUILD.md`](BUILD.md) §1.6 **D7**, which enumerates the
-> https-only transport as a deviation from the attached environment's instructions and carries the corrected
-> `curl --cacert https://…` forms. [`BUILD.md`](BUILD.md) §7.1 already carried this table correctly and was
-> the model for the version above.
+> ⚠ **THE GATEWAY PROBE IS NOT A `/dev/tcp` SOCKET WRITE AND THE 5105 INGRESS IS NOT PLAINTEXT.** Both are
+> easy to assume: `services/gateway-service/Dockerfile` uses `openssl s_client`, and its own comments explain
+> why a raw socket cannot work against a TLS listener. The distinction reaches past this table, because "the
+> ingress is plaintext" is the premise behind every `http://localhost:5105` probe — see
+> [`BUILD.md`](BUILD.md) §1.6 **D7**, which enumerates the https-only transport as a deviation from the
+> attached environment's instructions and carries the `curl --cacert https://…` forms this stack requires.
 
 ### 10.4 Rejected alternative — .NET Aspire's Docker Compose publishing
 
@@ -2042,11 +2226,11 @@ Both listeners bound — HTTP/1.1 on 5101, HTTP/2 on 5111 — `/health` answered
 `Http2`-only 5111 — and all five failed it. A deliberately unwritable storage directory made the process
 **refuse to start and terminate**, which is the fail-fast posture surviving as fail-fast.
 
-**That probe run measured the revision then in the tree, which bound two listeners, and the listener
-arrangement has since changed.** At the time `EXPOSE` carried 5101 and a second gRPC port, both bound, and a
+**That probe run was taken against a two-listener arrangement, which is NOT the shipped one.** In that
+run `EXPOSE` carried 5101 and a second gRPC port, both bound, and a
 fifth negative probe — an HTTP/1.1 request against the `Http2`-only second port — failed the probe as
-intended. The two surfaces have since been collapsed onto one `Http1AndHttp2` endpoint on 5101 for the reason
-§4.1 records, so the definition now declares `EXPOSE 5101` alone and there is no second listener to probe or
+intended. The shipped arrangement puts both surfaces on one `Http1AndHttp2` endpoint on 5101 for the reason
+§4.1 records, so the definition declares `EXPOSE 5101` alone and there is no second listener to probe or
 to drive negative. Everything else that run established — the uid, PID 1, the empty `ASPNETCORE_HTTP_PORTS`,
 the layer contents, the native provider, the volume ownership seam, the three response codes, the health
 transition and the fail-fast refusal — is unaffected by the change, since none of it depends on how many
@@ -2068,7 +2252,7 @@ provisioner's own source, the replica lock, and the bounded-wait failure.
 Those two runs are what fix the probe idiom for all four images: the runtime base carries `openssl` and
 neither `curl` nor `wget`, both measured on the image, so a probe may only use what the image actually ships
 — and **all four definitions use the same `openssl s_client` pipeline and install nothing**, Persistence
-having installed `curl` in an earlier revision and no longer doing so, for the reason §10.3 records.
+included, for the reason §10.3 records.
 
 **What an in-process host still cannot show, whatever its coverage.** It does not exercise TLS, ALPN protocol
 negotiation, a real gRPC channel, a client-certificate handshake, a container health probe, or Compose's

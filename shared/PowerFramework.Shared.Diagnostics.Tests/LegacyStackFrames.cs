@@ -164,6 +164,10 @@
 //      * A shared, cached array. Every factory returns a FRESH array, because arrays are mutable and
 //        a suite that sorted or overwrote one in place would otherwise corrupt every later suite in
 //        the same run.
+//
+//  LOCATOR CONVENTION: every bare `pfw.sra:L...` in this file means ws_objects/pfw.pbl.src/pfw.sra,
+//  the framework application - never the same-named packager object at
+//  ws_objects/pfw.pack.pbl.src/pfw.sra (AAP 0.8.6 R7).
 // ==================================================================================================
 
 using System;

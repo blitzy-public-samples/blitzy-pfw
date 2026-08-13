@@ -122,7 +122,7 @@
 //
 //     public string Lookup(string language, string category, string text)
 //
-// which assembles the expression itself from those three parts (I18nResourceReader.cs:L351). It
+// which assembles the expression itself from those three parts (I18nResourceReader.cs:L366). It
 // publishes NO member that accepts a pre-built expression, and its header records that as a
 // deliberate decision - a second way to ask one question would leak the query language to its
 // callers. Rendering a second expression here with Kernel's Formatting.Sprintf would therefore
@@ -138,7 +138,7 @@
 //       this file's reason to exist - remains auditable against :L52 from this file alone.
 //   (b) ITS PLACEHOLDERS ARE SEQUENTIAL EMPTY BRACES, '{}' and not '{0}'. That is the
 //       PowerFramework Sprintf dialect, which Kernel's Formatting.Sprintf implements: an omitted
-//       index takes the next argument in sequence (Formatting.cs:L694-L696). It is NOT .NET
+//       index takes the next argument in sequence (Formatting.cs:L550-L555, DECISION 9). It is NOT .NET
 //       composite formatting, and the framework's own dialect is knowable only from usage because
 //       the legacy Sprintf lives inside the closed pfw.dll.
 //   (c) THE ARGUMENT ORDER IS PRESERVED: the element name first, the source text second.
@@ -187,7 +187,7 @@
 // from a different category element altogether, which crosses the very boundary the switch below
 // exists to enforce. The mandated substitute does not build a query string at all: it walks the
 // same four steps of the same location path and compares the same two attribute values as DATA
-// (I18nResourceReader.cs:L426-L446), so no argument can contribute SYNTAX. That was not an
+// (I18nResourceReader.cs:L446-L456), so no argument can contribute SYNTAX. That was not an
 // oversight but a measured ruling, recorded in the reader at :L373-L402: ALL 126 <tr> entries of
 // pfw.i18n.xml resolve byte-identically under both spellings, no text attribute anywhere in the
 // table contains an apostrophe, and the only measured divergences are the injection payloads
@@ -661,8 +661,8 @@ public sealed class TraditionalChineseProvider : II18nProvider
             // caller never asked for or one from a different element, crossing the very category
             // boundary the switch above enforces. The mandated substitute builds no query string at
             // all: it walks the same location path and compares the same two attribute values as
-            // DATA (I18nResourceReader.cs:L426-L446), so no argument can contribute SYNTAX. That was
-            // measured rather than assumed and is recorded at I18nResourceReader.cs:L373-L402 - all
+            // DATA (I18nResourceReader.cs:L446-L456), so no argument can contribute SYNTAX. That was
+            // measured rather than assumed and is recorded at I18nResourceReader.cs:L350-L364 - all
             // 126 entries of the table resolve byte-identically under both spellings, no text
             // attribute anywhere in it contains an apostrophe, and the only divergences are the
             // injection payloads themselves, which AAP §0.1.5 permits declining because the change

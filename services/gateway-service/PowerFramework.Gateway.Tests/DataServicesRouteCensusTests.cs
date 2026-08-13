@@ -293,7 +293,7 @@ public sealed class DataServicesRouteCensusTests
     /// <summary>The group prefix every projected route sits under.</summary>
     private const string DataWindowPrefix = "/v1/datawindow";
 
-    /// <summary>The sub-group prefix the twenty-five C-04 projections sit under.</summary>
+    /// <summary>The sub-group prefix the twenty-four C-04 projections sit under.</summary>
     private const string ExpressionPrefix = DataWindowPrefix + "/expression";
 
     /// <summary>The published contract document, which is anonymous.</summary>
@@ -331,7 +331,7 @@ public sealed class DataServicesRouteCensusTests
         ["InvokeMethodChannel", "TraceChannel"];
 
     /// <summary>
-    /// THE CENSUS TABLE. Forty rows, and the count is asserted rather than trusted.
+    /// THE CENSUS TABLE. Thirty-nine rows, and the count is asserted rather than trusted.
     /// </summary>
     /// <remarks>
     /// Written out by hand ON PURPOSE, because a table derived from the production registration would

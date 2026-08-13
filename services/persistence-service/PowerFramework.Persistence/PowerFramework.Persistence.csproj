@@ -204,8 +204,14 @@
       an unused coupling. No peer service project is referenced either: C-A permits the published
       contracts project as the only cross-service edge in the system, and no behavioural code
       crosses a service boundary. Nothing in the five paths above reaches outside shared/.
+
+      A SECOND ProjectReference TO Shared.Eventful SAT HERE AND HAS BEEN REMOVED. It was an exact
+      duplicate of the edge declared immediately above this comment, so MSBuild deduplicated it and the
+      build never complained - which is precisely why it survived. The cost was not a build failure but a
+      project graph that read as though this service took six edges where it takes five, directly under a
+      comment whose subject is a reference that is deliberately ABSENT. One edge, one declaration, one
+      place to change it.
     -->
-    <ProjectReference Include="..\..\..\shared\PowerFramework.Shared.Eventful\PowerFramework.Shared.Eventful.csproj" />
 
   </ItemGroup>
 

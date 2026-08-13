@@ -118,14 +118,7 @@
 //  implementation files on its BAND 3 roster - the single source of truth for that list - and covers
 //  no test file at all.
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  `review_rules` returns exactly one line, "No user rules provided.", so NO user-specified rule
-//  governs this file. That is a finding rather than latitude: the enterprise baseline applies in
-//  their place, and the binding constraints cited inline are the refactor's own - C-B (replicate
-//  behaviour, never improve), C-C (the legacy tree is the read-only oracle), C-H (nullable and
-//  warnings-as-errors, with a coverage gate) and C-K (document every technology-specific decision).
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  SHAPE
 //  ------------------------------------------------------------------------------------------------
 //  Table-driven parity matrices expressed as theories with member data, which is the prescribed
@@ -161,7 +154,7 @@ namespace PowerFramework.Shared.Kernel.Tests
     /// </para>
     /// <para>
     /// The centrepiece is the interface-negative pair in SECTION C. The port walks
-    /// <see cref="System.Type.BaseType"/> and compares <see cref="System.Type.Name"/>, which is
+    /// <see cref="System.Type.BaseType"/> and compares <see cref="System.Reflection.MemberInfo.Name"/>, which is
     /// deliberately narrower than <see cref="System.Type.IsAssignableFrom(System.Type)"/>; those
     /// facts are what stop the narrowing being "simplified" away.
     /// </para>
@@ -873,7 +866,7 @@ namespace PowerFramework.Shared.Kernel.Tests
         /// <remarks>
         /// The fixture types are NESTED, so their <see cref="System.Type.FullName"/> carries a
         /// <c>+</c> separator as well as the namespace - and a nested type's
-        /// <see cref="System.Type.Name"/> carries neither, which is what makes every positive row in
+        /// <see cref="System.Reflection.MemberInfo.Name"/> carries neither, which is what makes every positive row in
         /// SECTION A a statement that the port reads <c>Name</c>. Both argument positions are asserted
         /// because they are separate code paths in the port: the class argument goes through the name
         /// lookup, the parent argument through the chain comparison.
@@ -1549,7 +1542,7 @@ namespace PowerFramework.Shared.Kernel.Tests
         }
 
         /// <summary>
-        /// CHARACTERIZES THE PORT: a constructed generic type's <see cref="System.Type.Name"/> carries
+        /// CHARACTERIZES THE PORT: a constructed generic type's <see cref="System.Reflection.MemberInfo.Name"/> carries
         /// the runtime's arity suffix, so <c>"List"</c> does not resolve while <c>"List`1"</c> does.
         /// </summary>
         /// <remarks>

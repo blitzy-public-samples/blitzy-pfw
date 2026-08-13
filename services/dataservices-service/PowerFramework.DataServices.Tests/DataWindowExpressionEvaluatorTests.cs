@@ -1541,7 +1541,7 @@ public class AggregateScopeTests
         DataWindowExpressionEvaluator evaluator = EvaluatorFixture.BuildEvaluator(out _);
 
         // IT IS THE RIGHT MODEL FOR AN UNPAGINATED SURFACE - a characterization run over a fixture that
-        // fits on one page needs to be able to SAY the buffer is the page. What changed is that it has
+        // fits on one page needs to be able to SAY the buffer is the page. Making it an opt-in means it has
         // to be said rather than assumed, so the resulting number is attributable to a stated pagination.
         evaluator.PageResolver = WholeBufferPageResolver.Instance;
 
@@ -2381,7 +2381,7 @@ public class DeployedPageResolutionTests
     /// <remarks>
     /// THE UNRECOGNISED ARM THROWS RATHER THAN FALLING BACK, and that is why the factory exists at all: a
     /// <c>default:</c> arm returning the refusing resolver would turn a mistyped setting - or a fourth
-    /// enum member somebody forgot to handle - back into the silent sentinel this change removes. The
+    /// enum member somebody forgot to handle - back into the silent sentinel this design refuses. The
     /// options validator rejects an undeclared value first, so in a configured service this is
     /// unreachable; it is the backstop for a caller that bypassed validation.
     /// </remarks>
@@ -3225,7 +3225,7 @@ public class LegacyMacroExpressionShapeTests
 //    9  :L6669                   :L1183, :L1349             the nested-Describe find expression
 //
 //  Shapes 1 to 3 arrive through EvaluateAtRow, which builds `Evaluate('<expression>',<row>)` and hands it
-//  to Describe [ContextMenuModel.cs:L5737-L5741], so they are exercised HERE as properties rather than as
+//  to Describe [ContextMenuModel.cs:L5744-L5748], so they are exercised HERE as properties rather than as
 //  expressions - the property text is itself observable, since a recording of the ported call sequence
 //  has to match the oracle's. Shape 9 is already covered by NestedDescribeTests above and is not
 //  duplicated; the two are cross-referenced rather than repeated.

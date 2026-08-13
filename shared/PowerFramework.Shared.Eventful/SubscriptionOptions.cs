@@ -40,11 +40,7 @@
 //          The ".^persistent" bulk-unsubscribe filter that gives the lifetime concept its reason to
 //          exist.
 //
-//  RULES POSITION, STATED EXPLICITLY
-//  review_rules reports exactly one line: "No user rules provided." No user-specified rule governs this
-//  file, none was invented to fill the gap, and that absence is not licence to lower the bar. In their
-//  place the AAP 0.7.2 enterprise baseline and the AAP 0.7.3 binding non-rule constraints apply:
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //      C-B   No behaviour improvements. Every numeric value and every symbol character below is
 //            reproduced exactly - nothing renumbered, nothing reordered, no value invented that the
 //            legacy does not have, and the two 32-bit bounds left bit-identical rather than "tidied"

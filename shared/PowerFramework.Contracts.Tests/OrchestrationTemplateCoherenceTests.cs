@@ -123,15 +123,14 @@ public sealed class OrchestrationTemplateCoherenceTests
     /// secret, and the three Persistence storage and pool settings.
     /// </para>
     /// <para>
-    /// THE TWO <c>_GRPC_URL</c> VARIABLES ARE WHY THE COUNT MOVED FROM TWENTY-TWO, and they are not a
-    /// duplication of the <c>_BASE_URL</c> pair. Persistence and DataServices each declare TWO endpoints,
-    /// one per PROTOCOL VERSION: one <c>Http1</c> endpoint on the documented port for <c>/health</c>,
-    /// <c>/v1/ping</c> and REST, and one <c>Http2</c> endpoint for the gRPC contracts. Both are
-    /// <c>https</c>, so ALPN could have carried both on one address - the split is kept because a caller
-    /// that dials the wrong one then fails at first use rather than reaching the wrong surface and being
-    /// answered: a gRPC channel against the <c>Http1</c> endpoint fails negotiation, and an HTTP/1.1 probe
-    /// against the <c>Http2</c> endpoint answers 400. Each is therefore named for what it carries rather
-    /// than sharing one variable.
+    /// THE TWO <c>_GRPC_URL</c> VARIABLES ARE NOT A DUPLICATION OF THE <c>_BASE_URL</c> PAIR, even though
+    /// each pair resolves to the same address. Persistence and DataServices each declare ONE endpoint,
+    /// <c>Http1AndHttp2</c> over <c>https</c>, so <c>/health</c>, <c>/v1/ping</c>, REST and the gRPC
+    /// contracts all answer on the documented port and ALPN selects between them. The two variables are
+    /// kept apart because each names a distinct EDGE rather than a distinct listener: a <c>_GRPC_URL</c> is
+    /// what a SERVICE dials for a contract call and a <c>_BASE_URL</c> is what a PROBE and the end-to-end
+    /// suite read, and they bind different service settings. Folding them into one would let a change of
+    /// call address silently move a probe.
     /// </para>
     /// <para>
     /// TWO are the shared server-certificate paths, which are deliberately ONE pair for the whole stack
@@ -162,32 +161,32 @@ public sealed class OrchestrationTemplateCoherenceTests
     /// anchor because a deployment can trust an issuer without being able to reach its revocation data.
     /// </para>
     /// <para>
-    /// 🔴 FIVE SECTION-PATH VARIABLES WERE REMOVED FROM THIS ROSTER, AND EVERY REMAINING ENTRY IS NOW A
-    /// FLAT SCREAMING-SNAKE NAME. <c>Security__CallerAuthorizations__3__{Caller,Audience,Scopes__0..2}</c>
-    /// granted the end-to-end suite's identity through the environment at a literal array index. They were
-    /// redundant in <c>Development</c>, where Security's own overlay already states that grant at that
-    /// index ALONGSIDE the credential entry the caller needs in order to authenticate for it - which no
-    /// environment block supplied - and wrong in <c>Production</c>, where the base settings file registers
-    /// no such caller, so the block created a permission nothing could authenticate to exercise. The index
-    /// was additionally load-bearing across two files under merge-by-index: a fourth row added to the
-    /// settings file would have been silently merged INTO the block rather than appended, yielding a hybrid
-    /// row that no duplicate guard could see. The grant now lives only where the caller is registered.
+    /// 🔴 NO SECTION-PATH VARIABLE BELONGS IN THIS ROSTER - EVERY ENTRY IS A FLAT SCREAMING-SNAKE NAME.
+    /// <c>Security__CallerAuthorizations__3__{Caller,Audience,Scopes__0..2}</c>
+    /// is the shape that grants the end-to-end suite's identity through the environment at a literal array
+    /// index, and it is redundant in <c>Development</c>, where Security's own overlay already states that
+    /// grant at that index ALONGSIDE the credential entry the caller needs in order to authenticate for it -
+    /// which no environment block supplies - and wrong in <c>Production</c>, where the base settings file
+    /// registers no such caller, so the block creates a permission nothing can authenticate to exercise. The
+    /// index is additionally load-bearing across two files under merge-by-index: a fourth row added to the
+    /// settings file is silently merged INTO the block rather than appended, yielding a hybrid
+    /// row that no duplicate guard can see. The grant therefore lives only where the caller is registered.
     /// </para>
     /// <para>
-    /// FOUR <c>_HOST_PORT</c> VARIABLES WERE ADDED, and they are the only entries that reach no
+    /// FOUR <c>_HOST_PORT</c> VARIABLES ARE THE ONLY ENTRIES THAT REACH NO
     /// application setting at all: they are the LEFT half of each <c>ports:</c> mapping. The container half
     /// stays fixed because it is what Kestrel binds, and a variable for it could only ever disagree with
     /// the settings file. These exist because the documented second-stack recipe
     /// (<c>docker compose -p pfw-2</c>) separates networks, volumes and container names but NOT published
-    /// ports, so with four fixed publications it collided on all four and could not start.
+    /// ports, so with four fixed publications it collides on all four and cannot start.
     /// </para>
     /// <para>
-    /// AND <c>INTERNAL_TLS_TRUSTED_CA_PATH</c> BECAME <c>INTERNAL_TLS_CA_PATH</c>, which is a change of
-    /// meaning rather than of spelling. The old variable's documented value was a path INSIDE a container
-    /// for a manifest that projected nothing there, so every internal channel and every image probe
-    /// verified against a file that did not exist. The manifest now declares the anchor as a Compose
-    /// secret, owns the container-side path as a literal, and this variable names the SOURCE on the
-    /// operator's host - which is why it also joins the must-be-empty set below.
+    /// AND <c>INTERNAL_TLS_CA_PATH</c> IS NOT A RESPELLING OF <c>INTERNAL_TLS_TRUSTED_CA_PATH</c> - the two
+    /// differ in MEANING. That second spelling belongs to the manifest and carries a path INSIDE a
+    /// container; declaring it here, in a file of operator-host paths, points every internal channel and
+    /// every image probe at a file that does not exist on either side. The manifest declares the anchor as a
+    /// Compose secret and owns the container-side path as a literal, and this variable names the SOURCE on
+    /// the operator's host - which is why it also joins the must-be-empty set below.
     /// </para>
     /// </remarks>
     private static readonly string[] ExpectedVariableNames =
@@ -224,6 +223,17 @@ public sealed class OrchestrationTemplateCoherenceTests
         "PERSISTENCE_HOST_PORT",
         "SECURITY_HOST_PORT",
 
+        // WHICH HOST INTERFACE EACH PUBLISHED PORT IS OFFERED ON, and these four exist because the
+        // answer used to be "every one of them". A two-field `ports:` mapping binds the host half to
+        // 0.0.0.0, so Persistence, DataServices and Security were reachable DIRECTLY from any host on
+        // the same network, going around Gateway and defeating the sole-ingress topology at the network
+        // layer. All four now default to loopback, which is what every access route the documentation
+        // publishes actually uses.
+        "DATASERVICES_HOST_BIND",
+        "GATEWAY_HOST_BIND",
+        "PERSISTENCE_HOST_BIND",
+        "SECURITY_HOST_BIND",
+
         // The switch that makes the ONE documented bring-up command sufficient on a fresh volume. It is
         // true in the template and FALSE in Persistence's own settings file, and that asymmetry is the
         // design rather than a drift: the code default is opted out, so nothing that fails to set it
@@ -240,22 +250,75 @@ public sealed class OrchestrationTemplateCoherenceTests
         "SECURITY_BASE_URL",
         "SECURITY_JWT_AUDIENCE",
         "SECURITY_JWT_ISSUER",
-        "SECURITY_JWT_SIGNING_KEY",
+        // ⚠ A PATH TO THE KEY, NOT THE KEY. This variable used to carry the RSA private key
+        // itself, which the manifest put into the container ENVIRONMENT - where `docker compose
+        // config` renders it in cleartext, `docker inspect` returns it to anyone who can reach
+        // the daemon socket, and every child process inherits it. It now names a host FILE that
+        // Compose projects read-only and the service reads through the `_FILE` convention.
+        "SECURITY_JWT_SIGNING_KEY_PATH",
+
+        // The file form of the OPTIONAL retiring key. A pass-through rather than a projection,
+        // because the retiring slot is empty in the steady state and a Compose secret's `file:`
+        // must name a path that already exists - so declaring one would abort every ordinary
+        // bring-up to serve a rollover that is not happening.
+        "SECURITY_JWT_RETIRING_SIGNING_KEY_FILE",
+
+        // THE ROLLOVER TRIO. Replacing the estate's one signing key in place refuses every token minted
+        // under the previous one until all three verifiers' cached key sets refresh, so a rollover
+        // publishes the outgoing key alongside the incoming one and each carries its own `kid`. Two of
+        // these three are IDENTIFIERS rather than material - a `kid` is published anonymously in the key
+        // set by design - which is why only the first joins the must-be-empty set below, and why the
+        // exactly-one-signing-secret row distinguishes material from identifier rather than matching on
+        // the name. The active identifier is a variable at all because the incoming key needs a NEW id and
+        // the shipped one is baked into the image's settings file: without it no rollover could be
+        // performed through this manifest.
+        "SECURITY_JWT_RETIRING_SIGNING_KEY",
+        "SECURITY_JWT_RETIRING_SIGNING_KEY_ID",
+        "SECURITY_JWT_SIGNING_KEY_ID",
 
         // THE ISSUANCE-ROSTER SECRETS - one per caller that may obtain a token. Required, and a missing
         // one REFUSES THE HOST: Security resolves every secret its roster names at startup and reports
         // the roster position of any that resolves to nothing. Three rather than five, because
         // Persistence requests no token at all (it reads the published key set anonymously) and the third
         // is the operator/end-to-end identity the Development overlay registers.
-        "SECURITY_CLIENT_SECRET_GATEWAY",
-        "SECURITY_CLIENT_SECRET_DATASERVICES",
+        // Both caller credentials are PATHS for the same reason as the signing key above; the third
+        // is the optional operator identity, which keeps its value form and gains a file form.
+        "SECURITY_CLIENT_SECRET_GATEWAY_PATH",
+        "SECURITY_CLIENT_SECRET_DATASERVICES_PATH",
         "SECURITY_CLIENT_SECRET",
+        "SECURITY_CLIENT_SECRET_FILE",
 
         "SECURITY_MTLS_CLIENT_CA_PATH",
         "SECURITY_MTLS_CLIENT_REVOCATION_MODE",
 
-        "TLS_CERTIFICATE_KEY_PATH",
-        "TLS_CERTIFICATE_PATH",
+        // THE TWO SETTINGS THAT MADE REVOCATION A DECISION INSTEAD OF A HARDCODED VALUE, plus the control
+        // that substitutes for it while the shipped posture cannot check.
+        //
+        // INTERNAL_TLS_REVOCATION_MODE is one variable for three services because all three verify
+        // against the single authority INTERNAL_TLS_CA_PATH names - a posture differing between them
+        // would leave the estate with the weaker guarantee and the appearance of the stronger. Both
+        // default to the value the settings files ship, so a deployment that copies this template
+        // unedited behaves identically to one that sets neither.
+        //
+        // SECURITY_MTLS_CLIENT_MAX_LIFETIME_DAYS is not a duplicate of the revocation mode above it. It
+        // bounds how long a caller certificate may DECLARE itself valid for, which is the only bound
+        // available on a compromised credential while nothing consults a CRL - and it is enforced rather
+        // than asserted in a comment, which was the state this replaced.
+        "SECURITY_MTLS_CLIENT_MAX_LIFETIME_DAYS",
+        "INTERNAL_TLS_REVOCATION_MODE",
+
+        // EIGHT PER-SERVICE HALVES, NOT ONE SHARED PAIR. The shared `TLS_CERTIFICATE_PATH` /
+        // `TLS_CERTIFICATE_KEY_PATH` gave all four services one cryptographic identity: the key read
+        // out of any container was the key every other service presented, and the certificate had to
+        // name every origin so it validated as any peer. Each service now supplies its own pair.
+        "SECURITY_TLS_CERTIFICATE_PATH",
+        "SECURITY_TLS_CERTIFICATE_KEY_PATH",
+        "PERSISTENCE_TLS_CERTIFICATE_PATH",
+        "PERSISTENCE_TLS_CERTIFICATE_KEY_PATH",
+        "DATASERVICES_TLS_CERTIFICATE_PATH",
+        "DATASERVICES_TLS_CERTIFICATE_KEY_PATH",
+        "GATEWAY_TLS_CERTIFICATE_PATH",
+        "GATEWAY_TLS_CERTIFICATE_KEY_PATH",
     ];
 
     /// <summary>
@@ -269,9 +332,33 @@ public sealed class OrchestrationTemplateCoherenceTests
     /// </remarks>
     private static readonly string[] MustBeEmptyVariableNames =
     [
-        "SECURITY_JWT_SIGNING_KEY",
-        "TLS_CERTIFICATE_PATH",
-        "TLS_CERTIFICATE_KEY_PATH",
+        // THE PATHS AND FILE REFERENCES SHIP EMPTY FOR THE SAME REASON THE MATERIAL DID. They name a
+        // location on the OPERATOR'S machine, which this template cannot know, and a pre-filled mount
+        // point that no manifest provides stops the documented bring-up dead while reading as configured.
+        "SECURITY_JWT_SIGNING_KEY_PATH",
+        "SECURITY_JWT_RETIRING_SIGNING_KEY_FILE",
+        "SECURITY_CLIENT_SECRET_GATEWAY_PATH",
+        "SECURITY_CLIENT_SECRET_DATASERVICES_PATH",
+        "SECURITY_CLIENT_SECRET_FILE",
+
+        // THE RETIRING KEY IS MATERIAL TOO, and it is additionally empty for a second reason: a populated
+        // one declares a rollover this template is not in the middle of, and Security refuses to start on
+        // it because the matching identifier would be absent. Its two IDENTIFIER siblings are deliberately
+        // NOT here - the retiring identifier is empty in the template but is not secret, and the active
+        // identifier carries a real default that must equal the settings value it repeats.
+        "SECURITY_JWT_RETIRING_SIGNING_KEY",
+        // EIGHT PER-SERVICE HALVES, NOT ONE SHARED PAIR. The shared `TLS_CERTIFICATE_PATH` /
+        // `TLS_CERTIFICATE_KEY_PATH` gave all four services one cryptographic identity: the key read
+        // out of any container was the key every other service presented, and the certificate had to
+        // name every origin so it validated as any peer. Each service now supplies its own pair.
+        "SECURITY_TLS_CERTIFICATE_PATH",
+        "SECURITY_TLS_CERTIFICATE_KEY_PATH",
+        "PERSISTENCE_TLS_CERTIFICATE_PATH",
+        "PERSISTENCE_TLS_CERTIFICATE_KEY_PATH",
+        "DATASERVICES_TLS_CERTIFICATE_PATH",
+        "DATASERVICES_TLS_CERTIFICATE_KEY_PATH",
+        "GATEWAY_TLS_CERTIFICATE_PATH",
+        "GATEWAY_TLS_CERTIFICATE_KEY_PATH",
 
         // THE TRUST ANCHOR IS HERE FOR A REASON THAT IS NOT SECRECY, and saying so matters because the
         // file is the PUBLIC half of an authority and is genuinely not sensitive. It is empty because it
@@ -323,6 +410,12 @@ public sealed class OrchestrationTemplateCoherenceTests
         "Sqlite:Password",
         "Jwt:MetadataAddress",
         "SECURITY_JWT_SIGNING_KEY",
+
+        // The retiring key is flat for exactly the same reason the active one is: SECURITY_JWT_ carries no
+        // double underscore, so section binding cannot reach it and Security reads it by literal name. Its
+        // IDENTIFIER is not here, because that one binds through the ordinary section path
+        // Security__RetiringSigningKeyId and IS declared in Security's settings file.
+        "SECURITY_JWT_RETIRING_SIGNING_KEY",
     ];
 
     /// <summary>
@@ -333,18 +426,21 @@ public sealed class OrchestrationTemplateCoherenceTests
     /// The template tells a reader not to rename the flat signing-key variable into a section path, and
     /// naming the wrong spelling is how that instruction is made actionable. Without this allowance the
     /// resolvability check below would report the prohibition itself as the defect it exists to prevent.
+    /// Both signing inputs are here for that one reason: the retiring key is flat for exactly the same
+    /// double-underscore cause as the active one, so the template forbids its section spelling too, and a
+    /// rollover is the moment an operator is most likely to reach for the regularised name.
     /// </para>
     /// <para>
-    /// <c>Jwt__JwksPath</c> is here for the neighbouring reason: it is named in order to record that it
-    /// USED to exist on Persistence, was read by nothing, and has been REMOVED. Documenting a withdrawn
-    /// key is worth more than deleting the sentence - an operator carrying it forward from an older
-    /// template needs to be told it is gone rather than left wondering why it has no effect - and the
-    /// resolvability check would otherwise report that explanation as an unresolvable key path, which is
-    /// the same category error as reporting a prohibition.
+    /// <c>Jwt__JwksPath</c> is here for the neighbouring reason: it is named in order to record that
+    /// Persistence has NO SUCH KEY and nothing reads one. Documenting a key that does not exist is worth
+    /// more than saying nothing - an operator carrying it forward from another template needs to be told
+    /// it has no effect rather than left wondering why - and the resolvability check would otherwise
+    /// report that explanation as an unresolvable key path, which is the same category error as reporting
+    /// a prohibition.
     /// </para>
     /// </remarks>
     private static readonly string[] DocumentedOnlyToBeForbidden =
-        ["Security__SigningKey", "Jwt__JwksPath"];
+        ["Security__SigningKey", "Security__RetiringSigningKey", "Jwt__JwksPath"];
 
     /// <summary>Every port the map assigns, as it may appear inside a template VALUE.</summary>
     /// <remarks>
@@ -353,15 +449,15 @@ public sealed class OrchestrationTemplateCoherenceTests
     /// would be an address for a service that does not exist.
     /// </para>
     /// <para>
-    /// THE ROSTER IS FOUR PORTS AND NOT SIX, WHICH IS THE COLLAPSE MADE ASSERTABLE. An earlier revision
-    /// also listed 5111 and 5112, the separate <c>Http2</c>-only gRPC endpoints of Persistence and
-    /// DataServices, placed outside the documented band so that an address the attached environment never
-    /// named could be added without moving one it did. They were withdrawn: AAP 0.3.2.2 assigns contracts
-    /// C-05..C-08 to 5101 and C-03/C-04 to 5102, so a gRPC contract answering anywhere else is not on the
-    /// port the map gives it. Each of those two services now binds ONE TLS endpoint with
-    /// <c>Protocols: Http1AndHttp2</c>, where ALPN carries the readiness probe and the gRPC contracts
-    /// together. Every documented port keeps exactly the meaning it was given, and a template value naming
-    /// 5111 or 5112 is now an address no listener answers.
+    /// THE ROSTER IS FOUR PORTS AND NOT SIX, WHICH IS THE ONE-ENDPOINT-PER-SERVICE RULE MADE ASSERTABLE.
+    /// A six-port roster would add 5111 and 5112, separate <c>Http2</c>-only gRPC endpoints for
+    /// Persistence and DataServices placed outside the documented band, so that an address the attached
+    /// environment never named could be added without moving one it did. That is not available: AAP
+    /// 0.3.2.2 assigns contracts C-05..C-08 to 5101 and C-03/C-04 to 5102, so a gRPC contract answering
+    /// anywhere else is not on the port the map gives it. Each of those two services binds ONE TLS
+    /// endpoint with <c>Protocols: Http1AndHttp2</c>, where ALPN carries the readiness probe and the gRPC
+    /// contracts together. Every documented port keeps exactly the meaning it was given, and a template
+    /// value naming 5111 or 5112 is an address no listener answers.
     /// </para>
     /// </remarks>
     private static readonly int[] AssignedPorts = [5101, 5102, 5104, 5105];
@@ -420,6 +516,15 @@ public sealed class OrchestrationTemplateCoherenceTests
             "GATEWAY_LOCALE",
             $"gateway-service/PowerFramework.Gateway/{BaseSettingsFileName}",
             "Gateway:Locale"),
+
+        // The active signing-key identifier. The template restates it so that a rollover can change it
+        // without rebuilding the image, and this row is what stops the restatement from drifting: the two
+        // spellings of one `kid` disagreeing would publish a key set under one identifier while stamping
+        // tokens with the other, which every verifier reads as a key it does not have.
+        new(
+            "SECURITY_JWT_SIGNING_KEY_ID",
+            $"security-service/PowerFramework.Security/{BaseSettingsFileName}",
+            "Security:SigningKeyId"),
     ];
 
     /// <summary>Every variable that must be left empty.</summary>
@@ -586,8 +691,8 @@ public sealed class OrchestrationTemplateCoherenceTests
     }
 
     /// <summary>
-    /// The signing-key instructions generate ASYMMETRIC material, and the withdrawn symmetric
-    /// instruction is nowhere in the file.
+    /// The signing-key instructions generate ASYMMETRIC material, and no symmetric-generation
+    /// instruction appears anywhere in the file.
     /// </summary>
     /// <remarks>
     /// Security signs with RS256 over a closed RS-family allow-list and imports the configured material
@@ -658,8 +763,8 @@ public sealed class OrchestrationTemplateCoherenceTests
     /// </summary>
     /// <remarks>
     /// All three verifiers reach the key set through the discovery document beneath their bearer
-    /// authority and expose no key-set setting of their own. Persistence once declared a relative
-    /// <c>Jwt:JwksPath</c>, but nothing read it and it has been removed, so an absolute URL has nowhere
+    /// authority and expose no key-set setting of their own - not even a relative
+    /// <c>Jwt:JwksPath</c> on Persistence, which nothing would read. So an absolute URL has nowhere
     /// to go in any of the three shapes.
     /// </remarks>
     [Fact]
@@ -890,29 +995,70 @@ public sealed class OrchestrationTemplateCoherenceTests
     }
 
     /// <summary>
-    /// Exactly one signing secret is declared, and no per-service signing key under any spelling.
+    /// Exactly one signing secret MINTS, at most one more is published for a rollover, and no per-service
+    /// signing key exists under any spelling.
     /// </summary>
     /// <remarks>
-    /// Security is the sole issuer; the other three hold verification material only. A per-service
-    /// signing key would make each of them a second issuer, and the security properties of a
-    /// sole-issuer topology depend on there being exactly one (AAP 0.6.6.3).
+    /// <para>
+    /// Security is the sole issuer; the other three hold verification material only. A per-service signing
+    /// key would make each of them a second issuer, and the security properties of a sole-issuer topology
+    /// depend on there being exactly one (AAP 0.6.6.3).
+    /// </para>
+    /// <para>
+    /// <b>MATERIAL AND IDENTIFIER ARE SEPARATED, BECAUSE AN EARLIER SHAPE OF THIS ROW CONFLATED THEM.</b>
+    /// It matched every variable whose name contained <c>SIGNING_KEY</c> and required exactly one, which
+    /// read as a sole-issuer assertion but was in fact a NAMING assertion: a <c>kid</c> variable would have
+    /// failed it even though a <c>kid</c> is published anonymously in the key set and authorises nothing,
+    /// and a second signing secret named without that substring would have passed it. What matters is how
+    /// many pieces of signing MATERIAL the template carries and whose they are, so identifiers - the names
+    /// ending <c>_KEY_ID</c> - are excluded and the material set is then pinned exactly.
+    /// </para>
+    /// <para>
+    /// TWO MATERIAL VARIABLES RATHER THAN ONE, AND THE SECOND IS NOT A SECOND ISSUER. A rollover publishes
+    /// the outgoing key beside the incoming one so that tokens still in flight keep verifying; minting uses
+    /// the ACTIVE key only, and the retiring key is verification material this service happens to hold
+    /// because it was its own key a moment ago. Both are prefixed <c>SECURITY_</c>, which is the property
+    /// that actually carries the sole-issuer guarantee, so that prefix is asserted too - a
+    /// <c>GATEWAY_JWT_SIGNING_KEY</c> would fail this row on the exact ground the row exists for.
+    /// </para>
     /// </remarks>
     [Fact]
-    public void TemplateDeclaresExactlyOneSigningSecret()
+    public void TemplateDeclaresExactlyOneMintingSecretAndAtMostOneRetiringOne()
     {
-        string[] signingVariables =
+        string[] signingMaterialVariables =
         [
             .. ReadTemplateVariables()
                 .Keys
                 .Where(static name => name.Contains("SIGNING_KEY", StringComparison.OrdinalIgnoreCase))
+                .Where(static name => !name.EndsWith("_KEY_ID", StringComparison.OrdinalIgnoreCase))
                 .Order(StringComparer.Ordinal),
         ];
 
+        // ⚠ NONE OF THESE CARRIES MATERIAL ANY MORE, WHICH STRENGTHENS THIS ROW RATHER THAN WEAKENING IT.
+        // The active key is named by a PATH and projected as a file; the retiring key keeps a value form
+        // for the length of a rollover and gains a preferred file form. So the census now counts the
+        // variables that REFER to signing material, and there is still exactly one active and at most one
+        // retiring - which is the sole-issuer property (AAP 0.6.6.3) this row exists to hold.
+        Assert.Equal(
+            (string[])
+            [
+                "SECURITY_JWT_RETIRING_SIGNING_KEY",
+                "SECURITY_JWT_RETIRING_SIGNING_KEY_FILE",
+                "SECURITY_JWT_SIGNING_KEY_PATH",
+            ],
+            signingMaterialVariables);
+
+        string[] foreignHolders =
+        [
+            .. signingMaterialVariables
+                .Where(static name => !name.StartsWith("SECURITY_", StringComparison.Ordinal)),
+        ];
+
         Assert.True(
-            signingVariables.Length == 1
-                && string.Equals(signingVariables[0], "SECURITY_JWT_SIGNING_KEY", StringComparison.Ordinal),
-            $"The template declares {Join(signingVariables)} as signing material. Exactly one signing "
-                + "secret exists in this system and Security holds it.");
+            foreignHolders.Length == 0,
+            $"The template declares {Join(foreignHolders)} as signing material for a service other than "
+                + "Security. Security is the sole issuer and the other three hold verification material "
+                + "only; a per-service signing key makes its holder a second issuer.");
     }
 
     /// <summary>Builds theory data from a name list.</summary>

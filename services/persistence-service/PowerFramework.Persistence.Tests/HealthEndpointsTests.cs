@@ -23,9 +23,6 @@
 //  because for one workflow identifier the legacy-side and target-side characterization recordings have
 //  to be captured against the same persistence-db volume state.
 //
-//  RULES POSITION
-//  No user rules were provided for this project - the rules document contains exactly one line saying
-//  so - and nothing is invented in their place. The relevant named constraints are cited at each case.
 // ==================================================================================================
 
 using System.Globalization;
@@ -381,10 +378,10 @@ public sealed class HealthEndpointsTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>THE BODY USED TO NAME THE COMPONENT AND NOTHING ELSE</b>, which left an operator reading
+    /// <b>NAMING THE COMPONENT AND NOTHING ELSE IN THE BODY</b> leaves an operator reading
     /// <c>/health</c> with a symptom and no action: "sqlite" is not ready says nothing about whether the
     /// volume is missing or the migrations simply have not been run, and those two call for opposite
-    /// responses. The seam already distinguished them internally and already recorded the remedy, so the
+    /// responses. The seam distinguishes them internally and records the remedy, so the
     /// only party not told was the one that has to act.
     /// </para>
     /// <para>
@@ -814,7 +811,7 @@ public sealed class HealthEndpointsTests
     /// <remarks>
     /// <para>
     /// THE RESOLVED PATH IS THE ONE VALUE IN THAT RECORD THAT IS ABOUT THE DEPLOYMENT RATHER THAN THE
-    /// DATABASE, and it used to be in three records plus the close record. A path is not itself a credential,
+    /// DATABASE, and putting it in three records plus the close record is the easy default. A path is not itself a credential,
     /// but it publishes where storage - and in a deployment that mounts one, where a secret volume - lives, to
     /// every reader of a log that needed none of it in order to read the log.
     /// </para>
@@ -863,7 +860,7 @@ public sealed class HealthEndpointsTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THE TWO HALVES OF THE F-13 SPLIT, ASSERTED SIDE BY SIDE ON ONE INPUT, which is the only way to
+    /// THE TWO HALVES OF THE READINESS-VERSUS-RUNTIME SPLIT, ASSERTED SIDE BY SIDE ON ONE INPUT, which is the only way to
     /// show they diverge deliberately rather than by accident. The same uncreatable location produces two
     /// quite different behaviours depending on which path asks:
     /// </para>
@@ -879,10 +876,10 @@ public sealed class HealthEndpointsTests
     /// probe to make a test go green.
     /// </para>
     /// <para>
-    /// <b>⚠ WHAT THIS CASE USED TO ASSERT, AND WHY IT NO LONGER DOES.</b> It required the CONFIGURED PATH
-    /// to appear in the thrown message, on the reasoning that an operator cannot fix a mount they are not
-    /// told about. The rest of this estate had already settled that question the other way, and this
-    /// service was internally inconsistent with itself: <c>Program.cs</c>'s internal-trust anchor states
+    /// <b>⚠ WHAT THIS CASE DELIBERATELY DOES NOT ASSERT, AND WHY.</b> Requiring the CONFIGURED PATH
+    /// to appear in the thrown message is the tempting reading, on the grounds that an operator cannot fix a
+    /// mount they are not told about. The rest of this estate settles that question the other way, and
+    /// asserting it here would make this service internally inconsistent: <c>Program.cs</c>'s internal-trust anchor states
     /// that "the path is not reproduced here, because a startup record must not publish a container's
     /// secret mount layout ... the message names the configuration key instead - the same rule
     /// Configuration/PersistenceOptions.cs applies to its own validation messages", and both sibling
@@ -897,7 +894,7 @@ public sealed class HealthEndpointsTests
     /// strengthened: the open still throws, still creates nothing, and now names the key while withholding
     /// the path. The operator's need is met by the key plus an established failure class - a file occupies
     /// the path, the parent is missing, the directory is unwritable, or its creation was refused - which is
-    /// more actionable than the single "not writable" sentence the old form emitted for all four.
+    /// more actionable than a single "not writable" sentence covering all four.
     /// </para>
     /// </remarks>
     [Fact]
@@ -949,7 +946,7 @@ public sealed class HealthEndpointsTests
 
         // AND THE PATH IS WITHHELD - message and inner exception alike. Asserted as booleans rather than
         // with Assert.DoesNotContain, because that overload renders both operands and would print the
-        // mount layout at exactly the moment the defect it guards against was present.
+        // mount layout at exactly the moment the defect it guards against is present.
         Assert.False(
             fault.Message.Contains(unusable, StringComparison.Ordinal),
             "The thrown message reproduces the configured storage path.");
@@ -1205,11 +1202,11 @@ public sealed class HealthEndpointsTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THE CASE THE MONOTONIC SWITCH EXISTS FOR, and the one the previous implementation got wrong. The
-    /// window used to be computed as the difference of two WALL-CLOCK reads. When the wall clock steps
-    /// backward - an NTP correction, a container resuming on a host whose clock moved, a manual change -
+    /// THE CASE THE MONOTONIC SWITCH EXISTS FOR, and the one a wall-clock implementation gets wrong.
+    /// Computing the window as the difference of two WALL-CLOCK reads fails when the wall clock steps
+    /// backward - an NTP correction, a container resuming on a host whose clock moved, a manual change:
     /// that difference goes NEGATIVE, a negative age is trivially within any window, and the cached
-    /// positive answer is served from then on. A bounded staleness silently became an unbounded one: this
+    /// positive answer is served from then on. A bounded staleness silently becomes an unbounded one: this
     /// service would keep reporting READY, and Gateway's gate would keep standing open, for as long as the
     /// clock stayed behind - with storage already gone.
     /// </para>
@@ -1508,8 +1505,8 @@ public sealed class HealthEndpointsTests
     /// A readiness probe against an unusable location reports not ready and discloses no path.
     /// </summary>
     /// <remarks>
-    /// TWO PROPERTIES AT ONCE, AND THE FIRST ONE IS WHY THE SECOND IS EASY. The readiness path no longer
-    /// attempts to create the data directory at all, so a location whose parent is an ordinary FILE - a
+    /// TWO PROPERTIES AT ONCE, AND THE FIRST ONE IS WHY THE SECOND IS EASY. The readiness path does not
+    /// attempt to create the data directory at all, so a location whose parent is an ordinary FILE - a
     /// location no filesystem will turn into a directory - is simply unreachable rather than a structural
     /// fault to be caught. That means the verdict comes from the seam's own recorded failure instead of
     /// from an exception whose message embeds the configured path, which is the disclosure this case
@@ -1537,7 +1534,7 @@ public sealed class HealthEndpointsTests
         Assert.Equal(HealthStatus.Unhealthy, result.Status);
         Assert.Equal(StorageReadiness.Unreachable, storage.LastReadiness);
 
-        // NOTHING WAS CREATED, which is the property F-13 is about: the blocker is still a file and no
+        // NOTHING WAS CREATED, which is the whole property of the split: the blocker is still a file and no
         // directory appeared beside or beneath it.
         Assert.True(File.Exists(blocker), "The readiness path must not have replaced the blocking file.");
         Assert.False(Directory.Exists(unusable), "The readiness path must not create the data directory.");
@@ -1566,12 +1563,12 @@ public sealed class HealthEndpointsTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THE CENTRAL F-13 CASE. Before the split, readiness ran the RUNTIME open: it brought the data
-    /// directory into being, opened under the legacy <c>mode=rwc</c> grammar so the database FILE was
-    /// created, and set the journal mode - so an unauthenticated request to <c>/health</c> performed three
-    /// filesystem mutations and then reported READY against a database it had just invented. That is both
-    /// a mutation driven from an unauthenticated surface and a false positive: the gate Gateway hangs on
-    /// would open for a service with no data.
+    /// THE CENTRAL CASE FOR THE SPLIT. A readiness path that ran the RUNTIME open would bring the data
+    /// directory into being, open under the legacy <c>mode=rwc</c> grammar so the database FILE is
+    /// created, and set the journal mode - so an unauthenticated request to <c>/health</c> would perform
+    /// three filesystem mutations and then report READY against a database it had just invented. That is
+    /// both a mutation driven from an unauthenticated surface and a false positive: the gate Gateway hangs
+    /// on would open for a service with no data.
     /// </para>
     /// <para>
     /// Asserting the directory listing is EMPTY rather than just checking for the database file is
@@ -1617,10 +1614,10 @@ public sealed class HealthEndpointsTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THE F-14 CASE. A constant scalar passes just as happily against an empty database, so before the
-    /// schema check a service whose volume mounted correctly and whose migrations never ran reported
-    /// READY - and then failed every request it received. That is the worst shape of readiness bug: the
-    /// gate opens, traffic arrives, and nothing works.
+    /// THE CASE FOR PROBING THE SCHEMA AND NOT ONLY THE ENGINE. A constant scalar passes just as happily
+    /// against an empty database, so without a schema check a service whose volume mounted correctly and
+    /// whose migrations never ran reports READY - and then fails every request it receives. That is the
+    /// worst shape of readiness bug: the gate opens, traffic arrives, and nothing works.
     /// </para>
     /// <para>
     /// The verdict is DISTINCT from unreachable rather than merely negative, because the two call for
@@ -1737,10 +1734,10 @@ public sealed class HealthEndpointsTests
             logger,
             TimeProvider.System);
 
-        // THROUGH THE RUNTIME OPEN, not the readiness probe. The readiness path no longer goes anywhere
-        // near this arm - that is F-13's separation - so exercising it means calling the member that owns
-        // it. The arm is still worth pinning: it is the one an operator reads when a real deployment
-        // cannot open its database at startup.
+        // THROUGH THE RUNTIME OPEN, not the readiness probe. The readiness path goes nowhere
+        // near this arm - readiness and runtime opening are separate paths - so exercising it means calling
+        // the member that owns it. The arm is worth pinning: it is the one an operator reads when a real
+        // deployment cannot open its database at startup.
         Assert.NotEqual(
             RetCode.OK,
             await storage.OpenAsync(TestContext.Current.CancellationToken));
@@ -1776,6 +1773,7 @@ public sealed class HealthEndpointsTests
     /// </summary>
     /// <param name="dataDirectory">The directory the database file should live in.</param>
     /// <param name="clock">The clock to inject, or <see langword="null"/> for the system clock.</param>
+    /// <param name="logger">The logger, or <see langword="null"/> to record nothing.</param>
     /// <returns>A seam that has not yet opened anything.</returns>
     private static SqliteConnectionFactory CreateStorage(
         string dataDirectory,

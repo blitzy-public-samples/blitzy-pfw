@@ -3,10 +3,10 @@
 //  ------------------------------------------------------------------------------------------------
 //  WHAT THIS FILE GUARDS, AND WHY THIS SERVICE HAS THE MOST TO LOSE
 //
-//  This service used to read the four inbound token-validation checks - issuer, audience, lifetime and
-//  signature - out of configuration and hand whatever it found to the bearer handler. A settings file
-//  could therefore turn any of them off while the host reported healthy. Each removes a whole class of
-//  forgery, and on the SOLE ISSUER the consequences are worse than anywhere else in the system:
+//  READING the four inbound token-validation checks - issuer, audience, lifetime and signature - out of
+//  configuration and handing whatever is found to the bearer handler would let a settings file turn any of
+//  them off while the host reported healthy. Each removes a whole class of forgery, and on the SOLE ISSUER
+//  the consequences are worse than anywhere else in the system:
 //
 //    * without issuer validation a credential from any issuer is accepted - and this service IS the
 //      issuer, so it would honour forgeries of its own authority;
@@ -21,10 +21,10 @@
 //  literally - to FALSE - and on this service it is load bearing rather than tidy: the legacy handler
 //  rewrites `scope` and `sub` into WS-Federation URIs, so with mapping ON the scope policy would look for
 //  claims that are no longer there and every scope check would silently pass nothing. So the required
-//  value is false and a configured TRUE is what must be refused. It was READ from configuration in
-//  section 5 and then overwritten by the literal, which is the same read-then-ignore shape the four
-//  switches used to have: the read decided nothing while appearing to. The read is gone and this file's
-//  last three rows are what replaces it.
+//  value is false and a configured TRUE is what must be refused. Section 5 assigns the literal and does
+//  NOT read the key, deliberately: reading it and then overwriting it is the read-then-ignore shape that
+//  would let a configured value decide nothing while appearing to. This file's last three rows are what
+//  enforce the value instead.
 //
 //  THE REFUSAL IS A STARTUP GATE HERE, NOT AN OPTIONS RULE, AND THAT SHAPES EVERY ROW BELOW. The two
 //  sibling services model these switches on their own typed options and refuse a disabled one through
@@ -209,10 +209,11 @@ public sealed class InvariantTokenValidationTests
     /// surface would be uniformly broken rather than visibly misconfigured.
     /// </para>
     /// <para>
-    /// <b>AND IT REPLACES A DEAD READ.</b> Section 5 of the composition root used to assign this from
-    /// configuration and then overwrite it with the literal a few lines later, so a configured value took
-    /// no effect while an operator reading the settings file would believe it had. The read is gone; the
-    /// refusal is what tells a deployment that the value is neither honoured nor honourable.
+    /// <b>AND IT STANDS IN FOR A READ THAT WOULD BE DEAD.</b> Assigning this from configuration in section
+    /// 5 of the composition root and then overwriting it with the literal a few lines later would let a
+    /// configured value take no effect while an operator reading the settings file believed it had. Section 5
+    /// therefore assigns only the literal, and this refusal is what tells a deployment that the value is
+    /// neither honoured nor honourable.
     /// </para>
     /// </remarks>
     [Fact]

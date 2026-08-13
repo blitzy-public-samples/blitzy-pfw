@@ -19,7 +19,7 @@ title: >-
 capabilityArea: >-
   The cryptographic surface: unkeyed hashing, keyed hashing, encoding conversion, the three
   symmetric cipher families, the asymmetric encrypt, decrypt, sign and verify set, and random
-  generation - together with the seven weak legacy defaults that are preserved as defaults and
+  generation - together with the eight weak legacy defaults that are preserved as defaults and
   annotated as known legacy weaknesses rather than corrected
 targetService: Security
 
@@ -30,8 +30,11 @@ description: |
   hashing of text and of a file, keyed hashing, the two encoding conversions in both
   directions, symmetric encryption and decryption across the three cipher families, the
   asymmetric encrypt, decrypt, sign and verify set with its three rejection outcomes, and
-  the three random generators. It pins seven weak legacy defaults so that a later change
-  cannot strengthen one of them without a recorded comparison failing.
+  the three random generators. It pins all EIGHT weak legacy defaults of
+  ../../docs/SECRETS.md section 7 so that a later change cannot strengthen one of them
+  without a recorded comparison failing. provesDefects carries those eight in that
+  document's order, followed by a ninth entry that is explicitly NOT one of them: the
+  identifier-preservation rule, which section 7 records as a rule rather than a weakness.
 
   NO CRYPTOGRAPHIC TEST WINDOW EXISTS, AND THAT IS A FINDING RATHER THAN A GAP IN THIS FILE
 
@@ -71,15 +74,18 @@ description: |
   cases below: key generation returns the public key and a reference to the private key, and
   the generated private key is retained by Security and never returned to the caller.
 
-  THE SEVEN PRESERVED DEFAULTS ARE ANNOTATED, NOT REMEDIATED
+  THE EIGHT PRESERVED DEFAULTS ARE ANNOTATED, NOT REMEDIATED
 
-  Every item in provesDefects below is a weak cryptographic default. Each is preserved as
-  the default and annotated as a known legacy weakness, and annotation is the whole
-  remediation: none is silently strengthened and no safe mode is added alongside it. The
-  list is therefore not a remediation backlog, and it must not be read as one. A capture
+  The first eight items in provesDefects below are weak cryptographic defaults - the
+  canonical eight of ../../docs/SECRETS.md section 7, in that document's order. Each is
+  preserved as the default and annotated as a known legacy weakness, and annotation is the
+  whole remediation: none is silently strengthened and no safe mode is added alongside it.
+  The list is therefore not a remediation backlog, and it must not be read as one. A capture
   that shows a strengthened default is a parity FAILURE and is filed as a divergence in the
   target, because behaviour preservation forbids improvements as firmly as it forbids
-  regressions.
+  regressions. The ninth and last item is deliberately NOT one of the eight and is not a
+  weakness at all: it is the identifier-preservation rule, and the note on the entry itself
+  says so at length so that the roster cannot be miscounted as nine defects.
 
   WHAT IS NOT CAPTURED
 
@@ -555,6 +561,24 @@ capturePhase:
         succeeds.
       format: "The boolean verification result per case, plus the numeric hash-type identifier"
       locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L474"
+    - name: rsa.sign.md5.accepted
+      description: >-
+        A signature over the same fixed data under the WEAKEST digest identifier in the hash
+        set, and its verification. This case exists because the declaring comment names the
+        hash set's consumers as the hash operation AND the signing and verification
+        operations, so the whole set - including the digest that is broken for collision
+        resistance - is a legal SIGNATURE-hash selector. That is provesDefects item 8, and
+        without this case the oracle would only ever have been asked to sign under a strong
+        digest and the item would be pinned by nothing. What is compared is that the operation
+        is ACCEPTED rather than refused, the identifier that selected the digest, and that the
+        signature verifies under the same identifier - a target that rejected the weak digest
+        would be a parity failure rather than a hardening, because refusing it would refuse
+        input the legacy accepts. The signature bytes are not compared, for the reason recorded
+        on rsa.sign.sha256.
+      format: >-
+        The accepted-or-refused outcome, the numeric hash-type identifier that selected the
+        digest, the signature byte length, and the boolean verification result
+      locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L927"
     - name: rsa.sizeLimit.rejection.pkcs1
       description: >-
         A first-class rejection outcome, not an incidental error. Under the default
@@ -590,7 +614,8 @@ capturePhase:
         The asymmetric padding identifier set as declared - CRYPTO_RSA_PADDING_PKCS1 = 0,
         CRYPTO_RSA_PADDING_OAEP = 1, and CRYPTO_RSA_PADDING_DEFAULT declared equal to
         CRYPTO_RSA_PADDING_PKCS1 - which is simultaneously the evidence for provesDefects
-        item 2 and for the unrepresentability recorded above.
+        item 2, whose default alias it records, and for item 3, whose unrepresentability it
+        establishes by having no third member.
       format: >-
         Identifier spelling to numeric value, in declaration order, with the default alias recorded as
         the identifier it resolves to
@@ -599,7 +624,7 @@ capturePhase:
       description: >-
         The declared key-size set - CRYPTO_RSA_BITS_1024 = 1024, CRYPTO_RSA_BITS_2048 = 2048
         and CRYPTO_RSA_BITS_4096 = 4096. The small size is a first-class declared value
-        alongside the other two, which is the evidence for provesDefects item 6, and it is
+        alongside the other two, which is the evidence for provesDefects item 7, and it is
         recorded so that its removal from the accepted set would surface as a difference.
       format: "Identifier spelling to numeric value, in declaration order"
       locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L965-L967"
@@ -816,14 +841,25 @@ determinismMask:
       byte identical. This is the most misleading failure available on this surface, which is
       why the encoding is pinned rather than left to a platform default.
 
-# EVERY ITEM BELOW IS A WEAK CRYPTOGRAPHIC DEFAULT THAT IS PRESERVED AS THE DEFAULT AND
-# ANNOTATED AS A KNOWN LEGACY WEAKNESS. Annotation is the whole remediation: not one of them
-# is silently strengthened and no safe mode is offered alongside any of them. This list is
-# NOT a remediation backlog. A capture showing a strengthened default is a parity FAILURE
-# and is filed as a divergence in the target, because behaviour preservation forbids
-# improvements as firmly as it forbids regressions. ../../docs/CONTRACTS.md section 5.3
-# carries the same roster from the contract side and is the authority for the annotations
-# the published contract descriptions actually bear.
+# THE FIRST EIGHT ITEMS BELOW ARE THE CANONICAL WEAK-DEFAULT REGISTER, IN THE CANONICAL ORDER,
+# AND THE NINTH IS DELIBERATELY NOT ONE OF THEM. ../../docs/SECRETS.md section 7 is the
+# authority: it enumerates EIGHT preserved weak defaults, numbered, and then records the
+# identifier-preservation rule separately with the words "it is not counted as a ninth item".
+# ../../docs/CONTRACTS.md section 5.3 carries the same eight in the same order with the exact
+# annotation text the contract descriptions bear, and the published contract carries them a
+# third time at the boundary itself. All three are numbered identically so a reader can check
+# them against one another item by item - and so is this list, which is the whole point of
+# stating the count here. The order is therefore load-bearing rather than presentational, and
+# so is the split between items 2 and 3: an earlier revision merged them and carried the
+# scope-of-the-hash-set item inside the ninth entry's prose, which left this roster reading as
+# seven against a canonical eight and made an item-by-item reconciliation impossible.
+#
+# EVERY ONE OF THE EIGHT IS A WEAK DEFAULT THAT IS PRESERVED AS THE DEFAULT AND ANNOTATED AS A
+# KNOWN LEGACY WEAKNESS. Annotation is the whole remediation: not one of them is silently
+# strengthened and no safe mode is offered alongside any of them. This list is NOT a
+# remediation backlog. A capture showing a strengthened default is a parity FAILURE and is
+# filed as a divergence in the target, because behaviour preservation forbids improvements as
+# firmly as it forbids regressions.
 provesDefects:
   - defect: >-
       The default symmetric mode is electronic codebook. The mode default is declared equal
@@ -846,23 +882,48 @@ provesDefects:
       :L36 with their blob counterparts through :L44, and the decrypt counterparts run from
       :L46 to :L60.
   - defect: >-
-      The default asymmetric padding is the PKCS-family form, and the no-padding form is
-      explicitly not supported. The legacy's own authoritative comment states the default,
-      states that the plaintext must be at least eleven bytes smaller than the key modulus,
-      states that the optimal-asymmetric-encryption-padding form requires forty-one bytes
-      smaller, and then states outright that no-padding is not supported.
-    locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L736-L738"
+      The default asymmetric padding is the PKCS-family form. The default padding identifier
+      is declared equal to the PKCS-family identifier, so every overload that omits the
+      padding selector signs and encrypts under it rather than under the
+      optimal-asymmetric-encryption-padding form.
+    locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L949-L951"
     note: >-
-      Annotation: the PKCS-family default is preserved and is not silently upgraded to the
-      optimal-asymmetric form, and the no-padding refusal is the LEGACY'S OWN rather than a
-      hardening decision taken by the port - which is why reproducing the refusal is
-      preservation rather than improvement. The refusal is doubly established: beyond the
-      comment, the declared padding set has exactly two members at
-      ws_objects/pfw.shared.pbl.src/enums.sru:L949-L950, so there is no third value to
-      select and the request is unrepresentable as well as refused. All three outcomes - the
-      two size-limit rejections and the no-padding rejection - are captured as first-class
-      results with their classifications, not as incidental errors. The padding-omitting
-      arities that reach the default are n_crypto.sru:L62, :L64, :L66 and :L68.
+      Annotation carried at the point of reproduction: the PKCS-family default is preserved
+      and is NOT silently upgraded to the optimal-asymmetric form, and no alternative default
+      is offered alongside it. The padding-omitting arities that reach the default are
+      ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L62, :L64, :L66 and :L68, and the legacy's own
+      authoritative comment states the default and its size bound at
+      ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L736. The evidence is
+      captured directly rather than inferred: rsa.encrypt.defaultPadding drives a
+      padding-omitting arity and records the identifier in force, and rsa.paddingIdentifiers
+      records the default alias resolving to the PKCS-family value. Both size-limit rejections
+      are captured as first-class results with their classifications - the two bounds differ,
+      eleven bytes against forty-one, and a port applying one bound to both paddings would pass
+      a single-case check.
+
+      SPLIT FROM THE ITEM BELOW DELIBERATELY. An earlier revision of this file carried the
+      default and the no-padding refusal as ONE entry, which made this roster seven items long
+      against the canonical eight of ../../docs/SECRETS.md section 7. They are two distinct
+      behaviours with different evidence - one is a default in force, the other is a capability
+      that does not exist - and merging them left the register unable to reconcile item by item
+      with the two documents that carry the same eight.
+  - defect: >-
+      The no-padding form is explicitly not supported, and the refusal is the LEGACY'S OWN
+      rather than a hardening decision taken by the port. The legacy's authoritative comment
+      states outright that no-padding is not supported, and the declared padding set has
+      exactly two members, so the request is unrepresentable as well as refused.
+    locator: "ws_objects/pfw.demos.pbl.src/u_cst_tabpage_utility_crypto.sru:L738"
+    note: >-
+      Annotation: reproducing this refusal is PRESERVATION rather than improvement, which is
+      the distinction that makes it belong on this list at all - a reader who assumed the port
+      had added the refusal would read a preserved behaviour as a hardening and might "relax"
+      it. Doubly established, and the second half is the stronger: beyond the comment, exactly
+      two padding values are declared at ws_objects/pfw.shared.pbl.src/enums.sru:L949-L950, so
+      there is no third identifier to select and no representable request to refuse. Captured
+      as rsa.noPadding.rejection, which records the outcome classification AND the declared
+      identifier set as the evidence that no third value exists. Established partly by
+      ABSENCE, which ../../docs/SECRETS.md section 7 records as the right kind of evidence
+      here: a capability the legacy cannot express is one the port must not offer.
   - defect: >-
       Symmetric padding is a single fixed family and is not selectable. There is no way to
       choose a padding scheme for any symmetric operation, and no way to discover which one
@@ -939,28 +1000,62 @@ provesDefects:
       bits as an observed output precisely so that a later narrowing of the accepted set
       surfaces as a comparison difference rather than as a silent policy change.
   - defect: >-
+      ONE hash-type set is declared for THREE consumers, so the weakest digest in it is a legal
+      SIGNATURE-hash selector and remains one. The declaring comment names the set's consumers
+      as the hash operation and the signing and verification operations, and all four signature
+      overloads accept it as a hash-type argument - so a signature may be requested under the
+      digest that is broken for collision resistance, and the request is accepted.
+    locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L927"
+    note: >-
+      Annotation: the weakness here is the SCOPE of an otherwise ordinary constant set rather
+      than any single value in it, and it is annotated rather than corrected. Narrowing the set
+      the signature operations accept would refuse input the legacy accepts, which is a
+      behavioural change dressed as hardening. The four signature overloads that take the hash
+      type are ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L70-L73, and the target reproduces the
+      acceptance explicitly - its signature-hash resolver maps the weak digest rather than
+      rejecting it, and says so where it does.
+
+      ONE EXCEPTION EXISTS AND IT IS NOT A STRENGTH DECISION. The checksum member is excluded
+      from the keyed and signing operations, because there is no keyed-hash-over-checksum or
+      signature-over-checksum construction to implement at all - so those operations publish a
+      narrowed identifier set while the unkeyed digests keep the full one. That is narrowing N1
+      of ../../docs/CONTRACTS.md, and the weak digest is deliberately NOT among what it removes.
+      The distinction matters for reading a capture: a refusal of the checksum on a signature is
+      preserved behaviour, and a refusal of the weak digest would be a divergence.
+
+      CAPTURED RATHER THAN ASSERTED. rsa.sign.md5.accepted signs and verifies under the weak
+      identifier and records the accepted-or-refused outcome with the identifier in force. That
+      case exists for this item alone: every other signature case in the capture uses a strong
+      digest, so without it the item would be pinned by no observation at all.
+  - defect: >-
       The algorithm identifier sets are preserved exactly, values and spellings alike: the
       six hash identifiers, the five cipher identifiers across three families, the three
       modes with their default alias, the two padding values with theirs, the two encoding
       values, the three random-string classes and the two identifier-formatting flags.
     locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L924-L967"
     note: >-
-      Stated precisely because the distinction matters: this is a preservation RULE rather
-      than a weakness, and it is listed here because this pair is what enforces it, not
-      because the identifiers are themselves defective. The rule exists because these
-      identifiers appear in serialized payloads, in log records and in characterization
-      recordings, so a rename or a renumbering would silently invalidate every stored
-      comparison - including every recording taken under this workflow. The identifiers keep
-      their original screaming-snake spelling in the target even though that departs from the
-      language's naming convention, and the analyzer rules that would object are suppressed
-      for the files carrying them rather than the identifiers being tidied.
+      🔴 THIS IS THE NINTH ENTRY AND IT IS NOT ONE OF THE EIGHT. The eight items above are the
+      canonical weak-default register that ../../docs/SECRETS.md section 7,
+      ../../docs/CONTRACTS.md section 5.3 and the published contract itself all carry in the
+      same order and with the same numbering. THIS entry is a preservation RULE rather than a
+      weakness, and section 7 says so in terms: it "is not counted as a ninth item". It is
+      recorded here anyway, because this pair is what enforces it and a rule with no capture
+      behind it is a rule nothing holds - but a reader reconciling this file against those
+      documents counts EIGHT defects and one rule, not nine defects.
 
-      One consequence of the declared sets is easy to miss and is recorded so it is not: the
-      declaring comment at ws_objects/pfw.shared.pbl.src/enums.sru:L927 names the hash set's
-      consumers as the hash operation AND the signing and verification operations - one set,
-      three consumers - so the whole set, including the weakest digest in it, is a legal
-      selector on the signature operations. That is preserved rather than narrowed, because
-      narrowing the accepted set would refuse input the legacy accepts.
+      The rule exists because these identifiers appear in serialized payloads, in log records
+      and in characterization recordings, so a rename or a renumbering would silently
+      invalidate every stored comparison - including every recording taken under this workflow.
+      The identifiers keep their original screaming-snake spelling in the target even though
+      that departs from the language's naming convention, and the analyzer rules that would
+      object are suppressed for the files carrying them rather than the identifiers being
+      tidied.
+
+      One consequence of the declared hash set is the subject of item 8 above rather than of
+      this entry, and the separation is deliberate: the SCOPE of that set is a weakness, while
+      the SPELLING of its members is a preservation rule. An earlier revision of this file
+      carried the scope consequence inside this note, which left the canonical eighth item
+      documented nowhere as an item and this roster one short.
 
       NO THIRD-PARTY CRYPTOGRAPHY PACKAGE IS ADOPTED, AND NONE IS NEEDED: the platform's own
       cryptographic library covers every operation enumerated on this surface - the

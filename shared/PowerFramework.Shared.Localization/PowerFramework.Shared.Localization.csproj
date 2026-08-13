@@ -157,11 +157,11 @@
       parser (n_cst_i18n_en.sru:L13 declares n_xmldoc, n_cst_i18n_cht.sru uses n_xmlqueryresult), and
       the resolution is to SUBSTITUTE the framework XML API - System.Xml.Linq.XDocument.Load plus a
       traversal of the loaded document - so that Localization acquires no Documents coupling and the
-      XML family stays deferred. Correction 6 names XPathSelectElements for the query half, and that
-      was the reader's mechanism until an interpolated expression was found to let a crafted argument
-      SELECT a translation the caller never asked for; the query is now a data comparison, which is
-      recorded at I18nResourceReader.Lookup with the measurement showing it changed nothing
-      observable. Either spelling satisfies Correction 6, whose subject is the DEPENDENCY. Nor may any of
+      XML family stays deferred. Correction 6 names XPathSelectElements for the query half; the query
+      here is a data comparison instead, because an interpolated location path lets a crafted argument
+      SELECT a translation the caller never asked for. That reasoning and the measurement showing the
+      substitution alters nothing observable are recorded at I18nResourceReader.Lookup.
+      Either spelling satisfies Correction 6, whose subject is the DEPENDENCY. Nor may any of
       the four deferred services (DesignSystem, Documents, Integration, ScriptBridge) be named: AAP
       §0.2.2.2 forbids implementing them even as a stub, so they have no project to reference.
       Relative path only: never an absolute path, and never a package standing in for a project.

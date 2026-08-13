@@ -41,12 +41,6 @@
 //      SAVING #Silent, forcing it true across a dispatch and RESTORING it afterwards, which is why
 //      SilentMode is a plain read/write property rather than a constructor argument.
 //
-//  RULES POSITION, STATED EXPLICITLY
-//      `review_rules` returns exactly one line: "No user rules provided." No user-specified rule governs
-//      this file, none was invented to fill the gap, and that absence is not licence to lower the bar. The
-//      AAP 0.7.2 enterprise baseline and the AAP 0.7.3 binding non-rule constraints govern in their place.
-//      The four that bear on this file are named below with what each required here.
-//
 //  C-B - THE DOUBLE ONLY OBSERVES AND RETURNS. IT CORRECTS, NORMALISES AND COMPLETES NOTHING.
 //      Every override records what it was handed and then returns what the suite configured. It does not
 //      repair a value, does not clamp a count, does not filter a target and does not tidy an argument.
@@ -120,7 +114,7 @@
 //      (dotnet_diagnostic.CA1707.severity = none and IDE1006 none) to a roster of individually NAMED
 //      IMPLEMENTATION FILES. That roster is published once, in the BAND 3 header of .editorconfig, and is
 //      deliberately not copied here: a list restated in a comment disagrees with the real one as soon as a
-//      section is added, which is what happened across seven files before this note was corrected. It
+//      section is added, which is exactly how such a restatement goes stale. It
 //      covers NO test file. With TreatWarningsAsErrors true, a SCREAMING_SNAKE or underscored member here
 //      is a BUILD ERROR and not a style opinion. Every member declared below is therefore conventional
 //      PascalCase, and the legacy spellings - `#Silent`, `_source`, `_hEvtCancelled`, `argPassed`,

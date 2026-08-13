@@ -131,13 +131,6 @@
 //      real in-repository secret site, inventoried in docs/SECRETS.md, and its remediation posture is
 //      never-replicate rather than remove-from-source.
 //
-//  RULES POSITION
-//  No user rules were provided for this project: the rules document contains exactly one line saying
-//  so, and it was re-verified while authoring this file. Nothing is invented or back-filled from
-//  convention in their place. The binding constraints are the enterprise-standard baseline together
-//  with the refactor's own named constraints, and every decision above cites the concern that drives
-//  it.
-//
 //  THE AUTHORED CONTRACT WINS
 //  shared/PowerFramework.Contracts/OpenApi/security.v1.yaml is authoritative for everything on the
 //  wire - both addresses, both operation identifiers, both response shapes and the absence of a
@@ -191,7 +184,7 @@ public static class JwksEndpoints
 {
     /// <summary>
     /// The operation identifier of the key-set publication, as the authored contract declares it
-    /// [<c>OpenApi/security.v1.yaml:L573</c>].
+    /// [<c>OpenApi/security.v1.yaml:L633</c>].
     /// </summary>
     /// <remarks>
     /// Supplied as the endpoint name, which is what the document generator emits as the operation
@@ -202,12 +195,12 @@ public static class JwksEndpoints
 
     /// <summary>
     /// The operation identifier of the discovery publication
-    /// [<c>OpenApi/security.v1.yaml:L622</c>].
+    /// [<c>OpenApi/security.v1.yaml:L682</c>].
     /// </summary>
     private const string MetadataOperationName = "getOpenIdConfiguration";
 
     /// <summary>
-    /// The tag both operations carry [<c>OpenApi/security.v1.yaml:L575,L624</c>].
+    /// The tag both operations carry [<c>OpenApi/security.v1.yaml:L635,L684</c>].
     /// </summary>
     /// <remarks>
     /// Both publications are part of contract C-01 alongside token issuance, so they are grouped with
@@ -217,13 +210,13 @@ public static class JwksEndpoints
     private const string OperationTagName = "TokenService";
 
     /// <summary>
-    /// The key-set operation summary [<c>OpenApi/security.v1.yaml:L576</c>].
+    /// The key-set operation summary [<c>OpenApi/security.v1.yaml:L636</c>].
     /// </summary>
     private const string KeySetOperationSummary =
         "Publish the token verification material as a JSON Web Key Set.";
 
     /// <summary>
-    /// The discovery operation summary [<c>OpenApi/security.v1.yaml:L625</c>].
+    /// The discovery operation summary [<c>OpenApi/security.v1.yaml:L685</c>].
     /// </summary>
     private const string MetadataOperationSummary =
         "Publish the discovery metadata a stock bearer handler self-configures from.";
@@ -610,7 +603,7 @@ public static class JwksEndpoints
     /// caller-controlled, so a request carrying a chosen Host header was answered with a document
     /// directing every consumer to fetch this issuer's verification keys from that host, and a stock
     /// bearer handler follows <c>jwks_uri</c> without question. A location and an identity that can
-    /// disagree is precisely the hazard: they are now the same configured value, so they cannot.
+    /// disagree is precisely the hazard: they are the same configured value, so they cannot.
     /// </para>
     /// <para>
     /// The consequence a deployment must know is that the issuer has to be the address consumers can
@@ -821,9 +814,27 @@ public static class JwksEndpoints
             return EmptyKeySetDetail;
         }
 
-        foreach (PublishedJsonWebKey key in keys)
+        // ------------------------------------------------------------------------------------------
+        // 🔴 THE IDENTIFIER RULE IS PER POSITION IN THE RING, NOT ONE VALUE FOR EVERY KEY. An earlier
+        // revision required EVERY published key to carry Security:SigningKeyId, which was right while one
+        // key existed and would have made a rollover unpublishable: the retiring entry carries
+        // Security:RetiringSigningKeyId by construction, so the check would have reported the key set as
+        // inconsistent and answered a problem document on the one path every verifier depends on.
+        //
+        // The active entry is first by construction, so `expected` is the active identifier for it and the
+        // retiring identifier for anything after it. A set carrying more than two entries cannot arise -
+        // the provider builds one or two - and if one ever did, its third entry would find an EMPTY
+        // expected identifier and be reported, which is the fail-closed direction.
+        // ------------------------------------------------------------------------------------------
+        for (int index = 0; index < keys.Length; index++)
         {
-            if (!string.Equals(key.KeyId, options.SigningKeyId, StringComparison.Ordinal))
+            PublishedJsonWebKey key = keys[index];
+
+            string expectedKeyId = index == 0
+                ? options.SigningKeyId
+                : options.RetiringSigningKeyId;
+
+            if (!string.Equals(key.KeyId, expectedKeyId, StringComparison.Ordinal))
             {
                 return KeyIdentifierDisagreementDetail;
             }
@@ -971,11 +982,11 @@ public static class JwksEndpoints
     /// <remarks>
     /// <para>
     /// COMPOSED FROM CONFIGURATION, NEVER FROM THE REQUEST, AND THAT IS AN INTEGRITY PROPERTY RATHER
-    /// THAN A STYLE CHOICE. This operation previously joined each path to the incoming request's scheme,
-    /// host and path base. Those three are all CALLER-CONTROLLED - a Host header, an
-    /// <c>X-Forwarded-*</c> header honoured by a proxy - so a request carrying a host of the caller's
-    /// choosing was answered with a discovery document telling every consumer to fetch this issuer's
-    /// verification keys from that host. A consumer's stock bearer handler follows <c>jwks_uri</c>
+    /// THAN A STYLE CHOICE. Joining each path to the incoming request's scheme, host and path base is the
+    /// idiomatic way to build an absolute address, and it is wrong here: those three are all
+    /// CALLER-CONTROLLED - a Host header, an <c>X-Forwarded-*</c> header honoured by a proxy - so a request
+    /// carrying a host of the caller's choosing would be answered with a discovery document telling every
+    /// consumer to fetch this issuer's verification keys from that host. A consumer's stock bearer handler follows <c>jwks_uri</c>
     /// without question, which is the entire reason this document exists, so the document is exactly the
     /// wrong place to reflect caller input back.
     /// </para>

@@ -3,10 +3,10 @@
 //  ------------------------------------------------------------------------------------------------
 //  WHAT THIS FILE GUARDS
 //
-//  Contracts C-05 Query, C-06 Update, C-07 Command and C-08 Transaction used to require an
-//  authenticated caller and nothing more. Combined with an issuer that granted every requested scope to
-//  any caller whose certificate chained to the configured authority, that meant ANY trusted service
-//  identity could mint a token addressed to this service and drive every one of its operations -
+//  Requiring an authenticated caller and nothing more on contracts C-05 Query, C-06 Update, C-07 Command
+//  and C-08 Transaction is the obvious posture. Combined with an issuer that grants every requested scope to
+//  any caller whose certificate chains to the configured authority, it means ANY trusted service
+//  identity can mint a token addressed to this service and drive every one of its operations -
 //  including the write, command and transaction surfaces, which are the only paths in the system that
 //  generate or execute SQL (CWE-862 missing authorization, CWE-863 incorrect authorization).
 //
@@ -445,16 +445,16 @@ public sealed class ReceiverAuthorizationTests
         /// </summary>
         /// <remarks>
         /// <para>
-        /// PER INSTANCE, AND THAT REPLACED A FIXED NAME. This host used to be pointed at one constant path
-        /// under the system temporary directory, shared by every run of the suite and by every process
-        /// running it. Two concurrent runs on one agent - routine under a parallel batch - then shared a
-        /// directory and a SQLite file, and residue from a run that did not finish was visible to the next.
+        /// PER INSTANCE RATHER THAN A FIXED NAME. Pointing this host at one constant path
+        /// under the system temporary directory shares it across every run of the suite and every process
+        /// running it. Two concurrent runs on one agent - routine under a parallel batch - then share a
+        /// directory and a SQLite file, and residue from a run that did not finish is visible to the next.
         /// Neither has anything to do with the authorization behaviour these rows assert, which is exactly
         /// why it must not be able to influence them.
         /// </para>
         /// <para>
         /// NOTHING NEEDS TO PRE-CREATE IT: the service creates its own data directory during startup
-        /// [<c>Program.cs:L1658</c>], so a fresh path is the ordinary case rather than a fault.
+        /// [<c>Program.cs:L1750</c>], so a fresh path is the ordinary case rather than a fault.
         /// </para>
         /// </remarks>
         private readonly string _dataDirectory = Path.Combine(

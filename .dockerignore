@@ -52,7 +52,7 @@
 #   * `!` re-includes, and the LAST matching pattern wins — which is why the deliberate re-inclusion
 #     guards are the final section of this file.
 #   * Excluding the container definition and this file is safe: Docker still sends both to the
-#     builder because it needs them to run the build, while COPY instructions no longer pick them up.
+#     builder because it needs them to run the build, while COPY instructions do not pick them up.
 #
 # RELATIONSHIP TO .gitignore. The two files have different jobs: .gitignore governs what is
 # committed, this file governs what is uploaded to the Docker daemon. .gitignore is NOT mirrored

@@ -44,9 +44,6 @@
 //  instead of leaving the comment stale. The byte-identity fact, by contrast, keeps passing - it is the
 //  drift-proof half, and it is what proves the build is not the thing that changed the file.
 //
-//  RULES POSITION
-//  review_rules returns "No user rules provided.". Constraints cited inline: C-C (the legacy tree is
-//  read-only and is the oracle), C-K (document boundary decisions).
 // ==================================================================================================
 
 using System.IO;

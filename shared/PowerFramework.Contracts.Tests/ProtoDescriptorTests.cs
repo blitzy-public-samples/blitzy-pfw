@@ -249,9 +249,9 @@ public sealed class ProtoDescriptorTests
 
         // BIDIRECTIONAL IS STRUCTURALLY REQUIRED, NOT A PREFERENCE.
         //
-        // se_cst_dw declares 22 events - 13 raw pbm_dwn* events and 9 semantic ones - where each raw
-        // event delegates to a semantic one and then to the broker, and a handler's RETURN VALUE can
-        // veto what happens next. So the server must send an event and RECEIVE a decision before it can
+        // se_cst_dw declares 22 events - 13 raw pbm_dwn* events and 9 semantic ones - where a raw event
+        // has up to two edges, a partner call and a broker trigger, and a handler's RETURN VALUE on either
+        // can veto what happens next. So the server must send an event and RECEIVE a decision before it can
         // continue, in order, within one logical session. That is a bidirectional stream and nothing
         // less will carry it.
         Assert.True(chain.IsClientStreaming);
@@ -466,12 +466,12 @@ public sealed class ProtoDescriptorTests
         // with its `forcecalc` flag. Neither is in the nine methods the legacy documentation lists, which
         // is precisely the point of asserting against the SOURCE.
         //
-        // THE COUNT WAS BRIEFLY 27, AND THE WITHDRAWN MEMBER IS NAMED SO IT IS NOT RE-ADDED. A `LoadRows`
-        // mutator was published here and has been removed: it corresponded to no legacy member, and it is
-        // absent from AAP 0.4.3's frozen C-04 inventory, so it widened a reviewed contract. The gap it was
-        // reaching for - no published operation populates the DataWindow a calculation evaluates over - is
-        // documented on `OpenExpressionSession` in the definition itself rather than closed by an
-        // unreviewed surface.
+        // THE COUNT IS 26, AND THE MEMBER MOST LIKELY TO BE ADDED IS NAMED SO IT IS NOT. A `LoadRows`
+        // mutator corresponds to no legacy member and is absent from AAP 0.4.3's frozen C-04 inventory, so
+        // publishing one would widen a reviewed contract. The gap it reaches for - no published operation
+        // populates the DataWindow a calculation evaluates over - is documented on
+        // <c>OpenExpressionSession</c> in the definition itself rather than closed by an unreviewed
+        // surface.
         Assert.Equal(26, service.Methods.Count);
 
         string[] names = service.Methods.Select(static method => method.Name).ToArray();
@@ -1141,11 +1141,11 @@ public sealed class ProtoDescriptorTests
     // ==============================================================================================
     //  CROSS-CONTRACT SCALAR CONSISTENCY, PRESENCE, AND THE FIXED UPDATE PAIR
     //  --------------------------------------------------------------------------------------------
-    //  Three guards over properties that are stated in the protocol definitions' comments and were
-    //  previously true only by inspection. Each one failed silently before it was asserted: a width
-    //  drift produced a working build with one `int` among a family of `long`s, a missing presence bit
-    //  made an omitted field indistinguishable from a deliberate zero, and a published pair of flags
-    //  offered callers behaviour the oracle does not have. None of the three is reachable through a
+    //  Three guards over properties that are stated in the protocol definitions' comments and are
+    //  otherwise true only by inspection. Each one fails SILENTLY when it is not asserted: a width
+    //  drift produces a working build with one `int` among a family of `long`s, a missing presence bit
+    //  makes an omitted field indistinguishable from a deliberate zero, and a published pair of flags
+    //  offers callers behaviour the oracle does not have. None of the three is reachable through a
     //  serialization round trip, which is why they are asserted against the descriptors directly.
     // ==============================================================================================
 

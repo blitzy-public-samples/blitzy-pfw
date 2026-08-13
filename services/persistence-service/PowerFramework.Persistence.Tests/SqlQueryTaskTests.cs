@@ -169,7 +169,7 @@ public sealed class SqlQueryTaskTests
     {
         using Harness harness = new();
 
-        // Registered FIRST, because an unsanctioned hook class is now refused at the setter rather than
+        // Registered FIRST, because an unsanctioned hook class is refused at the setter rather than
         // stored and silently ignored at retrieval - the activator is an allowlist, so a name it does not
         // carry can never produce a hook.
         _ = harness.HookActivator.Register(ProbeHookClass, static () => new DisposableProbeHook(RetCode.OK));
@@ -2412,6 +2412,20 @@ public sealed class SqlQueryTaskTests
 
         public bool AutoCommit { get; set; }
 
+        /// <summary>Moves the auto-commit mode and answers <see cref="RetCode.OK"/>.</summary>
+        /// <param name="autoCommit">The mode to put in force.</param>
+        /// <returns>Always <see cref="RetCode.OK"/>.</returns>
+        /// <remarks>
+        /// ROUTED THROUGH THE PROPERTY, so this double moves exactly the state the assignment moves. There is
+        /// no engine beneath it whose begin could fail, which is the contract's own nothing-to-do case.
+        /// </remarks>
+        public long TrySetAutoCommit(bool autoCommit)
+        {
+            AutoCommit = autoCommit;
+
+            return RetCode.OK;
+        }
+
         internal bool Connected { get; private set; }
 
         internal bool Broken { get; private set; }
@@ -2568,9 +2582,9 @@ public sealed class SqlQueryTaskTests
     /// <para>
     /// <b>THE ASSERTION IS ORDER-INDEPENDENT, BECAUSE THE FLAG IS PROCESS-WIDE.</b> Another test in this
     /// assembly may already have consumed the single warning, so this asserts AT MOST one warning across
-    /// two retrievals rather than exactly one. That still discriminates precisely: before the fix each
-    /// retrieval warned, so two retrievals gave two warnings and the bound is exceeded however the suite
-    /// is ordered. Asserting "exactly one" would have made the test depend on being run first.
+    /// two retrievals rather than exactly one. That still discriminates precisely: a per-retrieval
+    /// implementation warns each time, so two retrievals give two warnings and the bound is exceeded
+    /// however the suite is ordered. Asserting "exactly one" would make the test depend on running first.
     /// </para>
     /// </remarks>
     [Fact]
@@ -2600,7 +2614,7 @@ public sealed class SqlQueryTaskTests
         // STILL OBSERVED EVERY TIME: the demotion narrowed the severity, it did not drop the record.
         Assert.Equal(2, total);
 
-        // AT MOST ONE OF THEM IS A WARNING. Before the fix this was 2.
+        // AT MOST ONE OF THEM IS A WARNING. A per-retrieval implementation gives 2.
         Assert.True(
             warnings <= 1,
             $"The unappliable workaround produced {warnings} warnings across two retrievals, but it "

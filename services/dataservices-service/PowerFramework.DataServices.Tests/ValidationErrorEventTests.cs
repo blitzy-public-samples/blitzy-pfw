@@ -66,12 +66,10 @@
 //    * NO CLOCK, NO RANDOMNESS, NO WAITING AND NO AMBIENT STATE. Nothing here reads the wall clock, so
 //      no determinism mask is required (AAP 0.6.7) and no `TimeProvider` double is needed.
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  `review_rules` returns "No user rules provided." No user-specified rule governs this file, and
-//  none is invented. The enterprise baseline of AAP 0.7.2 applies in their place: nullable reference
-//  types on, warnings as errors, no secret in source, and a test project held to exactly the bar of
-//  the application it tests.
+//  BINDING CONSTRAINTS AT THIS SITE
+//  LOCATOR CONVENTION: every bare `pfw.sra:L...` in this file means ws_objects/pfw.pbl.src/pfw.sra,
+//  the framework application - never the same-named packager object at
+//  ws_objects/pfw.pack.pbl.src/pfw.sra (AAP 0.8.6 R7).
 // ==================================================================================================
 using System.Collections.Immutable;
 using System.Globalization;

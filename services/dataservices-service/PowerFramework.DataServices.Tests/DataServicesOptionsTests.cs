@@ -449,8 +449,8 @@ public sealed class DataServicesOptionsTests
     /// <remarks>
     /// <para>
     /// THE ANNOTATION ALONE DOES NOTHING. A range attribute is only applied where the validator walks the
-    /// group, and this group was previously walked ONLY for its duration - so a zero would have bound
-    /// silently and then refused the FIRST notification of every event chain, which a caller reads as a
+    /// group, so a validator that walks this group ONLY for its duration lets a zero bind
+    /// silently and then refuse the FIRST notification of every event chain, which a caller reads as a
     /// client fault while being a configuration mistake. A negative value is checked with it because that
     /// is what an operator writes when they mean "no limit", and it is precisely the value that must not be
     /// taken to mean that.
@@ -1307,10 +1307,10 @@ public sealed class DataServicesOptionsTests
         Assert.NotNull(
             typeof(SecurityClientOptions).GetProperty(nameof(SecurityClientOptions.ClientSecret)));
 
-        // AND THE PROPERTY THAT ONCE TRIPPED THE SCAN FOR THE WRONG REASON IS GONE. An earlier form of
-        // JwtAuthenticationOptions declared ValidateIssuerSigningKey - a boolean switch, not material, but
-        // a name a scanner cannot tell apart from one. It has been removed for a stronger reason than the
-        // scan, recorded on the next test.
+        // AND THE PROPERTY MOST LIKELY TO TRIP THIS SCAN FOR THE WRONG REASON IS ABSENT. A
+        // JwtAuthenticationOptions carrying ValidateIssuerSigningKey declares a boolean switch, not
+        // material - but a name a scanner cannot tell apart from one. It is absent for a stronger reason
+        // than the scan, recorded on the next test.
     }
 
     [Theory]
@@ -1335,10 +1335,10 @@ public sealed class DataServicesOptionsTests
         // `true` BY DEFAULT would have passed against every one of those deployments, because the default
         // was never the problem.
         //
-        // ⚠ THIS ROW ONCE ASSERTED ONLY THE FIRST OF THE TWO WAYS, AND THAT IS WHY IT IS WRITTEN LIKE THIS ⚠
+        // ⚠ ASSERTING ONLY THE FIRST OF THE TWO WAYS IS THE TEMPTING FORM, AND THIS IS WHY IT IS NOT USED ⚠
         //
-        // It required the member to be ABSENT. Absence does make the guarantee structural, but it has a
-        // cost the delivered design deliberately refuses to pay: an unknown configuration key is SILENTLY
+        // That form requires the member to be ABSENT. Absence does make the guarantee structural, but it has
+        // a cost the delivered design deliberately refuses to pay: an unknown configuration key is SILENTLY
         // IGNORED by the binder, so a deployment writing `"ValidateIssuer": false` would start cleanly and
         // its operator would believe the check was off while it was on. The handler therefore assigns all
         // four LITERALLY - Program.cs section 5, "ALL FOUR ARE ASSIGNED LITERALLY, NOT READ" - and the
@@ -1787,14 +1787,14 @@ public sealed class DataServicesOptionsTests
     /// accepted silently and the session would open without it.
     /// </para>
     /// <para>
-    /// ⚠ TWO KEYS THIS ROW USED TO BIND ARE DELIBERATELY ABSENT NOW. It set
-    /// <c>DisableBind</c> and <c>NCharBind</c> alongside <c>DbParm</c>, which is precisely the shape that
-    /// broke every session: the flags are DERIVED from the connection-parameter string, and
-    /// <c>"DisableBind=1"</c> resolves under the oracle's nested reading to <c>nchar_bind=false</c>, so the
-    /// two settings this row supplied CONTRADICTED the string it supplied them with. There is one input
-    /// now, and a leftover key in a deployed settings file binds to nothing and is silently ignored by the
-    /// configuration binder - which is the harmless outcome, and is why the FIX was to remove the
-    /// properties rather than to validate them. What guards against their return is the reflection row in
+    /// ⚠ TWO KEYS ARE DELIBERATELY ABSENT FROM THIS ROW. Setting
+    /// <c>DisableBind</c> and <c>NCharBind</c> alongside <c>DbParm</c> is precisely the shape that
+    /// breaks every session: the flags are DERIVED from the connection-parameter string, and
+    /// <c>"DisableBind=1"</c> resolves under the oracle's nested reading to <c>nchar_bind=false</c>, so
+    /// two such settings CONTRADICT the string they accompany. There is exactly one input,
+    /// and a leftover key in a deployed settings file binds to nothing and is silently ignored by the
+    /// configuration binder - which is the harmless outcome, and is why the properties are ABSENT rather
+    /// than validated. What guards against their return is the reflection row in
     /// <c>DataWindowServiceContractTests</c> that asserts neither property exists.
     /// </para>
     /// </remarks>
@@ -1840,7 +1840,7 @@ public sealed class DataServicesOptionsTests
     /// connection-parameter string matches neither of the oracle's two flag patterns
     /// [<c>n_cst_thread_task_sqlbase.sru:L128-L129</c>], so it keeps the runtime BINDING parameters rather
     /// than interpolating literals - the mechanical root of the legacy injection exposure - and that safe
-    /// arm is now reached from the one input rather than from a second setting that could contradict it.
+    /// arm is reached from the one input rather than from a second setting that could contradict it.
     /// <c>AutoCommit</c> false is the preserved legacy posture that keeps a partially applied multi-row
     /// update recoverable. An empty password is correct for the only evidenced engine rather than a
     /// placeholder.
@@ -1909,8 +1909,8 @@ public sealed class DataServicesOptionsTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THE DEFAULT IS THE HALF THAT MATTERS. The chain's queue used to be UNBOUNDED with its write outcome
-    /// discarded, which handed whoever opened a stream an unbounded memory commitment: nine of the 22 events
+    /// THE DEFAULT IS THE HALF THAT MATTERS. An UNBOUNDED chain queue with its write outcome
+    /// discarded hands whoever opens a stream an unbounded memory commitment: nine of the 22 events
     /// are questions the dispatch BLOCKS on, so a client that keeps sending while one is outstanding grows
     /// the queue for as long as it cares to and nothing in the process objects until it runs out of memory.
     /// A ceiling only closes that if it ships switched on, so the default is a real number rather than a
@@ -1952,7 +1952,7 @@ public sealed class DataServicesOptionsTests
     /// <summary>
     /// A collection window that collects nothing is refused.
     /// </summary>
-    /// <param name="window">The window a deployment configured.</param>
+    /// <param name="seconds">The interval, in seconds.</param>
     /// <remarks>
     /// 🔴 <b>ZERO ANSWERS EVERY POLL EMPTY, INCLUDING ONE WITH RECORDS ALREADY WAITING, AND THAT IS SILENT
     /// DATA LOSS RATHER THAN A VISIBLE MISCONFIGURATION.</b> The projected event stream's empty collection
@@ -2069,11 +2069,6 @@ public sealed class DataServicesOptionsTests
 //  captured against the overlay would be compared against an oracle that never saw it (AAP 0.6.7).
 //  Absence in the overlay is asserted key by key rather than assumed.
 //
-//  RULES POSITION. `review_rules` returns "No user rules provided." - a finding, not latitude, and
-//  nothing is invented in its place. The binding constraints are the plan's own: C-B (no behaviour
-//  improvements), C-D (nothing for a deferred service), C-E (no fabricated database), C-F (no hardcoded
-//  credential), C-G (every created boundary authenticated), C-K (document the decisions) and the
-//  enterprise baseline of section 0.7.2.
 // ==================================================================================================
 
 /// <summary>
@@ -2949,12 +2944,13 @@ public sealed class DataServicesSettingsDocumentTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// ⚠ THE SCHEME STAYS <c>https</c>, AND THAT IS A CORRECTION RATHER THAN A PREFERENCE. Security binds
+    /// ⚠ THE SCHEME STAYS <c>https</c>, AND THAT IS A REQUIREMENT RATHER THAN A PREFERENCE. Security binds
     /// a TLS listener in every environment because its token endpoint authenticates its caller with a
-    /// client certificate, and a client certificate cannot be presented, requested or validated on a
-    /// plaintext listener at all - so a loopback Security serving plain http would be a topology in which
-    /// nothing can authenticate rather than a convenient one. An earlier revision of the overlay relaxed
-    /// this to <c>http</c> and paired it with a relaxed metadata-transport setting; both are gone.
+    /// presented Basic credential OR a trusted client certificate: the certificate cannot be presented,
+    /// requested or validated on a plaintext listener at all, and the Basic credential would travel in
+    /// clear - so a loopback Security serving plain <c>http</c> is a topology in which nothing can
+    /// authenticate safely rather than a convenient one. Relaxing this to <c>http</c>, with or without a
+    /// paired metadata-transport relaxation, is therefore not available even for a development run.
     /// </para>
     /// <para>
     /// The consequence asserted here is that the overlay declares NO metadata-transport relaxation. That
@@ -3018,12 +3014,12 @@ public sealed class DataServicesSettingsDocumentTests
     /// ⚠ THE PERSISTENCE PORT IS 5101, WHICH IS THE PORT AAP 0.3.2.2 ASSIGNS IT, AND NAMING ANYTHING ELSE
     /// IS THE DEFECT. This address builds a gRPC channel. Persistence binds ONE TLS endpoint,
     /// <c>https://+:5101</c> with <c>Protocols: Http1AndHttp2</c>, so ALPN carries the C-05..C-08 gRPC
-    /// contracts and the HTTP/1.1 <c>/health</c> and <c>/v1/ping</c> surfaces on that single port. An
-    /// earlier revision named 5111 here, a second <c>Http2</c>-only endpoint placed above the documented
-    /// band; it was withdrawn because AAP 0.3.2.2 places C-05..C-08 on 5101, so a channel built on 5111
-    /// reached a port the map does not give those contracts. Naming 5111 now fails every retrieval and
-    /// every update at connect, before the request arrives, with nothing on the far side logging the
-    /// cause. The 5101-5105 band of the attached environment (constraint C-L) is therefore the whole of
+    /// contracts and the HTTP/1.1 <c>/health</c> and <c>/v1/ping</c> surfaces on that single port. The
+    /// tempting alternative is 5111, a second <c>Http2</c>-only endpoint placed above the documented band;
+    /// it is not available, because AAP 0.3.2.2 places C-05..C-08 on 5101, so a channel built on 5111
+    /// reaches a port the map does not give those contracts. Naming 5111 fails every retrieval and every
+    /// update at connect, before the request arrives, with nothing on the far side logging the cause.
+    /// The 5101-5105 band of the attached environment (constraint C-L) is therefore the whole of
     /// the estate's addressing, with 5103 still unallocated (constraint C-D).
     /// </para>
     /// <para>
@@ -3183,13 +3179,13 @@ public sealed class DataServicesSettingsDocumentTests
     /// answers an HTTP/1.1 <c>GET</c> with 200 and a gRPC unary call over HTTP/2.
     /// </para>
     /// <para>
-    /// AN EARLIER REVISION SPLIT THE TWO ACROSS SEPARATE ENDPOINTS, AND THAT WAS WITHDRAWN. It declared
-    /// <c>https://+:5102</c> restricted to <c>Http1</c> for REST and a second <c>https://+:5112</c>
-    /// restricted to <c>Http2</c> for gRPC, so that each listener accepted only what it was for. The cost
-    /// was that C-03 and C-04 answered on 5112, a port AAP 0.3.2.2 never names, while 5102 - the port it
-    /// assigns those contracts - carried only the probe. The assignment governs, so the split was
-    /// collapsed; 5103 is still unallocated (constraint C-D) because nothing moved into it, and the
-    /// readiness chain that gates Gateway still probes 5102 (constraint C-L).
+    /// SPLITTING THE TWO ACROSS SEPARATE ENDPOINTS IS THE TEMPTING SHAPE, AND IT IS NOT AVAILABLE. That
+    /// would declare <c>https://+:5102</c> restricted to <c>Http1</c> for REST and a second
+    /// <c>https://+:5112</c> restricted to <c>Http2</c> for gRPC, so each listener accepted only what it
+    /// was for. The cost is that C-03 and C-04 would answer on 5112, a port AAP 0.3.2.2 never names, while
+    /// 5102 - the port it assigns those contracts - carried only the probe. The assignment governs, so the
+    /// two share one endpoint; 5103 stays unallocated (constraint C-D) because nothing moves into it, and
+    /// the readiness chain that gates Gateway probes 5102 (constraint C-L).
     /// </para>
     /// <para>
     /// <c>+</c> binds EVERY interface, loopback included, which is why the Development overlay leaves
@@ -3214,8 +3210,8 @@ public sealed class DataServicesSettingsDocumentTests
             document["Kestrel:Endpoints:Rest:Protocols"],
             StringComparer.Ordinal);
 
-        // EXACTLY ONE ENDPOINT, AND THE WITHDRAWN SECOND ONE IS NAMED SO IT CANNOT RETURN QUIETLY. A
-        // second listener would put a published contract back on a port the map does not assign it, and
+        // EXACTLY ONE ENDPOINT, AND A SECOND ONE IS NAMED SO IT CANNOT ARRIVE QUIETLY. A
+        // second listener would put a published contract on a port the map does not assign it, and
         // any third would be an unaccounted listening socket on a service whose whole inbound surface is
         // meant to be the two published contracts plus the probe pair.
         Assert.Equal(
@@ -3541,10 +3537,14 @@ public sealed class DataServicesSettingsDocumentTests
     /// key prefix, a compact-token header, or an environment variable name.
     /// </para>
     /// <para>
-    /// ⚠ MEASURED: A CASE-INSENSITIVE SCAN PRODUCED A FALSE POSITIVE, AND FIXING IT SHARPENED THE RULE
-    /// RATHER THAN LOOSENING IT. An earlier form of this row matched ignoring case and failed on
-    /// <c>appsettings.json:L821</c>, where the phrase "private key" appears inside the sentence explaining
-    /// why this service holds none. Every token below has FIXED casing by specification - PEM armour is
+    /// ⚠ MEASURED: A CASE-INSENSITIVE SCAN FALSE-POSITIVES ON THIS SERVICE'S OWN DOCUMENTATION, WHICH IS
+    /// WHY ORDINAL IS THE SHARPER RULE RATHER THAN THE LOOSER ONE. Matching while ignoring case is the
+    /// tempting choice, on the reasoning that a credential smuggled in unusual casing would still be a
+    /// credential. It fails on
+    /// <c>services/dataservices-service/PowerFramework.DataServices/appsettings.json:L796</c>, where the
+    /// phrase "private key" appears inside the sentence explaining why this service holds none - so the
+    /// looser rule cannot distinguish the prohibition from the thing prohibited. Every token below has
+    /// FIXED casing by specification - PEM armour is
     /// upper case, a DER prefix is a base64 rendering, and a provider prefix is exactly as its issuer
     /// mints it - so ordinal comparison is the correct one, not a concession. A credential written in
     /// unusual casing would not be a working credential.

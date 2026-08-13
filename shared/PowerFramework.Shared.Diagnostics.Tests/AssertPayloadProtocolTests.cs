@@ -180,6 +180,11 @@
 // Nothing else is imported. In particular no legacy path is referenced, no service project is
 // referenced (C-A), and no reflection namespace appears - the internal payload-builder seam is reached
 // as a compiled reference through InternalsVisibleTo, never reflectively.
+//
+//  LOCATOR CONVENTION: every bare `pfw.sra:L...` in this file means ws_objects/pfw.pbl.src/pfw.sra,
+//  the framework application - never the same-named packager object at
+//  ws_objects/pfw.pack.pbl.src/pfw.sra (AAP 0.8.6 R7).
+
 using System;
 using System.Globalization;
 using System.Runtime.CompilerServices;

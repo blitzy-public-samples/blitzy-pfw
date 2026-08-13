@@ -88,26 +88,23 @@ const SPEC_DIRECTORY = './specs';
  *
  * WHY AN EXPLICIT INVENTORY RATHER THAN A DIRECTORY SWEEP
  * ------------------------------------------------------
- * An earlier generation of six superseded, unnumbered specs once sat in `specs/`
- * alongside these, and a bare `testDir` sweep collected all twelve — so the
- * documented `npm test` ran twelve files while every report described six. That
- * was not a cosmetic difference: the two generations both wrote `COMPANY` rows in
- * the one `persistence-db` volume, so the row state an optimistic-concurrency
- * assertion depends on was being changed by files nobody had reviewed for that
- * purpose and the `409` became a function of execution order; every pass, fail and
- * skip count covered twice the files the report named; and the two generations
- * disagreed about missing-stack behaviour with nothing selecting which answer was
- * authoritative.
+ * A bare `testDir` sweep collects whatever is in `specs/`, and that is the failure
+ * mode rather than a convenience. A second, unreviewed generation of specs sitting
+ * alongside these would be collected too — so the documented `npm test` would run
+ * twelve files while every report described six. That is not a cosmetic difference:
+ * two generations both write `COMPANY` rows in the one `persistence-db` volume, so
+ * the row state an optimistic-concurrency assertion depends on is changed by files
+ * nobody reviewed for that purpose and the `409` becomes a function of execution
+ * order; every pass, fail and skip count covers twice the files the report names;
+ * and two generations can disagree about missing-stack behaviour with nothing
+ * selecting which answer is authoritative.
  *
- * **Those six superseded files have since been removed from the tree**, which is
- * why the inventory check below is now EXACT IN BOTH DIRECTIONS rather than
- * one-sided. While they were present, an unenumerated file in `specs/` had to be
- * tolerated — failing on their presence would have forbidden keeping them — and
- * that tolerance was the gap: any `.spec.ts` dropped into the directory was
- * silently excluded from the run with nothing reporting it. With the directory
- * holding exactly the reviewed six, an unenumerated file is unambiguously either a
- * spec somebody forgot to enumerate or one that has not been reviewed, and both are
- * findings.
+ * THE DIRECTORY HOLDS EXACTLY THE REVIEWED SIX, which is what lets the inventory
+ * check below be EXACT IN BOTH DIRECTIONS rather than one-sided. Were an
+ * unenumerated file in `specs/` tolerated, any `.spec.ts` dropped into the directory
+ * would be silently excluded from the run with nothing reporting it. As it stands an
+ * unenumerated file is unambiguously either a spec somebody forgot to enumerate or
+ * one that has not been reviewed, and both are findings.
  *
  * Adding a spec is therefore a deliberate two-part act: create the file **and**
  * add it here. That is the intended friction — a file that appears in `specs/`
@@ -137,17 +134,13 @@ const SUITE_SPECS: readonly string[] = Object.freeze([
  *   A new spec added without touching this file is indistinguishable from one that
  *   ran and passed.
  *
- * ⚠ WHAT THIS REPLACED, BECAUSE THE OLD SHAPE COULD NOT FAIL. The second direction
- * used to be deliberately tolerated, on the correct reasoning that the six
- * superseded unnumbered specs were then still on disk and failing on their presence
- * would have forbidden keeping them. What stood in for it was a count check —
- * `expected.length !== SUITE_SPECS.length` — and that comparison was a TAUTOLOGY:
- * the sole caller passes `SUITE_SPECS` as `expected`, so it compared the list's
- * length with its own and could not fail for any input whatsoever. It read as the
- * count assertion its own comment described and asserted nothing at all. The
- * superseded files have since been removed, so an exact set comparison is now both
- * possible and correct, and it subsumes the count: two sets that are equal have
- * equal size.
+ * ⚠ A COUNT CHECK IN PLACE OF THE SECOND DIRECTION CANNOT FAIL, WHICH IS WHY THIS
+ * COMPARES SETS. `expected.length !== SUITE_SPECS.length` looks like the count
+ * assertion its own name suggests and is a TAUTOLOGY: the sole caller passes
+ * `SUITE_SPECS` as `expected`, so it compares the list's length with its own and
+ * cannot fail for any input whatsoever. An exact set comparison subsumes the count
+ * anyway — two sets that are equal have equal size — and it is only available
+ * because the directory holds exactly the enumerated specs.
  *
  * SORTED AND COMPARED AS TEXT, so the diagnostic can print both sides. Directory
  * order is filesystem-dependent and the enumeration is written in numbered order;
@@ -260,7 +253,7 @@ const resolvedGatewayBaseUrl = process.env['GATEWAY_BASE_URL'] ?? 'https://local
  * onto it, so three components that parse perfectly well are nevertheless
  * wrong here:
  *
- * - **Credentials** (`http://user:secret@host:5105`). Rejecting them is a
+ * - **Credentials** (`https://user:secret@host:5105`). Rejecting them is a
  *   secrets control rather than tidiness. Playwright records the request URL
  *   in traces, reports and failure messages, so a credential embedded in the
  *   base address is a credential written into every artifact the run
@@ -299,7 +292,7 @@ function assertUsableBaseUrl(candidate: string): string {
   if (trimmed.length === 0) {
     throw new Error(
       'GATEWAY_BASE_URL is set but empty. Unset it to use the default ' +
-        'composition-root URL, or set it to an absolute http/https URL.',
+        'composition-root URL, or set it to an absolute https URL.',
     );
   }
 
@@ -309,14 +302,24 @@ function assertUsableBaseUrl(candidate: string): string {
   } catch {
     throw new Error(
       'GATEWAY_BASE_URL is not a valid absolute URL. Expected a value such ' +
-        'as http://host:port. The configured value is deliberately not quoted ' +
+        'as https://host:port. The configured value is deliberately not quoted ' +
         'here, because a rejected address may carry a credential.',
     );
   }
 
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+  // 🔴 HTTPS ONLY. This accepted `http:` too, and the base it resolves is the one
+  // every credential-bearing request in the suite is composed onto - Gateway is the
+  // sole ingress, so an override to `http:` put every bearer token this suite
+  // presents onto the wire in cleartext, silently. Gateway declares a single TLS
+  // listener and the default below is already `https:`, so no reachable endpoint is
+  // given up by refusing the scheme. Kept in step with the identical rule in
+  // fixtures/service-endpoints.ts, which resolves the other three bases.
+  if (parsed.protocol !== 'https:') {
     throw new Error(
-      `GATEWAY_BASE_URL must use the http or https scheme, got "${parsed.protocol}".`,
+      `GATEWAY_BASE_URL must use the https scheme, got "${parsed.protocol}". ` +
+        'Every request this suite composes onto it carries a bearer token, and ' +
+        'Gateway declares a single TLS listener, so there is no plaintext ' +
+        'endpoint to address.',
     );
   }
 
@@ -356,13 +359,13 @@ function assertUsableBaseUrl(candidate: string): string {
 export default defineConfig({
   // ⚠ FAIL-CLOSED GLOBAL SETUP. THE SUITE REFUSES AN ABSENT TOPOLOGY ⚠
   //
-  // 🔴 THE DEFAULT USED TO BE BACKWARDS, AND THAT IS WHAT THIS LINE FIXES. Every
-  // spec began by probing Gateway and calling `test.skip` when the probe did not
-  // answer, so a plain `npx playwright test` - the command the environment's setup
-  // instructions document - exited 0 with every live assertion skipped. A green
-  // run proved nothing about the four services it exists to verify.
+  // 🔴 THE PERMISSIVE DEFAULT IS BACKWARDS, AND THAT IS WHAT THIS LINE CLOSES. If
+  // every spec begins by probing Gateway and calling `test.skip` when the probe does
+  // not answer, a plain `npx playwright test` - the command the environment's setup
+  // instructions document - exits 0 with every live assertion skipped. A green run
+  // then proves nothing about the four services it exists to verify.
   //
-  // It was worse than merely permissive. The probe converted a TLS fault into the
+  // It is worse than merely permissive. Such a probe converts a TLS fault into the
   // same "unreachable" as a refused connection, and every listener in this estate
   // is `https` presenting a certificate from a throwaway private authority - so
   // the single most likely local misconfiguration, an untrusted authority, SKIPPED
@@ -375,11 +378,11 @@ export default defineConfig({
   // and quoting the remedy for that class. A `503` is NOT a fault: it means the
   // service is running and reporting on itself, which spec 01 asserts on.
   //
-  // Skipping is still available and is now OPT-IN BY NAME:
+  // Skipping is available, and it is OPT-IN BY NAME:
   //     E2E_ALLOW_ABSENT_STACK=1 npx playwright test
   // An environment variable rather than a config flag, deliberately: the decision
   // belongs to whoever runs the command, and a checked-in flag would grant it to
-  // everybody including CI - which is the state this replaces.
+  // everybody including CI - which is the permissive state this closes.
   globalSetup: './global-setup.ts',
 
   // C-C, read-only legacy boundary. Discovery is confined to this directory's
@@ -397,12 +400,11 @@ export default defineConfig({
   // hazard a glob here would create is reaching OUTSIDE `tests/e2e/`, and a list
   // of six leaf filenames cannot.
   //
-  // Naming the files is what it buys: a sweep once collected an earlier
-  // generation of six superseded unnumbered specs as well, so the documented
-  // `npm test` ran twelve files and mutated shared COMPANY state from two
-  // generations at once. Those files have since been removed. See SUITE_SPECS
-  // above for the full reasoning and for why the inventory check is now exact in
-  // both directions rather than one-sided.
+  // Naming the files is what it buys: a sweep would collect any unreviewed spec
+  // generation sitting beside these, so the documented `npm test` would run twelve
+  // files and mutate shared COMPANY state from two generations at once. See
+  // SUITE_SPECS above for the full reasoning and for why the inventory check is
+  // exact in both directions rather than one-sided.
   //
   // The inventory is verified against the directory before the run, so a renamed
   // spec stops the run instead of quietly shrinking it AND an unenumerated one

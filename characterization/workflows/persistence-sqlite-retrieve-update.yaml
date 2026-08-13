@@ -212,11 +212,13 @@ seedPhase:
         Create the COMPANY table if it does not already exist, with six columns
         in this order: an auto-increment integer primary key that is not null; a
         required text name; a required integer age; a fixed-width character
-        address; a real salary; and a text birth field. Three of those column
-        types disagree with the DataWindow's own declarations, and that
-        disagreement is a defect this pair exists to preserve rather than
-        harmonize - see provesDefects below. The DDL spells its column names in
-        upper case while the DataWindow's database names are lower case.
+        address; a real salary; and a text birth field. FOUR of those column
+        types disagree with the DataWindow's own declarations - the name, address,
+        salary and birth columns - and that disagreement is a defect this pair
+        exists to preserve rather than harmonize; note that the two declared
+        widths bind nothing in storage, because a SQLite column type sets affinity
+        only. See provesDefects below. The DDL spells its column names in upper
+        case while the DataWindow's database names are lower case.
       locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469"
 
     - action: >-
@@ -568,9 +570,10 @@ capturePhase:
       description: >-
         The value of the fixture's footer computation, which aggregates salary
         over the page. Included because it exercises the expression engine even in
-        this fixture, and because the salary column is one of the three whose
-        DataWindow type and DDL type disagree - so the aggregate is computed over
-        values that crossed a type mismatch on the way in.
+        this fixture, and because the salary column is one of the four whose
+        DataWindow type and DDL type disagree - a two-place decimal declared over
+        REAL storage - so the aggregate is computed over values that crossed a type
+        mismatch on the way in and are not guaranteed to round trip identically.
       format: The computed value as the expression yields it, unrounded
       locator: "ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L27"
 
@@ -600,22 +603,48 @@ capturePhase:
     # statement text carries interpolated literal values wherever the connection's
     # bind-disabling flag is set, so recording the field as it stands would copy
     # row data - and potentially anything a caller spliced into a where-clause -
-    # straight into a tracked file. Splitting keeps the statement text comparable,
-    # which is the point of recording it, while the values travel separately.
+    # straight into a tracked file.
+    #
+    # REDACTED, NOT SPLIT. This entry read split-statement-and-parameters, whose
+    # own justification was that it keeps the statement text comparable while the
+    # values travel separately. The first half is right and the second half is the
+    # defect: the values still get written, into a tracked file, and a parameter
+    # collection IS the sensitive data - separating a literal from its statement
+    # moves the value, it does not protect it (docs/SECRETS.md section 6.3). A
+    # placeholder-redacted statement keeps the SHAPE byte-comparable, which is the
+    # only property this recording compares, and writes no value at all. It is also
+    # the only shape the published contract can produce: common.v1.DbError declares
+    # sqlsyntax and has no parameters member.
     - field: dbError.sqlsyntax
-      treatment: split-statement-and-parameters
+      treatment: redacted
 
     # REASON: same interpolation exposure, same treatment. Byte-comparable
     # statement text is exactly what this pair needs to prove; the literal values
-    # are not part of the statement's shape and are recorded apart from it.
+    # are not part of that shape, so the placeholder preserves everything the
+    # comparison reads and the values are never recorded.
     - field: update.generatedStatements
-      treatment: split-statement-and-parameters
+      treatment: redacted
 
     # REASON: the transaction descriptor's password field is WRITE-ONLY - never
     # echoed in a response, never logged, and therefore never recorded. Omitted
     # rather than redacted, because a redaction placeholder would still assert
     # that a value was present and how long it was.
     - field: transactionDescriptor.logpass
+      treatment: omitted
+
+    # REASON: the SAME descriptor's user-name field, and it was the one exclusion this
+    # store asserted without declaring. Both recordings READMEs already rule it
+    # "equally sensitive and equally excluded from every recording", yet no workflow
+    # named it - so the exclusion rested on prose while the schema exists precisely so
+    # that a withheld field is declared rather than assumed. Declared here to close
+    # that gap.
+    #
+    # WHY OMITTED RATHER THAN REDACTED, which is not the same answer as for a statement:
+    # a user name is a credential half in its entirety, not a shape with values inside
+    # it, so there is nothing to preserve by masking. A placeholder would still assert
+    # that an account was configured and how long its name was, which is why the
+    # password field beside it takes the same treatment for the same reason.
+    - field: transactionDescriptor.logid
       treatment: omitted
 
     # REASON: where a password parameter is supplied in its position the assembled
@@ -832,26 +861,51 @@ determinismMask:
 provesDefects:
 
   - defect: >-
-      Three of the fixture's six columns are declared with types its own DDL
-      contradicts. The DataWindow declares a 200-character address where the table
-      creates a 50-character column, a two-place decimal salary where the table
-      creates a real column, and a date birth field where the table creates a text
-      column. SQLite's flexible typing lets all three through without complaint,
-      so the mismatch never surfaces as an error - it surfaces as truncation,
-      rounding and string-versus-date coercion behaviour that the target must
-      reproduce exactly.
+      FOUR of the fixture's six columns are declared with types its own DDL
+      contradicts, and the four are the authoritative set - docs/PARITY.md section
+      3.5 enumerates them. The DataWindow declares a 100-character name where the
+      table creates an UNBOUNDED text column; a 200-character address where the
+      table creates CHAR(50); a two-place decimal salary where the table creates a
+      real column; and a date birth field where the table creates a text column.
+      Only the id and age columns agree. SQLite's flexible typing lets all four
+      through without complaint, so the mismatch never surfaces as an error - and
+      it does not surface as truncation either. A declared width is not a
+      constraint in SQLite: the declared type sets AFFINITY only and the length is
+      ignored entirely, so a 200-character address is stored IN FULL, unpadded and
+      untruncated, which docs/PARITY.md section 3.6 records as measured through the
+      published contract. What the target must reproduce is therefore the observable
+      behaviour of each side: whatever bound the DataWindow itself enforces, against
+      storage that enforces none, plus real-affinity rounding for the salary and
+      text-storage semantics - ordering, comparison and format - for the birth
+      field.
     locator: >-
-      ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L11-L13 against
+      ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L9, L11, L12, L13 against
       ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469
     note: >-
-      The precise DDL lines are the address column at :L467, the salary column at
-      :L468 and the birth column at :L469, inside the single CREATE TABLE spanning
-      :L463-L469. Preserved as defects and never harmonized: a target that widens
-      the column to match the DataWindow, narrows the DataWindow to match the
-      column, or "helpfully" coerces the birth field into a real date type has
-      diverged, however much more correct the result looks. That CREATE TABLE is
-      the only DDL in the repository, so there is no second schema to reconcile
-      against and no way to read the disagreement as a transcription slip.
+      The precise DDL lines in ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw are the
+      name column at :L465, the address column at :L467, the salary column at :L468
+      and the birth column at :L469, inside the single CREATE TABLE spanning
+      :L463-L469. The DataWindow's own declarations in
+      ws_objects/pfw.tests.pbl.src/dw_sqlite.srd are the name column at :L9, the
+      address column at :L11, the salary column at :L12 and the birth column at
+      :L13. The name row is the one an earlier revision of this entry omitted, and
+      the truncation claim it carried for the address was wrong in the direction that
+      matters: expecting a 50-character value back from a 200-character write would
+      encode an invalid golden-master expectation and fail a target that stores what
+      SQLite actually stores. Preserved as defects and
+      never harmonized: a target that widens a column to match the DataWindow,
+      narrows the DataWindow to match the column, enforces either width in storage,
+      or "helpfully" coerces the birth field into a real date type has diverged,
+      however much more correct the result looks. A fifth row does NOT belong here -
+      id is declared number, key and identity at
+      ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8 against ID INTEGER PRIMARY KEY
+      NOT NULL at ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L464, which is
+      consistent because INTEGER PRIMARY KEY aliases the rowid; the DDL simply
+      carries no AUTOINCREMENT keyword, so assignment reuses the rowids of deleted
+      rows and the identity round trip must not assume monotonicity. That CREATE
+      TABLE is the only DDL in the repository, so there is
+      no second schema to reconcile against and no way to read the disagreement as a
+      transcription slip.
 
   - defect: >-
       The update path assigns each modified key column TO ITSELF, purely to flip

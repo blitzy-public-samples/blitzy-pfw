@@ -38,12 +38,6 @@
 //      `global type n_cst_threading_eventful from n_cst_eventful` (consumed by Persistence). Both in
 //      scope services consume the broker, so it belongs to neither.
 //
-//  RULES POSITION, STATED EXPLICITLY
-//      `review_rules` returns exactly one line: "No user rules provided." No user-specified rule governs
-//      this file, no rule was invented to fill the gap, and that absence is NOT licence to lower the
-//      bar. The AAP 0.7.2 enterprise baseline and the AAP 0.7.3 binding non-rule constraints govern in
-//      their place. Every constraint that bears on this file is named below with what it required here.
-//
 //  C-A - SHARED IN-PROCESS IMPLEMENTATION, NOT A CROSS-SERVICE CHANNEL
 //      There is no gRPC type, no HTTP type, no serialization attribute, no [DataContract], no message
 //      bus abstraction and no Task-returning transport call anywhere in this file, and none may be
@@ -73,7 +67,7 @@
 //      rather than lossy - `n_scriptinvoker` is only a variadic-call escape hatch, because PowerScript
 //      cannot forward an arbitrary-length argument list and so the legacy `choose case`-unrolls the
 //      call. C# `params object?[]` covers that natively. Eventful therefore acquires NO ScriptBridge
-//      coupling. The behaviour-preserving substitute is <see cref="EventArgumentContext"/>, which is
+//      coupling. The behaviour-preserving substitute is EventArgumentContext, which is
 //      mandatory rather than optional: n_cst_threading_eventful.sru:L48-L58 genuinely uses the invoker
 //      parameter to INJECT a leading argument and report one consumed slot, and dropping the parameter
 //      without a substitute would silently destroy the threading layer's `Handler(source, ...)` calling
@@ -82,36 +76,36 @@
 //  C-K - EVERY TECHNOLOGY-SPECIFIC AND BOUNDARY-SPECIFIC DECISION IS DOCUMENTED HERE, AT ITS POINT OF
 //        REPRODUCTION, RATHER THAN IN A SEPARATE DOCUMENT
 //      DECISION 1  the n_scriptinvoker non-port and its prepared-argument substitute - above, and on
-//                  <see cref="EventArgumentContext"/> and <see cref="OnPrepare"/>.
+//                  EventArgumentContext and OnPrepare.
 //      DECISION 2  the message-pump non-port: `Post` becomes an explicitly queued continuation with a
-//                  deterministic drain - on <see cref="Post"/> and
-//                  <see cref="DrainPostedContinuations"/>.
+//                  deterministic drain - on Post and
+//                  DrainPostedContinuations.
 //      DECISION 3  the arity collapse onto `params object?[]`, with 10 recorded as a LEGACY LIMIT the
-//                  .NET contract may exceed without behavioural regression - on <see cref="Trigger"/>.
+//                  .NET contract may exceed without behavioural regression - on Trigger.
 //      DECISION 4  the assertion-detail decoupling that keeps Kernel as the sole project reference -
-//                  on <see cref="IAssertionDetail"/> and <see cref="TryReadAssertionDetail"/>.
-//      DECISION 5  the `Message.PowerObjectParm` substitution - on <see cref="Current"/>.
-//      DECISION 6  the `IsValid(this)` decision - on <see cref="Dispatch"/>.
+//                  on IAssertionDetail and TryReadAssertionDetail.
+//      DECISION 5  the `Message.PowerObjectParm` substitution - on Current.
+//      DECISION 6  the `IsValid(this)` decision - on Dispatch.
 //      DECISION 7  the `ex.text = ...` substitution, because `Exception.Message` is immutable in .NET -
-//                  on <see cref="DispatchExceptionTextKey"/> and
-//                  <see cref="GetDispatchExceptionText"/>.
+//                  on DispatchExceptionTextKey and
+//                  GetDispatchExceptionText.
 //      DECISION 8  the numeric-widening value comparison that PowerScript's `any` equality performs -
-//                  on <see cref="IsDifferentFrom"/>.
+//                  on IsDifferentFrom.
 //      DECISION 9  the tri-state default return value that reproduces `ClassName(aDefRetVal) = "any"` -
-//                  on <see cref="SetDefaultReturnValue(object?)"/>.
+//                  on SetDefaultReturnValue(object?).
 //      DECISION 10 the midpoint-probe rounding difference and why it is unobservable - on
-//                  <see cref="Dispatch"/>.
+//                  Dispatch.
 //      DECISION 11 the class-chain walk over nested declaring types - on
-//                  <see cref="BuildClassChain"/>.
+//                  BuildClassChain.
 //      DECISION 12 `Unsubscribe()` keeps the oracle's EMPTY filter, and the `.^persistent` rule is
-//                  discharged by <see cref="BuildPersistentSparingFilter"/> - on
-//                  <see cref="Unsubscribe()"/>.
+//                  discharged by BuildPersistentSparingFilter - on
+//                  Unsubscribe().
 //      DECISION 13 the overload ambiguity that `powerobject` mapping to `object` creates - on
-//                  <see cref="Unsubscribe(object?, string)"/>.
+//                  Unsubscribe(object?, string).
 //      DECISION 14 the disposal omission: the legacy destructor only destroyed invokers - on
-//                  <see cref="EventBroker"/>.
+//                  EventBroker.
 //      DECISION 15 handler resolution by reflection as the `mid` substitute - on
-//                  <see cref="ResolveHandler"/>.
+//                  ResolveHandler.
 //
 //  THE NAMING RULING - BUILD BREAKING IF IGNORED
 //      The repository root .editorconfig scopes its naming-analyzer suppressions to a roster of
@@ -130,11 +124,11 @@
 //      dispatch path cannot be covered to the 80% per-service gate.
 //
 //  THREE DISTINCT ALPHABETS SHARE THE NUMERALS 1 AND 2 AND MUST NEVER BE INTERCHANGED
-//      1. the prevent state          <see cref="VetoResult"/>: Continue 0, PreventOnce 1, PreventDeep 2
+//      1. the prevent state          VetoResult: Continue 0, PreventOnce 1, PreventDeep 2
 //      2. the OnPrepare / OnTriggering return code   tested with Predicates.IsPrevented against
 //                                                   RetCode.PREVENT, which is 1
-//      3. the OnException result     <see cref="ExceptionResultPrevent"/> 1 = leave the loop,
-//                                    <see cref="ExceptionResultContinue"/> 2 = clear the latch and carry
+//      3. the OnException result     ExceptionResultPrevent 1 = leave the loop,
+//                                    ExceptionResultContinue 2 = clear the latch and carry
 //                                    on, anything else = rethrow
 //
 //  ORDERING

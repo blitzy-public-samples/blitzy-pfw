@@ -149,7 +149,8 @@
     configurations are in play and nothing in this refactor requires another.
 
     Everything else arrives from the repository root by MSBuild directory walk up. global.json pins
-    SDK 10.0.302 with roll forward confined to the latest feature band, Directory.Build.props sets
+    the SDK version with roll forward confined to the latest feature band - the number is deliberately
+    not repeated here, for the reason the rest of this paragraph gives - Directory.Build.props sets
     net10.0, nullable reference types, implicit usings, warnings as errors and the analyzers and
     turns central package management on, and Directory.Packages.props holds every package version
     including the two mandatory security pins that clear the NuGet audit advisories. Restating any

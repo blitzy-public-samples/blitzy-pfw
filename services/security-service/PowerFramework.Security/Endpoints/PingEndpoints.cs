@@ -487,8 +487,8 @@ public sealed record PingResponse(
 }
 
 /// <summary>
-/// How severe the legacy framework considered a condition, preserved from the dialog it used to be
-/// delivered through.
+/// How severe the legacy framework considered a condition, preserved from the dialog the legacy
+/// delivered it through.
 /// </summary>
 /// <remarks>
 /// <para>

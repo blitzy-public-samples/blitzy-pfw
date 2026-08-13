@@ -83,10 +83,17 @@ description: >-
   stand. The contingency is nevertheless declared under capturePhase.redaction rather than
   left to judgement: if a captured statement ever carries an interpolated literal that
   could be sensitive, the treatment for this workflow's own recorded statement fields is
-  split-statement-and-parameters. That decision is scoped to this recording and does not
-  reach the published database-error payload's statement field, which
-  characterization/README.md section 6.2 rules is carried as one redacted field with
-  nothing beside it. No key, password, certificate, token or fragment of one appears
+  redacted - the same single redacted field the published payload takes, so this recording
+  and the contract agree rather than diverging. That treatment read
+  split-statement-and-parameters until the final security review: splitting withholds
+  nothing, because it writes the values into a tracked file, and a parameter collection is
+  itself the sensitive data (docs/SECRETS.md section 6.3 is the record of that being
+  considered and rejected). A placeholder keeps the statement SHAPE byte-comparable, which
+  is the only property this workflow compares. The scoping note still holds: this decision
+  governs this recording's own fields and does not reach the published database-error
+  payload's statement field, which characterization/README.md section 6.2 rules is carried
+  as one redacted field with nothing beside it. No key, password, certificate, token or
+  fragment of one appears
   anywhere in this definition or in any recording taken under it.
 
 oracleFixtures:
@@ -386,8 +393,12 @@ capturePhase:
         own inputs carry none, so under the fixture's defaults both fields are recorded as
         they stand. This entry is scoped to this recording and is NOT the published
         database-error payload's statement field, which characterization/README.md section
-        6.2 rules is carried as a single redacted field with nothing beside it.
-      treatment: split-statement-and-parameters
+        6.2 rules is carried as a single redacted field with nothing beside it. The
+        contingency treatment is that same single redacted field: this entry read
+        split-statement-and-parameters, which contradicted the ruling it cites one sentence
+        earlier, and which docs/SECRETS.md section 6.3 records as considered and rejected
+        because a parameter collection is itself the sensitive data.
+      treatment: redacted
   recordingArtifacts:
     - filename: capture-inputs.json
     - filename: parse-outcome.json

@@ -40,9 +40,6 @@
 //     unwinds; PreventDeep survives into the enclosing dispatch. Prevent() called OUTSIDE any dispatch
 //     answers RetCode.FAILED rather than throwing.
 //
-//  RULES POSITION
-//  review_rules returns "No user rules provided.". Constraints cited inline: C-B (replicate behaviour
-//  including defects), AAP 0.6.1 (event ordering is the highest-risk area), C-K (document decisions).
 // ==================================================================================================
 
 using System;
@@ -1231,7 +1228,7 @@ public class EventBrokerTests
     /// <para>
     /// The legacy posts to the Win32 message queue, which a headless Linux container does not have - so
     /// AAP 0.4.5.4 requires the posted call become an explicitly queued continuation. The observable
-    /// consequence is that posting is now deferred until something drains, rather than until the message
+    /// consequence is that posting is deferred until something drains, rather than until a message
     /// pump next runs.
     /// </para>
     /// <para>

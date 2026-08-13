@@ -128,9 +128,9 @@
 //  lengths come from the catalogue's metrics table and are never restated here: DES 8/8, 3DES 24/8,
 //  AES128 16/16, AES192 24/16, AES256 32/16, given as key bytes over block bytes.
 //
-//  The rule is applied in exactly one place per concern - the catalogue's normalizer for keys and
-//  supplied vectors, this file's single vector resolver for the synthesised case - so all 32
-//  overloads size material identically. Truncation silently discards entropy the caller believed it
+//  The rule is applied in exactly one place - the catalogue's normalizer, which handles keys and
+//  every SUPPLIED vector - so all 32 overloads size material identically. There is no second path,
+//  because no vector is ever derived here (DECISION D3). Truncation silently discards entropy the caller believed it
 //  supplied and zero-padding silently manufactures bytes the caller never chose. Both halves are
 //  weaknesses and both are preserved.
 //
@@ -154,9 +154,9 @@
 //  WHY REFUSING RATHER THAN CHOOSING A VECTOR, WHICH IS THE OPPOSITE OF THIS FILE'S USUAL RULE.
 //  Everywhere else a preserved legacy weakness is reproduced verbatim. Here there is no legacy
 //  behaviour to reproduce: what the closed binary [n_crypto.sru:L8] does with these eight arms is
-//  unknown, and nothing in this repository establishes it. An all-zero buffer of the block length
-//  was once chosen on the belief that it was "the conventional legacy behaviour"; the binary could
-//  as easily derive a vector from the key, use a fixed non-zero constant, or refuse the call.
+//  unknown, and nothing in this repository establishes it. An all-zero buffer of the block length is
+//  the conventional choice, but the binary could as easily derive a vector from the key, use a fixed
+//  non-zero constant, or refuse the call - and this repository cannot tell which.
 //
 //  AND A WRONG GUESS HERE IS INVISIBLE TO EVERY TEST THIS REPOSITORY CAN RUN, because encrypting
 //  and decrypting under the SAME wrong vector round-trips perfectly. The caller would receive
@@ -198,14 +198,14 @@
 //  platform requires an explicit feedback size, and CFB8 and full-block CFB produce ENTIRELY
 //  DIFFERENT CIPHERTEXT of different lengths.
 //
-//  WHAT WAS PREVIOUSLY DONE, AND WHY IT WAS WRONG. The width was inferred: the framework attributes
-//  OpenSSL among its eleven upstream libraries [ws_objects/pfw.demos.pbl.src/w_about.srw:L118], and
-//  OpenSSL's plain CFB aliases are full-block, so the full block width was adopted - 128 for AES,
-//  64 for 3DES, and 8 for DES because this platform's DES admits no other. Every part of that is
-//  defensible EXCEPT the conclusion, because an inference from an attribution is not a measurement
-//  of the binary, and this particular error is UNDETECTABLE: either width round-trips perfectly
-//  against itself, so no test available here can tell a right choice from a wrong one. Ciphertext
-//  produced under the wrong width passes every check and CANNOT BE DECRYPTED BY THE LEGACY.
+//  THE AVAILABLE INFERENCE, AND WHY IT IS NOT ENOUGH. The framework attributes OpenSSL among its
+//  eleven upstream libraries [ws_objects/pfw.demos.pbl.src/w_about.srw:L118], and OpenSSL's plain CFB
+//  aliases are full-block, which would put the width at 128 for AES, 64 for 3DES, and 8 for DES because
+//  this platform's DES admits no other. Every part of that is defensible EXCEPT treating it as settled,
+//  because an inference from an attribution is not a measurement of the binary - and this particular
+//  error is UNDETECTABLE: either width round-trips perfectly against itself, so no test available here
+//  can tell a right choice from a wrong one. Ciphertext produced under the wrong width passes every
+//  check and CANNOT BE DECRYPTED BY THE LEGACY.
 //
 //  THE RULE IS THEREFORE A REFUSAL, NOT A WIDTH. Every CFB call - encrypt or decrypt, with or
 //  without a vector, for every cipher type - raises `SymmetricParityUnavailableException` from
@@ -1986,19 +1986,19 @@ public sealed class SymmetricCipherProvider
     /// </exception>
     /// <remarks>
     /// <para>
-    /// THIS METHOD USED TO INVENT THE MISSING VECTOR, AND THAT IS THE DEFECT IT NOW EXISTS TO
-    /// PREVENT. Four <c>SymEncrypt</c> overloads accept a mode but no vector
-    /// [n_crypto.sru:L31, L35, L39, L43], mirrored by four <c>SymDecrypt</c> overloads
-    /// [:L47, L51, L55, L59]. CBC requires a vector, so one had to be supplied from somewhere, and an
-    /// all-zero buffer of the block length was chosen on the belief that it was "the conventional
-    /// legacy behaviour". Nothing in this repository establishes that. The closed binary
-    /// [n_crypto.sru:L8] could as easily have derived a vector from the key, used a fixed non-zero
-    /// constant, or refused the call outright.
+    /// THIS METHOD EXISTS TO REFUSE RATHER THAN TO INVENT. Four <c>SymEncrypt</c> overloads accept a
+    /// mode but no vector [n_crypto.sru:L31, L35, L39, L43], mirrored by four <c>SymDecrypt</c>
+    /// overloads [:L47, L51, L55, L59]. CBC requires a vector, so one would have to be supplied from
+    /// somewhere. An all-zero buffer of the block length is the conventional choice, but nothing in
+    /// this repository establishes that the legacy uses it: the closed binary [n_crypto.sru:L8] could
+    /// as easily derive a vector from the key, use a fixed non-zero constant, or refuse the call
+    /// outright. So this method supplies no vector at all - it either omits one, where the mode
+    /// consumes none, or refuses.
     /// </para>
     /// <para>
-    /// WHY THE GUESS WAS PARTICULARLY DANGEROUS RATHER THAN MERELY UNVERIFIED. A wrong vector is
+    /// WHY A GUESS WOULD BE PARTICULARLY DANGEROUS RATHER THAN MERELY UNVERIFIED. A wrong vector is
     /// invisible to every test this repository can run, because encrypting and decrypting under the
-    /// same wrong vector round-trips perfectly. The caller receives ciphertext that passes every
+    /// same wrong vector round-trips perfectly. The caller would receive ciphertext that passes every
     /// check available and that THE LEGACY CANNOT DECRYPT - data loss wearing the appearance of
     /// success. Refusing is the only outcome that cannot be silently wrong.
     /// </para>

@@ -907,6 +907,21 @@ capturePhase:
     - field: transactionDescriptor.logpass
       treatment: omitted
 
+    # REASON: the SAME descriptor's user-name field, and it was the one exclusion this
+    # store asserted without declaring. Both recordings READMEs already rule it
+    # "equally sensitive and equally excluded from every recording", yet no workflow
+    # named it - so the exclusion rested on prose while the schema exists precisely so
+    # that a withheld field is declared rather than assumed. Declared here to close
+    # that gap.
+    #
+    # WHY OMITTED RATHER THAN REDACTED, which is not the same answer as for a statement:
+    # a user name is a credential half in its entirety, not a shape with values inside
+    # it, so there is nothing to preserve by masking. A placeholder would still assert
+    # that an account was configured and how long its name was, which is why the
+    # password field beside it takes the same treatment for the same reason.
+    - field: transactionDescriptor.logid
+      treatment: omitted
+
   # ----------------------------------------------------------------------------
   # recordingArtifacts - what each side writes into its own recording directory.
   #

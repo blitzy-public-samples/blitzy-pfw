@@ -1513,7 +1513,7 @@ public sealed class I18nResourceReaderTests
     /// able to choose WHICH translation comes back can spoof that text; the enterprise security
     /// baseline of constraint C-G forbids leaving such a sink in place. The last two rows carry
     /// path and predicate syntax in the category and in the source text to show that neither
-    /// position accepts syntax any more - only data.
+    /// position accepts syntax at all - only data.
     /// </para>
     /// </remarks>
     [Theory]
@@ -1997,7 +1997,7 @@ public sealed class I18nResourceReaderTests
 
     /// <summary>
     /// The framework assemblies the substitution named by AAP 0.2.1.3 Correction 6 must appear as,
-    /// measured from the built assembly on .NET SDK 10.0.302.
+    /// measured from the built assembly on .NET the pinned SDK.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -2016,20 +2016,20 @@ public sealed class I18nResourceReaderTests
     /// and <see cref="XName"/> live, so this is both <c>XDocument.Load</c>, the substitute for
     /// <c>n_xmldoc.LoadFile</c>, and the element and attribute traversal that substitutes for
     /// <c>n_xmldoc.Query</c>.</item>
-    /// <item><c>System.Xml.ReaderWriter</c> - where <see cref="XmlReader"/> and
-    /// <see cref="XmlConvert"/> live, so this is the read-only parse the constructor performs and
+    /// <item><c>System.Xml.ReaderWriter</c> - where <c>System.Xml.XmlReader</c> and
+    /// <c>System.Xml.XmlConvert</c> live, so this is the read-only parse the constructor performs and
     /// the well-formed-name guard the category argument passes through.</item>
     /// </list>
     /// <para>
-    /// TWO XPATH FACADES USED TO BE REQUIRED HERE AND DELIBERATELY ARE NOT ANY MORE.
+    /// TWO XPATH FACADES ARE DELIBERATELY NOT REQUIRED HERE.
     /// <c>System.Xml.XPath.XDocument</c> (the <c>XPathSelectElements</c> extensions) and
-    /// <c>System.Xml.XPath</c> (<c>XPathException</c>) were required while the reader built its
+    /// <c>System.Xml.XPath</c> (<c>XPathException</c>) are needed only by a reader that builds its
     /// query by interpolating the language, the category and the source text into an XPath string.
-    /// That spelling was an injection sink rather than a faithful reproduction of a defect: a
-    /// balanced payload in the source text or the language EXTENDED the expression and selected an
-    /// entry the caller never asked for, which was measured against the real table before the
-    /// change. The reader now compares those values as data, so the two XPath facades are no longer
-    /// referenced and requiring them would fail the build for the security fix. Correction 6 is
+    /// That spelling is an injection sink rather than a faithful reproduction of a defect: a
+    /// balanced payload in the source text or the language EXTENDS the expression and selects an
+    /// entry the caller never asked for, measured against the real table. The reader compares those
+    /// values as data instead, so the two XPath facades are not referenced and requiring them would
+    /// fail the build for the security fix. Correction 6 is
     /// still satisfied and still asserted: it mandates that the deferred Documents XML family be
     /// substituted with the FRAMEWORK XML API, and the remaining two names are that API. What the
     /// assertion protects is unchanged - a reader that had stopped reading XML at all, in favour of

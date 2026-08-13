@@ -25,7 +25,7 @@
 //  change that altered how any of them resolves must be a deliberate decision with a test behind it
 //  rather than a side effect nobody measured.
 //
-//  THE IMPLEMENTATION IS A TRAVERSAL, SO EVERY PAYLOAD BELOW IS NOW A MISS
+//  THE IMPLEMENTATION IS A TRAVERSAL, SO EVERY PAYLOAD BELOW IS A MISS
 //  ------------------------------------------------------------------------------------------------
 //  I18nResourceReader.Lookup walks the four steps of the same location path with LINQ to XML and
 //  compares the same two attribute values. It never builds a query string, so no argument can
@@ -60,18 +60,15 @@
 //  ------------------------------------------------------------------------------------------------
 //    1  MALFORMED       - an unbalanced apostrophe. A miss under both spellings, and it is the one
 //                         class where the two agree for the same reason a caller would expect.
-//    2  WOULD-BE-TAUTOLOGY - the payloads that made the predicate a tautology. Each is now a miss,
-//                         and each carries the entry the legacy returned instead.
-//    3  WOULD-BE-UNION  - the payloads that appended a second location path, crossing the category
-//                         boundary, the language boundary, or both. Each is now a miss.
+//    2  WOULD-BE-TAUTOLOGY - the payloads that make the predicate a tautology under an interpolated
+//                         path. Each is a miss here, and each carries the entry an interpolated
+//                         reader would return instead.
+//    3  WOULD-BE-UNION  - the payloads that append a second location path, crossing the category
+//                         boundary, the language boundary, or both. Each is a miss here.
 //    4  THE BOUNDARY    - the properties that hold regardless of spelling: nothing escapes the table,
 //                         no framework-shipped key can escape its own literal, document order still
 //                         governs genuine duplicates, and the genuine keys still resolve.
 //
-//  RULES POSITION
-//  review_rules returns "No user rules provided.". Constraints cited inline: C-B (preserve behaviour
-//  rather than improve it), C-C (the oracle table is read-only), C-G (authenticate and do not publish
-//  a new sink), C-K (document the decision and its rejected alternative).
 // ==================================================================================================
 
 using System;

@@ -1417,13 +1417,13 @@ public sealed class ShippedCallerAuthorizationMatrixTests
     /// the overlay's row to the next free index, then update the count here.
     /// </para>
     /// <para>
-    /// THE HAZARD USED TO SPAN TWO REPOSITORIES' WORTH OF FILES AND NOW SPANS TWO SETTINGS FILES, which is
-    /// a real narrowing rather than a restatement. <c>orchestration/.env.example</c> and the Compose
-    /// manifest injected that same row through <c>Security:CallerAuthorizations</c> section-path variables
-    /// at the same literal index - redundantly in <c>Development</c>, where this service's own overlay
-    /// already states it beside the credential entry the caller needs, and wrongly in <c>Production</c>,
-    /// where no credential entry exists for it at all. Both are gone; the grant is stated once, where the
-    /// caller is registered.
+    /// THE HAZARD SPANS TWO SETTINGS FILES AND NO MORE, WHICH IS DELIBERATE. Injecting the same row from
+    /// <c>orchestration/.env.example</c> and the Compose manifest through
+    /// <c>Security:CallerAuthorizations</c> section-path variables at the same literal index would widen it
+    /// across the whole repository - redundantly in <c>Development</c>, where this service's own overlay
+    /// already states the row beside the credential entry the caller needs, and wrongly in
+    /// <c>Production</c>, where no credential entry exists for it at all. Neither injection exists: the
+    /// grant is stated once, where the caller is registered.
     /// </para>
     /// </remarks>
     [Fact]

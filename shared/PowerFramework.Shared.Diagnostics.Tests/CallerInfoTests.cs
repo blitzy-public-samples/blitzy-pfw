@@ -128,18 +128,7 @@
 //  nothing. If a value in this file ever became sensitive to inlining, something would be reading
 //  the run-time stack and the implementation, not the test, would be at fault.
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  review_rules returns exactly "No user rules provided." No user rule governs this file, none was
-//  invented, and the absence is not treated as licence to lower the bar. The binding constraints in
-//  their place are the AAP section 0.7.2 enterprise baseline and the section 0.7.3 inventory, cited
-//  inline where each applies: C-A (no I/O, no new coupling), C-B (replicate the declared surface,
-//  both shapes, no corrections and no additions), C-C (the legacy tree is read-only specification),
-//  C-H (both members and both the true and false paths are reached), C-K (every technology-specific
-//  decision documented at the point that covers it), and AAP section 0.4.5.4 (one-based to
-//  zero-based index translation is the refactor's most dangerous mechanical hazard - it is the
-//  reason the payload-parser translation below carries its arithmetic in the open).
-//
+//  BINDING CONSTRAINTS AT THIS SITE
 //  Identifiers here are strictly PascalCase with no underscore and no SCREAMING_SNAKE spelling. The
 //  repository root .editorconfig scopes its CA1707 and IDE1006 suppressions to the individual
 //  production files that carry preserved legacy constant identifiers; no test file is among them, so

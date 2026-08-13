@@ -34,13 +34,6 @@
 //  finalize [:L406-L408], the ORDER of the sequence, the BRANCH CONDITIONS, the CARRIER LIFECYCLE
 //  and the COMMIT/ROLLBACK EPILOGUE. Nothing else.
 //
-//  ============================ RULES POSITION (UR4) =============================================
-//  NO USER RULES WERE PROVIDED. `review_rules` returns exactly one line saying so, and that line is
-//  the complete document. No rule is invented, inferred or back-filled, and no file enters scope
-//  because of one. The binding constraints are therefore the enterprise-standard baseline plus the
-//  named non-rule constraints C-A through C-L, and each non-obvious decision below cites the
-//  constraint that drives it, as C-K requires.
-//
 //  ============================ SEVEN THINGS A STRAIGHTFORWARD PORT GETS WRONG ===================
 //
 //  1. 🔴 THE PREPARE STEP RUNS ONLY ON THE MULTI-TABLE PATH.
@@ -932,6 +925,7 @@ internal sealed class SqlUpdateTask : SqlTaskBase
     /// </para>
     /// </remarks>
 
+    /// <summary>
     /// Clears the error latch - <c>of_clearerror()</c>
     /// [<c>ws_objects/pfw.thread.pbl.src/n_cst_thread_task.sru:L607-L611</c>].
     /// </summary>
@@ -1972,7 +1966,7 @@ internal sealed class SqlUpdateTask : SqlTaskBase
     #region The error channel - the substrate's latch, reproduced where every raise passes through
 
     /// <summary>
-    /// Raises the framework error event - <c>Event OnError(errCode, errInfo)</c.
+    /// Raises the framework error event - <c>Event OnError(errCode, errInfo)</c>.
     /// </summary>
     /// <param name="errCode">The framework return code.</param>
     /// <param name="errorText">The untranslated diagnostic.</param>

@@ -77,14 +77,6 @@
 //  approach this repository adopts (AAP 0.6.7). No secret literal appears anywhere in this file, and
 //  nothing here needs one.
 //
-//  ============ RULES POSITION ====================================================================
-//  review_rules returns exactly "No user rules provided." - VERIFIED for this file, not assumed. No
-//  user-specified rule governs it. That absence is not licence: the enterprise-standard baseline of
-//  AAP 0.7.2 applies in its place, so nullable and warnings-as-errors are inherited from the
-//  repository-root Directory.Build.props and never relaxed, and there is no NoWarn and no #pragma
-//  anywhere below. The binding constraints are the non-rule ones of AAP 0.7.3: C-A (shape only),
-//  C-B (replicate the legacy model, never a simplified one), C-C (the legacy tree is read-only),
-//  C-H (quality gates inherited) and C-K (every assertion cites a locator).
 // ==================================================================================================
 
 using Google.Protobuf.Reflection;

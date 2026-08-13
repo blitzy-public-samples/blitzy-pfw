@@ -228,7 +228,7 @@ public sealed class TokenIssuanceTests
         new()
         {
             // The gateway, asking for the DataServices audience with the two scopes its client requests
-            // [services/gateway-service/PowerFramework.Gateway/Clients/DataServicesClient.cs:L1286-L1289].
+            // [services/gateway-service/PowerFramework.Gateway/Clients/DataServicesClient.cs:L1297,L1300].
             {
                 "powerframework-gateway",
                 "powerframework-dataservices",
@@ -236,7 +236,7 @@ public sealed class TokenIssuanceTests
             },
 
             // DataServices, asking for the Persistence audience with the two scopes its client requests
-            // [services/dataservices-service/PowerFramework.DataServices/Clients/PersistenceClient.cs:L438-L441].
+            // [services/dataservices-service/PowerFramework.DataServices/Clients/PersistenceClient.cs:L427,L430].
             {
                 "powerframework-dataservices",
                 "powerframework-persistence",
@@ -245,7 +245,7 @@ public sealed class TokenIssuanceTests
 
             // DataServices again, this time against Security itself - the one cross-service call that
             // needs a cryptographic scope
-            // [services/dataservices-service/PowerFramework.DataServices/Clients/SecurityClient.cs:L2232,
+            // [services/dataservices-service/PowerFramework.DataServices/Clients/SecurityClient.cs:L2234,
             //  its CryptoScope constant].
             {
                 "powerframework-dataservices",
@@ -327,6 +327,7 @@ public sealed class TokenIssuanceTests
     /// claim names the published contract uses.
     /// </summary>
     /// <param name="subject">The caller identity the token is minted for.</param>
+    /// <param name="audience">The intended audience.</param>
     /// <param name="scopes">The requested scope set.</param>
     /// <remarks>
     /// <para>
@@ -972,19 +973,22 @@ public sealed class TokenIssuanceTests
     }
 
     // ==============================================================================================
-    //  AREA E2 - THE PUBLISHED clientCredential SCHEME, WHICH WAS DECLARED AND UNREACHABLE
+    //  AREA E2 - THE PUBLISHED clientCredential SCHEME IS REACHABLE, WHICH IS NOT SELF-EVIDENT
     //
     //  security.v1.yaml declares clientCredential - HTTP Basic - FIRST among this operation's accepted
-    //  credentials, the roster implements it in full (fixed-time comparison against a per-instance decoy
-    //  on the no-match path), this file's own reader parses it to RFC 7617, and the route's authorization
-    //  predicate accepts it. The handler nevertheless read the CERTIFICATE directly and never called the
-    //  two-scheme resolver, so `trust.Evaluate(null)` refused a correct Basic credential before its header
-    //  was ever looked at: the declared primary scheme was dead code behind a certificate-only gate.
+    //  credentials, ahead of mutualTls. Reaching it requires four independent things to agree: the roster
+    //  must implement secret comparison (it does, fixed-time against a per-instance decoy on the no-match
+    //  path), this file's own reader must parse the header to RFC 7617, the route's authorization predicate
+    //  must accept the scheme, AND the handler must consult the two-scheme resolver rather than reading the
+    //  certificate directly. A handler that reads the certificate itself evaluates the resolver with no
+    //  credential and refuses a correct Basic credential before its header is ever looked at, which turns
+    //  the declared PRIMARY scheme into dead code behind a certificate-only gate.
     //
-    //  MEASURED CONSEQUENCE, NOT A THEORETICAL ONE. Every deployment topology WITHOUT caller certificates
-    //  - a reverse proxy or a mesh sidecar terminating TLS ahead of this service, which is exactly the case
-    //  the resolver's own remarks name - could not obtain a single token from the sole issuer, while the
-    //  service reported healthy throughout. These rows are what make that unrepeatable.
+    //  WHY THAT MATTERS OPERATIONALLY, NOT JUST FORMALLY. Every deployment topology WITHOUT caller
+    //  certificates - a reverse proxy or a mesh sidecar terminating TLS ahead of this service, which is
+    //  exactly the case the resolver's own remarks name - can obtain no token at all from the sole issuer
+    //  if Basic is unreachable, while the service reports healthy throughout. These rows assert the whole
+    //  path end to end so that no one of the four can regress silently.
     // ==============================================================================================
 
     /// <summary>
@@ -1523,7 +1527,7 @@ public sealed class TokenIssuanceTests
         // The key identifier is published anonymously in the JWKS, so it is the one member that MUST be
         // present and the one whose absence is safe to describe. The rendering is still not shown, because
         // the reason this assertion would fail is that the rendering changed - and the changed rendering is
-        // the thing that might now carry a credential.
+        // the very thing that might carry a credential.
         bool carriesTheKeyIdentifier = SensitiveValueAssertions.Carries(rendered, token.KeyId);
 
         Assert.True(

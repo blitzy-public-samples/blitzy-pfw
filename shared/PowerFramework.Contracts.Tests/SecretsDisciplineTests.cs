@@ -92,7 +92,7 @@
 //  ------------------------------------------------------------------------------------------------
 //  1. FieldDescriptor.Declaration IS NULL FOR EVERY FIELD IN THIS BUILD. Grpc.Tools does not pass
 //     protoc's source-info option, so the compiled descriptors carry no SourceCodeInfo and LEADING
-//     COMMENTS ARE NOT REACHABLE THROUGH DESCRIPTOR REFLECTION. Measured on SDK 10.0.302 with
+//     COMMENTS ARE NOT REACHABLE THROUGH DESCRIPTOR REFLECTION. Measured on the pinned SDK with
 //     Google.Protobuf 3.31.1, not assumed. Documentation-level markers are consequently asserted
 //     against the AUTHORED PROTOCOL DEFINITION TEXT, which is the artifact that actually carries
 //     them.
@@ -116,17 +116,6 @@
 //  never exercises it - that is PowerFramework.Security.Tests' subject, on the other side of the
 //  contract.
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  review_rules returns exactly "No user rules provided.", verified for this file. No user-specified
-//  rule governs it and none is invented. The enterprise-standard baseline of AAP 0.7.2 applies in
-//  their place, together with the binding non-rule constraints of AAP 0.7.3 - C-F (never replicate a
-//  secret; the three named sites are a floor), C-G (every new boundary authenticated), C-B (replicate,
-//  never correct: `sqlsyntax` is PRESERVED as a field and only its disclosure is controlled), C-K
-//  (every decision documented with its locator and the risk it controls), C-A (the contracts project
-//  is a boundary definition, not a shared-code path) and C-C (the legacy tree is read-only). Nullable
-//  reference types and warnings-as-errors are inherited from Directory.Build.props and are never
-//  relaxed: no NoWarn, no #pragma and no suppression appears in this file.
 // ==================================================================================================
 
 using System.Text;
@@ -679,7 +668,7 @@ public sealed class SecretsDisciplineTests(OpenApiContractDocuments documents)
     /// </para>
     /// <para>
     /// <b>Why the marker is asserted here rather than from the field's own leading comment.</b> Measured
-    /// on this toolchain, <see cref="FieldDescriptor.Declaration"/> is <see langword="null"/> for every
+    /// on this toolchain, <c>FieldDescriptor.Declaration</c> is <see langword="null"/> for every
     /// field in the build: Grpc.Tools does not request protoc's source-info option, so the compiled
     /// descriptors carry no comments at all and a comment-level marker is simply not reachable through
     /// descriptor reflection. The reserved metadata is what the descriptors DO carry, and
@@ -2394,7 +2383,7 @@ public sealed class SecretsDisciplineTests(OpenApiContractDocuments documents)
     /// <param name="fieldDeclaration">The field's declaration line, trimmed - for example <c>string x = 1;</c>.</param>
     /// <remarks>
     /// Reading the authored text is the only way to reach a comment: measured on this toolchain,
-    /// <see cref="FieldDescriptor.Declaration"/> is <see langword="null"/> for every field because
+    /// <c>FieldDescriptor.Declaration</c> is <see langword="null"/> for every field because
     /// Grpc.Tools does not request protoc's source-info option, so the compiled descriptors carry no
     /// comments at all.
     /// </remarks>

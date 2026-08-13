@@ -53,6 +53,12 @@ public sealed class IssuanceCredentialContractTests(OpenApiContractDocuments doc
     private const string MutualTlsSchemeName = "mutualTls";
 
     /// <summary>
+    /// The status a caller receives when no accepted credential verified - the one description a refused
+    /// integrator actually reads.
+    /// </summary>
+    private const string RefusalStatusCode = "401";
+
+    /// <summary>
     /// The exclusivity claims that must appear NOWHERE in the document.
     /// </summary>
     /// <remarks>
@@ -64,9 +70,17 @@ public sealed class IssuanceCredentialContractTests(OpenApiContractDocuments doc
     /// per-operation check would have missed four of them.
     /// </para>
     /// <para>
-    /// The last two entries are the ones that mattered most: "no address ... without a client
-    /// certificate" reads as an absolute guarantee, and an integrator who believes it provisions a
-    /// certificate authority it does not need in order to bring the system up at all.
+    /// The absolute-guarantee phrasings are the ones that mattered most: "no address ... without a
+    /// client certificate" reads as a promise about every topology, and an integrator who believes it
+    /// provisions a certificate authority it does not need in order to bring the system up at all.
+    /// </para>
+    /// <para>
+    /// THE LIST GREW ONCE, AND THE ADDITIONS ARE WHY IT IS A LIST. A later revision of the `401`
+    /// description said mutual TLS was the "only accepted caller authentication on this operation" -
+    /// the same claim in wording none of the original entries matched, in a response description
+    /// rather than in the operation description, three lines below a <c>security</c> block declaring
+    /// two alternatives. The three "is the only" forms were added with it, because that is the shape
+    /// the claim keeps returning in.
     /// </para>
     /// </remarks>
     private static readonly string[] ExclusivityClaims =
@@ -77,6 +91,9 @@ public sealed class IssuanceCredentialContractTests(OpenApiContractDocuments doc
         "client certificate and by nothing else",
         "client certificate and with nothing else",
         "without a client certificate",
+        "only accepted caller authentication",
+        "mutual tls is the only",
+        "client certificate is the only",
     ];
 
     /// <summary>
@@ -219,6 +236,94 @@ public sealed class IssuanceCredentialContractTests(OpenApiContractDocuments doc
                 + $"'{MutualTlsSchemeName}' as ALTERNATIVES, and either satisfies it - so a description "
                 + "asserting exclusivity sends an integrator to provision material no topology requires, "
                 + "or to conclude the system cannot be brought up at all.");
+    }
+
+    /// <summary>
+    /// The prose a refused caller actually reads agrees with the <c>security</c> block: every scheme the
+    /// block declares is named by the operation description AND by the description of the refusal status.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE SCHEME NAMES COME FROM THE MACHINE CONTRACT, NOT FROM THIS FILE.</b> That is the whole
+    /// point of this row and what makes it a semantic-agreement assertion rather than a second wording
+    /// rule: the accepted set is read out of the operation's own <c>security</c> block, so a scheme
+    /// added, renamed or removed there is carried into the assertion automatically. The two sibling
+    /// rows above pin the declaration's SHAPE and pin that the operation description names the two
+    /// schemes by their literal identifiers; neither would notice a third scheme being declared and
+    /// then explained nowhere.
+    /// </para>
+    /// <para>
+    /// THE REFUSAL DESCRIPTION IS INCLUDED BECAUSE IT IS WHERE THE DRIFT LANDED THE SECOND TIME. A
+    /// caller that fails to authenticate reads <c>401</c>, not the operation summary, and a <c>401</c>
+    /// attributing the refusal to a missing client certificate sends a deployment whose proxy strips
+    /// certificates to provision a certificate authority instead of checking its roster entry. Naming
+    /// both schemes there is what makes the status mean "neither accepted credential verified".
+    /// </para>
+    /// <para>
+    /// IT ASSERTS PRESENCE OF THE IDENTIFIERS AND NOTHING ELSE. How each scheme is explained, in what
+    /// order, and at what length are all free; the closed exclusivity list in the row above is what
+    /// stops a description that names both from still claiming only one is accepted.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void EveryCredentialTheOperationAcceptsIsNamedByItsDescriptionAndByItsRefusalStatus()
+    {
+        OpenApiOperation issuance = RequireIssuanceOperation();
+
+        Assert.NotNull(issuance.Security);
+
+        List<string> declaredSchemes = [];
+
+        foreach (OpenApiSecurityRequirement requirement in issuance.Security)
+        {
+            foreach (OpenApiSecuritySchemeReference scheme in requirement.Keys)
+            {
+                string? id = scheme.Reference?.Id;
+
+                if (!string.IsNullOrEmpty(id) && !declaredSchemes.Contains(id, StringComparer.Ordinal))
+                {
+                    declaredSchemes.Add(id);
+                }
+            }
+        }
+
+        // A block that resolved to no scheme name at all would make every assertion below vacuous, so
+        // the count is asserted before the descriptions are read.
+        Assert.Equal(2, declaredSchemes.Count);
+
+        Assert.NotNull(issuance.Responses);
+
+        IOpenApiResponse refusal = Assert.Contains(RefusalStatusCode, issuance.Responses);
+
+        (string Location, string Text)[] proseThatMustAgree =
+        [
+            ($"the '{IssuanceOperationId}' operation description", issuance.Description ?? string.Empty),
+            ($"the '{RefusalStatusCode}' response description", refusal.Description ?? string.Empty),
+        ];
+
+        foreach ((string location, string text) in proseThatMustAgree)
+        {
+            Assert.False(
+                string.IsNullOrWhiteSpace(text),
+                $"The Security document at '{documents.SecurityDocumentPath}' leaves {location} empty, so "
+                    + "a consumer has only the security block to work from and cannot tell which of the "
+                    + "declared credentials its own topology can present.");
+
+            List<string> unexplained = [.. declaredSchemes.Where(
+                scheme => !text.Contains(scheme, StringComparison.Ordinal))];
+
+            // Composed by concatenation rather than through a culture-aware formatter because every
+            // substitution is already a string.
+            Assert.True(
+                unexplained.Count == 0,
+                $"The '{IssuanceOperationId}' operation in '{documents.SecurityDocumentPath}' declares "
+                    + $"{string.Join(" and ", declaredSchemes)} as ALTERNATIVES, either of which satisfies "
+                    + $"it, but {location} never names {string.Join("; ", unexplained)}. Prose that "
+                    + "explains one of two accepted credentials reads as a requirement for the one it "
+                    + "names: on the refusal status it sends a deployment whose proxy terminates TLS to "
+                    + "provision a certificate authority no topology requires, and on the operation it "
+                    + "hides the scheme that deployment must actually use.");
+        }
     }
 
     /// <summary>Resolves the token-issuance operation, or fails naming what the document does declare.</summary>

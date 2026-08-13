@@ -124,7 +124,7 @@
 //  AC_NATIVE carries 不开启事务 - "do NOT begin a transaction". NEITHER THE CONSTANTS NOR AN
 //  EQUIVALENT ENUM IS DECLARED IN THIS FILE. They are declared ONCE, in the published protocol
 //  definition, as `enum AutoCommitMode { AC_OFF = 0; AC_ON = 1; AC_NATIVE = 2; }`
-//  [shared/PowerFramework.Contracts/Proto/persistence.v1.proto:L1720-L1727], and this file
+//  [shared/PowerFramework.Contracts/Proto/persistence.v1.proto:L1841-L1849], and this file
 //  REFERENCES the generated enum - exactly as Tasks/SqlCommandTask.cs does. That is a FAITHFUL
 //  expression of the legacy alias relationship rather than a departure from it: the oracle's point
 //  was that both sides name ONE set of values, and both sides now name one generated enum. THE

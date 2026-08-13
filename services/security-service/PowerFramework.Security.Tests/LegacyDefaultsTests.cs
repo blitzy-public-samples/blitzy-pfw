@@ -23,9 +23,9 @@
 //  every value the legacy encrypted undecryptable; promoting the default RSA padding from PKCS#1
 //  to OAEP would do the same for every RSA payload; introducing a key-derivation function would
 //  change every key and therefore every ciphertext; and generating a random initialization vector
-//  in place of the all-zero one would produce ciphertext the legacy has no field in which to
-//  transmit an initialization vector for. Each of those "improvements" is a data-loss defect
-//  wearing the costume of a security fix.
+//  inside a vector-less overload would produce ciphertext the legacy has no field in which to
+//  transmit that vector, which is why DECISION D3 REFUSES those arms instead. Each of those
+//  "improvements" is a data-loss defect wearing the costume of a security fix.
 //
 //  Consequently, and deliberately, THIS FILE CONTAINS NO SKIPPED OR CONDITIONALLY EXCLUDED TEST, no
 //  deliberate failure standing in for a weakness, no deferred-work marker proposing that a default
@@ -61,8 +61,8 @@
 //  prototypes and no implementation exists anywhere in the repository. Four observables are
 //  therefore genuinely unobservable from the repository, and the catalogue records each as a
 //  DOCUMENTED DECISION rather than a measurement - D1 the raw-key-bytes rule, D2 the absence of an
-//  integrity tag, D3 the all-zero initialization vector, and D4 the single text-safe payload
-//  encoding. Per constraint C-K the tests that pin them below say so in as many words: they assert
+//  integrity tag, D3 the REFUSAL of the cells whose vector or feedback width is unprovable, and D4
+//  the single text-safe payload encoding. Per constraint C-K the tests that pin them below say so in as many words: they assert
 //  that the DECISION IS APPLIED UNIFORMLY, which is what a test can establish, and they do not
 //  claim byte-exact agreement with the closed binary, which only the behavioural oracle can
 //  adjudicate.
@@ -605,10 +605,10 @@ public sealed class LegacyDefaultsTests
     /// </para>
     /// <para>
     /// THE INEQUALITIES ARE THE HALF THAT CATCHES AN IGNORED DEFAULT. A payload of three whole
-    /// blocks with differing content is used precisely so that the comparison bites: under the
-    /// all-zero vector of DECISION D3 the FIRST cipher block of CBC coincides with ECB's, because
-    /// the vector contributes nothing to it, and only the later blocks diverge. A single-block
-    /// payload would therefore compare equal for the wrong reason.
+    /// blocks with differing content is used precisely so that the comparison bites: this row's CBC
+    /// comparison supplies an ALL-ZERO vector, and under a zero vector the FIRST cipher block of CBC
+    /// coincides with ECB's because the vector contributes nothing to it - only the later blocks
+    /// diverge. A single-block payload would therefore compare equal for the wrong reason.
     /// </para>
     /// </remarks>
     [Theory]
@@ -627,7 +627,7 @@ public sealed class LegacyDefaultsTests
         // The two modes the default is NOT. If a future edit promoted the default to either of
         // them, the equality above would fail and one of these would start passing vacuously, so
         // both directions are asserted together.
-        // THE PROOF IS NOW SHARPER THAN AN INEQUALITY. Asking this same vector-less arm for either of
+        // THE PROOF IS SHARPER THAN AN INEQUALITY. Asking this same vector-less arm for either of
         // the other two modes is REFUSED under DECISION D3, and that refusal is itself decisive: the
         // codebook mode is the ONLY mode this arm can serve, because it is the only one consuming no
         // vector. Were the default anything else, the mode-omitting call above would have been refused
@@ -684,7 +684,7 @@ public sealed class LegacyDefaultsTests
             RecoversPlainText(cipherText, key, ntype, Enums.CRYPTO_SYMCRYPT_MODE_ECB, plain),
             "The helper must be able to answer positively, or the refutations below prove nothing.");
 
-        // The refutation is now a refusal rather than a failed recovery, and it is stronger for it:
+        // The refutation is a refusal rather than a failed recovery, and it is stronger for it:
         // the other two modes cannot even be ATTEMPTED through this vector-less arm (DECISION D3), so
         // the codebook mode is the only one it can serve and therefore the only one it can default to.
         Assert.Throws<SymmetricParityUnavailableException>(
@@ -710,8 +710,8 @@ public sealed class LegacyDefaultsTests
         Assert.Equal(Enums.CRYPTO_SYMCRYPT_MODE_DEFAULT, LegacyDefaults.SYMMETRIC_MODE_DEFAULT);
         Assert.Equal(Enums.CRYPTO_SYMCRYPT_MODE_ECB, LegacyDefaults.SYMMETRIC_MODE_DEFAULT);
 
-        // Because the default is ECB, the mode-omitting arms never need a synthesised vector, which
-        // is what confines DECISION D3 to the eight mode-WITH-vector-less arms.
+        // Because the default is ECB, the mode-omitting arms never need a vector at all, which is what
+        // confines DECISION D3's refusal to the eight arms that name a mode but carry no vector.
         Assert.False(
             LegacyDefaults.ModeUsesInitializationVector(LegacyDefaults.SYMMETRIC_MODE_DEFAULT));
     }
@@ -1535,26 +1535,24 @@ public sealed class LegacyDefaultsTests
     //  ORACLE  n_crypto.sru:L31, L35, L39, L43   SymEncrypt - a mode, but no vector
     //          n_crypto.sru:L47, L51, L55, L59   SymDecrypt - the same four shapes, mirrored
     //  ------------------------------------------------------------------------------------------
-    //  WHAT THESE TESTS USED TO ASSERT, AND WHY IT WAS THE WRONG THING. Eight of the thirty-two
-    //  symmetric overloads accept a mode but no initialization vector, so a caller may ask for a
-    //  vector-consuming mode without supplying one. The port used to synthesise an all-zero vector
-    //  of the block length, and these tests asserted that it did - comparing the vector-less arm
-    //  against an explicit all-zero vector and finding them equal.
+    //  WHAT THESE ROWS ASSERT. Eight of the thirty-two symmetric overloads accept a mode but no
+    //  initialization vector, so a caller may ask for a vector-consuming mode without supplying one.
+    //  Those eight arms REFUSE such a mode, with a reason naming the missing evidence. This is not a
+    //  rare branch - it is a quarter of the family - and the codebook mode, which consumes no vector,
+    //  is unaffected and is asserted to still work.
     //
-    //  That equality was guaranteed by construction: one code path called the other. It therefore
-    //  proved the two agreed with EACH OTHER and nothing at all about the closed binary, while
-    //  reading exactly like a parity assertion. `n_crypto` is declared native "pfw.dll"
-    //  [n_crypto.sru:L8] with no PowerScript body for any of the 32 overloads, so what vector the
-    //  oracle substituted is unobservable from this repository.
+    //  WHY REFUSING IS ASSERTED RATHER THAN SOME SUBSTITUTED VECTOR. Any substitute would have to be
+    //  invented: `n_crypto` is declared native "pfw.dll" [n_crypto.sru:L8] with no PowerScript body
+    //  for any of the 32 overloads, so what vector the oracle uses is unobservable from this
+    //  repository. And a test comparing a vector-less arm against an explicit all-zero vector would
+    //  pass by CONSTRUCTION if the port substituted that same vector - one code path calling the
+    //  other - proving only that the two agree with EACH OTHER while reading exactly like a parity
+    //  assertion.
     //
     //  WHY THAT MATTERS MORE THAN IT LOOKS. A wrong vector round-trips perfectly against itself, so
     //  no test here could ever detect it - while the ciphertext produced would be undecryptable by
-    //  the legacy. The guess was therefore silently unfalsifiable AND potentially destructive, which
-    //  is the combination the narrow-with-a-defined-error rule exists to forbid.
-    //
-    //  WHAT IS ASSERTED NOW. Those eight arms REFUSE a vector-consuming mode, with a reason naming
-    //  the missing evidence. This is not a rare branch - it is a quarter of the family - and the
-    //  codebook mode, which consumes no vector, is unaffected and is asserted to still work.
+    //  the legacy. A guess would therefore be silently unfalsifiable AND potentially destructive,
+    //  which is the combination the narrow-with-a-defined-error rule exists to forbid.
     // ==========================================================================================
 
     /// <summary>
@@ -1762,15 +1760,15 @@ public sealed class LegacyDefaultsTests
     }
 
     /// <summary>
-    /// Electronic codebook mode never reaches the synthesised vector at all, which is what confines
-    /// this decision to the modes that genuinely require one.
+    /// Electronic codebook mode never consumes a vector at all, which is what confines this
+    /// decision's refusal to the modes that genuinely require one.
     /// </summary>
     /// <param name="ntype">The published cipher type under test.</param>
     /// <remarks>
     /// DOCUMENTED DECISION D3, and its boundary. The default mode consumes no vector, so a vector
     /// supplied to an electronic codebook operation cannot influence the result - the catalogue's
     /// classifier reports as much, and the provider structures the call so that a supplied vector
-    /// cannot reach the primitive even in principle. Both the zero vector and a non-zero one are
+    /// cannot reach the primitive even in principle. Both an all-zero vector and a non-zero one are
     /// shown to make no difference.
     /// </remarks>
     [Theory]
@@ -1786,8 +1784,8 @@ public sealed class LegacyDefaultsTests
 
         byte[] withoutVector = _cipher.SymEncrypt(plain, key, ntype, ecb);
         // Constructed here from a length rather than written as a literal, so this file still holds
-        // nothing resembling key material. The catalogue no longer offers a factory for it: the
-        // all-zero vector was DECISION D3's guess, and removing the guess removed its factory.
+        // nothing resembling key material. The catalogue offers no factory for it, because DECISION D3
+        // supplies no vector anywhere - this buffer exists only to prove ECB ignores one.
         byte[] withZeroVector = _cipher.SymEncrypt(
             plain,
             key,
@@ -2583,6 +2581,7 @@ public sealed class LegacyDefaultsTests
     /// <param name="ntype">The cipher type to attempt it under.</param>
     /// <param name="mode">The cipher mode to attempt it under.</param>
     /// <param name="expectedPlainText">The plaintext that must NOT come back.</param>
+    /// <param name="vector">The initialization vector.</param>
     /// <returns>
     /// <see langword="true"/> only when the decryption both completed and produced
     /// <paramref name="expectedPlainText"/>.

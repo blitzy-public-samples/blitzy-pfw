@@ -102,17 +102,6 @@
 //  parallel collections. No secret, credential, key or token literal appears anywhere in this file, and
 //  none is needed (constraint C-F's never-replicate posture).
 //
-//  RULES POSITION
-//  ------------------------------------------------------------------------------------------------
-//  `review_rules` returns exactly "No user rules provided.", so NO user-specified rule governs this
-//  file. Its absence is not licence. The enterprise-standard baseline of AAP 0.7.2 applies in its place:
-//  nullable and warnings-as-errors inherited from Directory.Build.props and never relaxed, so the
-//  nullable results of reflection are HANDLED rather than suppressed - there is no `!`, no `#pragma` and
-//  no NoWarn in this file. The governing constraints are the AAP's own: C-A (assert values and names
-//  only, and reference nothing outside the contracts and kernel projects - in particular no service
-//  project), C-B (replicate the legacy quirks, never correct them), C-H (analyzer-clean) and C-K (every
-//  row cites its locator, and each place the kernel cannot serve as oracle states why).
-//
 //  A LOCATOR CORRECTION, MADE HERE SO IT IS NOT REDISCOVERED (C-K)
 //  ------------------------------------------------------------------------------------------------
 //  The buffer and item-status evidence is often attributed to n_cst_thread_task_sqlbase_ds.sru. It is

@@ -1,5 +1,5 @@
 // ==================================================================================================
-//  SIGNING-KEY POLICY - THE FORMAT DISCRIMINATOR, THE WEAK-KEY ANNOTATION, AND THE REFUSAL THAT IS NOT
+//  SIGNING-KEY POLICY - THE FORMAT DISCRIMINATOR, AND THE FLOOR THAT APPLIES TO THE ISSUER KEY ALONE
 // ==================================================================================================
 //
 //  WHY THIS FILE EXISTS AS ITS OWN FILE RATHER THAN AS CASES BOLTED ONTO SigningKeyProviderTests
@@ -10,25 +10,32 @@
 //    * Security:SigningKeyFormat IS BOUND AND ENFORCED. An unrecognised encoding is refused at startup
 //      rather than reaching an import that would fail for an unexplained reason. A setting that is
 //      declared, documented and inert is a FALSE ASSURANCE, which is worse than no setting at all.
-//    * NO KEY IS REFUSED FOR BEING SHORT, AND NO SETTING EXISTS THAT COULD MAKE ONE BE. AAP 0.6.6.4
-//      keeps 1024-bit RSA a legal size across this estate - the oracle's catalogue lists
-//      CRYPTO_RSA_BITS_1024 = 1024 as first class [ws_objects/pfw.shared.pbl.src/enums.sru:L965] - and
-//      requires every weak cryptographic default to be replicated as an ANNOTATED default rather than
-//      corrected. An earlier revision declared Security:SigningKeyMinimumSizeBits, defaulted it to 2048
-//      and failed startup below that floor; that is the behaviour change C-B forbids however desirable
-//      it looks, and these tests are what keep it from returning.
+//    * A KEY BELOW SecurityOptions.MinimumSigningKeySizeBits IS REFUSED, AND NO SETTING EXISTS THAT
+//      COULD LOWER THAT FLOOR. This file previously asserted the opposite, and the reasoning it carried
+//      was wrong in one specific way that is worth recording rather than quietly deleting: it read AAP
+//      0.6.6.4's 1024-bit allowance as governing this key. It does not. That section governs the C-02
+//      CRYPTOGRAPHIC SURFACE - the operations n_crypto actually published, whose weak defaults a caller
+//      can observe today and which C-B forbids correcting. The legacy has NO token issuer, NO JWT, NO
+//      JWKS and NO signing identity of any kind; it opens no listening socket at all [AAP 0.1.4]. So
+//      there is no legacy behaviour here for a floor to correct, and what governs a boundary the
+//      decomposition CREATED is AAP G7 and constraint C-G - every created boundary authenticated from
+//      the outset - plus the enterprise baseline of AAP 0.7.2 where no legacy behaviour speaks.
 //
-//  WHAT REPLACES THE REFUSAL, AND WHERE EACH HALF IS ASSERTED
+//  THE TWO SURFACES NOW DIFFER DELIBERATELY, AND THAT IS WHAT THESE CASES PIN
 //
-//    * SigningKeyProvider measures the imported modulus, publishes it on SigningKeySizeBits, sets
-//      SigningKeyIsLegacyWeak below SecurityOptions.LegacyWeakSigningKeySizeBits, and logs a warning
-//      naming the measured size. Tested by constructing the provider over a 1024-bit key and reading
-//      all three, including the captured log record.
-//    * SecurityOptionsValidator raises NO size failure at all, at any size. Tested by calling the
-//      validator directly and asserting the absence.
-//    * The issuer and C-02's key-GENERATION surface now share one allowance rather than differing.
-//      RsaProvider.GenRSAKey still accepts 1024 bits, and the shared-allowance case asserts both halves
-//      at once so that neither can be "harmonised" in the wrong direction by a later edit.
+//    * SigningKeyProvider REFUSES a modulus below the floor, disposing the imported key and throwing, so
+//      the host does not start. Tested by constructing over a 1024-bit key and asserting the throw, the
+//      critical log record, and that neither the message nor the record echoes the material.
+//    * SecurityOptionsValidator reports the SAME floor from the SAME constant, so a deployment gets a
+//      configuration diagnostic beside its other startup faults rather than a bare constructor crash.
+//    * C-02's key-GENERATION surface is UNCHANGED. RsaProvider.GenRSAKey still accepts 1024 bits and
+//      LegacyDefaults.RSA_SMALLEST_LEGAL_KEY_SIZE_BITS still publishes it
+//      [ws_objects/pfw.shared.pbl.src/enums.sru:L965]. The divergence case asserts BOTH halves at once -
+//      the issuer refusing and the legacy generator accepting - so that neither can be "harmonised" into
+//      the other by a later edit in either direction.
+//    * NO CONFIGURABLE FLOOR EXISTS. A floor an operator can lower is not a floor, so the reflection
+//      guard that once proved the absence of any size PROPERTY is kept and re-aimed: the floor must be a
+//      constant, and no bound setting may govern the modulus.
 //
 //  KEY HYGIENE. Every key in this file is GENERATED IN THIS PROCESS. No key literal appears, and
 //  nothing is copied from any of the eight hardcoded-secret sites the repository carries [AAP 0.6.6.1],
@@ -51,9 +58,9 @@ using Xunit;
 namespace PowerFramework.Security.Tests;
 
 /// <summary>
-/// Verifies that the signing-key format discriminator is bound and enforced, that a short modulus is
-/// annotated rather than refused, and that no configuration surface exists which could turn the
-/// annotation back into a rejection.
+/// Verifies that the signing-key format discriminator is bound and enforced, that a modulus below
+/// <see cref="SecurityOptions.MinimumSigningKeySizeBits"/> is refused rather than merely remarked on, and
+/// that no configuration surface exists which could lower that floor.
 /// </summary>
 public sealed class SigningKeyPolicyTests
 {
@@ -69,29 +76,30 @@ public sealed class SigningKeyPolicyTests
     private const string TestIssuer = "https://security.invalid";
 
     /// <summary>
-    /// The size the oracle keeps legal and this service therefore accepts for its own identity, with an
-    /// annotation rather than a refusal.
+    /// The size the oracle keeps legal on its own C-02 generation surface, and which this service's
+    /// ISSUER identity therefore refuses. The two are different surfaces, and that difference is the
+    /// point of several cases below.
     /// </summary>
     private const int LegacySmallestKeySizeBits = 1024;
 
     /// <summary>
-    /// The documented default is the value the settings file states, and NO minimum-size setting exists
-    /// on the options type at all.
+    /// The documented default is the value the settings file states, the floor is a CONSTANT, and no
+    /// bound setting on the options type governs the modulus.
     /// </summary>
     /// <remarks>
-    /// The second half is a reintroduction guard rather than a restatement of the first: it walks the
-    /// bound properties by reflection, so a future edit that added back a size floor under any spelling
-    /// fails here even if every other case in this file were left untouched. The annotation threshold is
-    /// asserted to be a CONSTANT and not a property for the same reason - a configurable threshold reads
-    /// as a policy an operator could tighten into the rejection AAP 0.6.6.4 forbids.
+    /// The second half is a lowering guard rather than a restatement of the first: it walks the bound
+    /// properties by reflection, so a future edit that turned the floor into configuration under any
+    /// spelling fails here even if every other case in this file were left untouched. A floor an operator
+    /// can lower is not a floor, and the operator most likely to lower it is one whose deployment already
+    /// holds a short key.
     /// </remarks>
     [Fact]
-    public void TheDocumentedDefaultIsTheDeclaredDefaultAndNoSizeFloorExists()
+    public void TheDocumentedDefaultIsTheDeclaredDefaultAndTheFloorIsNotConfigurable()
     {
         SecurityOptions options = new();
 
         Assert.Equal(SecurityOptions.PermittedSigningKeyFormat, options.SigningKeyFormat);
-        Assert.Equal(2048, SecurityOptions.LegacyWeakSigningKeySizeBits);
+        Assert.Equal(2048, SecurityOptions.MinimumSigningKeySizeBits);
 
         string[] sizeProperties =
         [
@@ -105,39 +113,43 @@ public sealed class SigningKeyPolicyTests
 
         Assert.True(
             sizeProperties.Length == 0,
-            "SecurityOptions declares a key-size property: " + string.Join(", ", sizeProperties) +
-            ". AAP 0.6.6.4 keeps 1024-bit RSA a legal size in this estate and requires the weakness to " +
-            "be annotated rather than corrected, so no bound setting may govern the signing key's " +
-            "modulus. The annotation threshold is the constant LegacyWeakSigningKeySizeBits.");
+            "SecurityOptions declares a key-size PROPERTY: " + string.Join(", ", sizeProperties) +
+            ". The signing-key floor must stay the constant MinimumSigningKeySizeBits. A bound setting " +
+            "would be a floor an operator could lower, which returns this estate to the state the floor " +
+            "closes - a weak modulus signing every credential every service accepts.");
     }
 
     /// <summary>
-    /// THE SHARED-ALLOWANCE PROOF. At one and the same key size, the issuer identity accepts and the
-    /// legacy generation surface accepts, and the issuer says so rather than staying silent.
+    /// 🔴 THE DIVERGENCE PROOF. At one and the same key size the ISSUER identity refuses and the LEGACY
+    /// generation surface accepts, and both halves are asserted together so neither can be harmonised
+    /// into the other.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Both halves are asserted in one case rather than trusted to two independent tests. If a later
-    /// edit reintroduced an issuer floor, the first half fails. If a later edit raised the legacy
-    /// generator's own allowance - which WOULD be the forbidden silent correction - the second half
-    /// fails. The annotation is asserted alongside the acceptance so that "accepted" cannot quietly
-    /// become "accepted and unremarked".
+    /// This is the case that carries the whole argument, which is why both halves live in one test rather
+    /// than in two that could drift. If a later edit removed the issuer floor - the change a reader of AAP
+    /// 0.6.6.4 is most likely to make, because that section really does keep 1024-bit RSA legal - the
+    /// first half fails. If a later edit "tidied" the legacy generator to match the issuer, which WOULD be
+    /// the silent legacy correction C-B forbids, the second half fails.
     /// </para>
     /// <para>
-    /// The legacy half asserts the published constant as well as the behaviour, because the constant is
-    /// what documents the allowance to a reader
+    /// WHY THE TWO DIFFER. AAP 0.6.6.4 governs the C-02 surface: operations the oracle published, whose
+    /// weak defaults are observable behaviour. Token issuance is not among them - the legacy has no token
+    /// issuer at all - so the issuer key is a boundary this decomposition created, and constraint C-G
+    /// governs it. The legacy half asserts the published constant as well as the behaviour, because that
+    /// constant is what documents the allowance to a reader
     /// [<c>ws_objects/pfw.shared.pbl.src/enums.sru:L965</c>].
     /// </para>
     /// </remarks>
     [Fact]
-    public void TheIssuerAndTheLegacyGenerationSurfaceShareTheLegacyAllowance()
+    public void TheIssuerRefusesTheLegacyAllowanceTheGenerationSurfaceStillAccepts()
     {
-        // ---- half one: the issuer identity accepts 1024 bits, and annotates it ----
-        using SigningKeyProvider issuer = CreateProvider(GeneratePkcs8Base64(LegacySmallestKeySizeBits));
+        // ---- half one: the ISSUER identity refuses 1024 bits and never produces a credential ----
+        InvalidOperationException refused = Assert.Throws<InvalidOperationException>(
+            () => CreateProvider(GeneratePkcs8Base64(LegacySmallestKeySizeBits)));
 
-        Assert.NotNull(issuer.SigningCredentials);
-        Assert.Equal(LegacySmallestKeySizeBits, issuer.SigningKeySizeBits);
-        Assert.True(issuer.SigningKeyIsLegacyWeak);
+        Assert.Contains("1024", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("2048", refused.Message, StringComparison.Ordinal);
 
         // ---- half two: C-02's generation surface still accepts exactly that size ----
         Assert.Equal(
@@ -156,23 +168,25 @@ public sealed class SigningKeyPolicyTests
         Assert.True(
             generated,
             "The legacy key-generation surface must still accept 1024 bits. Refusing it here would be " +
-            "the silent legacy correction this refactor forbids [enums.sru:L965, AAP 0.6.6.4].");
+            "the silent legacy correction this refactor forbids [enums.sru:L965, AAP 0.6.6.4]. The " +
+            "issuer floor is scoped to the issuer's own signing identity and must not reach this " +
+            "surface.");
         Assert.NotEmpty(privateKey);
         Assert.NotEmpty(publicKey);
     }
 
     /// <summary>
-    /// A short key is ACCEPTED, flagged, and reported through the log - not refused.
+    /// 🔴 A short key is REFUSED, and both the exception and the log record name the measured size without
+    /// echoing the material.
     /// </summary>
     /// <remarks>
-    /// The warning is asserted through a captured log record rather than inferred, because the record is
-    /// the only thing an operator ever sees: nothing fails, nothing throws, and the service starts. A
-    /// modulus length is not a secret - this service publishes it in the key set it serves anonymously -
-    /// so the record states the measured size, and the assertion additionally proves the key material
-    /// itself is never echoed.
+    /// The record is asserted as well as the throw, because an operator reading a startup failure needs to
+    /// know WHICH modulus was too short: "too short" alone sends them to guess. A modulus length is not a
+    /// secret - this service publishes it in the key set it serves anonymously - so naming it discloses
+    /// nothing, and the assertion additionally proves the key material itself appears in neither.
     /// </remarks>
     [Fact]
-    public void AShortKeyIsAcceptedAndAnnotatedRatherThanRefused()
+    public void AShortKeyIsRefusedAndTheRefusalNamesTheMeasuredSizeOnly()
     {
         string shortKey = GeneratePkcs8Base64(LegacySmallestKeySizeBits);
         RecordingLogger<SigningKeyProvider> logger = new();
@@ -185,32 +199,34 @@ public sealed class SigningKeyPolicyTests
             SigningKey = shortKey,
         };
 
-        using SigningKeyProvider provider = new(Options.Create(options), logger);
+        InvalidOperationException refused = Assert.Throws<InvalidOperationException>(
+            () => new SigningKeyProvider(Options.Create(options), logger));
 
-        Assert.NotNull(provider.SigningCredentials);
-        Assert.Equal(LegacySmallestKeySizeBits, provider.SigningKeySizeBits);
-        Assert.True(provider.SigningKeyIsLegacyWeak);
+        Assert.Contains("1024", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("2048", refused.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(shortKey, refused.Message, StringComparison.Ordinal);
 
         (LogLevel level, string message) = Assert.Single(logger.Records);
 
-        Assert.Equal(LogLevel.Warning, level);
+        Assert.Equal(LogLevel.Critical, level);
         Assert.Contains("1024", message, StringComparison.Ordinal);
         Assert.Contains("2048", message, StringComparison.Ordinal);
         Assert.DoesNotContain(shortKey, message, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// A key at or above the annotation threshold constructs normally and draws no remark.
+    /// A key at or above the floor constructs normally and draws no remark.
     /// </summary>
     /// <param name="keySizeBits">The generated key size.</param>
     /// <remarks>
-    /// The silence is the assertion. Every key is accepted, so acceptance alone would prove nothing;
-    /// what distinguishes these sizes is that neither the flag nor the log record is raised for them.
+    /// The silence is half the assertion. 2048 is included deliberately as the BOUNDARY: the floor is
+    /// inclusive, so the smallest acceptable key must construct, and an off-by-one that made it exclusive
+    /// would refuse every deployment following the documented generation procedure.
     /// </remarks>
     [Theory]
     [InlineData(2048)]
     [InlineData(3072)]
-    public void AKeyAtOrAboveTheAnnotationThresholdDrawsNoRemark(int keySizeBits)
+    public void AKeyAtOrAboveTheFloorConstructsAndDrawsNoRemark(int keySizeBits)
     {
         RecordingLogger<SigningKeyProvider> logger = new();
 
@@ -226,21 +242,20 @@ public sealed class SigningKeyPolicyTests
 
         Assert.NotNull(provider.SigningCredentials);
         Assert.Equal(keySizeBits, provider.SigningKeySizeBits);
-        Assert.False(provider.SigningKeyIsLegacyWeak);
         Assert.Empty(logger.Records);
     }
 
     /// <summary>
-    /// A STRAY MINIMUM-SIZE KEY IN CONFIGURATION GOVERNS NOTHING, and the short key it names still
-    /// constructs.
+    /// A STRAY MINIMUM-SIZE KEY IN CONFIGURATION GOVERNS NOTHING - IN EITHER DIRECTION.
     /// </summary>
     /// <remarks>
-    /// This is the case that pins the removal rather than merely the current behaviour. A deployment
-    /// upgraded from the revision that carried Security:SigningKeyMinimumSizeBits keeps the key in its
-    /// own settings, and an unmatched configuration key binds to nothing silently - so the assertion is
-    /// that the service starts anyway with the 1024-bit key that setting would once have refused. It
-    /// goes through the same mechanism the host uses, Bind over the named section, so it would fail if a
-    /// property of that name were reintroduced.
+    /// The floor is a constant, so a deployment that writes <c>Security:SigningKeyMinimumSizeBits</c> into
+    /// its own settings changes nothing: an unmatched configuration key binds to nothing silently. Both
+    /// directions are asserted from the one stray key, because both are ways a reader could believe the
+    /// setting works. A value ABOVE the constant does not tighten the floor - the 2048-bit key is still
+    /// accepted - and, by the same mechanism, a value BELOW it could not loosen one. It goes through the
+    /// same mechanism the host uses, <c>Bind</c> over the named section, so it would fail if a property of
+    /// that name were reintroduced.
     /// </remarks>
     [Fact]
     public void AStrayMinimumSizeKeyInConfigurationGovernsNothing()
@@ -263,7 +278,7 @@ public sealed class SigningKeyPolicyTests
         // The signing key itself arrives through a FLAT key rather than through the section, exactly as
         // it does in the host, because the environment provider only folds a double underscore into a
         // section separator.
-        options.SigningKey = GeneratePkcs8Base64(LegacySmallestKeySizeBits);
+        options.SigningKey = GeneratePkcs8Base64(SecurityOptions.MinimumSigningKeySizeBits);
 
         ValidateOptionsResult result = new SecurityOptionsValidator().Validate(
             Options.DefaultName,
@@ -275,30 +290,46 @@ public sealed class SigningKeyPolicyTests
 
         using SigningKeyProvider provider = new(Options.Create(options));
 
-        Assert.Equal(LegacySmallestKeySizeBits, provider.SigningKeySizeBits);
+        Assert.Equal(SecurityOptions.MinimumSigningKeySizeBits, provider.SigningKeySizeBits);
     }
 
     /// <summary>
-    /// The validator raises NO failure for a short key, at any size.
+    /// 🔴 The validator REPORTS the floor for a short key, naming the measured size and the minimum, and
+    /// reports nothing at all for a key at the floor.
     /// </summary>
     /// <remarks>
-    /// The validator accumulates every failure it finds, so this asserts the absence of any failure
-    /// MENTIONING the measured size rather than overall success - the object under test declares no
-    /// audience roster and would fail for that unrelated reason. A validator that reported a size fault
-    /// would fail the host at startup, which is the rejection AAP 0.6.6.4 forbids.
+    /// The validator accumulates every failure it finds, so each half asserts the presence or absence of
+    /// ITS OWN failure rather than overall success - the object under test declares no audience roster and
+    /// would fail for that unrelated reason. Reporting here as well as in the provider is what turns a bare
+    /// constructor crash into a configuration diagnostic that arrives beside every other startup fault, and
+    /// the material is asserted absent from the message for the same reason it is absent from every other
+    /// rejection in the options layer (constraint C-F).
     /// </remarks>
     [Fact]
-    public void TheValidatorRaisesNoSizeFailureForAShortKey()
+    public void TheValidatorReportsTheFloorForAShortKeyAndNothingForAKeyAtIt()
     {
-        ValidateOptionsResult result = Validate(
-            options => options.SigningKey = GeneratePkcs8Base64(LegacySmallestKeySizeBits));
+        string shortKey = GeneratePkcs8Base64(LegacySmallestKeySizeBits);
+
+        ValidateOptionsResult tooShort = Validate(options => options.SigningKey = shortKey);
+
+        string failure = Assert.Single(
+            tooShort.Failures ?? [],
+            candidate => candidate.Contains("1024", StringComparison.Ordinal));
+
+        Assert.Contains("2048", failure, StringComparison.Ordinal);
+        Assert.Contains(
+            SecurityOptions.SigningKeyEnvironmentVariableName,
+            failure,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(shortKey, failure, StringComparison.Ordinal);
+
+        ValidateOptionsResult atTheFloor = Validate(
+            options => options.SigningKey =
+                GeneratePkcs8Base64(SecurityOptions.MinimumSigningKeySizeBits));
 
         Assert.DoesNotContain(
-            result.Failures ?? [],
-            failure => failure.Contains("1024", StringComparison.Ordinal));
-        Assert.DoesNotContain(
-            result.Failures ?? [],
-            failure => failure.Contains("too short", StringComparison.OrdinalIgnoreCase));
+            atTheFloor.Failures ?? [],
+            candidate => candidate.Contains("2048-bit minimum", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -395,8 +426,8 @@ public sealed class SigningKeyPolicyTests
     }
 
     /// <summary>
-    /// Both accepted encodings are measured the same way, so the annotation does not depend on which
-    /// shape the material arrived in.
+    /// Both accepted encodings are measured the same way, so the floor does not depend on which shape the
+    /// material arrived in.
     /// </summary>
     /// <remarks>
     /// NEITHER SHAPE MAY BE REFUSED - the legacy generator's armoured output is an OPTIONAL fourth
@@ -419,19 +450,14 @@ public sealed class SigningKeyPolicyTests
         Assert.Equal(2048, fromArmoured.SigningKeySizeBits);
         Assert.Equal(2048, fromBase64.SigningKeySizeBits);
 
-        // The same short key through both paths, so an annotation applied on one path only would be
-        // visible as a disagreement here rather than as an unremarked short key later.
+        // The same short key through both paths, so a floor applied on one path only would be visible as
+        // a disagreement here rather than as an unremarked short key later.
         using RSA armouredShort = RSA.Create(LegacySmallestKeySizeBits);
 
-        using SigningKeyProvider shortFromArmoured =
-            CreateProvider(armouredShort.ExportPkcs8PrivateKeyPem());
-        using SigningKeyProvider shortFromBase64 =
-            CreateProvider(Convert.ToBase64String(armouredShort.ExportPkcs8PrivateKey()));
-
-        Assert.Equal(LegacySmallestKeySizeBits, shortFromArmoured.SigningKeySizeBits);
-        Assert.Equal(LegacySmallestKeySizeBits, shortFromBase64.SigningKeySizeBits);
-        Assert.True(shortFromArmoured.SigningKeyIsLegacyWeak);
-        Assert.True(shortFromBase64.SigningKeyIsLegacyWeak);
+        Assert.Throws<InvalidOperationException>(
+            () => CreateProvider(armouredShort.ExportPkcs8PrivateKeyPem()));
+        Assert.Throws<InvalidOperationException>(
+            () => CreateProvider(Convert.ToBase64String(armouredShort.ExportPkcs8PrivateKey())));
     }
 
     /// <summary>

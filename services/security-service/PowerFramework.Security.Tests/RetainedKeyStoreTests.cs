@@ -222,6 +222,7 @@ public sealed class RetainedKeyStoreTests
     /// How far past the window's end the clock is moved: zero is the boundary itself, one tick is the first
     /// instant outside it.
     /// </param>
+    /// <param name="resolves">Whether the reference is expected to resolve.</param>
     /// <remarks>
     /// THE BOUNDARY IS ASSERTED FROM BOTH SIDES. A row that only moved the clock a day forward would pass
     /// against an inclusive comparison, an exclusive one, and an off-by-one in either direction.
@@ -239,7 +240,7 @@ public sealed class RetainedKeyStoreTests
 
         clock.SetUtcNow(DateTimeOffset.UnixEpoch + Retention + TimeSpan.FromTicks(elapsedTicksPastTheWindow));
 
-        ProblemHttpResult? rejection = store.TryResolveReference(keyRef, NullLoggerFactory.Instance, out string material);
+        ProblemHttpResult? rejection = store.TryResolveReference(keyRef, string.Empty, NullLoggerFactory.Instance, out string material);
 
         if (resolves)
         {
@@ -343,7 +344,7 @@ public sealed class RetainedKeyStoreTests
                 {
                     foreach (string reference in references)
                     {
-                        _ = store.TryResolveReference(reference, NullLoggerFactory.Instance, out _);
+                        _ = store.TryResolveReference(reference, string.Empty, NullLoggerFactory.Instance, out _);
                     }
 
                     return;

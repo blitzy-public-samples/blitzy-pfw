@@ -766,9 +766,9 @@ public sealed class MalformedRequestBodyTests
     /// A body carrying a member the shape does not declare is refused as a client error.
     /// </summary>
     /// <remarks>
-    /// THE STATUS IS ASSERTED AS 400 AND NOT MERELY AS A FAILURE, because the defect this row closes was a
-    /// 500: the serializer's refusal escaped as an unhandled fault, telling a caller its own request was
-    /// fine and this service was broken.
+    /// THE STATUS IS ASSERTED AS 400 AND NOT MERELY AS A FAILURE, because the defect this row closes is a
+    /// 500: the serializer's refusal escaping as an unhandled fault, telling a caller its own request was
+    /// fine and this service is broken.
     /// </remarks>
     [Fact]
     public async Task AnUndeclaredMemberIsRefusedAsAClientError()

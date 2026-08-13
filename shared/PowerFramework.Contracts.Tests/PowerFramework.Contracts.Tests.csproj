@@ -5,7 +5,7 @@
     Proto/common.v1.proto, Proto/dataservices.v1.proto, Proto/persistence.v1.proto,
     OpenApi/security.v1.yaml and OpenApi/gateway.v1.yaml.
 
-    HAND-AUTHORED ON PURPOSE. `dotnet new xunit3` does not exist in SDK 10.0.302 and
+    HAND-AUTHORED ON PURPOSE. `dotnet new xunit3` does not exist in the pinned SDK and
     `dotnet new xunit` scaffolds the xunit v2 line with an older test SDK and coverage package,
     so templating this project would silently downgrade the test stack.
 

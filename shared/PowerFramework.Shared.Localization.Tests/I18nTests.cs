@@ -28,10 +28,6 @@
 //  job is to pass its own local by reference and hand back whatever the provider left there, and the
 //  tests below assert that round trip rather than the provider's internals.
 //
-//  RULES POSITION
-//  review_rules returns "No user rules provided.", so no user-specified rule governs this file. The
-//  binding constraints cited inline are C-B (replicate behaviour, never improve) and C-C (the legacy
-//  tree is read-only and is the oracle).
 // ==================================================================================================
 
 using PowerFramework.Shared.Kernel;
@@ -138,9 +134,13 @@ public class I18nTests
     /// <see cref="RetCode.E_INVALID_OBJECT"/>.
     /// </summary>
     /// <remarks>
-    /// The codes are read by identifier rather than as the literals 0 and -3, per AAP 0.4.5.3: these
+    /// The codes are read by identifier rather than as the literals 0 and -5, per AAP 0.4.5.3: these
     /// values appear in log records and characterization recordings, so the identifier is the stable
-    /// reference and the number is an implementation detail of the algebra.
+    /// reference and the number is an implementation detail of the algebra. <c>-5</c> is
+    /// <see cref="RetCode.E_INVALID_OBJECT"/> [retcode.sru:L48] and NOT
+    /// <see cref="RetCode.E_INVALID_ARGUMENT"/>, which is <c>-3</c>: the oracle's installer guards
+    /// with <c>Not IsValid(n)</c> and answers the invalid-OBJECT code [i18n.srf:L12], so naming the
+    /// argument code here would describe a different arm of the algebra.
     /// </remarks>
     [Fact]
     public void InstallingAProviderReportsOkAndInstallingNullReportsInvalidObject()
