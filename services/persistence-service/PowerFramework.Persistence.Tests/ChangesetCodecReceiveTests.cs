@@ -694,7 +694,7 @@ public sealed class ChangesetPayloadCodecTests
 
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state, CarrierBaselineTrust.AsStated));
         Assert.Equal(1L, target.RowCount());
 
         object? restored = target.GetItemValue(1L, 1, DwBuffer.Primary);
@@ -734,7 +734,7 @@ public sealed class ChangesetPayloadCodecTests
 
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        _ = codec.TryApply(target, state);
+        _ = codec.TryApply(target, state, CarrierBaselineTrust.AsStated);
 
         object? restored = target.GetItemValue(1L, 5, DwBuffer.Primary);
 
@@ -774,7 +774,7 @@ public sealed class ChangesetPayloadCodecTests
 
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state, CarrierBaselineTrust.AsStated));
         Assert.Equal(31L, target.GetItemValue(1L, 3, DwBuffer.Primary));
         Assert.Equal(30L, target.GetItemOriginalValue(1L, 3, DwBuffer.Primary));
         Assert.Equal(ItemStatus.DataModified, target.GetItemStatus(1L, 0, DwBuffer.Primary));
@@ -782,13 +782,22 @@ public sealed class ChangesetPayloadCodecTests
     }
 
     [Fact]
-    public void AColumnWhoseOriginalEqualsItsCurrentIsOmittedAndReadsBackAsUnchanged()
+    public void AColumnWhoseOriginalEqualsItsCurrentStillCarriesItsBaseline()
     {
-        // The contract states the producer rule explicitly on common.v1.DataWindowRow: a column whose
-        // original equals its current MAY be omitted from `original_values`, and an omission READS AS
-        // "unchanged since the last baseline". Both halves are asserted here - the encoder's omission and
-        // the decoder's reading - because a decoder that defaulted an absent original to null instead
-        // would put a null into every generated where clause and match no row at all.
+        // 🔴 THE PRODUCER RULE CHANGED, AND THIS ROW IS WHERE THE OLD ONE WAS PINNED. The contract used to
+        // let a producer OMIT a column whose original equalled its current value and require the consumer
+        // to read the omission as "unchanged since the last baseline". That is an inference this codec's
+        // own receive half can make and a consumer of the published contract cannot be asked to: it left a
+        // FRESHLY RETRIEVED row - every column agreeing, by definition - carrying no baseline at all, so a
+        // caller had to reconstruct the `updatewhere=1` predicate from an absence, and the other legal
+        // reading of that absence ("no baseline exists") drops the predicate and silently overwrites.
+        // AAP 0.6.3.2 admits no exemption: per row, both the current AND the original value of every
+        // marked column. So one entry travels per column the row carries, agreeing or not.
+        //
+        // THE DECODER'S FALLBACK IS UNCHANGED AND IS STILL COVERED, by
+        // AColumnWithNoStatedOriginalAdoptsTheRowsStatusRatherThanMeasuringItselfAgainstItself below: a
+        // CALLER-composed payload may still state no original, and an unstated one is still read as the
+        // current value rather than as a null that would match no row.
         DataWindowBufferStore source = new() { Processing = new DataWindowProcessing(1L) };
         long row = source.AppendRow(DwBuffer.Primary, ItemStatus.DataModified);
 
@@ -808,13 +817,27 @@ public sealed class ChangesetPayloadCodecTests
         DataWindowRow projected = state!.Segments[0].Rows[0];
 
         Assert.Equal("Contoso", Assert.Single(projected.Columns).Value.StringValue);
-        Assert.Empty(projected.OriginalValues);
+
+        // ONE BASELINE, FOR THE ONE COLUMN THE ROW CARRIES - and it agrees with the current value, which
+        // is the whole point: agreement is stated rather than left to be inferred from silence.
+        ColumnValue baseline = Assert.Single(projected.OriginalValues);
+        Assert.Equal("Contoso", baseline.Value.StringValue);
+        Assert.Equal(2L, baseline.ColumnId);
 
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state, CarrierBaselineTrust.AsStated));
         Assert.Equal("Contoso", target.GetItemValue(1L, 2, DwBuffer.Primary));
         Assert.Equal("Contoso", target.GetItemOriginalValue(1L, 2, DwBuffer.Primary));
+
+        // AND THE ADDED BASELINE CANNOT CHANGE HOW A PRODUCED PAYLOAD IS READ, which is what makes the
+        // producer rule safe to change at all. The encoder stamps ItemStatus on EVERY column it projects,
+        // and assigning a proto3 `optional` field sets its presence bit whatever the value - so a payload
+        // this service produced always takes the honour-them-exactly branch and never the row-status
+        // inference the extra original could otherwise have interacted with. The row keeps its own stamp
+        // and the column keeps the unmodified status the baseline left it with.
+        Assert.Equal(ItemStatus.DataModified, target.GetItemStatus(1L, 0, DwBuffer.Primary));
+        Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
     }
 
     [Fact]
@@ -857,7 +880,7 @@ public sealed class ChangesetPayloadCodecTests
 
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        _ = codec.TryApply(target, state);
+        _ = codec.TryApply(target, state, CarrierBaselineTrust.AsStated);
 
         Assert.Equal(expected ? 1L : 0L, target.RowCount());
         Assert.Equal(expected ? 1L : 0L, target.FilteredCount());
@@ -880,7 +903,7 @@ public sealed class ChangesetPayloadCodecTests
 
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state, CarrierBaselineTrust.AsStated));
         Assert.Equal(2L, target.DeletedCount());
     }
 
@@ -1283,7 +1306,7 @@ public sealed class ChangesetPayloadCodecTests
         ChangesetPayloadCodec codec = new();
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreFailure, codec.TryApply(target, state));
+        Assert.Equal(DataWindowBufferStore.DataStoreFailure, codec.TryApply(target, state, CarrierBaselineTrust.AsStated));
         Assert.Equal(0L, target.RowCount());
 
         // And the target's own kind is untouched by the refusal.
@@ -1300,7 +1323,7 @@ public sealed class ChangesetPayloadCodecTests
         ChangesetPayloadCodec codec = new();
         DataWindowBufferStore target = new() { Processing = DataWindowProcessing.Unassigned };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state, CarrierBaselineTrust.AsStated));
         Assert.Equal(2L, target.Processing.Value);
         Assert.Equal(1L, target.RowCount());
     }
@@ -1315,7 +1338,7 @@ public sealed class ChangesetPayloadCodecTests
         ChangesetPayloadCodec codec = new();
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreFailure, codec.TryApply(target, state: null));
+        Assert.Equal(DataWindowBufferStore.DataStoreFailure, codec.TryApply(target, state: null, CarrierBaselineTrust.AsStated));
         Assert.Equal(0L, target.RowCount());
     }
 
@@ -1338,7 +1361,7 @@ public sealed class ChangesetPayloadCodecTests
         {
             DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-            long result = codec.TryApply(target, candidate);
+            long result = codec.TryApply(target, candidate, CarrierBaselineTrust.AsStated);
 
             Assert.True(
                 result == DataWindowBufferStore.DataStoreSuccess
@@ -1563,7 +1586,7 @@ public sealed class ChangesetPayloadCodecTests
         ChangesetPayloadCodec codec = new();
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state, CarrierBaselineTrust.AsStated));
 
         // ONLY column 2 moved, so only column 2 is modified. Columns 1 and 3 restated their stored
         // values, which is what a caller assembling a payload from a retrieval does for every column it
@@ -1605,7 +1628,7 @@ public sealed class ChangesetPayloadCodecTests
         ChangesetPayloadCodec codec = new();
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state, CarrierBaselineTrust.AsStated));
 
         // The key spelled int64 against an original spelled double: the same number, so unmoved.
         Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 1, DwBuffer.Primary));
@@ -1629,11 +1652,24 @@ public sealed class ChangesetPayloadCodecTests
     }
 
     [Fact]
-    public void AColumnWithNoStatedOriginalAdoptsTheRowsStatusRatherThanMeasuringItselfAgainstItself()
+    public void AColumnWithNoStatedOriginalReadsUnchangedOnARowThatIsNotAnInsert()
     {
-        // A COLUMN WITH NO BASELINE CANNOT BE MEASURED, so the row's statement stands for it. This is
-        // what keeps an insert-shaped row right - it carries no originals at all - and it is also the
-        // reading for a DataModified! row that stated originals for some columns and not others.
+        // 🔴 ABSENCE OF AN ORIGINAL MEANS UNCHANGED, NEVER "THE CURRENT VALUE IS THE BASELINE".
+        //
+        // This column used to ADOPT the row's modified status, on the reasoning that a column with no
+        // baseline cannot be measured against one. The premise holds; the conclusion was backwards for an
+        // update. Stamped modified, the column entered the generated SET list - while the predicate
+        // beside it read its baseline as the value being WRITTEN, because the codec substituted the
+        // current value for the missing original. So an update that changed a value and omitted its
+        // original was aimed at whichever row already held the NEW value: a write to a different row than
+        // the one the caller read, reported as success. For a KEY column it was worse still, because
+        // SqlUpdateCarrier.HasKeyChange then saw current == original and took the ordinary UPDATE path,
+        // bypassing the updatekeyinplace=no DELETE-plus-INSERT the fixture demands.
+        //
+        // The contract's own encoding says what absence means: TryProjectRow emits an original ONLY where
+        // it differs from the current value, so no original IS a statement that the column did not move.
+        // That is now what it reads as - which also makes this the transfer path's exact reading rather
+        // than a lenient one.
         CarrierState state = CanonicalStateWith(
             Row(
                 DwBuffer.Primary,
@@ -1645,13 +1681,144 @@ public sealed class ChangesetPayloadCodecTests
         ChangesetPayloadCodec codec = new();
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            codec.TryApply(target, state, CarrierBaselineTrust.AsStated));
 
         // Column 1 stated an original that proves it did not move.
         Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 1, DwBuffer.Primary));
 
-        // Column 2 stated none, so it adopts.
+        // Column 2 stated none, so it reads unchanged - and its baseline equals its current value, which
+        // is precisely what "unchanged" means and is no longer a claim about a value that moved.
+        Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
+        Assert.Equal(
+            "edited",
+            target.GetItemOriginalValue(1L, 2, DwBuffer.Primary));
+    }
+
+    [Fact]
+    public void AnInsertShapedRowStillAdoptsItsStatusForColumnsThatStateNoOriginal()
+    {
+        // THE ONE CASE WHERE ADOPTING IS RIGHT, AND IT IS WHY THE RULE IS CONDITIONED ON THE ROW RATHER
+        // THAN APPLIED FLATLY. A New!/NewModified! row has NO prior state, so it carries no originals at
+        // all - and it generates an INSERT, which has no where clause, so nothing here can be aimed at
+        // the wrong row. Resolving its columns to NotModified! instead would not be the state the
+        // in-process runtime holds for a new row, and would leave the insert with nothing marked.
+        CarrierState state = CanonicalStateWith(
+            Row(DwBuffer.Primary, 1L, ItemStatus.NewModified, [Column(2, "inserted"), Column(3, 41L)]));
+
+        ChangesetPayloadCodec codec = new();
+        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            codec.TryApply(target, state, CarrierBaselineTrust.AsStated));
+
+        Assert.Equal(ItemStatus.NewModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
+        Assert.Equal(ItemStatus.NewModified, target.GetItemStatus(1L, 3, DwBuffer.Primary));
+    }
+
+    // ==============================================================================================
+    //  THE UPDATE PATH'S BASELINE REQUIREMENT - CarrierBaselineTrust.RequiredOnChangedRows
+    //  --------------------------------------------------------------------------------------------
+    //  The originals in an update payload ARE the optimistic-concurrency check, and the caller that
+    //  composes them is the same party whose values are being written. So on that path an unstated
+    //  baseline is refused outright rather than inferred - which is no more than AAP 0.6.3.2 already
+    //  requires a payload to transmit. The transfer path keeps the producer's own encoding, because
+    //  there the producer is this service.
+    // ==============================================================================================
+
+    [Fact]
+    public void TheUpdatePathRefusesAChangedRowThatLeftAColumnsBaselineUnstated()
+    {
+        // The identical payload the transfer path admits above. Here it is refused, because here the
+        // originals become a predicate and a caller is not a trustworthy source of a value it is
+        // simultaneously overwriting. Refused WHOLE: nothing is admitted, so a half-applied payload
+        // cannot be left behind for the caller to unwind.
+        CarrierState state = CanonicalStateWith(
+            Row(
+                DwBuffer.Primary,
+                1L,
+                ItemStatus.DataModified,
+                [Column(1, 25L), Column(2, "edited")],
+                [Column(1, 25L)]));
+
+        ChangesetPayloadCodec codec = new();
+        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreFailure,
+            codec.TryApply(target, state, CarrierBaselineTrust.RequiredOnChangedRows));
+
+        Assert.Equal(0L, target.RowCount());
+    }
+
+    [Fact]
+    public void TheUpdatePathAdmitsAChangedRowThatStatesEveryBaseline()
+    {
+        // THE CONTROL, and the shape a conforming caller sends: both halves of every column it carries.
+        // Nothing about the requirement is unsatisfiable - it is one field per column, and the retrieval
+        // the caller read the row from answered every one of them.
+        CarrierState state = CanonicalStateWith(
+            Row(
+                DwBuffer.Primary,
+                1L,
+                ItemStatus.DataModified,
+                [Column(1, 25L), Column(2, "edited")],
+                [Column(1, 25L), Column(2, "original")]));
+
+        ChangesetPayloadCodec codec = new();
+        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            codec.TryApply(target, state, CarrierBaselineTrust.RequiredOnChangedRows));
+
+        // The unmoved column reads unchanged, the moved one reads modified, and the moved one's BASELINE
+        // is the value the caller read rather than the value it wrote - which is the whole point.
+        Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 1, DwBuffer.Primary));
         Assert.Equal(ItemStatus.DataModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
+        Assert.Equal("original", target.GetItemOriginalValue(1L, 2, DwBuffer.Primary));
+        Assert.Equal("edited", target.GetItemValue(1L, 2, DwBuffer.Primary));
+    }
+
+    [Fact]
+    public void TheUpdatePathExemptsAnInsertShapedRowFromTheBaselineRequirement()
+    {
+        // An insert states no originals because it has no prior state, and generates no predicate. Both
+        // members of the pair are exempt, because ItemStatusMachine treats both as insert-shaped on the
+        // way out of this codec too.
+        foreach (ItemStatus status in (ItemStatus[])[ItemStatus.New, ItemStatus.NewModified])
+        {
+            CarrierState state = CanonicalStateWith(
+                Row(DwBuffer.Primary, 1L, status, [Column(2, "inserted")]));
+
+            ChangesetPayloadCodec codec = new();
+            DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+            Assert.Equal(
+                DataWindowBufferStore.DataStoreSuccess,
+                codec.TryApply(target, state, CarrierBaselineTrust.RequiredOnChangedRows));
+
+            Assert.Equal(1L, target.RowCount());
+        }
+    }
+
+    [Fact]
+    public void TheUpdatePathRefusesADeleteBufferRowThatStatesNoBaseline()
+    {
+        // A DELETE IS A PREDICATE TOO, and the review's own wording puts deleted rows beside modified
+        // ones for exactly that reason: DELETE ... WHERE is built from the same originals. A delete row
+        // that states none would have been aimed at the caller's current values.
+        CarrierState state = CanonicalStateWith(
+            Row(DwBuffer.Delete, 1L, ItemStatus.NotModified, [Column(1, 25L), Column(2, "gone")]));
+
+        ChangesetPayloadCodec codec = new();
+        DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreFailure,
+            codec.TryApply(target, state, CarrierBaselineTrust.RequiredOnChangedRows));
     }
 
     [Fact]
@@ -1669,7 +1836,7 @@ public sealed class ChangesetPayloadCodecTests
         ChangesetPayloadCodec codec = new();
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state, CarrierBaselineTrust.AsStated));
         Assert.Equal(ItemStatus.NewModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
     }
 
@@ -1694,7 +1861,7 @@ public sealed class ChangesetPayloadCodecTests
         ChangesetPayloadCodec codec = new();
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state, CarrierBaselineTrust.AsStated));
 
         Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 1, DwBuffer.Primary));
         Assert.Equal(ItemStatus.DataModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
@@ -1720,7 +1887,7 @@ public sealed class ChangesetPayloadCodecTests
         ChangesetPayloadCodec codec = new();
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state, CarrierBaselineTrust.AsStated));
 
         Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 1, DwBuffer.Primary));
         Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
@@ -1737,7 +1904,7 @@ public sealed class ChangesetPayloadCodecTests
         ChangesetPayloadCodec codec = new();
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state, CarrierBaselineTrust.AsStated));
         Assert.Equal(ItemStatus.NotModified, target.GetItemStatus(1L, 2, DwBuffer.Primary));
     }
 
@@ -1769,7 +1936,7 @@ public sealed class ChangesetPayloadCodecTests
 
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state));
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, codec.TryApply(target, state, CarrierBaselineTrust.AsStated));
 
         // The column was never modified in its own right, and the round trip preserves that even though
         // the ROW is stamped modified - which is exactly the retrieve path's shape.
@@ -1787,7 +1954,7 @@ public sealed class ChangesetPayloadCodecTests
         ChangesetPayloadCodec codec = new();
         DataWindowBufferStore target = new() { Processing = new DataWindowProcessing(1L) };
 
-        long result = codec.TryApply(target, state);
+        long result = codec.TryApply(target, state, CarrierBaselineTrust.AsStated);
 
         Assert.True(
             result == DataWindowBufferStore.DataStoreFailure,

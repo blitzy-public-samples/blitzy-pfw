@@ -27,30 +27,31 @@
  * either; where a value here and a value there ever differ, those are right
  * and this is wrong.
  *
- *   5101  Persistence   PowerFramework.Persistence   https, Http1 — REST /health, /v1/ping
- *   5111  Persistence   PowerFramework.Persistence   https, Http2 — gRPC (C-05..C-08)
- *   5102  DataServices  PowerFramework.DataServices  https, Http1 — /health, /v1/ping, thin
- *                                                      projection
- *   5112  DataServices  PowerFramework.DataServices  https, Http2 — gRPC (C-03, C-04)
+ *   5101  Persistence   PowerFramework.Persistence   https, Http1AndHttp2 — REST /health,
+ *                                                      /v1/ping, and gRPC (C-05..C-08)
+ *   5102  DataServices  PowerFramework.DataServices  https, Http1AndHttp2 — /health, /v1/ping,
+ *                                                      thin projection, and gRPC (C-03, C-04)
  *   5104  Security      PowerFramework.Security      https, Http1 — the sole token issuer
  *   5105  Gateway       PowerFramework.Gateway       https, Http1 — REST + OpenAPI, sole ingress
  *
- * EVERY LISTENER TERMINATES TLS, AND TWO SERVICES BIND TWO OF THEM. Every boundary
+ * EVERY LISTENER TERMINATES TLS, AND EACH SERVICE BINDS EXACTLY ONE. Every boundary
  * in this map is created by the decomposition itself, every request across one
  * carries a bearer token, and Security additionally publishes the key set the whole
  * estate verifies against — so cleartext would make every token replayable and the
- * trust bootstrap substitutable on path (CWE-319). Two endpoints per gRPC-carrying
- * service is retained rather than forced: each endpoint pins ONE protocol version,
- * so a probe and a gRPC channel each address a listener that can only answer the
- * thing it is for, and misaddressing either fails at once instead of later. Security
- * is REST-only and Gateway is the REST ingress, so each binds one.
+ * trust bootstrap substitutable on path (CWE-319). On the two gRPC-carrying services
+ * TLS is load-bearing for a second reason: `Http1AndHttp2` is resolved by ALPN during
+ * the handshake, so one endpoint serves this suite's HTTP/1.1 `fetch` AND an in-estate
+ * HTTP/2 gRPC caller. On cleartext the same declaration means HTTP/1.1 alone, because
+ * Kestrel disables HTTP/2 without application-protocol negotiation. Security is
+ * REST-only and Gateway is the REST ingress, so both pin `Http1`.
  *
- * THE FOUR PORTS THIS SUITE USES ARE THE HTTP/1.1 ONES: 5101, 5102, 5104 and
- * 5105. A `fetch` speaks HTTP/1.1, so naming 5111 or 5112 here would produce a
- * `400` from a healthy service on every probe. The two HTTP/2 ports exist for
- * the in-estate gRPC callers — DataServices dialling Persistence, Gateway
- * dialling DataServices — and this suite never dials either directly, which is
- * why they appear in the table for orientation and nowhere else in this module.
+ * EVERY PORT IN THIS MAP IS REACHABLE BY `fetch`, WHICH IS NEW. An earlier revision
+ * gave Persistence and DataServices a second `Http2`-only listener each, on 5111 and
+ * 5112, and those two ports answered an HTTP/1.1 `GET` with `400` — so the map had six
+ * rows of which this suite could address only four. They were withdrawn because AAP
+ * §0.3.2.2 assigns C-05..C-08 to 5101 and C-03/C-04 to 5102; the in-estate gRPC callers
+ * — DataServices dialling Persistence, Gateway dialling DataServices — now dial those
+ * same two ports over HTTP/2, and this suite still never dials either directly.
  *
  * The band runs 5101 to 5105 and the composition root is published on 5105,
  * both preserved from the attached environment (C-L) so the environment's
@@ -303,25 +304,42 @@ function stripTrailingSlashes(value: string): string {
  * against it directly; the address exists so the anonymous health path can be
  * probed and so a readiness walk can name which upstream is not ready.
  *
- * **The scheme is `https` and the port is 5101, which is this service's HTTP/1.1
- * endpoint.** Its gRPC contracts answer on a SECOND endpoint, 5111, and the
- * reason that second endpoint exists is worth keeping even though TLS removes
- * its necessity: on a PLAINTEXT endpoint Kestrel cannot carry both protocol
- * versions at once — configured for both it disables HTTP/2 and logs that it
- * has, and configured for HTTP/2 alone it answers an HTTP/1.1 probe with `400`.
- * Under TLS, ALPN negotiates the version and one endpoint would suffice, so the
- * split is now a deliberate SEPARATION OF SURFACES rather than a workaround: the
- * REST health path and the gRPC contracts have different audiences and different
- * readiness meanings. This suite probes with `fetch`, which speaks HTTP/1.1, so
- * 5101 is the only port it may name; 5111 belongs to DataServices' generated
- * gRPC client and to nothing here.
+ * **The scheme is `https` and the port is 5101, which is this service's ONLY
+ * endpoint.** It declares `Protocols: Http1AndHttp2`, so ALPN gives this suite's
+ * `fetch` HTTP/1.1 on that port and gives DataServices' generated gRPC client
+ * HTTP/2 on the very same port. TLS is what makes that possible: on a PLAINTEXT
+ * endpoint Kestrel cannot carry both versions at once — configured for both it
+ * disables HTTP/2 and logs that it has, and configured for HTTP/2 alone it answers
+ * an HTTP/1.1 probe with `400`.
+ *
+ * An earlier revision therefore split the two surfaces across two endpoints, with
+ * the gRPC contracts on a second `Http2`-only port, 5111. That was withdrawn: AAP
+ * §0.3.2.2 assigns contracts C-05..C-08 to 5101, so answering them beside that port
+ * rather than on it put a published contract where the map does not place it. The
+ * separation of surfaces the split was also defended on is preserved without a
+ * second socket — the REST health path and the gRPC contracts are still distinct
+ * routes with distinct audiences and distinct readiness meanings.
  *
  * One consequence for a local run, stated rather than glossed: every listener in
  * this estate is TLS, so a local bring-up needs a certificate the runner trusts.
- * The remedy is `dotnet dev-certs https --trust`, or pointing these variables at
- * a deployment whose certificate already chains. `playwright.config.ts` keeps
- * `ignoreHTTPSErrors` **false** deliberately: an untrusted certificate is a real
- * finding about the stack rather than noise to suppress.
+ * WHICH remedy applies depends on which bring-up you used, and the two are not
+ * interchangeable:
+ *
+ *   - `dotnet run` on the host presents the local ASP.NET Core development
+ *     certificate, so `dotnet dev-certs https --trust` is the remedy.
+ *   - `docker compose up` presents the certificate the manifest projects as a
+ *     Compose secret at `/run/secrets/internal-tls/server.crt`, issued by the
+ *     private authority whose public half is projected beside it as `ca.crt`.
+ *     `dotnet dev-certs` cannot help with that one — it is a different issuer.
+ *     Point Node at the authority instead:
+ *     `NODE_EXTRA_CA_CERTS=$INTERNAL_TLS_CA_PATH`, the same host path the
+ *     manifest's `internal-tls-ca-certificate` secret is sourced from. Node
+ *     honours that variable natively, so it needs nothing from this repository.
+ *
+ * Either way, `playwright.config.ts` keeps `ignoreHTTPSErrors` **false**
+ * deliberately: an untrusted certificate is a real finding about the stack
+ * rather than noise to suppress. Pointing these variables at a deployment whose
+ * certificate already chains publicly is the third option and needs neither.
  */
 export const PERSISTENCE_BASE_URL: string = resolveBaseUrl(
   'PERSISTENCE_BASE_URL',
@@ -336,10 +354,12 @@ export const PERSISTENCE_BASE_URL: string = resolveBaseUrl(
  * only by Gateway, so this suite reaches its behaviour through Gateway rather
  * than through this address. The address is here for the health probe.
  *
- * **The scheme is `https` and the port is 5102, its HTTP/1.1 endpoint**, for
- * exactly the reason given on {@link PERSISTENCE_BASE_URL}: its gRPC contracts
- * answer on a separate HTTP/2 endpoint, 5112, which Gateway's generated client
- * dials and this suite never does.
+ * **The scheme is `https` and the port is 5102, its only endpoint**, for exactly the
+ * reason given on {@link PERSISTENCE_BASE_URL}: it declares `Http1AndHttp2`, so its
+ * gRPC contracts answer over HTTP/2 on this same 5102 that Gateway's generated client
+ * dials and that this suite probes over HTTP/1.1. An earlier revision put those
+ * contracts on a separate HTTP/2 endpoint, 5112, and it was withdrawn because AAP
+ * §0.3.2.2 assigns C-03 and C-04 to 5102.
  */
 export const DATASERVICES_BASE_URL: string = resolveBaseUrl(
   'DATASERVICES_BASE_URL',
@@ -409,20 +429,26 @@ export const SECURITY_DEFAULT_BASE_URL: string = 'https://localhost:5104';
  * Development overlay overrides that same endpoint key rather than adding a
  * second; and `docs/ARCHITECTURE.md` §4.1 records the same listener.
  *
- * Persistence and DataServices additionally bind a second endpoint for their gRPC
- * contracts, for the reason recorded on {@link PERSISTENCE_BASE_URL}. Security is
- * REST-only, so it needs no second endpoint and this suite calls it directly on
- * 5104.
+ * Persistence and DataServices bind ONE endpoint each as well, but theirs declares
+ * `Http1AndHttp2` because it carries their gRPC contracts alongside their REST
+ * surface, for the reason recorded on {@link PERSISTENCE_BASE_URL}. Security is
+ * REST-only, so `Http1` is all its endpoint needs, and this suite calls it directly
+ * on 5104.
  *
  * `playwright.config.ts` keeps `ignoreHTTPSErrors` **false** deliberately: an
  * untrusted certificate is a real finding about the stack rather than noise to
- * suppress. The remedy for a local one is `dotnet dev-certs https --trust`.
+ * suppress. The remedy depends on the bring-up — `dotnet dev-certs https
+ * --trust` for a host `dotnet run`, or
+ * `NODE_EXTRA_CA_CERTS=$INTERNAL_TLS_CA_PATH` for a Compose stack,
+ * which presents a certificate from its own private authority. See
+ * {@link PERSISTENCE_BASE_URL} for why the two are not interchangeable.
  *
  * One consequence to be honest about: a TLS handshake happening is not the same
  * as a client certificate being presented. Unless a spec supplies one, the
- * mutual-TLS caller authentication on `POST /v1/tokens` is negotiated but not
- * exercised, and the suite authenticates with the Basic credential instead; see
- * {@link SECURITY_CLIENT_CERTIFICATE} for how a spec supplies a certificate.
+ * mutual-TLS caller authentication on `POST /v1/tokens` has been exercised
+ * end to end against the Compose stack, alongside the Basic credential — the
+ * suite passes on either; see {@link SECURITY_CLIENT_CERTIFICATE} for how a spec
+ * supplies a certificate.
  *
  * Nothing here restricts the scheme: `SECURITY_BASE_URL` accepts `http` exactly
  * as it accepts `https`, so a deployment that terminates TLS at a proxy and
@@ -449,8 +475,10 @@ export const SECURITY_DEFAULT_BASE_URL: string = 'https://localhost:5104';
  *      validated on a plaintext listener at all, so `POST /v1/tokens` becomes
  *      uncallable rather than merely less safe.
  *
- * The remedy for an untrusted local certificate is `dotnet dev-certs https
- * --trust`, never `ignoreHTTPSErrors` and never a cleartext default.
+ * The remedy for an untrusted certificate is to trust its issuer — `dotnet
+ * dev-certs https --trust` for a host run, `NODE_EXTRA_CA_CERTS` pointed at the
+ * Compose stack's `ca.crt` for a containerized one — never `ignoreHTTPSErrors`
+ * and never a cleartext default.
  */
 export const SECURITY_BASE_URL: string = resolveBaseUrl(
   'SECURITY_BASE_URL',
@@ -569,20 +597,22 @@ export const CAPABILITIES_PATH: string = '/v1/capabilities';
 export const DATAWINDOW_PATH_PREFIX: string = '/v1/datawindow';
 
 /**
- * Token issuance on Security — contract C-01, `POST`, **mutual TLS only**.
+ * Token issuance on Security — contract C-01, `POST`, **`Basic` OR mutual TLS**.
  *
  * Issues a short-lived service token from a caller identity, an audience and
  * a scope set. **Security is the sole token issuer**; no other service mints,
  * so this path is meaningful only against {@link SECURITY_BASE_URL}.
  *
- * **This is the single mutual-TLS edge in the system, and it is the only
- * operation in the contract a bearer token cannot protect** — a caller cannot
- * present a token in order to obtain its first token. The OpenAPI definition
- * declares a `mutualTLS` scheme and applies it here as an override of the
- * document-level bearer requirement, so the identity that is honoured is the
- * one the presented **client certificate** establishes. The request body
- * carries no credential of any kind, and `additionalProperties: false` means
- * one cannot be added.
+ * **This is the only operation in the contract a bearer token cannot protect**
+ * — a caller cannot present a token in order to obtain its first token. The
+ * OpenAPI definition therefore overrides the document-level bearer requirement
+ * here with two alternatives, and the identity that is honoured is whichever
+ * one the caller presented: the subject named by an HTTP `Basic` credential,
+ * or the common name of a presented **client certificate**. It is also the
+ * single mutual-TLS edge in the system — that scheme appears nowhere else —
+ * but "the only edge that MAY use it" is not "the only scheme it accepts".
+ * Either way the request body carries no credential of any kind, and
+ * `additionalProperties: false` means one cannot be added.
  *
  * Two schemes establish caller identity and the operation accepts EITHER:
  * {@link SECURITY_CLIENT_CREDENTIAL}, presented as an HTTP `Basic` credential and

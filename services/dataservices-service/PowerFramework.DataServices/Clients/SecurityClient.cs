@@ -2,7 +2,7 @@
 //  SecurityClient.cs
 //  DataServices' only outbound edge to the Security service. It covers TWO published contracts:
 //    C-01  security.v1.TokenService   POST /v1/tokens
-//    C-02  security.v1.CryptoService  17 operations under /v1/crypto/**
+//    C-02  security.v1.CryptoService  18 operations under /v1/crypto/**
 //  ------------------------------------------------------------------------------------------------
 //  WHAT THIS FILE IS
 //    DataServices reaches Security for exactly two reasons, and this file is both of them.
@@ -197,7 +197,7 @@
 //        header name rather than a body value. And the secret is never logged, never echoed into a
 //        diagnostic and never included in any exception message.
 //
-//        THE SEVENTEEN C-02 CRYPTO OPERATIONS ARE THE OTHER EDGE, AND EVERY ONE OF THEM CARRIES A
+//        THE EIGHTEEN C-02 CRYPTO OPERATIONS ARE THE OTHER EDGE, AND EVERY ONE OF THEM CARRIES A
 //        BEARER CREDENTIAL. They do not override the document-level security, so the bearer
 //        requirement applies to all of them; an unauthenticated crypto call is therefore not merely
 //        unwise but unusable, because once Security enforces its own contract every one of them
@@ -322,6 +322,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using PowerFramework.DataServices.Configuration;
 using PowerFramework.Shared.Kernel;
+using PowerFramework.Shared.Diagnostics;
 
 namespace PowerFramework.DataServices.Clients;
 
@@ -398,8 +399,10 @@ public interface IServiceTokenProvider
 
 /// <summary>
 /// The cryptographic surface of the legacy framework as DataServices reaches it. Contract
-/// <b>C-02</b>, <c>security.v1.CryptoService</c>: seventeen operations covering all sixty-three
-/// cryptographic overloads of <c>ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L11-L73</c>.
+/// <b>C-02</b>, <c>security.v1.CryptoService</c>: eighteen operations - seventeen covering all
+/// sixty-three cryptographic overloads of <c>ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L11-L73</c>,
+/// plus one AUTHORED release operation that has no legacy counterpart because the legacy retains
+/// nothing to release.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -409,7 +412,8 @@ public interface IServiceTokenProvider
 /// instance is required.
 /// </para>
 /// <para>
-/// HOW SIXTY-THREE OVERLOADS COLLAPSE ONTO SEVENTEEN MEMBERS WITHOUT LOSING A SEMANTIC DISTINCTION.
+/// HOW SIXTY-THREE OVERLOADS COLLAPSE ONTO SEVENTEEN OF THE EIGHTEEN MEMBERS WITHOUT LOSING A
+/// SEMANTIC DISTINCTION.
 /// The legacy has parallel <c>string</c> and <c>blob</c> overload families throughout, and its return
 /// form FOLLOWS its input form: the string-shaped symmetric overloads at <c>n_crypto.sru:L30-L37</c>
 /// return <c>string</c> while the blob-shaped ones at <c>:L38-L45</c> return <c>blob</c>. That whole
@@ -828,6 +832,75 @@ public interface ICryptoServiceClient
         ushort bits,
         bool? pemFormat,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Releases a retained generated private key by its reference.
+    /// <c>DELETE /v1/crypto/rsa/keys/{keyRef}</c>.
+    /// </summary>
+    /// <param name="keyRef">
+    /// The opaque reference <see cref="GenerateRsaKeyAsync"/> returned. The published schema declares
+    /// <c>minLength: 1</c>, so an empty reference is refused HERE rather than after a round trip.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>
+    /// <see langword="true"/> when this call released a key; <see langword="false"/> when no key is
+    /// retained under that reference FOR THIS CALLER.
+    /// <para>
+    /// <b>THE FALSE OUTCOME IS A SUCCESSFUL ANSWER AND IS NOT PROMOTED TO A FAILURE</b>, on exactly the
+    /// terms <see cref="RsaVerifyAsync"/> is not: the operation ran and answered. The contract states
+    /// that release is idempotent from the caller's point of view - <b>a second release of the same
+    /// reference answers <c>404</c></b> - so a release is a question with two substantive answers rather
+    /// than one answer and one fault. That distinction is what lets a release sit in a cleanup path,
+    /// which is where a release belongs and where a call that threw on "already gone" would be the wrong
+    /// shape.
+    /// </para>
+    /// <para>
+    /// <b>THE FOUR REASONS FOR A FALSE ARE DELIBERATELY INDISTINGUISHABLE AND THIS CLIENT DOES NOT TRY TO
+    /// TELL THEM APART.</b> The reference may never have existed, may already have been released, may have
+    /// expired, or may belong to a different caller; the contract answers all four identically because
+    /// telling them apart would turn the operation into an oracle for which references exist, and a
+    /// <c>keyRef</c> is a credential-like handle. Reporting a distinction the service refuses to make
+    /// would fabricate information about the store.
+    /// </para>
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>AUTHORED, NOT PORTED (C-K).</b> The legacy has no retained-key store and therefore nothing to
+    /// release: <c>GenRSAKey</c> [<c>n_crypto.sru:L19-L20</c>] hands the private half straight back
+    /// through a <c>ref</c> parameter and the caller owns it from that moment. Retaining it on the
+    /// service side is what makes the generation response safe across a network boundary, and a retained
+    /// thing needs a way to be given back. Nothing here is a port of a legacy call, which is why no
+    /// <c>n_crypto</c> locator is cited as its source.
+    /// </para>
+    /// <para>
+    /// <b>WHY THE OPERATION MATTERS RATHER THAN MERELY EXISTING.</b> The retained store is bounded in
+    /// total, per caller and in time. Without a release, a caller's only way to free a slot is to wait
+    /// out the retention lifetime, so a provisioning sequence longer than the per-caller allowance stalls
+    /// for no reason - and a caller at its allowance receives <c>500</c> from
+    /// <see cref="GenerateRsaKeyAsync"/> with no key generated. With a release, the lifetime is a backstop
+    /// for a caller that crashed rather than the only mechanism.
+    /// </para>
+    /// <para>
+    /// <b>WHAT RELEASE DOES NOT DO.</b> It drops the last reference the service holds to the key text and
+    /// nothing more. The retained value is a string and a string cannot be wiped, so no memory-scrubbing
+    /// guarantee is offered or implied. That residual belongs to the preserved legacy signature, which
+    /// returns key text rather than bytes [<c>n_crypto.sru:L19-L20</c>], and it is recorded here rather
+    /// than hidden.
+    /// </para>
+    /// <para>
+    /// THE REFERENCE IS NEVER LOGGED by this client and is never echoed by the service, so no diagnostic
+    /// on this path carries a caller-supplied value at all.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="keyRef"/> is <see langword="null"/>, empty or white space.
+    /// </exception>
+    /// <exception cref="SecurityClientException">
+    /// The service refused the request - <c>401</c> when the credential was rejected, <c>403</c> when this
+    /// caller may not use the operation - or answered off-contract.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">No upstream address was configured.</exception>
+    Task<bool> ReleaseRsaKeyAsync(string keyRef, CancellationToken cancellationToken);
 
     /// <summary>
     /// Generates cryptographically random bytes. <c>POST /v1/crypto/random/blob</c>, covering the
@@ -1884,7 +1957,7 @@ public sealed class SecurityClientException : Exception
 
 /// <summary>
 /// The typed HTTP client for DataServices' only outbound edge to the Security service, covering
-/// contract <b>C-01</b>'s token issuance operation and all seventeen operations of contract
+/// contract <b>C-01</b>'s token issuance operation and all eighteen operations of contract
 /// <b>C-02</b>.
 /// </summary>
 /// <remarks>
@@ -1985,8 +2058,18 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// <summary>The C-02 RSA verification path.</summary>
     private static readonly Uri RsaVerifyPath = new("/v1/crypto/rsa/verify", UriKind.Relative);
 
+    /// <summary>
+    /// The C-02 RSA key collection path, as text, because the release operation appends a path segment
+    /// to it.
+    /// </summary>
+    /// <remarks>
+    /// ONE SPELLING FOR BOTH OPERATIONS. Generation posts to this collection and release deletes a member
+    /// of it, so declaring the path twice would let the two drift apart on the first contract change.
+    /// </remarks>
+    private const string RsaKeysPathText = "/v1/crypto/rsa/keys";
+
     /// <summary>The C-02 RSA key generation path.</summary>
-    private static readonly Uri RsaKeysPath = new("/v1/crypto/rsa/keys", UriKind.Relative);
+    private static readonly Uri RsaKeysPath = new(RsaKeysPathText, UriKind.Relative);
 
     /// <summary>The C-02 random bytes path.</summary>
     private static readonly Uri RandomBlobPath = new("/v1/crypto/random/blob", UriKind.Relative);
@@ -2142,7 +2225,7 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// </summary>
     /// <remarks>
     /// Named on the service-dot-capability convention this system's other outbound credentials already
-    /// use. One scope covers all seventeen C-02 operations because they are one capability: a caller
+    /// use. One scope covers all eighteen C-02 operations because they are one capability: a caller
     /// that may hash may also sign, since the same key store answers both. Splitting them into finer
     /// scopes would publish a distinction the contract does not make.
     /// </remarks>
@@ -2216,8 +2299,8 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// <remarks>
     /// <para>
     /// Static and shared because all three of its members are compile-time constants, which is also what
-    /// makes the credential cache reusable across every crypto operation: seventeen operations resolve to
-    /// ONE cache key, so a burst of crypto calls costs one issuance rather than seventeen.
+    /// makes the credential cache reusable across every crypto operation: eighteen operations resolve to
+    /// ONE cache key, so a burst of crypto calls costs one issuance rather than eighteen.
     /// </para>
     /// <para>
     /// This request is fed to <see cref="GetTokenAsync"/>, the same public member the service's own
@@ -2279,7 +2362,7 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// <param name="tokenCache">
     /// The credential cache this client reads and writes. SUPPLIED BY THE COMPOSITION ROOT AS A
     /// SINGLETON, which is what makes one credential genuinely shared by contract C-01's token provider
-    /// and contract C-02's seventeen crypto operations. Omitting it gives this instance a private cache,
+    /// and contract C-02's eighteen crypto operations. Omitting it gives this instance a private cache,
     /// which is the right default for a test that wants an isolated one and the WRONG state for a host -
     /// so the composition root always names it.
     /// </param>
@@ -2335,7 +2418,7 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
             _logger.LogTrace(
                 "Reusing the held service token for subject {Subject} and audience {Audience}; it "
                 + "remains valid until {ExpiresAt:O}.",
-                request.Subject,
+                LogSafeText.Render(request.Subject),
                 request.Audience,
                 held.ExpiresAt);
 
@@ -2383,7 +2466,7 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
         _logger.LogDebug(
             "Requesting a service token from Security for subject {Subject} and audience {Audience} "
             + "with {RequestedScopeCount} requested scope(s).",
-            request.Subject,
+            LogSafeText.Render(request.Subject),
             request.Audience,
             request.Scopes.Count);
 
@@ -2414,7 +2497,7 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
             "Security issued a service token for subject {Subject} and audience {Audience}; it expires "
             + "at {ExpiresAt:O} with {GrantedScopeCount} of {RequestedScopeCount} requested scope(s) "
             + "granted.",
-            request.Subject,
+            LogSafeText.Render(request.Subject),
             request.Audience,
             token.ExpiresAt,
             token.GrantedScopes.Count,
@@ -2516,14 +2599,20 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     }
 
     // ==============================================================================================
-    //  C-02 - security.v1.CryptoService, 17 operations under /v1/crypto/**
+    //  C-02 - security.v1.CryptoService, 18 operations under /v1/crypto/**
     //
-    //  Every member below is a POST, including the ones that read like queries. That is the published
-    //  contract and it is deliberate: a GET with the payload in the query string would place plaintext,
-    //  ciphertext and digests into request lines, and therefore into access logs, proxy caches and
-    //  browser history - none of which the in-process legacy had. The three generators are not
+    //  SEVENTEEN OF THE EIGHTEEN ARE A POST, including the ones that read like queries. That is the
+    //  published contract and it is deliberate: a GET with the payload in the query string would place
+    //  plaintext, ciphertext and digests into request lines, and therefore into access logs, proxy caches
+    //  and browser history - none of which the in-process legacy had. The three generators are not
     //  idempotent in any useful sense either, since each returns a different result per call by
     //  definition.
+    //
+    //  THE EIGHTEENTH IS A DELETE, AND IT IS THE ONE EXCEPTION TO EVERY GENERALISATION IN THIS BANNER.
+    //  The key release is published as DELETE /v1/crypto/rsa/keys/{keyRef}: it carries no request body and
+    //  no response body, and it is the only operation on either contract whose PATH carries a
+    //  caller-supplied value. Its reference is therefore escaped into a single path segment and is never
+    //  logged - see BuildRsaKeyReleasePath and DeleteAsync for both halves of that.
     //
     //  NO REQUEST BODY AND NO RESPONSE BODY IS LOGGED BY ANY MEMBER BELOW. The only record any of them
     //  writes is the published operation identifier, which carries nothing.
@@ -2853,6 +2942,43 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     }
 
     /// <inheritdoc/>
+    public async Task<bool> ReleaseRsaKeyAsync(string keyRef, CancellationToken cancellationToken)
+    {
+        // The published schema declares minLength 1 on the reference. Refused before a request is built,
+        // so a reference that cannot name anything is reported at its origin rather than as a 404 that
+        // would be indistinguishable from a genuine "not held".
+        ArgumentException.ThrowIfNullOrWhiteSpace(keyRef);
+
+        System.Net.HttpStatusCode statusCode = await DeleteAsync(
+                BuildRsaKeyReleasePath(keyRef),
+                "releaseRsaKey",
+                System.Net.HttpStatusCode.NotFound,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (statusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            // A SUBSTANTIVE PUBLISHED ANSWER: no key is retained under that reference for this caller. The
+            // four reasons are deliberately indistinguishable at the contract level and nothing here tries
+            // to distinguish them.
+            return false;
+        }
+
+        // 204 IS THE ONLY SUCCESS THE DOCUMENT DECLARES. Another 2xx is the service answering outside its
+        // own published schema, and reporting it as a release would claim an outcome that was never
+        // described. Narrowed with a defined error rather than widened with a guess.
+        if (statusCode != System.Net.HttpStatusCode.NoContent)
+        {
+            throw Malformed(
+                "releaseRsaKey",
+                "carried a success status other than the single 204 the contract declares for it",
+                statusCode);
+        }
+
+        return true;
+    }
+
+    /// <inheritdoc/>
     public async Task<byte[]> GenerateRandomBlobAsync(uint size, CancellationToken cancellationToken)
     {
         EnsureAcceptedRandomSize(size);
@@ -3085,6 +3211,31 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
         };
     }
 
+    /// <summary>
+    /// Builds the release operation's path by appending the reference as a single path segment.
+    /// </summary>
+    /// <param name="keyRef">The reference to release. Already checked non-empty by the caller.</param>
+    /// <returns>The relative path the published operation is declared at.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THE REFERENCE IS ESCAPED, AND THAT IS NECESSARY RATHER THAN DEFENSIVE.</b> The published
+    /// <c>KeyReference</c> schema constrains the value to a non-empty string and declares NO pattern, so
+    /// the contract itself permits a reference containing a slash, a question mark or a fragment marker.
+    /// Concatenating such a value unescaped would forge extra path segments or a query string, and the
+    /// request would then reach a different route - or no route - carrying part of the reference where the
+    /// service never looks. <see cref="Uri.EscapeDataString"/> percent-encodes every reserved character
+    /// INCLUDING the separator, so whatever the reference contains arrives as exactly one segment.
+    /// </para>
+    /// <para>
+    /// This is the ONLY operation on either contract whose path carries caller-supplied text. The other
+    /// seventeen name a fixed route and place every value in a request body, which is why no equivalent
+    /// escaping appears anywhere else in this file.
+    /// </para>
+    /// </remarks>
+    private static Uri BuildRsaKeyReleasePath(string keyRef) => new(
+        string.Concat(RsaKeysPathText, "/", Uri.EscapeDataString(keyRef)),
+        UriKind.Relative);
+
     // ==============================================================================================
     //  TRANSPORT - the one place a request is actually sent
     // ==============================================================================================
@@ -3104,9 +3255,11 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// <returns>The response body and the status it arrived with.</returns>
     /// <remarks>
     /// <para>
-    /// THIS OVERLOAD IS THE AUTHENTICATED ONE, AND IT IS THE ONE ALL SEVENTEEN C-02 OPERATIONS USE. It
-    /// obtains a bearer credential for Security's own audience and attaches it to the request before
-    /// sending. Every C-02 operation inherits the document-level bearer requirement in the published
+    /// THIS OVERLOAD IS THE AUTHENTICATED ONE, AND IT IS THE ONE EVERY C-02 OPERATION CARRYING A REQUEST
+    /// BODY USES - seventeen of the eighteen. It obtains a bearer credential for Security's own audience
+    /// and attaches it to the request before sending. The eighteenth, the bodiless key release, obtains its
+    /// credential the same way through <see cref="DeleteAsync"/>, so all eighteen are authenticated and
+    /// only the shape of the exchange differs. Every C-02 operation inherits the document-level bearer requirement in the published
     /// contract, so an unauthenticated crypto call is not merely unwise - once Security enforces its own
     /// contract, every one of them answers 401 and the entire cryptographic surface is unreachable.
     /// </para>
@@ -3139,7 +3292,7 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
         where TRequest : class
         where TResponse : class
     {
-        // Obtained through the cached public path, so seventeen operations share one credential and one
+        // Obtained through the cached public path, so all eighteen operations share one credential and one
         // issuance. The token's OWN reported type is used as the scheme rather than a literal: the
         // contract pins it with a schema constant and this client already validates it on arrival, so
         // reusing it keeps a single source of truth instead of two that can disagree.
@@ -3153,6 +3306,84 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
                 new AuthenticationHeaderValue(credential.TokenType, credential.AccessToken),
                 cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends one bodiless <c>DELETE</c> and reports the status it was answered with.
+    /// </summary>
+    /// <param name="path">The published relative path, with any path parameter already escaped.</param>
+    /// <param name="operationId">
+    /// The published operation identifier, carried into the diagnostic and onto the failure type exactly
+    /// as it is on the request/response path.
+    /// </param>
+    /// <param name="declaredAbsentStatus">
+    /// The one non-success status this operation publishes as a SUBSTANTIVE ANSWER rather than a fault.
+    /// It is returned to the caller instead of being raised.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The status the response arrived with.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>A SEPARATELY NAMED SENDER RATHER THAN A METHOD FLAG ON THE EXISTING ONE.</b>
+    /// <see cref="SendAsync{TRequest, TResponse}"/> serializes a request body and deserializes a response
+    /// body, and BOTH are absent here - the release carries no body in either direction. Passing a method
+    /// and two nulls through that path would make every one of its callers read as though a body were
+    /// optional, when for the other seventeen operations it is required. The file already expresses the
+    /// credential split as two differently named senders for the same reason, and this is the same rule
+    /// applied to the shape of the exchange.
+    /// </para>
+    /// <para>
+    /// <b>ONE NON-SUCCESS STATUS IS RETURNED AND EVERY OTHER ONE IS RAISED.</b> Which status that is comes
+    /// from the CALLER rather than from here, so this member states no operation's semantics: a status this
+    /// operation publishes as an answer is handed back, and everything else goes through the same
+    /// <see cref="CreateFailureAsync"/> the request/response path uses, carrying the operation identifier,
+    /// the status and the problem body's members. Nothing is retried here, on the same terms as the
+    /// request/response path - and the resilience pipeline will not retry it either, because
+    /// <c>DELETE</c> is not a safe method and no Security path is on the replay-safe table.
+    /// </para>
+    /// <para>
+    /// The single diagnostic carries the operation identifier and nothing else. IN PARTICULAR IT DOES NOT
+    /// CARRY THE PATH, which on this one operation embeds a caller-supplied reference the contract states
+    /// is never logged - so the omission is a requirement rather than a convention here.
+    /// </para>
+    /// </remarks>
+    private async Task<System.Net.HttpStatusCode> DeleteAsync(
+        Uri path,
+        string operationId,
+        System.Net.HttpStatusCode declaredAbsentStatus,
+        CancellationToken cancellationToken)
+    {
+        // Obtained through the same cached public path every C-02 operation uses, so a release shares the
+        // one issuance with the rest of the surface rather than minting its own credential.
+        ServiceToken credential = await GetTokenAsync(CryptoTokenRequest, cancellationToken)
+            .ConfigureAwait(false);
+
+        EnsureBaseAddress(operationId);
+        _logger.LogDebug("Invoking the Security service operation {OperationId}.", operationId);
+
+        // No Content at all, deliberately: the operation publishes no request body, and an empty one would
+        // still carry a Content-Length and a Content-Type the document does not declare.
+        using HttpRequestMessage request = new(HttpMethod.Delete, path);
+
+        // Assigned rather than added, on the same terms as the request/response path.
+        request.Headers.Authorization =
+            new AuthenticationHeaderValue(credential.TokenType, credential.AccessToken);
+
+        using HttpResponseMessage response = await _httpClient
+            .SendAsync(request, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (response.StatusCode == declaredAbsentStatus)
+        {
+            return response.StatusCode;
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw await CreateFailureAsync(response, operationId, cancellationToken).ConfigureAwait(false);
+        }
+
+        return response.StatusCode;
     }
 
     /// <summary>
@@ -3183,7 +3414,7 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// lifetime of the client; and building it per request means a configuration reload is picked up on
     /// the next issuance rather than at the next process start. It is written to the request message and
     /// nowhere else - not to the client's default headers, which are instance-wide and would publish it
-    /// to all seventeen C-02 calls as well.
+    /// to all eighteen C-02 calls as well.
     /// </para>
     /// </remarks>
     private Task<(TResponse Payload, System.Net.HttpStatusCode StatusCode)>

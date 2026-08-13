@@ -96,10 +96,12 @@ using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Mime;
+using System.Reflection;
 using System.Text.Json;
 
 using Google.Protobuf;
 using Grpc.Core;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -108,6 +110,7 @@ using PowerFramework.Contracts.Common.V1;
 using PowerFramework.DataServices.Clients;
 using PowerFramework.DataServices.Endpoints;
 using PowerFramework.DataServices.Grpc;
+using PowerFramework.Shared.Diagnostics;
 using PowerFramework.Shared.Localization;
 using Xunit;
 
@@ -1275,11 +1278,23 @@ internal static class RestProjection
     /// <summary>An update payload carrying one value the declared column type cannot represent.</summary>
     /// <returns>The payload.</returns>
     /// <remarks>
+    /// <para>
     /// Addressed at the TRANSCRIBED FIXTURE, because the validator resolves columns by asking the host and
     /// only runs where the handle resolves. <c>age</c> is declared <c>number</c>
     /// [<c>dw_sqlite.srd:L10</c>], so a non-numeric value is exactly what the ported <c>dwnvlnumber</c>
     /// validator refuses - and the refusal is the LOCALIZED dialog of
     /// <c>se_cst_dw.sru:L355</c> and <c>:L357</c>, re-expressed.
+    /// </para>
+    /// <para>
+    /// IT CARRIES THE COLUMN'S ORIGINAL TOO, AND THAT IS NOT DECORATION. A <c>DataModified!</c> row
+    /// generates an <c>UPDATE ... WHERE</c> whose predicate is built from the ORIGINAL value of every
+    /// column it carries (AAP 0.6.3.2), so a row that states none is refused for a MISSING BASELINE before
+    /// its values are the subject at all [<c>Validators/UpdateRowValidator</c>]. That refusal is a
+    /// different fault with a different code, and a payload carrying both would make the cases that use
+    /// this one assert about whichever fault happened to be reported first. Stating the baseline leaves
+    /// exactly ONE fault in the payload - the unrepresentable value - which is what every case here is
+    /// about.
+    /// </para>
     /// </remarks>
     internal static object RejectedUpdatePayload() => new
     {
@@ -1298,6 +1313,15 @@ internal static class RestProjection
                         columnName = "age",
                         columnId = 3,
                         value = new { stringValue = "not-a-number" },
+                    },
+                },
+                originalValues = new[]
+                {
+                    new
+                    {
+                        columnName = "age",
+                        columnId = 3,
+                        value = new { doubleValue = 32d },
                     },
                 },
             },
@@ -1913,10 +1937,13 @@ public sealed class RestProjectionStatusMappingTests(DataServicesTestHostFactory
     /// map's own arm composed with the shared status mapper's own arm:
     /// <c>E_INVALID_ARGUMENT</c> is an <c>InvalidArgument</c> and therefore <b>400</b>;
     /// <c>E_ACCESS_DENIED</c> is a <c>PermissionDenied</c> and therefore <b>403</b> - a valid-but-
-    /// insufficient credential, distinct from none at all; <c>E_INVALID_HANDLE</c> is a
-    /// <c>FailedPrecondition</c> and therefore <b>400</b> rather than 404, because a session descriptor
-    /// naming a transaction that is not valid produces the identical refusal for ever and 503 would invite
-    /// a pointless retry; <c>E_BUSY</c> is a <c>ResourceExhausted</c> and therefore <b>429</b>, the status
+    /// insufficient credential, distinct from none at all; <c>E_INVALID_HANDLE</c> is a <c>NotFound</c> and
+    /// therefore <b>404</b>, which is the row the published table declares for it and the answer the unary
+    /// outcome map and both of DataWindowService's upstream maps already give it - it used to be a
+    /// <c>FailedPrecondition</c>, and since the published table declares no such row that arm fell to the
+    /// canonical mapping and reached the caller as <b>400</b> carrying <c>E_INVALID_ARGUMENT</c>, replacing
+    /// the originating code and blaming a malformed argument for a handle the upstream no longer holds;
+    /// <c>E_BUSY</c> is a <c>ResourceExhausted</c> and therefore <b>429</b>, the status
     /// that carries a retry hint, and NOT 503, because a busy resource is a ceiling that clears rather
     /// than a service that is down; and anything the acquisition map does not name reaches its default arm
     /// as <c>Unavailable</c> and therefore <b>503</b>.
@@ -1931,7 +1958,7 @@ public sealed class RestProjectionStatusMappingTests(DataServicesTestHostFactory
     [InlineData(KernelRetCode.E_INVALID_ARGUMENT, 400, KernelRetCode.E_INVALID_ARGUMENT, false)]
     [InlineData(KernelRetCode.E_INVALID_SQL, 400, KernelRetCode.E_INVALID_ARGUMENT, false)]
     [InlineData(KernelRetCode.E_ACCESS_DENIED, 403, KernelRetCode.E_ACCESS_DENIED, false)]
-    [InlineData(KernelRetCode.E_INVALID_HANDLE, 400, KernelRetCode.E_INVALID_ARGUMENT, false)]
+    [InlineData(KernelRetCode.E_INVALID_HANDLE, 404, KernelRetCode.E_OBJECT_NOT_FOUND, false)]
     [InlineData(KernelRetCode.E_BUSY, 429, KernelRetCode.E_BUSY, false)]
     [InlineData(KernelRetCode.E_DB_ERROR, 503, KernelRetCode.E_RETRY, true)]
     [InlineData(KernelRetCode.FAILED, 503, KernelRetCode.E_RETRY, true)]
@@ -2258,25 +2285,35 @@ public sealed class RestProjectionStatusMappingTests(DataServicesTestHostFactory
     }
 
     /// <summary>
-    /// A failure this projection does not classify is a 500 that leaks nothing about how it was produced.
+    /// A refused payload is a 400 that leaks nothing about how the refusal was produced.
     /// </summary>
     /// <returns>A task representing the assertions.</returns>
     /// <remarks>
     /// <para>
-    /// <b>THE DEFAULT ARM IS 500 AND NOT 400, AND THE DIRECTION OF BLAME IS THE ASSERTION.</b> An outcome
-    /// the map has not been taught is a contract this projection does not yet understand - a fault on THIS
-    /// side of the boundary - and answering 400 would blame the caller and invite a retry with different
-    /// input that can never succeed. <c>E_INVALID_DATA</c> is such an outcome today, which is what makes
-    /// the arm reachable through the deployed host at all.
+    /// 🔴 <b>THIS ROW USED TO ASSERT 500, AND IT WAS PINNING A DEFECT RATHER THAN A PROPERTY.</b> Its own
+    /// reasoning said so out loud: it reached the map's DEFAULT arm because "<c>E_INVALID_DATA</c> is such
+    /// an outcome today", meaning this projection had not been taught a code the ingress had - so the SAME
+    /// refusal answered 400 through the gateway and 500 here, on two surfaces documented as equivalent. A
+    /// 500 told the caller that this service had failed and invited it to retry an identical payload that
+    /// can never succeed. <c>E_INVALID_DATA</c> is now an explicit arm and this row asserts 400, which is
+    /// the honest answer: the request's own DATA is what was refused.
     /// </para>
     /// <para>
-    /// AND IT LEAKS NOTHING. No gRPC status name, no exception type, no stack frame and no source path
-    /// reaches the response - all four are how an unclassified failure usually betrays its internals, and
-    /// the correlation identifier is what a caller is given instead (CWE-209).
+    /// THE DEFAULT ARM'S BLAME DIRECTION IS STILL ASSERTED, AND IN A PLACE THAT CANNOT ROT INTO A DEFECT
+    /// AGAIN. It moved to <c>RestProjectionStatusEquivalenceTests</c>, which calls the mapping directly
+    /// with codes no deployed operation can be provoked into answering - the only way to exercise an arm
+    /// for an outcome the map has NOT been taught, and the reason this row could only ever reach it by
+    /// accident.
+    /// </para>
+    /// <para>
+    /// WHAT THIS ROW IS ACTUALLY FOR IS THE LEAK, AND THAT PROPERTY IS UNCHANGED BY THE STATUS. No gRPC
+    /// status name, no exception type, no stack frame and no source path reaches the response - all four
+    /// are how a translated failure betrays its internals - and the correlation identifier is what a
+    /// caller is given instead (CWE-209).
     /// </para>
     /// </remarks>
     [Fact]
-    public async Task AnUnclassifiedFailureIsAServerFaultThatLeaksNothingAsync()
+    public async Task ARefusedPayloadLeaksNothingAboutHowItWasProducedAsync()
     {
         using HttpClient client = host.CreateAuthenticatedClient();
 
@@ -2285,7 +2322,7 @@ public sealed class RestProjectionStatusMappingTests(DataServicesTestHostFactory
             RestProjection.UpdateRoute,
             RestProjection.RejectedUpdatePayload());
 
-        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 
         string raw = await RestProjection.BodyAsync(response);
 
@@ -2309,8 +2346,8 @@ public sealed class RestProjectionStatusMappingTests(DataServicesTestHostFactory
 
         using JsonDocument body = await RestProjection.DocumentAsync(response);
 
-        // The numeric code is surfaced instead, so the specific legacy outcome stays identifiable even
-        // though the projection does not classify it.
+        // The numeric code is surfaced alongside the status, so the specific legacy outcome stays
+        // identifiable rather than being collapsed into the HTTP status that classifies it.
         Assert.Equal(
             KernelRetCode.E_INVALID_DATA,
             body.RootElement.GetProperty(RestProjection.RetCodeMember).GetInt64());
@@ -2752,6 +2789,113 @@ public sealed class RestProjectionSurfaceTests(DataServicesTestHostFactory host)
             "The last element of a projected stream must carry its own final flag, so the last chunk is "
             + "identifiable as the last rather than inferred from the array ending - which is what makes a "
             + "truncated array distinguishable from a complete one.");
+    }
+
+    /// <summary>
+    /// Every projected row carries its <c>originalValues</c> member, with one entry per column on a
+    /// retrieved row and an EMPTY array on an insert-shaped one.
+    /// </summary>
+    /// <returns>A task representing the assertions.</returns>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE BASELINE MEMBER THAT WAS DESCRIBED AS NORMALLY ABSENT, ASSERTED WHERE IT ACTUALLY
+    /// REACHES A CALLER.</b> A revision described <c>originalValues</c> as normally ABSENT on a retrieved
+    /// row, on the reasoning that a consumer could infer the baseline from the current value. AAP 0.6.3.2 states
+    /// the obligation with no exemption - per row, both the current and the original value of every marked
+    /// column - and the fixture is why: all six columns are marked <c>updatewhereclause=yes</c> under
+    /// <c>updatewhere=1</c> [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14</c>], so all six
+    /// originals go into the generated WHERE clause. Absence had two legal readings and one of them drops
+    /// the predicate entirely.
+    /// </para>
+    /// <para>
+    /// <b>THE INSERT ROW IS THE HALF THAT PROVES THE GUARANTEE IS SATISFIABLE AT ALL.</b> A repeated
+    /// protobuf field has no explicit presence, so an EMPTY one is a default value - which the canonical
+    /// JSON mapping omits. If this projection used that mapping it could not emit the member for the one
+    /// row that legitimately has no prior state. The projection formats default values precisely so the
+    /// member appears as <c>[]</c>, and this row is where that is checked rather than asserted in a
+    /// comment.
+    /// </para>
+    /// <para>
+    /// <b>WHY THIS IS A TEST RATHER THAN A <c>required</c> LIST.</b> <c>DataWindowRow</c> travels in a
+    /// REQUEST as well as a response, and the projection's strict canonical parser reads an absent member
+    /// as its default - so declaring the member required on the published schema would advertise a check
+    /// nothing performs. The obligation on a caller is conditional on the row and is enforced at run time
+    /// by <c>Validators/UpdateRowValidator</c>; the obligation on the SERVER is unconditional and is what
+    /// this test pins. <c>ConflictRow</c>, which travels only outbound, does declare both value sets
+    /// required.
+    /// </para>
+    /// <para>
+    /// READ THROUGH THE HTTP BOUNDARY, not off a message object, because the claim is about what a caller
+    /// receives. A message-level assertion would pass while the formatter dropped the member.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task EveryProjectedRowCarriesItsOriginalBaselineMemberAsync()
+    {
+        await using DataServicesTestHostFactory scoped = RestProjection.Host(out _);
+
+        scoped.PersistenceEdge.Reset();
+        scoped.PersistenceEdge.ScriptQueryMessages(
+            ScriptedPersistenceResponses.QueryStreamCarryingBaselinedAndInsertedRows());
+
+        using HttpClient client = scoped.CreateAuthenticatedClient();
+
+        using HttpResponseMessage response = await RestProjection.PostAsync(
+            client,
+            RestProjection.RetrieveRoute,
+            new { datawindowHandle = RestProjection.UnresolvedHandle });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        using JsonDocument body = await RestProjection.DocumentAsync(response);
+
+        JsonElement rows = body.RootElement[0].GetProperty("rows");
+
+        Assert.Equal(2, rows.GetArrayLength());
+
+        // ---- The baselined row: the member is present, and it covers every column ----
+
+        JsonElement baselined = rows[0];
+
+        Assert.True(
+            baselined.TryGetProperty("originalValues", out JsonElement baselinedOriginals),
+            "A retrieved row must carry its originalValues member. It is the baseline the updatewhere=1 "
+            + "predicate compares against, and a caller that received none could not construct a correct "
+            + "update at all.");
+
+        JsonElement baselinedColumns = baselined.GetProperty("columns");
+
+        Assert.Equal(6, baselinedColumns.GetArrayLength());
+        Assert.Equal(baselinedColumns.GetArrayLength(), baselinedOriginals.GetArrayLength());
+
+        // ONE BASELINE PER COLUMN, MATCHED BY IDENTIFIER RATHER THAN BY POSITION. Equal lengths alone
+        // would be satisfied by six originals for one column, which is the shape a partial producer
+        // produces.
+        foreach (JsonElement column in baselinedColumns.EnumerateArray())
+        {
+            string columnId = column.GetProperty("columnId").GetString() ?? string.Empty;
+
+            Assert.Contains(
+                baselinedOriginals.EnumerateArray(),
+                original => string.Equals(
+                    original.GetProperty("columnId").GetString(),
+                    columnId,
+                    StringComparison.Ordinal));
+        }
+
+        // ---- The insert row: the member is present and EMPTY, which is a different claim ----
+
+        JsonElement inserted = rows[1];
+
+        Assert.True(
+            inserted.TryGetProperty("originalValues", out JsonElement insertedOriginals),
+            "An insert-shaped row must still carry the member, as an empty array. `required` constrains "
+            + "PRESENCE and not length, and only formatting default values keeps an empty repeated field "
+            + "expressible - without it the projection could not satisfy its own schema for the one row "
+            + "that legitimately has no prior state.");
+
+        Assert.Equal(JsonValueKind.Array, insertedOriginals.ValueKind);
+        Assert.Equal(0, insertedOriginals.GetArrayLength());
     }
 }
 
@@ -3276,6 +3420,118 @@ public sealed class RestProjectionRedactionTests
         Assert.Contains(RestProjection.UnresolvedHandle, upstreamRecord, StringComparison.Ordinal);
         Assert.DoesNotContain(statement, upstreamRecord, StringComparison.Ordinal);
         Assert.DoesNotContain(driverText, upstreamRecord, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A caller-supplied handle carrying line breaks cannot forge a second operator record, and an
+    /// oversize one cannot flood the sink.
+    /// </summary>
+    /// <returns>A task representing the assertions.</returns>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE HANDLE WAS WRITTEN VERBATIM, AND THE ATTACK NEEDS NO SOPHISTICATION.</b> The record above
+    /// is the one that carries the caller's DataWindow handle - deliberately, because it is what makes a
+    /// failure traceable - and it wrote the value exactly as it arrived. Every console, file and syslog
+    /// provider renders a structured record to a LINE, so a handle containing a line break appended a
+    /// COMPLETE fabricated record after the real one: same shape, same channel, carrying whatever severity,
+    /// service name and outcome the caller chose to write into it. Nothing downstream could tell the two
+    /// apart, which makes it a forgery rather than merely noise.
+    /// </para>
+    /// <para>
+    /// <b>AND THE SECOND HALF IS SIZE.</b> The handle is read from a request body, so a caller chooses its
+    /// length; one request carrying a multi-megabyte handle produced a multi-megabyte record, and a loop of
+    /// them fills whatever the records are written to - taking the service down by way of its diagnostics
+    /// rather than by way of its endpoints.
+    /// </para>
+    /// <para>
+    /// BOTH HALVES ARE ASSERTED ON THE SAME REQUEST, because one rendering has to answer both and a fix
+    /// that escaped without bounding, or bounded without escaping, would satisfy half of this row. The
+    /// escaped form is asserted PRESENT as well as the raw form absent: a rendering that simply dropped the
+    /// offending characters would pass an absence assertion while making two distinct handles render alike,
+    /// so an operator could no longer tell which handle a failure involved.
+    /// </para>
+    /// <para>
+    /// THE PAYLOAD TEXT IS ASSERTED PRESENT TOO. Escaping is not censorship: the caller's value stays
+    /// readable and stays on one line, which is what keeps the record worth reading at all.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ACallerSuppliedHandleCannotForgeOrFloodAnOperatorRecordAsync()
+    {
+        await using DataServicesTestHostFactory host = RestProjection.Host(out _);
+
+        ProjectionLogRecorder operatorLog = RestProjection.RecordOperatorLog(host);
+
+        host.PersistenceEdge.Reset();
+
+        host.PersistenceEdge.UpdateResponse = new PersistenceUpdateResponse
+        {
+            Status = new PersistenceOperationStatus
+            {
+                RetCode = (WireRetCode)(int)KernelRetCode.E_DB_ERROR,
+                DbError = new DbError { Sqldbcode = 19L, Buffer = DwBuffer.Primary, Row = 3L },
+            },
+            Counts = new PersistenceUpdateCounts(),
+        };
+
+        // The forged tail is shaped like a real record so that a rendering which let it through would
+        // produce something a reader would act on rather than something obviously wrong. The oversize tail
+        // is appended to the SAME value so one request exercises both bounds.
+        const string ForgedTail = "fatal: the COMPANY table was dropped by dw-1";
+        string handle = "dw-forged\r\n" + ForgedTail + "\u2028" + new string('h', 4096);
+
+        using HttpClient client = host.CreateAuthenticatedClient();
+
+        using HttpResponseMessage response = await RestProjection.PostAsync(
+            client,
+            RestProjection.UpdateRoute,
+            new { datawindowHandle = handle });
+
+        ImmutableArray<string> records = operatorLog.Records;
+
+        // Not vacuous: the sink is live and it saw the site under test.
+        Assert.NotEmpty(records);
+
+        string upstreamRecord = Assert.Single(
+            records,
+            record => record.Contains(
+                RestProjection.UpstreamServiceLoggerCategory,
+                StringComparison.Ordinal));
+
+        // 1. NO RAW LINE TERMINATOR SURVIVES, so the record cannot have been split. All three families are
+        //    checked, including U+2028, which is NOT a control character by char.IsControl and is therefore
+        //    exactly what a hand-written filter lets through.
+        Assert.DoesNotContain("\r", upstreamRecord, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n", upstreamRecord, StringComparison.Ordinal);
+        Assert.DoesNotContain("\u2028", upstreamRecord, StringComparison.Ordinal);
+
+        // 2. THE ESCAPED FORM IS PRESENT, which is what keeps the rendering injective: two distinct handles
+        //    still render distinctly, so a failure remains attributable to the handle that caused it.
+        Assert.Contains("\\u000D\\u000A", upstreamRecord, StringComparison.Ordinal);
+
+        // 3. THE VALUE IS BOUNDED AND THE ORIGINAL LENGTH IS RECORDED, so an operator can tell an unusual
+        //    name from a payload aimed at the log.
+        Assert.Contains(
+            LogSafeText.TruncationPrefix
+                + handle.Length.ToString(CultureInfo.InvariantCulture)
+                + LogSafeText.TruncationSuffix,
+            upstreamRecord,
+            StringComparison.Ordinal);
+
+        // 4. THE FORGED TAIL IS STILL THERE AND IS HARMLESS, which is the difference between escaping and
+        //    censorship: the caller's value remains readable so an operator can see what was sent, and it
+        //    is now unambiguously PART OF the handle rather than a record of its own. Asserting its
+        //    presence is what stops a future "just strip the newline and everything after it" from passing.
+        Assert.Contains(ForgedTail, upstreamRecord, StringComparison.Ordinal);
+
+        // 5. AND THE WHOLE RECORD IS ONE LINE, which is the property the forgery depended on breaking. This
+        //    is asserted over the ENTIRE stream rather than the one record, because a leak through the
+        //    resilience pipeline's category or the hosting layer's would be exactly as damaging.
+        Assert.All(
+            records,
+            record => Assert.Single(record.Split('\n')));
+
+        _ = response;
     }
 
     /// <summary>
@@ -3840,3 +4096,507 @@ public sealed class RestProjectionStructuredErrorRelayTests(DataServicesTestHost
     }
 }
 
+
+// =====================================================================================================
+//  THE PUBLISHED IN-BAND STATUS MAPPING, PINNED AS A TABLE
+// =====================================================================================================
+
+/// <summary>
+/// Every arm of the published in-band <c>RetCode</c>-to-HTTP mapping, asserted directly.
+/// </summary>
+/// <remarks>
+/// <para>
+/// 🔴 <b>WHY THIS SUITE EXISTS, STATED AS THE DEFECT IT CLOSES.</b> This service's REST projection and the
+/// ingress's proxy of the same operations are documented as EQUIVALENT: the same refusal must carry the
+/// same HTTP status whichever surface a caller reached it through. Six codes broke that and nothing
+/// noticed - <c>E_INVALID_DATA</c> and <c>E_INVALID_DATAOBJECT</c> were 400 at the ingress and 500 here,
+/// <c>E_NOT_EXISTS</c>, <c>E_VAR_NOT_FOUND</c> and <c>E_MEMBER_NOT_FOUND</c> were 404 there and 500 here,
+/// and <c>FAILED</c> - the oracle's own unspecific failure, which the projected methods really answer -
+/// was 502 there and 500 here. Every one of them fell into a DEFAULT arm, so the divergence was invisible
+/// from either side.
+/// </para>
+/// <para>
+/// <b>THE TABLE IS WHY IT CANNOT DIVERGE AGAIN, AND DRIVING THE MAP DIRECTLY IS WHY THE TABLE CAN BE
+/// COMPLETE.</b> Reaching the mapping through a deployed host exercises only the handful of outcomes a
+/// real operation can be provoked into answering, which is exactly how six arms went unexercised. Calling
+/// <c>InBandStatus.Project</c> makes every arm assertable, including the codes no operation here answers
+/// and the unrecognised code that reaches the default.
+/// </para>
+/// <para>
+/// <b>THE SAME TABLE IS DUPLICATED IN THE GATEWAY'S SUITE ON PURPOSE, AND HOISTING IT INTO THE CONTRACTS
+/// PROJECT WOULD BE WRONG.</b> Constraint C-A permits exactly one thing to cross a service boundary - the
+/// published contract definitions - and that project carries NO behaviour. A shared mapping table would
+/// be behaviour, and a service reading another service's table would be the coupling the decomposition
+/// exists to remove. So the table is stated twice, once per surface, and each copy names the other:
+/// <c>PowerFramework.Gateway.Tests.ProxyStatusEquivalenceTests</c> is the twin. Two identical tables that
+/// each fail loudly are the correct shape for an equivalence between two independently deployable
+/// services.
+/// </para>
+/// <para>
+/// THE PROSE IS DELIBERATELY NOT COMPARED. Each surface's fallback sentence names the surface a caller is
+/// talking to - the ingress says "upstream" where this one does not - and either way the sentence is
+/// replaced by the contract's own diagnostic whenever one was supplied, which is the case behaviour
+/// preservation cares about (constraint C-B). The STATUS is the contract; the sentence is the courtesy.
+/// </para>
+/// </remarks>
+public sealed class RestProjectionStatusEquivalenceTests
+{
+    /// <summary>
+    /// The complete published mapping: every classified outcome and the status it must answer.
+    /// </summary>
+    /// <remarks>
+    /// HELD AS A TUPLE ARRAY RATHER THAN ONLY AS THEORY DATA so that
+    /// <see cref="TheTableCoversEveryClassifiedArm"/> can walk the same entries the theory runs.
+    /// Projecting both from one declaration is what makes it impossible for the per-row assertion and the
+    /// completeness guard to describe different sets and both pass. The six entries the finding added are
+    /// marked so a reader can see what changed and why each one is where it is.
+    /// </remarks>
+    private static readonly (long RetCode, int HttpStatus)[] PublishedMappingDeclarations =
+    [
+        // 400 - the caller's request is at fault and can be corrected.
+        (KernelRetCode.E_INVALID_ARGUMENT, StatusCodes.Status400BadRequest),
+        (KernelRetCode.E_INVALID_SQL, StatusCodes.Status400BadRequest),
+        (KernelRetCode.E_OUT_OF_RANGE, StatusCodes.Status400BadRequest),
+        (KernelRetCode.E_OUT_OF_BOUND, StatusCodes.Status400BadRequest),
+
+        // ⚠ ADDED. The payload could not be applied - the caller's DATA, not this service.
+        (KernelRetCode.E_INVALID_DATA, StatusCodes.Status400BadRequest),
+
+        // ⚠ ADDED. A DataWindow name in the request BODY that resolves to nothing. 400 and not 404,
+        // because the retrieval side answers the same mistake with E_INVALID_ARGUMENT.
+        (KernelRetCode.E_INVALID_DATAOBJECT, StatusCodes.Status400BadRequest),
+
+        // 403 - authenticated and refused.
+        (KernelRetCode.E_ACCESS_DENIED, StatusCodes.Status403Forbidden),
+
+        // 404 - the request named something that is not there.
+        (KernelRetCode.E_INVALID_HANDLE, StatusCodes.Status404NotFound),
+        (KernelRetCode.E_OBJECT_NOT_FOUND, StatusCodes.Status404NotFound),
+
+        // ⚠ ADDED, all three. The same situation as the two above: a name with nothing behind it.
+        (KernelRetCode.E_NOT_EXISTS, StatusCodes.Status404NotFound),
+        (KernelRetCode.E_VAR_NOT_FOUND, StatusCodes.Status404NotFound),
+        (KernelRetCode.E_MEMBER_NOT_FOUND, StatusCodes.Status404NotFound),
+
+        // 409 - a definitive answer that may be retried. NEVER a silent overwrite.
+        (KernelRetCode.E_RETRY, StatusCodes.Status409Conflict),
+
+        // 429 - capacity, not correctness.
+        (KernelRetCode.E_BUSY, StatusCodes.Status429TooManyRequests),
+
+        // 504 - the operation ran out of budget.
+        (KernelRetCode.E_TIME_OUT, StatusCodes.Status504GatewayTimeout),
+
+        // 501 - reserved for a capability that is genuinely absent.
+        (KernelRetCode.E_NO_SUPPORT, StatusCodes.Status501NotImplemented),
+        (KernelRetCode.E_NO_IMPLEMENTATION, StatusCodes.Status501NotImplemented),
+
+        // 502 - the path behind this surface answered badly.
+        (KernelRetCode.E_DB_ERROR, StatusCodes.Status502BadGateway),
+        (KernelRetCode.E_INVALID_TRANSACTION, StatusCodes.Status502BadGateway),
+
+        // ⚠ ADDED. The oracle's own unspecific failure, answered by an operation that COMPLETED. 502 and
+        // not 500, because nothing on this side faulted - and it is what the ingress answers for it.
+        (KernelRetCode.FAILED, StatusCodes.Status502BadGateway),
+    ];
+
+    /// <summary>Every classified outcome, projected onto theory rows.</summary>
+    /// <returns>One row per classified outcome.</returns>
+    public static TheoryData<long, int> PublishedMapping()
+    {
+        TheoryData<long, int> rows = [];
+
+        foreach ((long retCode, int httpStatus) in PublishedMappingDeclarations)
+        {
+            rows.Add(retCode, httpStatus);
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Outcomes the map has NOT been taught, each of which must reach the default arm.
+    /// </summary>
+    /// <returns>One row per unclassified outcome.</returns>
+    /// <remarks>
+    /// THE FIRST FOUR ARE CODES THIS SERVICE'S OWN IMPLEMENTATIONS REALLY ANSWER and the map still does not
+    /// classify - recorded here as a measured fact rather than fixed, because inventing a status for each
+    /// would be this suite choosing a contract the finding did not ask for and the ingress does not
+    /// publish either, which would REINTRODUCE the divergence in the opposite direction. The fifth is a
+    /// number no <c>RetCode</c> declares, which is the case the default arm exists for.
+    /// </remarks>
+    public static TheoryData<long> UnclassifiedOutcomes() =>
+    [
+        KernelRetCode.E_INTERNAL_ERROR,
+        KernelRetCode.E_OUT_OF_MEMORY,
+        KernelRetCode.E_EVENT_NOT_FOUND,
+        KernelRetCode.E_INVALID_OBJECT,
+        -987_654L,
+    ];
+
+
+    /// <summary>Each classified outcome maps to exactly the published status.</summary>
+    /// <param name="retCode">The failing in-band outcome.</param>
+    /// <param name="expectedStatus">The status the published mapping declares for it.</param>
+    [Theory]
+    [MemberData(nameof(PublishedMapping))]
+    public void AClassifiedOutcomeMapsToItsPublishedStatus(long retCode, int expectedStatus)
+    {
+        RestProjectionEndpoints.StatusProjection projected =
+            RestProjectionEndpoints.InBandStatus.Project(retCode, errorText: null);
+
+        Assert.Equal(expectedStatus, projected.HttpStatus);
+
+        // The numeric outcome is carried through unchanged, so the specific legacy code stays identifiable
+        // rather than being collapsed into the status that classifies it.
+        Assert.Equal(retCode, projected.RetCode);
+
+        // 🔴 NOT ATTRIBUTED TO AN UPSTREAM, AND THAT IS THE ONE PLACE THE TWO SURFACES CORRECTLY DIFFER.
+        // The gateway marks an in-band refusal as coming from upstream because for the gateway it did: it
+        // relayed an answer another service produced. This projection IS that service - the outcome was
+        // produced in-process by the very implementation the route invokes - so claiming an upstream would
+        // point an operator at Persistence for a refusal DataServices decided. The attribution differs; the
+        // STATUS, which is what the equivalence claim covers, does not.
+        Assert.False(projected.FromUpstream);
+    }
+
+    /// <summary>
+    /// An outcome the map has not been taught reaches the default arm, and the default blames this side.
+    /// </summary>
+    /// <param name="retCode">The unclassified outcome.</param>
+    /// <remarks>
+    /// <b>THE DIRECTION OF BLAME IS THE ASSERTION.</b> An outcome the map has not been taught is a contract
+    /// this projection does not yet understand, which is a fault on THIS side of the boundary; answering
+    /// 400 would blame the caller and invite a retry with different input that can never succeed. This is
+    /// the property a host-driven row could only reach by accident - and one did, by using a code that
+    /// SHOULD have been classified, which is how the divergence this suite exists for stayed hidden.
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(UnclassifiedOutcomes))]
+    public void AnUnclassifiedOutcomeReachesTheDefaultArm(long retCode)
+    {
+        RestProjectionEndpoints.StatusProjection projected =
+            RestProjectionEndpoints.InBandStatus.Project(retCode, errorText: null);
+
+        Assert.Equal(StatusCodes.Status500InternalServerError, projected.HttpStatus);
+        Assert.Equal(retCode, projected.RetCode);
+    }
+
+    /// <summary>
+    /// The table above covers every arm the map declares, so an arm added later cannot go unasserted.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE COMPLEMENT THAT MAKES THE TABLE TOTAL RATHER THAN A SAMPLE.</b> Every row above proves one
+    /// arm answers what it should; none of them notices an arm the table forgot, which is precisely the
+    /// failure mode that let six codes diverge. This walks every negative <c>RetCode</c> constant the
+    /// kernel declares, asks the map for it, and requires that anything the map CLASSIFIES - anything not
+    /// answering the default - appears in the table.
+    /// </para>
+    /// <para>
+    /// IT WALKS THE KERNEL'S CONSTANTS BY REFLECTION rather than a list kept here, so a new failure code
+    /// that acquires a status is caught by this row on the day it is classified.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheTableCoversEveryClassifiedArm()
+    {
+        HashSet<long> tabled = [.. PublishedMappingDeclarations.Select(row => row.RetCode)];
+
+        List<string> unasserted = [];
+
+        foreach (FieldInfo field in typeof(KernelRetCode).GetFields(
+            BindingFlags.Public | BindingFlags.Static))
+        {
+            if (field.GetValue(null) is not long value || value >= 0L || tabled.Contains(value))
+            {
+                continue;
+            }
+
+            RestProjectionEndpoints.StatusProjection projected =
+                RestProjectionEndpoints.InBandStatus.Project(value, errorText: null);
+
+            if (projected.HttpStatus != StatusCodes.Status500InternalServerError)
+            {
+                unasserted.Add(
+                    string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"{field.Name} ({value}) maps to {projected.HttpStatus} but is not in the table"));
+            }
+        }
+
+        Assert.Empty(unasserted);
+    }
+}
+
+
+// =====================================================================================================
+//  THE COLLECTION WINDOW ON THE ONE PROJECTED STREAM THAT NEVER ENDS
+// =====================================================================================================
+
+/// <summary>
+/// The projected expression event stream answers within a finite window rather than never answering.
+/// </summary>
+/// <remarks>
+/// <para>
+/// 🔴 <b>WHY THIS SUITE EXISTS, STATED AS THE DEFECT IT CLOSES.</b> <c>EventStream</c> is a SUBSCRIPTION:
+/// the engine ends it only when the client goes away. The projection collected every stream to completion
+/// before answering - correct for a retrieval, which ends with its final-marked chunk, and fatal for this
+/// one. A normal HTTP request to <c>/v1/datawindow/expression/event-stream</c> therefore received neither
+/// the events nor a success status, and held a request thread, a relay subscription and a connection for
+/// as long as the caller was willing to wait. The route was published, documented and unusable.
+/// </para>
+/// <para>
+/// <b>THE ASSERTION THAT MATTERS IS THAT THE REQUEST COMPLETES AT ALL.</b> Every row here would have hung
+/// until the test framework's own cancellation fired, so a passing row is itself the evidence: the window
+/// closes, the collected sequence is rendered, and the status is 200 even when nothing was emitted.
+/// </para>
+/// <para>
+/// THE WINDOW IS SHORTENED FOR THE SUITE rather than waiting the shipped two seconds per row, through the
+/// host factory's per-test settings opt-in. That is a duration, not a behaviour: the property under test is
+/// that a window bounds the collection, and the shipped value is asserted separately by the options suite.
+/// </para>
+/// </remarks>
+public sealed class RestProjectionStreamWindowTests
+{
+    /// <summary>The projected subscription - the one route the window applies to.</summary>
+    private const string EventStreamRoute = "/v1/datawindow/expression/event-stream";
+
+    /// <summary>The configuration key the window binds from.</summary>
+    private const string WindowKey = "DataServices:RestProjection:StreamCollectionWindow";
+
+    /// <summary>A window short enough that a row costs a fraction of a second.</summary>
+    private const string ShortWindow = "00:00:00.250";
+
+    /// <summary>
+    /// A poll of the projected subscription completes with 200 and an empty ordered collection.
+    /// </summary>
+    /// <returns>A task representing the assertions.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>AN EMPTY ARRAY IS THE COMPLETE ANSWER, NOT A TRUNCATION AND NOT A FAULT.</b> Nothing is emitting
+    /// events in this host, so the honest answer to "the records available now" is none - and the contract
+    /// says so in both the projected operation's description and the authored gateway document. A 204, a
+    /// 504 or a problem body would each describe something that did not happen.
+    /// </para>
+    /// <para>
+    /// THE MEDIA TYPE IS ASSERTED because a problem body would also deserialize as JSON: checking the
+    /// status alone would pass for a refusal that happened to carry an array-shaped member.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task APollOfTheProjectedSubscriptionCompletesWithinTheWindowAsync()
+    {
+        await using DataServicesTestHostFactory host = new();
+
+        host.AdditionalSettings[WindowKey] = ShortWindow;
+
+        using HttpClient client = host.CreateAuthenticatedClient();
+
+        (string sessionId, string handle) = await RestProjection.OpenExpressionSessionAsync(client);
+
+        using HttpResponseMessage response = await RestProjection.PostAsync(
+            client,
+            EventStreamRoute,
+            new { sessionId, datawindowHandle = handle });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        Assert.Equal(
+            MediaTypeNames.Application.Json,
+            response.Content.Headers.ContentType?.MediaType);
+
+        using JsonDocument body = await RestProjection.DocumentAsync(response);
+
+        Assert.Equal(JsonValueKind.Array, body.RootElement.ValueKind);
+        Assert.Equal(0, body.RootElement.GetArrayLength());
+    }
+
+    /// <summary>
+    /// A second poll behaves identically, so the window releases everything it took.
+    /// </summary>
+    /// <returns>A task representing the assertions.</returns>
+    /// <remarks>
+    /// <b>THE ROW THAT CATCHES A LEAK RATHER THAN A HANG.</b> The window cancels a linked source and the
+    /// projected method disposes a relay subscription on its way out; if either were left behind, the
+    /// second poll would either observe a cancelled context immediately or accumulate a subscription per
+    /// request. Two polls against ONE host is the smallest arrangement in which that is observable at all -
+    /// a fresh host per row would hide it.
+    /// </remarks>
+    [Fact]
+    public async Task ASecondPollIsUnaffectedByTheFirstAsync()
+    {
+        await using DataServicesTestHostFactory host = new();
+
+        host.AdditionalSettings[WindowKey] = ShortWindow;
+
+        using HttpClient client = host.CreateAuthenticatedClient();
+
+        (string sessionId, string handle) = await RestProjection.OpenExpressionSessionAsync(client);
+
+        for (int poll = 0; poll < 2; poll++)
+        {
+            using HttpResponseMessage response = await RestProjection.PostAsync(
+                client,
+                EventStreamRoute,
+                new { sessionId, datawindowHandle = handle });
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+            using JsonDocument body = await RestProjection.DocumentAsync(response);
+
+            Assert.Equal(0, body.RootElement.GetArrayLength());
+        }
+    }
+
+    /// <summary>
+    /// The window applies to the subscription alone: a self-terminating stream is not truncated by it.
+    /// </summary>
+    /// <returns>A task representing the assertions.</returns>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE ROW THAT KEEPS THE FIX FROM BECOMING A WORSE DEFECT THAN THE ONE IT CLOSED.</b> A window
+    /// applied to streaming IN GENERAL would silently truncate a retrieval - which ends with its
+    /// final-marked chunk and can legitimately take longer than any window - and a truncated array cannot
+    /// be told apart from a complete one, so the caller would receive the wrong answer under a success
+    /// status. The window is therefore opt-in per operation, and this row is what proves the opt-in is
+    /// actually selective rather than nominal.
+    /// </para>
+    /// <para>
+    /// IT USES A DELIBERATELY IMPOSSIBLE WINDOW - the shortest a TimeSpan can express - so the row fails if
+    /// the retrieval is windowed at all. With the flag off, that value has no effect on this route
+    /// whatsoever; with the flag wrongly on, the collection would be cut before the first chunk arrived.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AFiniteStreamIsNotTruncatedByTheWindowAsync()
+    {
+        await using DataServicesTestHostFactory host = new();
+
+        host.AdditionalSettings[WindowKey] = "00:00:00.001";
+
+        using HttpClient client = host.CreateAuthenticatedClient();
+
+        using HttpResponseMessage response = await RestProjection.PostAsync(
+            client,
+            RestProjection.RetrieveRoute,
+            new { datawindowHandle = RestProjection.UnresolvedHandle });
+
+        // The retrieval reaches the scripted upstream and answers its scripted chunks. What matters is that
+        // the answer is NOT an empty collection produced by a window that should not have applied - the
+        // route either succeeds with content or fails on its own merits, and neither outcome is a window.
+        using JsonDocument body = await RestProjection.DocumentAsync(response);
+
+        if (response.StatusCode == HttpStatusCode.OK)
+        {
+            Assert.Equal(JsonValueKind.Array, body.RootElement.ValueKind);
+            Assert.True(
+                body.RootElement.GetArrayLength() > 0,
+                "The retrieval answered an EMPTY collection under a one-millisecond window, which is what "
+                    + "a window wrongly applied to a self-terminating stream looks like.");
+        }
+        else
+        {
+            // A refusal is a legitimate outcome for this payload and says nothing about windowing - but a
+            // 504 or an empty success would, so the refusal is required to be the projection's own.
+            Assert.NotEqual(HttpStatusCode.GatewayTimeout, response.StatusCode);
+            Assert.Equal(
+                RestProjection.ProblemMediaType,
+                response.Content.Headers.ContentType?.MediaType);
+        }
+    }
+
+    /// <summary>
+    /// Exactly one route opts into the collection window, asserted from the source that declares them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE STRUCTURAL HALF OF THE ROW ABOVE, AND IT GUARDS THE WORSE DEFECT RATHER THAN THE ONE THAT
+    /// WAS FIXED.</b> A window applied to streaming in general would truncate a retrieval, and a truncated
+    /// JSON array is indistinguishable from a complete one - so the caller would receive the wrong answer
+    /// under a success status, which is a quieter failure than the non-terminating request the window
+    /// exists to close. The behavioural row proves a retrieval is not windowed TODAY; this one proves the
+    /// opt-in is still an opt-in, so a second route acquiring it has to be a deliberate edit that fails
+    /// here first.
+    /// </para>
+    /// <para>
+    /// READ FROM THE REGISTRATION SOURCE rather than from the route table at run time, because "which
+    /// routes passed the flag" is not observable from a running host at all: the flag is a registration-time
+    /// argument that leaves no trace on the endpoint metadata. The file is located through the same
+    /// repository-root resolution this suite already uses to read the authored contract.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ExactlyOneRouteOptsIntoTheCollectionWindow()
+    {
+        string source = File.ReadAllText(
+            RestProjectionContract.Resolve(
+                "services/dataservices-service/PowerFramework.DataServices/Endpoints/"
+                + "RestProjectionEndpoints.cs"));
+
+        const string optIn = "collectWithinWindow: true";
+
+        int occurrences = 0;
+
+        for (int at = source.IndexOf(optIn, StringComparison.Ordinal);
+            at >= 0;
+            at = source.IndexOf(optIn, at + optIn.Length, StringComparison.Ordinal))
+        {
+            occurrences++;
+        }
+
+        Assert.Equal(1, occurrences);
+
+        // AND IT IS THE SUBSCRIPTION ROUTE. The count alone would be satisfied by the flag moving to the
+        // retrieval, which is the exact mistake this row exists to prevent - so the registration nearest
+        // the opt-in is required to be the event stream's.
+        int flag = source.IndexOf(optIn, StringComparison.Ordinal);
+        int registration = source.LastIndexOf("MapServerStream<", flag, StringComparison.Ordinal);
+
+        Assert.True(registration >= 0, "The opt-in is not inside a server-stream registration.");
+
+        Assert.Contains(
+            "/event-stream",
+            source[registration..flag],
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The projected operation's published description states the poll semantics.
+    /// </summary>
+    /// <returns>A task representing the assertions.</returns>
+    /// <remarks>
+    /// <b>A BOUNDED POLL THAT DOES NOT SAY SO IS A DIFFERENT DEFECT FROM THE ONE THAT WAS FIXED, NOT A
+    /// SMALLER ONE.</b> A consumer generating a client from the published document would read the response
+    /// as the whole event sequence, treat an empty array as "the subscription ended", and never poll again.
+    /// The remedy for the non-terminating route was explicitly "apply a finite poll window AND update the
+    /// document", so the document is asserted here rather than taken on trust.
+    /// </remarks>
+    [Fact]
+    public async Task TheGeneratedDocumentPublishesThePollSemanticsAsync()
+    {
+        await using DataServicesTestHostFactory host = new();
+
+        using HttpClient client = host.CreateAuthenticatedClient();
+
+        using HttpResponseMessage document = await client.GetAsync(
+            RestProjection.Relative(RestProjection.DocumentRoute),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, document.StatusCode);
+
+        string text = await RestProjection.BodyAsync(document);
+
+        // The description says it is a poll, names the setting that bounds it, and says what an empty
+        // collection means - the three things a consumer cannot infer from the schema.
+        foreach (string published in (string[])
+        [
+            "BOUNDED POLL",
+            "StreamCollectionWindow",
+            "never 'the subscription ended'",
+        ])
+        {
+            Assert.Contains(published, text, StringComparison.Ordinal);
+        }
+    }
+}

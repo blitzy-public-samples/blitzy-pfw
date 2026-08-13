@@ -141,6 +141,7 @@ using Google.Protobuf.Reflection;
 using Grpc.Core;
 using PowerFramework.Contracts.Common.V1;
 using PowerFramework.Contracts.Persistence.V1;
+using PowerFramework.Shared.Diagnostics;
 using PowerFramework.Shared.Kernel;
 
 // THE ONE NAME COLLISION IN THIS FILE, RESOLVED DELIBERATELY RATHER THAN DISCOVERED AS A BUILD BREAK.
@@ -660,7 +661,16 @@ public class PersistenceClient
     /// <c>of_reset</c> and every setter but not the destructor, and guarding release here would leave a
     /// caller unable to clean up after an operation it could not complete. Persistence owns whether a
     /// release is admissible while its own work is running.
-    /// <para>RETRY SAFETY: safe - releasing an already-released task is reported, not fatal.</para>
+    /// <para>
+    /// 🔴 RETRY SAFETY: <b>NOT SAFE.</b> A release CONSUMES the registration: the server removes it and
+    /// then answers <c>E_INVALID_HANDLE</c> when there is nothing to remove
+    /// [<c>Grpc/QueryService.ReleaseQueryTask</c>], and the caller-side cleanup path reads a non-OK answer
+    /// as evidence of a leak - it records "the server may still be holding it"
+    /// [<see cref="ReleaseWorkTaskAsync"/>]. So a replay after a SUCCESSFUL first attempt whose response
+    /// was lost manufactures an operator warning asserting the opposite of the truth. Excluded from the
+    /// replay-safe roster [<c>Clients/OutboundCallPolicy</c>]; a task whose release never arrives is
+    /// reclaimed by the registry rather than by a retry.
+    /// </para>
     /// </remarks>
     public virtual Task<ReleaseQueryTaskResponse> ReleaseQueryTaskAsync(
         ReleaseQueryTaskRequest request,
@@ -1231,6 +1241,11 @@ public class PersistenceClient
     /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
     /// <exception cref="RpcException">The call failed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
+    /// <remarks>
+    /// 🔴 RETRY SAFETY: <b>NOT SAFE</b>, for the reason given on <see cref="ReleaseQueryTaskAsync"/>: the
+    /// release consumes its own registration and a replay answers <c>E_INVALID_HANDLE</c>
+    /// [<c>Grpc/UpdateService.ReleaseUpdateTask</c>], which the cleanup path records as a suspected leak.
+    /// </remarks>
     public virtual Task<ReleaseUpdateTaskResponse> ReleaseUpdateTaskAsync(
         ReleaseUpdateTaskRequest request,
         CancellationToken cancellationToken) =>
@@ -1494,7 +1509,7 @@ public class PersistenceClient
                         + "conflict detail accompanied it. The status and trailers are rethrown unchanged "
                         + "rather than being reported as a conflict without its detail, and the update is "
                         + "not retried.",
-                        taskId);
+                        LogSafeText.Render(taskId));
 
                     throw;
                 }
@@ -1504,7 +1519,7 @@ public class PersistenceClient
                     + "update table {UpdateTable}; {RowsExpected} row(s) expected, {RowsMatched} matched; "
                     + "retCode {RetCode}. The conflict is surfaced with its detail so the caller can "
                     + "re-read and rebase or surface it; it is never retried and never overwritten.",
-                    taskId,
+                    LogSafeText.Render(taskId),
                     conflict.Rows.Count,
                     conflict.UpdateTable,
                     conflict.RowsExpected,
@@ -1580,6 +1595,11 @@ public class PersistenceClient
     /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
     /// <exception cref="RpcException">The call failed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
+    /// <remarks>
+    /// 🔴 RETRY SAFETY: <b>NOT SAFE</b>, for the reason given on <see cref="ReleaseQueryTaskAsync"/>: the
+    /// release consumes its own registration and a replay answers <c>E_INVALID_HANDLE</c>
+    /// [<c>Grpc/CommandService.ReleaseCommandTask</c>].
+    /// </remarks>
     public virtual Task<ReleaseCommandTaskResponse> ReleaseCommandTaskAsync(
         ReleaseCommandTaskRequest request,
         CancellationToken cancellationToken) =>
@@ -2181,7 +2201,7 @@ public class PersistenceClient
                     + "recorded rather than raised, because raising it would replace the answer the caller "
                     + "is entitled to.",
                     kind,
-                    task.TaskId,
+                    LogSafeText.Render(task.TaskId),
                     status.RetCode);
             }
         }
@@ -2192,7 +2212,7 @@ public class PersistenceClient
                 + "server may still be holding it. Only the status code is recorded; the failure is not "
                 + "raised, for the reason above.",
                 kind,
-                task.TaskId,
+                LogSafeText.Render(task.TaskId),
                 failure.StatusCode);
         }
     }
@@ -2219,7 +2239,7 @@ public class PersistenceClient
                 _logger.LogWarning(
                     "Ending session {SessionId} answered {ReturnCode}, so its pooled-transaction reference "
                     + "may still be held. Recorded rather than raised.",
-                    session.SessionId,
+                    LogSafeText.Render(session.SessionId),
                     ended.Status.RetCode);
             }
         }
@@ -2228,7 +2248,7 @@ public class PersistenceClient
             _logger.LogWarning(
                 "Ending session {SessionId} failed with gRPC status {StatusCode}, so its "
                 + "pooled-transaction reference may still be held. Recorded rather than raised.",
-                session.SessionId,
+                LogSafeText.Render(session.SessionId),
                 failure.StatusCode);
         }
     }
@@ -2281,15 +2301,31 @@ public class PersistenceClient
         InvokeAsync(_transaction.SetAutoCommitAsync, request, WriteTokenRequest, cancellationToken);
 
     /// <summary>
-    /// Reads whether a session's autocommit switch is on. Contract <b>C-08</b>.
+    /// 🔴 COMMITS OR ROLLS BACK a session according to its statement status - the ported
+    /// <c>of_autocommit</c> checkpoint. Contract <b>C-08</b>.
     /// </summary>
-    /// <param name="request">The session handle.</param>
+    /// <param name="request">The session to check point.</param>
     /// <param name="cancellationToken">Cancels the call.</param>
     /// <returns>The contract's response.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
     /// <exception cref="RpcException">The call failed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
-    /// <remarks>RETRY SAFETY: SAFE - read-only.</remarks>
+    /// <remarks>
+    /// <para>
+    /// <b>THE NAME READS LIKE A SETTINGS QUERY AND THE BEHAVIOUR IS THE OPPOSITE, WHICH IS WHY THIS
+    /// SUMMARY LEADS WITH THE VERBS.</b> It described itself as reading the autocommit switch, which is
+    /// what <see cref="SetTransactionAutoCommitAsync"/>'s counterpart would do; the operation actually
+    /// ROLLS BACK on a non-zero statement status - only when autocommit is off - and otherwise COMMITS with
+    /// auto-rollback enabled, over shared work
+    /// [<c>Grpc/TransactionService.AutoCommit</c>, <c>n_cst_thread_trans.sru:L370-L381</c>].
+    /// </para>
+    /// <para>
+    /// 🔴 RETRY SAFETY: <b>NOT SAFE.</b> A replay after a lost response commits or rolls back a SECOND
+    /// time, against whatever the session has accumulated since. It belongs with <c>Commit</c> and
+    /// <c>Rollback</c> and is excluded from the replay-safe roster alongside them
+    /// [<c>Clients/OutboundCallPolicy</c>]; the mistaken read-only claim here is what had admitted it.
+    /// </para>
+    /// </remarks>
     public virtual Task<AutoCommitResponse> AutoCommitAsync(
         AutoCommitRequest request,
         CancellationToken cancellationToken) =>
@@ -2945,12 +2981,15 @@ public class PersistenceClient
         }
         catch (InvalidProtocolBufferException parseFailure)
         {
+            // Described rather than attached. A protobuf parse failure quotes the bytes and field numbers
+            // it choked on, and those bytes come from the UPSTREAM's trailer - so the message is another
+            // party's content, arriving on the one path where that party was already failing.
             _logger.LogWarning(
-                parseFailure,
                 "The conflict trailer on an aborted update could not be parsed as "
                 + "{SupportedPayloadType}. The gRPC failure is surfaced unchanged, with its trailers "
-                + "intact.",
-                SupportedRichErrorPayloadType);
+                + "intact. FaultTypes={FaultTypes}",
+                SupportedRichErrorPayloadType,
+                ExceptionChain.DescribeTypes(parseFailure));
 
             return null;
         }
@@ -2993,7 +3032,7 @@ public class PersistenceClient
                 + "{Cancelled}); {RowsInserted} inserted, {RowsUpdated} updated, {RowsDeleted} deleted; "
                 + "{IdentityBlockCount} identity block(s), one per update table, each carrying its primary "
                 + "and filter arrays in the order received.",
-                taskId,
+                LogSafeText.Render(taskId),
                 outcome,
                 Predicates.IsSucceeded(outcome),
                 Predicates.IsCancelled(outcome),
@@ -3035,7 +3074,7 @@ public class PersistenceClient
             "Persistence reported a database failure on task {TaskId}: sqldbcode {SqlDbCode}, buffer "
             + "{Buffer}, row {Row}. The statement text and the driver text are redacted and are not "
             + "logged.",
-            taskId,
+            LogSafeText.Render(taskId),
             error.Sqldbcode,
             error.Buffer,
             error.Row);

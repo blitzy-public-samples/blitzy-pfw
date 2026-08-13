@@ -762,11 +762,11 @@ public sealed class SystemErrorHandler : IExceptionHandler
     /// DECISION 2, carrying all seven decoded fields and the exact formatted block.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The correlation identifier leads this record deliberately: it is the value the caller was
     /// handed, so an operator searching for it must be able to match it without knowing which of the
     /// two record forms was written (DECISION 7).
-    /// </remarks>
-    /// <remarks>
+    /// </para>
     /// <para>
     /// <c>PayloadFieldCount</c> and <c>PayloadDecodedFieldCount</c> are the F11 observation: the legacy
     /// decode discards fields silently in two documented ways, and this pair is what makes the

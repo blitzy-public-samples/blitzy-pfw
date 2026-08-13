@@ -180,6 +180,7 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using PowerFramework.DataServices.Clients;
 using PowerFramework.DataServices.Configuration;
+using PowerFramework.Shared.Diagnostics;
 using PowerFramework.Shared.Kernel;
 
 namespace PowerFramework.DataServices.Endpoints;
@@ -522,17 +523,24 @@ public static class HealthEndpoints
         {
             // Decision record item 4: the handler reports rather than throws, because a probe that
             // faulted would take the container with it and the readiness gate could never recover.
-            // The exception is logged HERE, where the operator can see it, and is deliberately NOT
+            // The fault is recorded HERE, where the operator can see it, and is deliberately NOT
             // projected onto the anonymous response (item 2). OperationCanceledException is excluded
             // from this catch on purpose: it means the caller disconnected, so there is no longer a
             // response to write and attempting one would only fail again.
+            //
+            // 🔴 "LOGGED HERE, WHERE THE OPERATOR CAN SEE IT" WAS TRUE OF THE OPERATOR AND OF EVERYONE
+            // ELSE THE RECORD REACHES. A readiness probe reaches both upstream clients, so the fault
+            // arriving here can be a transport fault quoting a configured address or an upstream's own
+            // status detail; an attached exception is rendered by every provider with its whole message
+            // chain and its stack. The type chain replaces it and still says which probe failed and why.
             loggerFactory
                 .CreateLogger(LoggerCategoryName)
                 .LogError(
-                    exception,
-                    "Readiness evaluation failed for the {Service} service; reporting {Status}.",
+                    "Readiness evaluation failed for the {Service} service; reporting {Status}. "
+                        + "FaultTypes={FaultTypes}",
                     ServiceIdentifier,
-                    StatusUnhealthy);
+                    StatusUnhealthy,
+                    ExceptionChain.DescribeTypes(exception));
 
             status = HealthStatus.Unhealthy;
             checks = [BuildSelfCheck(HealthStatus.Unhealthy)];
@@ -914,7 +922,7 @@ public static class HealthEndpoints
 /// <para>
 /// WHY IT EXISTS, STATED AS THE GAP IT CLOSES. Every outward call this service makes carries a bearer
 /// token: Persistence requires one on all four of its contracts, and so does each of Security's
-/// seventeen cryptographic operations. The only way to obtain one is <c>POST /v1/tokens</c>, which
+/// eighteen cryptographic operations. The only way to obtain one is <c>POST /v1/tokens</c>, which
 /// contract C-01 protects with MUTUAL TLS and with nothing else - because a caller cannot present a
 /// bearer token in order to obtain its first bearer token. A deployment that mounts no client
 /// certificate is a legitimate startup state and is deliberately not a startup failure, but it is a

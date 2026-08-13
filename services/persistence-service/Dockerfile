@@ -92,12 +92,21 @@
 # --------------------------------------------------------------------------------------------------
 # STAGE 1 - BUILD
 #
-# mcr.microsoft.com/dotnet/sdk:10.0, matched to the SDK global.json pins (10.0.302, rollForward
-# latestFeature). The family tag is used deliberately so that a security-patched rebuild picks the
-# fix up; the reproducibility that matters is pinned where it can be, in global.json and in
-# Directory.Packages.props.
+# THE BUILD IMAGE IS PINNED TO A PATCH REVISION, NOT TO THE 10.0 FAMILY TAG, AND THE DIFFERENCE IS A
+# SECURITY PROPERTY RATHER THAN A STYLE ONE. `mcr.microsoft.com/dotnet/sdk:10.0.400` is the SDK of the
+# 2026-08-11 security release of the 10.0 channel (runtime 10.0.11, ten CVEs fixed against 10.0.10).
+# An earlier revision used the family tag `sdk:10.0` on the reasoning that a rebuild would then pick a
+# security patch up by itself. IT DOES NOT: a family tag that is already present locally is reused as
+# it stands, so a builder holding a pre-patch `10.0` layer rebuilds on the vulnerable base and reports
+# success. A patch revision cannot go stale silently - advancing it is a diff a reviewer sees - and CI
+# additionally builds with `pull: true` so the reviewed digest is fetched rather than assumed
+# (CWE-1104).
+#
+# Measured on this tag: DOTNET_SDK_VERSION=10.0.400 and `dotnet --version` = 10.0.400. global.json
+# pins SDK 10.0.303 with rollForward: latestFeature, and 10.0.400 satisfies that pin by rolling
+# forward one feature band within 10.0 - both are the same 10.0.11 platform release.
 # --------------------------------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0.400 AS build
 
 WORKDIR /src
 
@@ -123,11 +132,20 @@ WORKDIR /src
 COPY global.json Directory.Build.props Directory.Packages.props .editorconfig ./
 
 # The project manifests ALONE, before any source, so the restore layer is cached against dependency
-# changes rather than against every edit to a .cs file. These five are the complete restore closure
-# of the Persistence application: itself plus the four shared projects it references. The one
-# transitive edge among those four - Diagnostics references the shared kernel - resolves inside the
-# same set, so nothing further is needed. No sibling service manifest appears, and none may:
+# changes rather than against every edit to a .cs file. These SIX are the complete restore closure
+# of the Persistence application: itself plus the five shared projects it references. The transitive
+# edges among those five - Diagnostics references the shared kernel, and so does Eventful - resolve
+# inside the same set, so nothing further is needed. No sibling service manifest appears, and none may:
 # Persistence must restore, build and publish with no other service present.
+#
+# ⚠ THE EVENTFUL ENTRY WAS ADDED AFTER THE REFERENCE WAS, AND THE GAP BETWEEN THE TWO IS WHY THIS
+# COMMENT NAMES A COUNT. PowerFramework.Persistence acquired a ProjectReference to
+# PowerFramework.Shared.Eventful - it hosts the port of n_cst_threading_eventful, which the shared
+# broker's own documentation names as its subclass - and this list was not updated with it. The HOST
+# build stayed green, because the whole tree is present there; the CONTAINER build failed with CS0234
+# "the type or namespace name 'Eventful' does not exist in the namespace 'PowerFramework.Shared'",
+# because this file decides what the container can see. A reference added to the project file is a
+# reference that must be added HERE TOO, in both lists below.
 COPY services/persistence-service/PowerFramework.Persistence/PowerFramework.Persistence.csproj \
      services/persistence-service/PowerFramework.Persistence/
 COPY shared/PowerFramework.Contracts/PowerFramework.Contracts.csproj \
@@ -138,15 +156,18 @@ COPY shared/PowerFramework.Shared.Diagnostics/PowerFramework.Shared.Diagnostics.
      shared/PowerFramework.Shared.Diagnostics/
 COPY shared/PowerFramework.Shared.Containers/PowerFramework.Shared.Containers.csproj \
      shared/PowerFramework.Shared.Containers/
+COPY shared/PowerFramework.Shared.Eventful/PowerFramework.Shared.Eventful.csproj \
+     shared/PowerFramework.Shared.Eventful/
 
 RUN dotnet restore services/persistence-service/PowerFramework.Persistence/PowerFramework.Persistence.csproj
 
-# Now the sources. The four shared trees first and the application last, so an edit confined to the
+# Now the sources. The five shared trees first and the application last, so an edit confined to the
 # application does not invalidate the shared layers. Each COPY names one project directory: the
 # .dockerignore keeps bin/, obj/ and TestResults/ out, so no host build output can leak in.
 COPY shared/PowerFramework.Shared.Kernel/ shared/PowerFramework.Shared.Kernel/
 COPY shared/PowerFramework.Shared.Diagnostics/ shared/PowerFramework.Shared.Diagnostics/
 COPY shared/PowerFramework.Shared.Containers/ shared/PowerFramework.Shared.Containers/
+COPY shared/PowerFramework.Shared.Eventful/ shared/PowerFramework.Shared.Eventful/
 COPY shared/PowerFramework.Contracts/ shared/PowerFramework.Contracts/
 COPY services/persistence-service/PowerFramework.Persistence/ services/persistence-service/PowerFramework.Persistence/
 
@@ -164,19 +185,23 @@ RUN dotnet publish services/persistence-service/PowerFramework.Persistence/Power
 # --------------------------------------------------------------------------------------------------
 # STAGE 2 - RUNTIME (the one and only final image)
 #
-# mcr.microsoft.com/dotnet/aspnet:10.0, matched to the Microsoft.AspNetCore.App runtime this refactor
-# builds against.
+# THE RUNTIME IMAGE IS PINNED TO A PATCH REVISION FOR THE SAME REASON THE BUILD IMAGE IS.
+# `mcr.microsoft.com/dotnet/aspnet:10.0.11` is the runtime of the 2026-08-11 security release, matched
+# to the Microsoft.AspNetCore.App version this refactor builds against and to the six platform package
+# pins in Directory.Packages.props. Measured on this tag: ASPNET_VERSION=10.0.11 and
+# DOTNET_VERSION=10.0.11 with APP_UID=1654 backed by a real `app` account, on Ubuntu 24.04 LTS, and it
+# ships NEITHER curl NOR wget.
 #
 # NOT the sdk image, which carries a compiler, a package cache and a shell toolchain that a running
 # service has no use for. NOT the non-ASP.NET `runtime` image either: this service hosts gRPC over
 # Kestrel and would fail to start without the shared framework this image provides.
 # --------------------------------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
+FROM mcr.microsoft.com/dotnet/aspnet:10.0.11 AS final
 
 # NOTHING IS INSTALLED IN THIS STAGE, AND THIS PARAGRAPH SAYS WHY. It sits here deliberately, because
 # this is precisely the line at which a future maintainer reaches for a package manager.
 #
-# MEASURED ON mcr.microsoft.com/dotnet/aspnet:10.0 RATHER THAN ASSUMED. The image carries
+# MEASURED ON mcr.microsoft.com/dotnet/aspnet:10.0.11 RATHER THAN ASSUMED. The image carries
 # /usr/bin/openssl (3.0.13), /usr/bin/bash, /usr/bin/timeout and /usr/bin/head, and it carries NEITHER
 # curl NOR wget. The readiness probe at the foot of this file is built from that set alone, so no
 # package is required for it; the probe's own comment documents the pipeline clause by clause.
@@ -240,29 +265,27 @@ RUN mkdir -p /var/lib/powerframework \
   && chown -R $APP_UID:$APP_UID /var/lib/powerframework
 VOLUME ["/var/lib/powerframework"]
 
-# THE LISTENING PORTS - TWO OF THEM, DOCUMENTED HERE AND ESTABLISHED IN CONFIGURATION
+# THE LISTENING PORT - ONE OF IT, DOCUMENTED HERE AND ESTABLISHED IN CONFIGURATION
 #
-# ASPNETCORE_HTTP_PORTS is cleared rather than set. appsettings.json declares TWO named Kestrel
-# endpoints, and each carries a protocol set a bare port number cannot express:
+# ASPNETCORE_HTTP_PORTS is cleared rather than set. appsettings.json declares ONE named Kestrel
+# endpoint, carrying a protocol set a bare port number cannot express:
 #
-#     Rest  https://+:5101  Http1   - /health and /v1/ping
-#     Grpc  https://+:5111  Http2   - the four published gRPC contracts, C-05 through C-08
+#     Rest  https://+:5101  Http1AndHttp2  - /health, /v1/ping AND the four published gRPC
+#                                            contracts, C-05 through C-08
 #
-# ONE PROTOCOL VERSION EACH, RATHER THAN Http1AndHttp2 ON ONE PORT, and that is a measured decision
-# rather than a preference: on a TLS endpoint ALPN negotiates between the two versions, but the
-# distinct endpoints keep the readiness probe reachable over HTTP/1.1 with no dependence on ALPN
-# behaviour in whatever proxy or client sits in front of it. A deployment that prefers one address
-# collapses them by pointing Kestrel__Endpoints__Rest__Url at https://+:5101 with Protocols
-# Http1AndHttp2 and clearing the Grpc endpoint - the environment provider is added after
-# appsettings.json and wins on an identical key, so that needs no change to this file.
+# BOTH VERSIONS ON ONE PORT, BECAUSE AAP 0.3.2.2 ASSIGNS THIS SERVICE ONE: "gRPC, plus REST /health
+# and /v1/ping". The endpoint terminates TLS, which is what makes that work - ALPN negotiates between
+# the versions per connection, measured on this toolchain rather than assumed. An earlier revision bound
+# a second HTTP/2-only listener so that a misaddressed client failed at negotiation rather than later;
+# that diagnostic gain published C-05..C-08 at an address the plan does not assign, and the plan's port
+# map is what the manifest, the probes and the e2e fixture all address.
 #
 # Leaving ASPNETCORE_HTTP_PORTS populated, including with the base image's own 8080, would add a
-# SECOND, PLAINTEXT listener beside the configured pair, so it is emptied. EXPOSE therefore DOCUMENTS
-# the contract rather than establishing it. 5101 is this service's slot in the retained 5101-5105
-# band; 5111 is internal to the orchestration network and is not named by the attached environment:
+# SECOND, PLAINTEXT listener beside the configured one, so it is emptied. EXPOSE therefore DOCUMENTS
+# the contract rather than establishing it. 5101 is this service's slot in the retained 5101-5105 band:
 #
-#     5101  Persistence     REST /health and /v1/ping over TLS - THIS IMAGE (gRPC on 5111)
-#     5102  DataServices    REST projection for Gateway over TLS (gRPC on 5112)
+#     5101  Persistence     REST /health, /v1/ping AND its gRPC contracts over TLS - THIS IMAGE
+#     5102  DataServices    REST projection for Gateway AND its gRPC contracts over TLS
 #     5103  RESERVED - deliberately unallocated so the obvious Phase 2 slot stays visible rather than
 #           being reassigned to one of the four services this phase builds. Nothing is provisioned
 #           for it here: no stage, no variable, no build input.
@@ -270,7 +293,7 @@ VOLUME ["/var/lib/powerframework"]
 #     5105  Gateway         REST + OpenAPI over TLS, the documented composition-root access URL
 ENV ASPNETCORE_ENVIRONMENT=Production
 ENV ASPNETCORE_HTTP_PORTS=
-EXPOSE 5101 5111
+EXPOSE 5101
 
 # NON-ROOT, SWITCHED BEFORE THE PROBE AND BEFORE THE ENTRY POINT.
 # APP_UID is published by the base image as 1654 and corresponds to the unprivileged `app` user and
@@ -341,10 +364,9 @@ USER $APP_UID
 # variable only this probe would read is configuration surface nothing else consumes. A deployment that
 # moves the listener through Kestrel's own configuration has to move this probe with it.
 #
-# THE gRPC LISTENER ON 5111 IS DELIBERATELY NOT PROBED. It is configured Http2-only, so it would answer
-# this HTTP/1.1 request with 400; and the host binds both endpoints or refuses to start, so 5101
-# answering already proves the process is serving. Probing both would add a second way to fail without
-# adding anything it can detect.
+# THERE IS NO SECOND LISTENER TO PROBE. The single endpoint carries HTTP/1.1 and HTTP/2 together, so
+# this HTTP/1.1 request and the gRPC contracts reach the same address and ALPN chooses between them; the
+# host binds its endpoint or refuses to start, so 5101 answering already proves the process is serving.
 #
 # The start period is unhurried because this host does real work before it answers anything: it
 # validates its bound configuration, refuses a storage directory that resolves inside the read-only

@@ -63,6 +63,7 @@
 
 using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Text.Json.Nodes;
 using Xunit;
 using Xunit.Sdk;
@@ -135,17 +136,28 @@ public sealed class ServiceConfigurationCoherenceTests
     /// is therefore <see langword="true"/> for every service.
     /// </para>
     /// <para>
-    /// EVERY LISTENER IS TLS, AND TWO SERVICES BIND TWO OF THEM. The environment's readiness gates are
-    /// spelled as plaintext URLs, but a gate fixes the probe SHAPE - an anonymous <c>GET</c> of
+    /// EVERY LISTENER IS TLS, AND EVERY SERVICE BINDS EXACTLY ONE OF THEM. The environment's readiness
+    /// gates are spelled as plaintext URLs, but a gate fixes the probe SHAPE - an anonymous <c>GET</c> of
     /// <c>/health</c> on the documented port answering 200 - and not the transport beneath it, so
     /// honouring it with a trust anchor added takes no deviation under AAP 0.8.3. Every listener here is
     /// therefore <c>https</c>, which AAP 0.1.4 requires of a surface decomposition itself created.
-    /// Persistence and DataServices, which serve gRPC contracts AND an HTTP/1.1 readiness probe, bind one
-    /// endpoint per PROTOCOL VERSION so that a listener accepts only what it is for: the documented port
-    /// keeps the REST surface and a second port outside the documented 5101-5105 band carries gRPC.
-    /// Security is REST-only and Gateway is the REST ingress, so both bind one <c>Http1</c> endpoint each
-    /// and neither needs a second. <see cref="ServiceProfile.GrpcPort"/> is <see langword="null"/> for a service with no gRPC
-    /// endpoint, and that null is the assertion that it declares none.
+    /// Persistence and DataServices serve gRPC contracts AND an HTTP/1.1 readiness probe from the SAME
+    /// endpoint, which over TLS is exactly what ALPN is for: <c>Protocols: Http1AndHttp2</c> on the one
+    /// port the map assigns them carries both, and a measured probe confirmed it answers an HTTP/1.1
+    /// <c>GET /health</c> with 200 and a gRPC unary call with HTTP/2 on that single port. Security is
+    /// REST-only and Gateway is the REST ingress, so both declare <c>Http1</c>.
+    /// <see cref="ServiceProfile.ServesGrpc"/> is what selects between the two protocol values, and it is
+    /// <see langword="true"/> for exactly the two services that publish a gRPC contract.
+    /// </para>
+    /// <para>
+    /// A SECOND ENDPOINT PER PROTOCOL VERSION WAS WITHDRAWN, AND THE REASON IS THE PORT MAP RATHER THAN
+    /// THE TRANSPORT. An earlier revision gave Persistence a second listener on 5111 and DataServices one
+    /// on 5112, both <c>Http2</c>-only, so that a listener accepted only what it was for. AAP 0.3.2.2
+    /// assigns contracts C-05..C-08 to port 5101 and C-03/C-04 to port 5102, so a gRPC contract answering
+    /// on 5111 or 5112 answered on a port the AAP never names while the port it does name carried only
+    /// the probe - the assignment, not the diagnostic convenience of one-version-per-port, is what governs.
+    /// The band assertion below therefore admits ONE port per service and nothing else, and 5103 stays
+    /// unallocated (constraint C-D) because nothing was moved into it.
     /// </para>
     /// </remarks>
     private static readonly ServiceProfile[] Services =
@@ -155,7 +167,7 @@ public sealed class ServiceConfigurationCoherenceTests
             DirectoryName: "persistence-service",
             ProjectName: "PowerFramework.Persistence",
             Port: 5101,
-            GrpcPort: 5111,
+            ServesGrpc: true,
             DeclaresListener: true,
             ListenerScheme: Uri.UriSchemeHttps,
             RequiresClientCertificateMode: false),
@@ -164,7 +176,7 @@ public sealed class ServiceConfigurationCoherenceTests
             DirectoryName: "dataservices-service",
             ProjectName: "PowerFramework.DataServices",
             Port: 5102,
-            GrpcPort: 5112,
+            ServesGrpc: true,
             DeclaresListener: true,
             ListenerScheme: Uri.UriSchemeHttps,
             RequiresClientCertificateMode: false),
@@ -173,7 +185,7 @@ public sealed class ServiceConfigurationCoherenceTests
             DirectoryName: "security-service",
             ProjectName: "PowerFramework.Security",
             Port: 5104,
-            GrpcPort: null,
+            ServesGrpc: false,
             DeclaresListener: true,
             ListenerScheme: Uri.UriSchemeHttps,
             RequiresClientCertificateMode: true),
@@ -182,7 +194,7 @@ public sealed class ServiceConfigurationCoherenceTests
             DirectoryName: "gateway-service",
             ProjectName: "PowerFramework.Gateway",
             Port: 5105,
-            GrpcPort: null,
+            ServesGrpc: false,
             DeclaresListener: true,
             ListenerScheme: Uri.UriSchemeHttps,
             RequiresClientCertificateMode: false),
@@ -198,10 +210,12 @@ public sealed class ServiceConfigurationCoherenceTests
     /// </remarks>
     private static readonly CallerAddress[] CallerAddresses =
     [
-        // The two gRPC call edges name the HTTP/2 endpoint; every other address names the REST one.
-        // Getting this the wrong way round is the exact defect this table exists to catch: a gRPC
-        // channel pointed at the HTTP/1.1 endpoint fails during transport negotiation before reaching a
-        // method, and a readiness probe pointed at the HTTP/2 endpoint receives 400 forever.
+        // The two gRPC call edges are marked as such, and every other address names a REST surface. Both
+        // kinds resolve to the SAME port now that each service binds one endpoint carrying both protocol
+        // versions, so the distinction no longer selects a port - it asserts that a gRPC edge names a
+        // service that actually publishes a gRPC contract. That is still worth keeping separately: an
+        // address moved onto Security or Gateway, neither of which serves gRPC, would otherwise look
+        // well-formed here and fail only at the first call.
         new("gateway", BaseSettingsFileName, "Gateway:Upstreams:DataServices", "dataservices", TargetEndpoint.Grpc),
         new("gateway", BaseSettingsFileName, "Gateway:Upstreams:Security", "security", TargetEndpoint.Rest),
         new("gateway", BaseSettingsFileName, "Gateway:HealthProbes:Persistence", "persistence", TargetEndpoint.Rest),
@@ -244,8 +258,8 @@ public sealed class ServiceConfigurationCoherenceTests
     ];
 
     /// <summary>
-    /// The complete authoritative leaf set of the <c>Security</c> section - twenty-two entries, no
-    /// twenty-third.
+    /// The complete authoritative leaf set of the <c>Security</c> section - twenty entries, no
+    /// twenty-first.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -272,6 +286,16 @@ public sealed class ServiceConfigurationCoherenceTests
     /// of them are read by the options type and documented in the orchestration template, which is what
     /// qualifies a leaf as authoritative.
     /// </para>
+    /// <para>
+    /// IT ALSO SHRANK, FROM TWENTY-TWO, AND THAT DIRECTION IS THE MORE INTERESTING ONE. The roster
+    /// entries once carried <c>Audiences</c> and <c>Scopes</c> members of their own, so the same
+    /// permission was declarable in two places: the grant matrix, which the issuer consults on every
+    /// request, and the roster entry, which NOTHING read once the matrix existed. A settings file
+    /// declaring both invites an operator to tighten the half that decides nothing. Both members were
+    /// therefore removed from the options type outright rather than cross-checked, and their leaves left
+    /// this list with them - which is exactly the ORPHANED direction of this assertion working as
+    /// intended, since a key no options type binds is a key an operator cannot discover is inert.
+    /// </para>
     /// </remarks>
     private static readonly string[] AuthoritativeSecurityLeafPaths =
     [
@@ -292,22 +316,19 @@ public sealed class ServiceConfigurationCoherenceTests
         "Security:TokenLifetime",
         "Security:SigningAlgorithm",
 
-        // THE TWO SIGNING-KEY POLICY LEAVES ARE AUTHORITATIVE BECAUSE THEY ARE ENFORCED, WHICH IS THE
-        // ONLY TEST THAT QUALIFIES A LEAF. An earlier reading held that both were dead by construction
-        // and asserted their ABSENCE here; that is no longer true of this service and the assertion would
-        // now hide two live screens. Each is bound and each refuses a host:
-        //   * SigningKeyFormat is compared against the recognised set by SecurityOptionsValidator's
-        //     signing-material check [Configuration/SecurityOptions.cs:1705], so a deployment naming a
-        //     format this service cannot import fails the BRING-UP rather than the first issuance.
-        //   * SigningKeyMinimumSizeBits is a floor the same check applies to the imported modulus
-        //     [Configuration/SecurityOptions.cs:1745] and SigningKeyProvider re-applies when it acquires
-        //     the key [Tokens/SigningKeyProvider.cs:553]. It is NOT a silent legacy correction: the
-        //     legacy catalogue keeps 1024-bit RSA a first-class CRYPTO-OPERATION size and this service's
-        //     crypto surface still accepts it, while this leaf governs only the ISSUER'S OWN signing
-        //     input - a net-new boundary with no legacy behaviour to preserve. Its default is stated in
-        //     the settings file so an operator can see and lower it deliberately.
+        // ONE SIGNING-KEY POLICY LEAF, AND IT IS AUTHORITATIVE BECAUSE IT IS ENFORCED - which is the
+        // only test that qualifies a leaf. SigningKeyFormat is compared against the recognised set by
+        // SecurityOptionsValidator's signing-material check, so a deployment naming a format this service
+        // cannot import fails the BRING-UP rather than the first issuance.
+        //
+        // THERE IS DELIBERATELY NO SigningKeyMinimumSizeBits LEAF TO DECLARE. An intermediate revision
+        // carried one, defaulted it to 2048 and refused a shorter modulus at startup. AAP 0.6.6.4 keeps
+        // 1024-bit RSA a legal size across this estate and C-B forbids correcting a weak legacy default
+        // rather than annotating it, so the setting, its bounds and its rejection are withdrawn: the
+        // modulus is measured in Tokens/SigningKeyProvider, published on SigningKeySizeBits, compared
+        // against the CONSTANT SecurityOptions.LegacyWeakSigningKeySizeBits for the annotation alone, and
+        // never refused. A constant is not a configuration leaf, so nothing belongs in this list for it.
         "Security:SigningKeyFormat",
-        "Security:SigningKeyMinimumSizeBits",
 
         "Security:SigningKeyId",
         "Security:TokenEndpointPath",
@@ -345,10 +366,16 @@ public sealed class ServiceConfigurationCoherenceTests
         // above, so the two cannot disagree about who is authorised. Four member-level entries because the
         // roster is an array of objects; `SecretConfigurationKey` is a KEY NAME and never a secret, which
         // is what keeps the roster declarable in a settings file at all (constraint C-F).
+        // THE CREDENTIAL DIRECTORY, AND EXACTLY TWO MEMBERS OF IT. `Security:Clients` answers who may
+        // AUTHENTICATE at the issuance edge and under which secret key name; what an authenticated identity
+        // may REQUEST is stated once, in the grant matrix above. The `:Audiences` and `:Scopes` members that
+        // used to be listed here were bound, frozen onto the resolved roster entry, and consulted by
+        // NOTHING - so they advertised permissions the matrix withholds, and an operator editing them
+        // changed nothing at all. Their absence from this list is now enforced twice over: a settings file
+        // declaring either fails this row, and a host started with either present in configuration refuses
+        // to start by name (IssuanceRosterAuthority).
         "Security:Clients:*:Subject",
         "Security:Clients:*:SecretConfigurationKey",
-        "Security:Clients:*:Audiences",
-        "Security:Clients:*:Scopes",
 
         // AND NOTHING FOR `Security:Callers`, WHICH IS AN ABSENCE WITH A REASON RATHER THAN AN OMISSION.
         // That key is the NESTED authoring shape for the same grant matrix - each caller's grants under
@@ -472,6 +499,22 @@ public sealed class ServiceConfigurationCoherenceTests
         // for want of a key rather than on its merits.
         "InternalTls:TrustedCaPath",
 
+        // THE SCHEMA-PROVISIONING SWITCH, DECLARED HERE AND FALSE, WHICH IS THE OPPOSITE OF WHAT THE
+        // ORCHESTRATION TEMPLATE SETS. That divergence is the design and not a drift: the CODE default is
+        // opted out, so every deployment and every service-level test that does not set it behaves exactly
+        // as it did before the switch existed, and the manifest is the single visible place the stack opts
+        // in - which is what makes the one documented bring-up command sufficient on a fresh volume. What
+        // it buys there is the whole of the readiness chain: this service's probe reports the storage
+        // engine's real state, so on a fresh persistence-db volume an unprovisioned database never becomes
+        // ready and the health condition holds DataServices and Gateway behind it for ever.
+        //
+        // It is declared rather than left to the code default because it is the one setting that decides
+        // WHO OWNS THE SCHEMA, and an operator cannot audit that from anywhere but this file. It is also
+        // deliberately NOT a member of the Sqlite section: that group is the evidenced connection-URI
+        // grammar and its member set is pinned by Persistence's own suite precisely so a runtime concern
+        // with no place in the URI cannot be added to it.
+        "Schema:ApplyMigrationsOnStartup",
+
         // THE DATA-OBJECT DEFINITIONS A CALLER MAY NAME BY NAME. In the legacy, assigning a name loads a
         // compiled DataWindow out of the target's library list; the `.srd` objects live in the read-only
         // legacy tree and no managed runtime can load one, so what a name resolves TO is a deployment fact.
@@ -581,22 +624,27 @@ public sealed class ServiceConfigurationCoherenceTests
     // ----------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Asserts that a listening service declares exactly the endpoints its profile records - one per
-    /// protocol version - each on its assigned port, on the scheme the port map records, and each
-    /// naming a SINGLE protocol version.
+    /// Asserts that a listening service declares exactly ONE endpoint, on the port the map assigns it,
+    /// on the scheme the port map records, naming the protocol value its contract surface needs.
     /// </summary>
     /// <param name="serviceKey">The service under test.</param>
     /// <remarks>
     /// <para>
-    /// THE SINGLE-VERSION ASSERTION IS THE POINT OF THIS TEST, NOT A DETAIL. Over TLS an endpoint COULD
-    /// negotiate both versions by ALPN, and each is pinned to one anyway: a listener that accepts only
-    /// what it is for cannot be misaddressed silently, so naming 5111 or 5112 with an HTTP/1.1 client
-    /// fails at negotiation instead of arriving at the wrong surface and answering. Requiring
-    /// <c>Http1</c> on the REST endpoint and <c>Http2</c> on the gRPC endpoint is what keeps that
-    /// property. It also forecloses a regression that a CLEARTEXT estate made unavoidable and this one
-    /// merely makes silent: on cleartext, <c>Http1AndHttp2</c> does not mean "both" - Kestrel disables
-    /// HTTP/2 and logs "HTTP/2 is not enabled ... TLS is not enabled" - so any drift back to a plaintext
-    /// url would take every gRPC call with it.
+    /// ONE ENDPOINT PER SERVICE IS THE POINT OF THIS TEST, AND THE PROTOCOL VALUE IS HOW A SINGLE PORT
+    /// CARRIES TWO SURFACES. Over TLS, <c>Http1AndHttp2</c> genuinely means both: ALPN selects the version
+    /// during the handshake, so one listener answers an HTTP/1.1 <c>GET /health</c> AND a gRPC unary call.
+    /// A measured probe confirmed exactly that on a single TLS port before this assertion was written to
+    /// expect it. Requiring <c>Http1AndHttp2</c> of the two gRPC-serving services and <c>Http1</c> of the
+    /// two REST-only ones is what keeps the assignment of AAP 0.3.2.2 - contracts C-05..C-08 on 5101 and
+    /// C-03/C-04 on 5102 - true of the listener rather than only of the documentation.
+    /// </para>
+    /// <para>
+    /// THE TLS REQUIREMENT IS LOAD-BEARING HERE, WHICH IS WHY THE SCHEME IS ASSERTED IN THE SAME PLACE.
+    /// On CLEARTEXT, <c>Http1AndHttp2</c> does NOT mean both: Kestrel disables HTTP/2 and logs "HTTP/2 is
+    /// not enabled ... TLS is not enabled", so a drift back to a plaintext url would silently take every
+    /// gRPC call with it while <c>/health</c> kept answering 200 and this file kept reading as correct.
+    /// The sibling row below independently forbids any port other than the assigned one, so a regression
+    /// that re-added a second protocol-specific listener fails there too.
     /// </para>
     /// </remarks>
     [Theory]
@@ -607,14 +655,13 @@ public sealed class ServiceConfigurationCoherenceTests
         JsonObject settings = LoadSettings(service, BaseSettingsFileName);
         JsonObject endpoints = RequireEndpoints(service, settings);
 
-        Assert.Equal(service.GrpcPort is null ? 1 : 2, endpoints.Count);
+        Assert.Single(endpoints);
 
-        AssertEndpoint(service, endpoints, service.Port, "Http1");
-
-        if (service.GrpcPort is int grpcPort)
-        {
-            AssertEndpoint(service, endpoints, grpcPort, "Http2");
-        }
+        AssertEndpoint(
+            service,
+            endpoints,
+            service.Port,
+            service.ServesGrpc ? "Http1AndHttp2" : "Http1");
     }
 
     /// <summary>
@@ -672,6 +719,88 @@ public sealed class ServiceConfigurationCoherenceTests
     }
 
     /// <summary>
+    /// Asserts that EVERY declared listener - in the base file and in the development overlay alike -
+    /// binds the wildcard host, and never a loopback one.
+    /// </summary>
+    /// <param name="serviceKey">The service under test.</param>
+    /// <remarks>
+    /// <para>
+    /// 🔴 WHAT WENT WRONG, AND WHY EVERY EXISTING ROW MISSED IT. Gateway's development overlay bound
+    /// <c>https://localhost:5105</c> while its base file bound <c>https://+:5105</c>. The row above reads
+    /// only endpoint NAMES, and the rows before it read only the base file, so the estate's single
+    /// deployment-breaking listener passed every assertion in this file.
+    /// </para>
+    /// <para>
+    /// A CONTAINER'S LOOPBACK INTERFACE IS NOT THE HOST'S, which is what makes this a deployment failure
+    /// rather than a preference. Bound to <c>localhost</c> the process is reachable from inside its own
+    /// container and from nowhere else, so a published port forwards to an address that refuses the
+    /// connection - and the estate's documented environment selection for a local stack is
+    /// <c>Development</c>, so the overlay is the file that decides.
+    /// </para>
+    /// <para>
+    /// THE FAILURE IS SILENT, WHICH IS WHY IT NEEDS A TEST RATHER THAN A COMMENT. Every image HEALTHCHECK
+    /// connects to <c>127.0.0.1</c> - the one interface a loopback binding still serves - so the container
+    /// reports healthy, the <c>depends_on: service_healthy</c> chain opens on it, <c>docker compose ps</c>
+    /// shows a fully healthy stack, and only an external client discovers that nothing is listening. No
+    /// existing gate could see it: not the port map, not the protocol rows, not the container probe.
+    /// </para>
+    /// <para>
+    /// THE WILDCARD IS THE RULE FOR A SETTINGS FILE BECAUSE A SETTINGS FILE SHIPS INSIDE AN IMAGE. A
+    /// developer wanting the loopback narrowing for a host-side run states it on that run -
+    /// <c>ASPNETCORE_URLS</c> or <c>dotnet run --urls</c> - which is scoped to the run and cannot travel
+    /// into a container. The scheme, port and protocol are asserted by the rows above; this row asserts
+    /// only the host, so a failure here names exactly one fault.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(ListeningServiceKeys))]
+    public void EveryDeclaredListenerBindsTheWildcardHostInEveryEnvironment(string serviceKey)
+    {
+        ServiceProfile service = RequireService(serviceKey);
+        List<string> failures = [];
+
+        foreach (string fileName in new[] { BaseSettingsFileName, DevelopmentSettingsFileName })
+        {
+            if (FindNode(LoadSettings(service, fileName), "Kestrel:Endpoints") is not JsonObject endpoints)
+            {
+                // No listener declared in this file: it inherits the one the base file declares, which is
+                // the other correct answer and cannot carry the defect.
+                continue;
+            }
+
+            foreach ((string name, JsonNode? endpoint) in endpoints)
+            {
+                if (endpoint is not JsonObject declared
+                    || declared["Url"]?.GetValue<string>() is not string url)
+                {
+                    continue;
+                }
+
+                // The authority is read textually rather than through Uri, because '+' is not a legal host
+                // in an absolute URI and Uri.TryCreate rejects the very value this row requires.
+                int schemeEnd = url.IndexOf("://", StringComparison.Ordinal);
+                string authority = schemeEnd < 0 ? url : url[(schemeEnd + 3)..];
+                string host = authority.Split(':', 2)[0];
+
+                if (string.Equals(host, "+", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                failures.Add(
+                    $"{service.ProjectName}/{fileName} binds 'Kestrel:Endpoints:{name}:Url' to host "
+                        + $"'{host}' rather than the wildcard '+'. Inside a container that address serves "
+                        + "the container's own loopback interface only, so a published port forwards to an "
+                        + "address that refuses the connection - and the image HEALTHCHECK connects to "
+                        + "127.0.0.1, so the container still reports healthy and the readiness chain still "
+                        + "opens. Bind '+' here and narrow a host-side run with ASPNETCORE_URLS instead.");
+            }
+        }
+
+        Assert.Empty(failures);
+    }
+
+    /// <summary>
     /// Asserts that no declared listener and no caller address names a port outside the documented
     /// band, and that none names the port reserved for the deferred Phase-2 service.
     /// </summary>
@@ -718,24 +847,26 @@ public sealed class ServiceConfigurationCoherenceTests
     }
 
     /// <summary>
-    /// Asserts that every declared listener names either the port the map documents for its service or
-    /// that service's own gRPC port, that none names the port reserved for the deferred Phase-2 service,
-    /// and that no gRPC port falls inside the documented band.
+    /// Asserts that every declared listener names exactly the one port the map documents for its service,
+    /// that none names the port reserved for the deferred Phase-2 service, and that every documented port
+    /// sits inside the band the attached environment fixes.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THE RULE IS "EXACTLY THE TWO PORTS THIS SERVICE OWNS", WHICH IS STRICTER THAN A BAND CHECK. An
+    /// THE RULE IS "EXACTLY THE ONE PORT THIS SERVICE OWNS", WHICH IS STRICTER THAN A BAND CHECK. An
     /// earlier form of this test asserted only that every listener sat inside the documented
     /// 5101-5105 band; that admitted a service binding a SIBLING'S port, which is a collision the band
     /// alone cannot see.
     /// </para>
     /// <para>
-    /// A gRPC port is required to sit OUTSIDE the documented band, and that is the point of the second
-    /// assertion rather than an exemption from the first. The band is the set of addresses the attached
-    /// environment fixes for <c>/health</c> and <c>/v1/ping</c>, and its only spare slot is the reserved
-    /// Phase-2 one; a gRPC endpoint placed inside it would either collide with a documented address or
-    /// consume the reserved slot. Placing it outside keeps every documented address exactly where the
-    /// environment put it (constraint C-L) and leaves 5103 unallocated (constraint C-D).
+    /// IT IS ALSO WHAT FORBIDS THE WITHDRAWN SECOND LISTENER FROM RETURNING. A revision before this one
+    /// gave the two gRPC-serving services an extra <c>Http2</c>-only endpoint on 5111 and 5112, chosen to
+    /// sit outside the band so that neither collided with a documented address nor consumed the reserved
+    /// slot. It was withdrawn because AAP 0.3.2.2 assigns C-05..C-08 to 5101 and C-03/C-04 to 5102, and a
+    /// contract answering on a port the AAP does not name is not on the port the AAP assigns it. With the
+    /// two surfaces collapsed onto one <c>Http1AndHttp2</c> endpoint each, "the service's documented port"
+    /// is the ONLY admissible port, every documented address stays exactly where the environment put it
+    /// (constraint C-L), and 5103 remains unallocated (constraint C-D) because nothing moved into it.
     /// </para>
     /// </remarks>
     [Fact]
@@ -758,12 +889,12 @@ public sealed class ServiceConfigurationCoherenceTests
                 string url = RequireString(endpoint, "Url", service, $"Kestrel:Endpoints:{name}:Url");
                 int port = ParseListenerPort(url, service, $"Kestrel:Endpoints:{name}:Url");
 
-                if (port != service.Port && port != service.GrpcPort)
+                if (port != service.Port)
                 {
                     failures.Add(
                         $"{service.ProjectName} declares 'Kestrel:Endpoints:{name}:Url' on port {port}, "
-                            + $"which is neither its documented port {service.Port} nor its gRPC port "
-                            + $"{service.GrpcPort?.ToString(CultureInfo.InvariantCulture) ?? "(none)"}.");
+                            + $"which is not the port {service.Port} the map assigns it. Every service "
+                            + "binds exactly one endpoint, on its own documented port.");
                 }
 
                 if (port == ReservedPhaseTwoPort)
@@ -782,14 +913,6 @@ public sealed class ServiceConfigurationCoherenceTests
                         + "fixes.");
             }
 
-            if (service.GrpcPort is int grpcPort
-                && grpcPort is >= LowestDocumentedPort and <= HighestDocumentedPort)
-            {
-                failures.Add(
-                    $"{service.ProjectName}'s gRPC port {grpcPort} falls INSIDE the "
-                        + $"{LowestDocumentedPort}-{HighestDocumentedPort} band, whose only spare slot is "
-                        + $"the reserved {ReservedPhaseTwoPort}.");
-            }
         }
 
         Assert.Empty(failures);
@@ -808,10 +931,11 @@ public sealed class ServiceConfigurationCoherenceTests
     /// <param name="keyPath">Configuration key path of the address.</param>
     /// <param name="targetKey">Service the address is expected to reach.</param>
     /// <param name="namesGrpcEndpoint">
-    /// Whether the address must name the target's HTTP/2 gRPC endpoint rather than its HTTP/1.1 REST
-    /// one. A gRPC channel pointed at the REST endpoint fails during transport negotiation, and a
-    /// readiness probe pointed at the gRPC endpoint receives 400 forever, so the two are asserted
-    /// separately rather than treated as one address per service.
+    /// Whether the address is a gRPC call edge rather than a REST one. Both now resolve to the SAME port,
+    /// because each service binds one <c>Http1AndHttp2</c> endpoint carrying both surfaces - so this flag
+    /// no longer selects a port. It asserts instead that a gRPC edge names a service that actually
+    /// publishes a gRPC contract: an address repointed at Security or Gateway, neither of which serves
+    /// one, would otherwise look well-formed and fail only at the first call.
     /// </param>
     [Theory]
     [MemberData(nameof(AllCallerAddresses))]
@@ -834,14 +958,15 @@ public sealed class ServiceConfigurationCoherenceTests
                 + "not quoted here because an address key is exactly where a credential-bearing value "
                 + "would hide.");
 
-        int expectedPort = namesGrpcEndpoint
-            ? target.GrpcPort ?? throw FailException.ForFailure(
+        if (namesGrpcEndpoint && !target.ServesGrpc)
+        {
+            throw FailException.ForFailure(
                 $"{caller.ProjectName}/{fileName} key '{keyPath}' is declared as a gRPC edge, but "
-                    + $"{target.ProjectName} declares no gRPC endpoint.")
-            : target.Port;
+                    + $"{target.ProjectName} publishes no gRPC contract.");
+        }
 
         Assert.Equal(target.ListenerScheme, parsed.Scheme);
-        Assert.Equal(expectedPort, parsed.Port);
+        Assert.Equal(target.Port, parsed.Port);
         Assert.Equal(string.Empty, parsed.UserInfo);
     }
 
@@ -1281,6 +1406,363 @@ public sealed class ServiceConfigurationCoherenceTests
         Assert.Empty(failures);
     }
 
+    /// <summary>
+    /// No listener in any settings file binds a loopback-only host, in any environment.
+    /// </summary>
+    /// <param name="serviceKey">The service under test.</param>
+    /// <param name="fileName">The settings file under test.</param>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THIS GUARD EXISTS BECAUSE THE DEFECT HAPPENED, AND NOTHING REPORTED IT. Gateway's
+    /// <c>appsettings.Development.json</c> declared <c>https://localhost:5105</c> - narrowed from the
+    /// base file's <c>https://+:5105</c> on the reasoning that <c>localhost</c> "restricts a developer's
+    /// run to the loopback interface". True for a host <c>dotnet run</c>, and wrong here, because
+    /// <c>orchestration/.env.example</c> sets <c>ASPNETCORE_ENVIRONMENT=Development</c> and a Compose
+    /// environment value wins over the image <c>ENV</c> - so THE DOCUMENTED CONTAINER BRING-UP SELECTS
+    /// THIS OVERLAY.
+    /// </para>
+    /// <para>
+    /// Inside a container <c>localhost</c> binds the container's own loopback only, while Docker's
+    /// published-port forwarding arrives on its <c>eth0</c> address. Measured: <c>curl</c> and
+    /// <c>openssl</c> from the host both failed the TLS handshake on 5105 while 5101, 5102 and 5104
+    /// answered 200. AND THE SERVICE STILL REPORTED HEALTHY, because its own HEALTHCHECK connects to
+    /// <c>127.0.0.1</c> from inside the container - so Compose showed four healthy services,
+    /// <c>depends_on</c> opened, and the unreachable surface was the INGRESS every end-to-end workflow
+    /// enters through.
+    /// </para>
+    /// <para>
+    /// A runtime probe would have caught it and no static test did, which is exactly why this one is
+    /// static: it runs in a clean checkout with nothing up, and it fails on the authored text rather
+    /// than on a bring-up somebody has to remember to perform.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(AllSettingsFiles))]
+    public void NoListenerBindsALoopbackOnlyHost(string serviceKey, string fileName)
+    {
+        ServiceProfile service = RequireService(serviceKey);
+
+        if (FindNode(LoadSettings(service, fileName), "Kestrel:Endpoints") is not JsonObject endpoints)
+        {
+            // No override in this file is a legitimate state - the base file's listener stands.
+            return;
+        }
+
+        foreach ((string name, JsonNode? endpoint) in endpoints)
+        {
+            string? url = (endpoint as JsonObject)?["Url"]?.GetValue<string>();
+
+            if (url is null)
+            {
+                continue;
+            }
+
+            // ORDINAL AND CASE-INSENSITIVE ON THE HOST ONLY. The three spellings below are the ones
+            // Kestrel treats as loopback-only; `+` and `*` bind every interface and are what a
+            // container needs. A named host that resolves to a loopback address is not detectable from
+            // text and is out of this assertion's reach - stated so the bound is not overclaimed.
+            foreach (string loopback in (string[])["//localhost:", "//127.0.0.1:", "//[::1]:"])
+            {
+                Assert.False(
+                    url.Contains(loopback, StringComparison.OrdinalIgnoreCase),
+                    $"{service.ProjectName}/{fileName} binds endpoint '{name}' to a loopback-only host "
+                        + $"('{url}'). Inside a container that binds the container's own loopback, while "
+                        + "Docker's published-port forwarding arrives on its eth0 address - so the "
+                        + "service is unreachable from the host WHILE ITS OWN HEALTHCHECK, which "
+                        + "connects to 127.0.0.1 inside the container, still reports healthy. Use '+' "
+                        + "so every interface is bound; a host run on '+' still serves loopback.");
+            }
+        }
+    }
+
+    // ==============================================================================================
+    //  7. THE EXTERNAL INGRESS GRANT - THE ONE GRANT AN OPERATOR PROVISIONS BY HAND
+    //
+    //  🔴 THE DEFECT THESE THREE ASSERTIONS CLOSE. Gateway is the ingress: nothing inside the system
+    //  calls it, so Security's shipped matrix pre-grants NO caller the gateway audience and out of the
+    //  box every authenticated gateway route answers 401 to every credential the issuer will mint. That
+    //  is fail-closed on purpose. Opening it is therefore a deployment act, and the guidance for it used
+    //  to say the grant's scope list "may be anything the deployment finds useful for its own auditing,
+    //  INCLUDING a single placeholder, because the gateway itself requires no scope".
+    //
+    //  IT DOES REQUIRE SCOPES - three of them - so following that guidance produced a token that MINTED
+    //  SUCCESSFULLY and was then refused 403 on every route it could reach. Issuance intersects the
+    //  requested scopes with the grant and reports the overlap, and a NARROWING IS A SUCCESS, so nothing
+    //  refuses at provisioning time: the whole cost lands at the boundary, three layers from the cause.
+    //
+    //  THE GRANT IS STATED IN EXACTLY ONE ARTIFACT, AND THAT IS THE FIX RATHER THAN A GAP. It used to be
+    //  stated in three - Security's Development overlay, the orchestration template and the Compose
+    //  manifest - and the manifest's injection was withdrawn for three reasons its own comment records:
+    //  in Development it duplicated the overlay, which already ships the grant AND the credential entry
+    //  the caller needs to authenticate for it; in Production it granted a permission no credential
+    //  could exercise; and it made the literal index 3 load-bearing across two files, so a fourth row
+    //  legitimately added to the settings file would have been merged INTO the injected one rather than
+    //  appended, because the configuration provider merges an array BY INDEX. What follows asserts the
+    //  single statement is correct, that neither of the other two artifacts restates it, and that both
+    //  say where it lives - so the guidance cannot go stale again silently.
+    // ==============================================================================================
+
+    /// <summary>The one external caller the repository provisions a grant for.</summary>
+    private const string IngressGrantCaller = "pfw-e2e-suite";
+
+    /// <summary>The audience that grant addresses: Gateway, the sole ingress.</summary>
+    private const string IngressGrantAudience = "powerframework-gateway";
+
+    /// <summary>
+    /// The published external-ingress grant is stated in Security's Development overlay and in NO other
+    /// roster artifact, and both of the others say where it is.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ONE ARTIFACT STATES THE GRANT, AND AN OPERATOR IS TOLD WHICH. The overlay is what a local
+    /// <c>dotnet run</c> reads and what the Compose bring-up selects, and it is also where the caller's
+    /// CREDENTIAL is registered - so the grant and the thing that authenticates for it live in one file
+    /// and cannot drift apart. A second statement of it in the template or the manifest would be a
+    /// grant with two owners, which is the hardest kind of configuration defect to attribute.
+    /// </para>
+    /// <para>
+    /// THE INDEX IS ASSERTED TOO, NOT ONLY THE VALUES, and it is also why the second statement had to
+    /// go. The configuration provider merges an array BY INDEX rather than by appending: Security's base
+    /// file occupies <c>CallerAuthorizations</c> 0, 1 and 2, so this grant is element 3. An environment
+    /// injection at that same index made the literal 3 load-bearing across two files - a fourth row
+    /// legitimately added to the settings file would have been merged INTO the injected one, producing a
+    /// HYBRID row with the row count unchanged and nothing refused at startup.
+    /// </para>
+    /// <para>
+    /// THE NEGATIVE HALF READS DECLARATIONS AND NOT MENTIONS. Both the template and the manifest discuss
+    /// the withdrawn keys at length, which is the documentation this test wants to keep; what neither may
+    /// carry is a LIVE declaration of them. So the template is read line by line for an uncommented
+    /// assignment and the manifest for an uncommented mapping key.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheExternalIngressGrantIsStatedOnceAndTheOtherRosterArtifactsSayWhereItIs()
+    {
+        const int GrantIndex = 3;
+
+        // 1. SECURITY'S DEVELOPMENT OVERLAY - the settings shape.
+        JsonArray overlay = LoadSettings(RequireService("security"), DevelopmentSettingsFileName)
+            ["Security"]?["CallerAuthorizations"] as JsonArray
+            ?? throw FailException.ForFailure(
+                "Security's Development overlay declares no 'Security:CallerAuthorizations' array, so the "
+                    + "external ingress grant this repository documents is not published anywhere a local "
+                    + "run would read it.");
+
+        Assert.True(
+            overlay.Count > GrantIndex,
+            $"Security's Development overlay declares {overlay.Count} caller authorizations, so index "
+                + $"{GrantIndex} - the index every artifact agrees the ingress grant occupies - is absent.");
+
+        JsonNode grant = overlay[GrantIndex]
+            ?? throw FailException.ForFailure(
+                $"Security's Development overlay has a null element at CallerAuthorizations[{GrantIndex}].");
+
+        Assert.Equal(IngressGrantCaller, grant["Caller"]?.GetValue<string>());
+        Assert.Equal(IngressGrantAudience, grant["Audience"]?.GetValue<string>());
+
+        string[] overlayScopes =
+        [
+            .. (grant["Scopes"] as JsonArray ?? []).Select(static scope => scope!.GetValue<string>()),
+        ];
+
+        Assert.Equal(GatewayContractTests.PublishedRequiredScopes.Length - 1, overlayScopes.Length);
+
+        Assert.Equal(
+            [.. GatewayContractTests.PublishedRequiredScopes
+                .Where(static scope => !string.Equals(
+                    scope,
+                    GatewayContractTests.NoScopeRequiredSentinel,
+                    StringComparison.Ordinal))],
+            overlayScopes);
+
+        // 2. THE ORCHESTRATION TEMPLATE AND 3. THE COMPOSE MANIFEST - neither DECLARES the keys, and
+        //    both explain the grant instead. A commented mention is the documentation; an uncommented
+        //    declaration is the second owner this test exists to forbid.
+        string templatePath = Path.Combine(RequireOrchestrationDirectory(), ".env.example");
+        string manifestPath = Path.Combine(RequireOrchestrationDirectory(), "docker-compose.yml");
+        string template = File.ReadAllText(templatePath);
+        string manifest = File.ReadAllText(manifestPath);
+
+        string prefix = $"Security__CallerAuthorizations__{GrantIndex}__";
+
+        foreach ((string path, string text) in ((string, string)[])
+            [
+                (".env.example", template),
+                ("docker-compose.yml", manifest),
+            ])
+        {
+            string[] declarations =
+            [
+                .. text.Split('\n')
+                    .Select(static line => line.TrimStart())
+                    .Where(line => !line.StartsWith('#') && line.Contains(prefix, StringComparison.Ordinal)),
+            ];
+
+            Assert.True(
+                declarations.Length == 0,
+                $"orchestration/{path} DECLARES the external ingress grant:{Environment.NewLine}"
+                    + string.Join(Environment.NewLine, declarations)
+                    + $"{Environment.NewLine}The grant is stated once, in Security's "
+                    + "appsettings.Development.json, beside the credential entry the caller "
+                    + "authenticates with. A second declaration at the same array index makes the literal "
+                    + $"{GrantIndex} load-bearing across two files: the configuration provider merges an "
+                    + "array by index, so a fourth row added to the settings file would be merged into "
+                    + "this one instead of appended.");
+
+            // AND THE ARTIFACT SAYS WHERE THE GRANT IS, so its absence reads as a decision rather than
+            // as an oversight to be corrected by re-adding it.
+            Assert.Contains(prefix, text, StringComparison.Ordinal);
+            Assert.Contains("Development", text, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// Every scope the ingress grant carries is a scope Gateway's routes actually enforce, and the grant
+    /// carries all of them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE ENFORCED SET IS READ OUT OF THE ROUTES, NOT RESTATED HERE. Each Gateway endpoint file declares
+    /// its own <c>RequiredScope</c> constant and the composition root registers a policy under that exact
+    /// name, so those three literals are the authority. Restating them in this test would make a rename
+    /// invisible - the grant would keep matching the copy while the routes moved on.
+    /// </para>
+    /// <para>
+    /// AND THE CONTRACT IS HELD TO THE SAME SET. <c>gateway.v1.yaml</c> now publishes the requirement per
+    /// operation as <c>x-required-scope</c>; asserting the document, the grant and the code together is
+    /// what makes the published contract usable for provisioning rather than merely accurate.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void EveryScopeTheIngressGrantCarriesIsAScopeGatewayEnforces()
+    {
+        string[] enforced =
+        [
+            .. new[]
+            {
+                ("PingEndpoints.cs", "ping"),
+                ("CapabilityEndpoints.cs", "capabilities"),
+                ("DataServicesProxyEndpoints.cs", "datawindow"),
+            }.Select(entry => ReadRequiredScopeConstant(entry.Item1)),
+        ];
+
+        JsonArray overlay = (JsonArray)LoadSettings(
+            RequireService("security"),
+            DevelopmentSettingsFileName)["Security"]!["CallerAuthorizations"]!;
+
+        string[] granted =
+        [
+            .. (overlay[3]!["Scopes"] as JsonArray ?? []).Select(static scope => scope!.GetValue<string>()),
+        ];
+
+        Assert.Equal(
+            enforced.Order(StringComparer.Ordinal),
+            granted.Order(StringComparer.Ordinal));
+
+        // AND THE PUBLISHED DOCUMENT'S CLOSED SET IS THE SAME THREE, plus its no-requirement sentinel.
+        Assert.Equal(
+            GatewayContractTests.PublishedRequiredScopes
+                .Where(static scope =>
+                    !string.Equals(
+                        scope,
+                        GatewayContractTests.NoScopeRequiredSentinel,
+                        StringComparison.Ordinal))
+                .Order(StringComparer.Ordinal),
+            enforced.Order(StringComparer.Ordinal));
+
+        // The sentinel must not collide with a real scope, or "no requirement" would read as a grant.
+        Assert.DoesNotContain(
+            GatewayContractTests.NoScopeRequiredSentinel,
+            enforced,
+            StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// No settings file tells an operator that an arbitrary or placeholder scope will do for the ingress
+    /// grant, and the orchestration template names the three real scopes instead.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 A PROSE ASSERTION OVER A COMMENT, WHICH NEEDS DEFENDING AND EARNS IT. The retired sentence was
+    /// not decoration: it was the instruction an operator followed, and following it produced a token
+    /// that minted and was then refused everywhere. A comment that misinstructs is a defect with the same
+    /// cost as a wrong value and none of the visibility, so the retired wording is pinned as absent and
+    /// the corrective wording as present. The check is deliberately narrow - it looks for the phrase that
+    /// did the damage, not for the word "placeholder", which appears legitimately elsewhere.
+    /// </remarks>
+    [Fact]
+    public void NoSettingsFileOffersAPlaceholderScopeAsSufficientForTheIngress()
+    {
+        string[] retiredClaims =
+        [
+            "INCLUDING a single placeholder",
+            "the gateway itself requires no scope",
+        ];
+
+        List<string> failures = [];
+
+        foreach (ServiceProfile service in Services)
+        {
+            foreach (string fileName in (string[])[BaseSettingsFileName, DevelopmentSettingsFileName])
+            {
+                string path = Path.Combine(
+                    RequireServicesDirectory(),
+                    service.DirectoryName,
+                    service.ProjectName,
+                    fileName);
+
+                if (!File.Exists(path))
+                {
+                    continue;
+                }
+
+                string text = File.ReadAllText(path);
+
+                failures.AddRange(
+                    retiredClaims
+                        .Where(claim => text.Contains(claim, StringComparison.Ordinal))
+                        .Select(claim =>
+                            $"{service.ProjectName}/{fileName} still says \"{claim}\". Gateway enforces "
+                                + "ping, capabilities and datawindow per route, so a grant carrying "
+                                + "anything else authenticates and is then refused 403 on every route it "
+                                + "reaches."));
+            }
+        }
+
+        Assert.Empty(failures);
+
+        // AND THE REPLACEMENT IS PRESENT, so the guidance was corrected rather than merely deleted.
+        //
+        // IT LIVES IN THE OPERATOR-FACING TEMPLATE RATHER THAN IN A SETTINGS FILE, and that is a
+        // constraint rather than a preference: all four of Security's and Persistence's settings files
+        // are STRICT JSON with no comment lines, so prose cannot live in them at all, and
+        // orchestration/.env.example is the artifact an operator actually reads while provisioning a
+        // caller. The retired wording is pinned as absent from every settings file above; the corrective
+        // wording is pinned as present here.
+        string guidance = File.ReadAllText(
+            Path.Combine(RequireOrchestrationDirectory(), ".env.example"));
+
+        Assert.Contains(
+            "A PLACEHOLDER WILL NOT DO",
+            guidance,
+            StringComparison.Ordinal);
+
+        foreach (string scope in GatewayContractTests.PublishedRequiredScopes)
+        {
+            if (string.Equals(
+                scope,
+                GatewayContractTests.NoScopeRequiredSentinel,
+                StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            Assert.Contains(scope, guidance, StringComparison.Ordinal);
+        }
+
+        Assert.Contains(IngressGrantCaller, guidance, StringComparison.Ordinal);
+        Assert.Contains(IngressGrantAudience, guidance, StringComparison.Ordinal);
+    }
+
     // ----------------------------------------------------------------------------------------------
     // Helpers
     // ----------------------------------------------------------------------------------------------
@@ -1375,6 +1857,76 @@ public sealed class ServiceConfigurationCoherenceTests
                 $"'{service.DirectoryName}/{service.ProjectName}/{fileName}' does not have a JSON object at "
                     + "its root, so no configuration key could be bound from it.");
     }
+
+    /// <summary>Locates the repository's <c>orchestration</c> directory.</summary>
+    /// <returns>The absolute path of the orchestration directory.</returns>
+    /// <remarks>
+    /// Derived from the services directory's parent rather than walked for separately, so both locators
+    /// can never disagree about which checkout they are reading.
+    /// </remarks>
+    private static string RequireOrchestrationDirectory()
+    {
+        string root = Directory.GetParent(RequireServicesDirectory())?.FullName
+            ?? throw FailException.ForFailure(
+                "The services directory has no parent, so the repository root cannot be derived from it.");
+
+        string orchestration = Path.Combine(root, "orchestration");
+
+        if (!Directory.Exists(orchestration))
+        {
+            throw FailException.ForFailure(
+                $"'{orchestration}' does not exist. The orchestration directory carries the template and "
+                    + "the manifest this assertion compares, so its absence is a finding rather than a "
+                    + "reason to skip a check.");
+        }
+
+        return orchestration;
+    }
+
+    /// <summary>
+    /// Reads the single <c>RequiredScope</c> constant declared by one Gateway endpoint source file.
+    /// </summary>
+    /// <param name="endpointFileName">The endpoint file name, for example <c>PingEndpoints.cs</c>.</param>
+    /// <returns>The scope literal the route enforces.</returns>
+    /// <remarks>
+    /// SOURCE TEXT RATHER THAN A PROJECT REFERENCE, for the reason the file header gives: this project
+    /// deliberately references no service, so that its guards keep running while a service's own project
+    /// is unbuildable. Exactly one declaration must be found - a second would mean the file declares two
+    /// requirements and this test would be silently reading whichever came first.
+    /// </remarks>
+    private static string ReadRequiredScopeConstant(string endpointFileName)
+    {
+        string path = Path.Combine(
+            RequireServicesDirectory(),
+            "gateway-service",
+            "PowerFramework.Gateway",
+            "Endpoints",
+            endpointFileName);
+
+        if (!File.Exists(path))
+        {
+            throw FailException.ForFailure(
+                $"'{path}' does not exist, so the scope Gateway enforces on that surface cannot be read "
+                    + "from the route that declares it.");
+        }
+
+        MatchCollection matches = RequiredScopeDeclarationPattern.Matches(File.ReadAllText(path));
+
+        if (matches.Count != 1)
+        {
+            throw FailException.ForFailure(
+                $"'{endpointFileName}' declares {matches.Count} 'RequiredScope' constants; exactly one is "
+                    + "expected, because a route has one scope requirement.");
+        }
+
+        return matches[0].Groups["scope"].Value;
+    }
+
+    /// <summary>Matches a <c>RequiredScope</c> constant declaration in an endpoint source file.</summary>
+    private static readonly Regex RequiredScopeDeclarationPattern = new(
+        """(?:internal|public|private)\s+const\s+string\s+RequiredScope\s*=\s*"(?<scope>[^"]+)"\s*;""",
+        RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture,
+        TimeSpan.FromSeconds(5));
 
     /// <summary>Locates the repository's <c>services</c> directory by walking up from the test binary.</summary>
     /// <returns>The absolute path of the services directory.</returns>
@@ -1659,11 +2211,14 @@ public sealed class ServiceConfigurationCoherenceTests
     /// <param name="Key">Stable lower-case key used by the theory data.</param>
     /// <param name="DirectoryName">Directory under <c>services/</c>.</param>
     /// <param name="ProjectName">The .NET project name, used in diagnostics.</param>
-    /// <param name="Port">The port the map assigns, which carries the HTTP/1.1 REST surface.</param>
-    /// <param name="GrpcPort">
-    /// The port carrying the HTTP/2 gRPC surface, or <see langword="null"/> for a service that serves no
-    /// gRPC contract. One protocol version per endpoint, so the two are separate endpoints where both
-    /// exist.
+    /// <param name="Port">
+    /// The one port the map assigns, carrying every surface the service publishes - the HTTP/1.1 REST one
+    /// and, where <paramref name="ServesGrpc"/> is set, the HTTP/2 gRPC one alongside it.
+    /// </param>
+    /// <param name="ServesGrpc">
+    /// Whether the service publishes a gRPC contract. It selects the <c>Protocols</c> value the single
+    /// endpoint must declare - <c>Http1AndHttp2</c> when set so that ALPN can carry both surfaces on the
+    /// assigned port, <c>Http1</c> when not - and it is what a gRPC caller edge is checked against.
     /// </param>
     /// <param name="DeclaresListener">Whether the service configures its own Kestrel endpoint.</param>
     /// <param name="ListenerScheme">The scheme callers must use to reach it.</param>
@@ -1677,18 +2232,23 @@ public sealed class ServiceConfigurationCoherenceTests
         string DirectoryName,
         string ProjectName,
         int Port,
-        int? GrpcPort,
+        bool ServesGrpc,
         bool DeclaresListener,
         string ListenerScheme,
         bool RequiresClientCertificateMode);
 
-    /// <summary>Which of a target service's two endpoints an address must name.</summary>
+    /// <summary>Which surface of a target service an address is held for.</summary>
+    /// <remarks>
+    /// Both land on the same port now that a service binds one endpoint carrying both protocol versions.
+    /// The distinction records which SURFACE the address is used against, which is what makes an edge
+    /// pointed at a service publishing no gRPC contract visible here rather than at the first call.
+    /// </remarks>
     private enum TargetEndpoint
     {
-        /// <summary>The HTTP/1.1 endpoint on the port the map documents.</summary>
+        /// <summary>The HTTP/1.1 REST surface on the port the map documents.</summary>
         Rest,
 
-        /// <summary>The HTTP/2 endpoint carrying the target's gRPC contracts.</summary>
+        /// <summary>The HTTP/2 gRPC surface, on the same port and the same endpoint.</summary>
         Grpc,
     }
 

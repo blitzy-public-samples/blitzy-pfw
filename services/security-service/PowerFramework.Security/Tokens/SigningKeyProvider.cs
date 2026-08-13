@@ -212,10 +212,10 @@
 
 using System.Buffers.Text;
 using System.Collections.Immutable;
-using System.Globalization;
 using System.Security.Cryptography;
 using System.Text.Json.Serialization;
 
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 
@@ -489,34 +489,42 @@ public sealed class SigningKeyProvider : IDisposable
     /// armoured output is an OPTIONAL fourth argument
     /// [<c>ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20</c>], and the single-line base64 form is
     /// the only shape an environment file can carry because that format has no line continuation. The
-    /// modulus floor below mirrors the validator's in the same way and reads the same setting, so the
-    /// two cannot disagree about a given key either.
+    /// modulus is MEASURED below rather than judged, and the validator measures and discards it, so there
+    /// is no size rule anywhere for the two to disagree about either.
     /// </para>
     /// <para>
-    /// A KEY-SIZE CHECK *IS* PERFORMED, IMMEDIATELY AFTER THE IMPORT, and an earlier revision of this
-    /// paragraph said the opposite - that no check was performed because 1024-bit RSA is a first-class
-    /// legal size in the oracle's own catalogue [<c>ws_objects/pfw.shared.pbl.src/enums.sru:L965</c>].
-    /// That allowance is real but belongs to a DIFFERENT SURFACE: <c>Crypto/RsaProvider.GenRSAKey</c>,
-    /// where a caller names the size and byte-for-byte parity is the obligation, still accepts 1024 bits
-    /// and is untouched. The key imported here is this service's OWN signing identity, which is net-new
-    /// - the legacy framework has no token issuer - so there is no legacy behaviour on it to preserve,
-    /// and applying another surface's allowance to the system's trust root would import a weakness
-    /// rather than preserve a behaviour. The floor is configured by
-    /// <c>Security:SigningKeyMinimumSizeBits</c>, defaults to 2048, and cannot be configured below that.
+    /// NO KEY IS REFUSED FOR BEING SHORT, AND THAT IS THE REQUIREMENT RATHER THAN AN OVERSIGHT. An
+    /// earlier revision enforced a configurable 2048-bit floor here and failed construction below it.
+    /// AAP 0.6.6.4 keeps 1024-bit RSA a legal size across this estate - the oracle's own catalogue lists
+    /// it as first class [<c>ws_objects/pfw.shared.pbl.src/enums.sru:L965</c>] - and requires every weak
+    /// cryptographic default to be replicated as an ANNOTATED default rather than corrected, so a
+    /// rejection would be a behaviour change dressed as robustness (C-B). The modulus is therefore
+    /// MEASURED and REPORTED: <see cref="SigningKeySizeBits"/> publishes it,
+    /// <see cref="SigningKeyIsLegacyWeak"/> compares it against
+    /// <see cref="SecurityOptions.LegacyWeakSigningKeySizeBits"/>, and a warning naming the measured
+    /// size is logged once at construction when the comparison holds. The same allowance is untouched on
+    /// the neighbouring C-02 surface, <c>Crypto/RsaProvider.GenRSAKey</c>, where a caller names the size
+    /// and byte-for-byte parity is the obligation.
+    /// </para>
+    /// <para>
+    /// WHAT IS STILL FATAL. Material that is absent, unreadable, or public-only fails construction, and
+    /// the host therefore refuses to start: an issuer that cannot sign is a broken configuration rather
+    /// than a weak one, and the fail-fast posture reproduced from
+    /// <c>ws_objects/pfw.pbl.src/pfw.sra:L143</c> applies to it.
     /// </para>
     /// <para>
     /// NO CLEAN-UP ARM WRAPS THE STEPS AFTER THE IMPORT, and that is reasoned rather than overlooked.
-    /// The one step after the import that CAN fail for a configuration reason is the modulus floor, and
-    /// it disposes the key itself before throwing. Everything after that - exporting the public
-    /// parameters, encoding two public members, and pairing the key with its algorithm - operates on a
-    /// key that has just imported successfully and cannot fail for a configuration reason. Were one of
+    /// NO step after the import can fail for a configuration reason at all, now that no key is refused for
+    /// its length: measuring the modulus, logging the annotation when it is short, exporting the public
+    /// parameters, encoding two public members, and pairing the key with its algorithm all operate on a
+    /// key that has just imported successfully. Were one of
     /// them to fail anyway, this constructor throws, so the host refuses to start and the process ends;
     /// there is no arm in which a leaked key handle outlives the failure, because there is no arm in
     /// which anything outlives it. Wrapping them would add a recovery path that only an
     /// already-terminating process could ever reach.
     /// </para>
     /// </remarks>
-    public SigningKeyProvider(IOptions<SecurityOptions> options)
+    public SigningKeyProvider(IOptions<SecurityOptions> options, ILogger<SigningKeyProvider>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -532,25 +540,41 @@ public sealed class SigningKeyProvider : IDisposable
         _privateKey = ImportPrivateKey(material);
 
         // --------------------------------------------------------------------------------------------
-        // THE MODULUS FLOOR, ENFORCED BEFORE ANY CREDENTIAL EXISTS
+        // THE MODULUS IS MEASURED AND ANNOTATED HERE, AND NOTHING IS REFUSED FOR ITS SIZE
         //
-        // Placed HERE - after the import and before the SigningCredentials below - because that is the
-        // only position at which the guarantee is structural rather than procedural: from this line on,
-        // no construction path can reach a credential built over a key shorter than the configured
-        // floor, whatever the caller did or did not validate first.
+        // Placed immediately after the import because that is the first line at which the size is
+        // knowable, and before any credential exists so that both projections below carry a key whose
+        // measurement has already been published.
         //
-        // SecurityOptionsValidator applies the same floor and is not made redundant by this: it is what
-        // turns the fault into a named configuration failure an operator can act on, whereas this is
-        // what makes the guarantee hold even for a construction path that never ran options validation
-        // - which the service tests exercise directly.
+        // A SHORT KEY IS USED, NOT REJECTED. AAP 0.6.6.4 keeps 1024-bit RSA legal across this estate and
+        // requires each weak cryptographic default to be replicated as an ANNOTATED default; C-B forbids
+        // correcting it. The annotation is therefore the whole mechanism: the measured size is published
+        // on SigningKeySizeBits, the verdict on SigningKeyIsLegacyWeak, and a warning naming the measured
+        // size is logged once here so an operator learns of the weakness from the service itself rather
+        // than only from docs/SECRETS.md 4.1.
         //
-        // THE FLOOR IS THIS SERVICE'S OWN SIGNING IDENTITY AND NOTHING ELSE. Crypto/RsaProvider's
-        // GenRSAKey deliberately enforces no minimum and still accepts 1024 bits, preserving the legacy
-        // allowance [ws_objects/pfw.shared.pbl.src/enums.sru:L965]; that surface is untouched here and a
-        // test pins the two apart. The key measured on this line has no legacy analogue at all, because
-        // the legacy framework has no token issuer.
+        // THE SAME ALLOWANCE IS UNTOUCHED WHERE IT IS THE LEGACY'S. Crypto/RsaProvider's GenRSAKey
+        // enforces no minimum either, preserving the catalogue's 1024-bit entry
+        // [ws_objects/pfw.shared.pbl.src/enums.sru:L965], and a test pins the two surfaces together
+        // rather than apart.
+        //
+        // A SIZE IS NOT A SECRET, so logging it discloses nothing: the modulus itself is published in
+        // the key set this service serves anonymously at /.well-known/jwks.json.
         // --------------------------------------------------------------------------------------------
-        RequireSufficientModulus(_privateKey, security.SigningKeyMinimumSizeBits);
+        SigningKeySizeBits = _privateKey.KeySize;
+        SigningKeyIsLegacyWeak = SigningKeySizeBits < SecurityOptions.LegacyWeakSigningKeySizeBits;
+
+        if (SigningKeyIsLegacyWeak)
+        {
+            logger?.LogWarning(
+                "The configured signing key has a {SigningKeySizeBits}-bit RSA modulus, below the "
+                + "{LegacyWeakSigningKeySizeBits}-bit size at which this service stops remarking on it. "
+                + "The key is accepted and used: AAP 0.6.6.4 keeps 1024-bit RSA a legal size in this "
+                + "estate and requires the weakness to be annotated rather than corrected. Rotate the "
+                + "issuer key to a longer modulus when the deployment can.",
+                SigningKeySizeBits,
+                SecurityOptions.LegacyWeakSigningKeySizeBits);
+        }
 
         // THE FALSE IS LOAD BEARING. Exporting WITHOUT the private parameters is what makes both
         // public projections below structurally incapable of carrying a private component: they are
@@ -582,6 +606,39 @@ public sealed class SigningKeyProvider : IDisposable
             },
             algorithm);
     }
+
+    /// <summary>
+    /// The RSA modulus size, in bits, of the signing key this instance imported.
+    /// </summary>
+    /// <value>The measured modulus size. Always positive, because a key that did not import throws.</value>
+    /// <remarks>
+    /// NOT A SECRET, WHICH IS WHY IT MAY BE PUBLISHED AND LOGGED. The modulus itself is served
+    /// anonymously in the key set at <c>/.well-known/jwks.json</c>, so its length discloses nothing an
+    /// unauthenticated caller could not already read. It is exposed so that a deployment, a diagnostic
+    /// and a test can all see the same number the construction-time warning names, rather than each
+    /// re-deriving it from the key.
+    /// </remarks>
+    public int SigningKeySizeBits { get; }
+
+    /// <summary>
+    /// Whether the signing key's modulus is shorter than
+    /// <see cref="SecurityOptions.LegacyWeakSigningKeySizeBits"/>, and is therefore reported as a
+    /// preserved legacy weakness.
+    /// </summary>
+    /// <value>
+    /// <see langword="true"/> when the measured modulus is below the annotation threshold; otherwise
+    /// <see langword="false"/>.
+    /// </value>
+    /// <remarks>
+    /// AN ANNOTATION, NEVER A REFUSAL. A key this flags is still imported, still paired with its
+    /// algorithm and still used to mint every token this service issues: AAP 0.6.6.4 keeps 1024-bit RSA
+    /// a legal size across this estate and requires each weak cryptographic default to be replicated as
+    /// an annotated default rather than corrected (C-B). Construction logs a warning naming the measured
+    /// size when this is <see langword="true"/>, and <c>docs/SECRETS.md</c> 4.1 states the same position
+    /// in prose. Nothing in this service branches on it beyond that warning, and nothing may be added
+    /// that turns it into a rejection.
+    /// </remarks>
+    public bool SigningKeyIsLegacyWeak { get; }
 
     /// <summary>
     /// The credential the token issuer signs with: the private key paired with the resolved
@@ -777,47 +834,6 @@ public sealed class SigningKeyProvider : IDisposable
     /// the wrong kind of thing. Collapsing them into one message would send an operator to the wrong
     /// place. Nothing here inspects, measures, trims or copies the value.
     /// </remarks>
-    /// <summary>
-    /// Refuses an imported signing key whose RSA modulus is shorter than the configured floor.
-    /// </summary>
-    /// <param name="key">The imported private key.</param>
-    /// <param name="minimumSizeBits">The configured floor, in bits.</param>
-    /// <exception cref="InvalidOperationException">
-    /// The modulus is shorter than <paramref name="minimumSizeBits"/>.
-    /// </exception>
-    /// <remarks>
-    /// <para>
-    /// THE KEY IS DISPOSED BEFORE THE THROW, matching how the import path releases a public-only key
-    /// before reporting it: the instance holds private material, the construction that would have owned
-    /// it is not going to complete, and nothing else has a reference through which to dispose it. The
-    /// caller field has already been assigned, so it is left holding a disposed key - which is exactly
-    /// the state every member of this type already guards against, and the process is terminating in any
-    /// case because a failing constructor here refuses the host.
-    /// </para>
-    /// <para>
-    /// THE MESSAGE STATES THE MEASURED SIZE. A modulus length is not a secret - this service publishes
-    /// it in the key set it serves anonymously - and without it an operator cannot distinguish a wrong
-    /// key from a wrong generation command. No byte of the key appears.
-    /// </para>
-    /// </remarks>
-    private static void RequireSufficientModulus(RSA key, int minimumSizeBits)
-    {
-        int keySizeBits = key.KeySize;
-
-        if (keySizeBits >= minimumSizeBits)
-        {
-            return;
-        }
-
-        key.Dispose();
-
-        throw new InvalidOperationException(string.Format(
-            CultureInfo.InvariantCulture,
-            SecurityOptionsValidator.SigningKeyTooShortMessageFormat,
-            keySizeBits,
-            minimumSizeBits));
-    }
-
     private static string RequireSigningMaterial(string? material)
     {
         if (string.IsNullOrWhiteSpace(material))

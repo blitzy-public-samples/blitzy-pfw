@@ -19,6 +19,7 @@
 //  from anywhere in the repository.
 // ==================================================================================================
 
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Reflection;
@@ -420,6 +421,231 @@ public sealed class SecurityClientCryptoTests
             () => client.GenerateRsaKeyAsync(2048, null, TestContext.Current.CancellationToken));
 
         Assert.Equal("generateRsaKey", failure.OperationId);
+    }
+
+    // ==============================================================================================
+    //  GROUP 3b - THE AUTHORED KEY RELEASE  [no legacy counterpart]
+    //  ----------------------------------------------------------------------------------------------
+    //  DELETE /v1/crypto/rsa/keys/{keyRef} is the ONE C-02 operation that has no legacy overload behind
+    //  it. The legacy GenRSAKey [n_crypto.sru:L19-L20] hands the private half straight back through a
+    //  `ref` parameter, so nothing is retained and there is nothing to release; retaining it on the
+    //  service side is what makes the generation response safe across a boundary, and a retained thing
+    //  needs a way to be given back. There is therefore no call-site parity to assert here and inventing
+    //  one would be a new feature - what these rows pin is the published shape and the published status
+    //  handling, which is exactly what a consumer depends on.
+    //
+    //  IT IS ALSO THE ONE OPERATION ON EITHER CONTRACT WHOSE PATH CARRIES A CALLER VALUE, and the only
+    //  one that is not a POST, so the rows below are the only place those two properties are checked.
+    // ==============================================================================================
+
+    [Fact]
+    public async Task ReleaseRsaKeyAsync_DeletesThePublishedMemberPathAndAnswersTrueOnTheDeclared204()
+    {
+        RecordingHandler handler = new RecordingHandler().Enqueue(HttpStatusCode.NoContent, json: null);
+        (SecurityClient client, _) = CreateClient(handler);
+
+        bool released = await client.ReleaseRsaKeyAsync(
+            FakeKeyRef,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(released);
+        Assert.Equal(HttpMethod.Delete, handler.Requests[0].Method);
+        Assert.Equal("/v1/crypto/rsa/keys/" + FakeKeyRef, Path(handler));
+
+        // NO REQUEST BODY AT ALL, not an empty one: an empty body would still carry a Content-Length and
+        // a Content-Type the document does not declare.
+        Assert.Null(handler.Requests[0].Content);
+        Assert.Equal(string.Empty, handler.Bodies[0]);
+    }
+
+    [Fact]
+    public async Task ReleaseRsaKeyAsync_AnswersFalseOn404RatherThanRaisingAFailure()
+    {
+        // 404 IS THE PUBLISHED ANSWER FOR "NOTHING HELD FOR THIS CALLER" and the contract states release
+        // is idempotent from the caller's point of view. Promoting it to a failure would make a release
+        // unusable in the cleanup path a release belongs in.
+        RecordingHandler handler = new RecordingHandler().Enqueue(
+            HttpStatusCode.NotFound,
+            "{\"title\":\"Not Found\",\"status\":404,\"retCode\":-1002}",
+            "application/problem+json");
+        (SecurityClient client, _) = CreateClient(handler);
+
+        bool released = await client.ReleaseRsaKeyAsync(
+            FakeKeyRef,
+            TestContext.Current.CancellationToken);
+
+        Assert.False(released);
+    }
+
+    [Fact]
+    public async Task ReleaseRsaKeyAsync_IsIdempotentFromTheCallersPointOfView()
+    {
+        // The first release succeeds and the second answers 404, which is the contract's own worded
+        // outcome for a repeat. Both calls answer; neither raises.
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.NoContent, json: null)
+            .Enqueue(HttpStatusCode.NotFound, json: null);
+        (SecurityClient client, _) = CreateClient(handler);
+
+        bool first = await client.ReleaseRsaKeyAsync(FakeKeyRef, TestContext.Current.CancellationToken);
+        bool second = await client.ReleaseRsaKeyAsync(FakeKeyRef, TestContext.Current.CancellationToken);
+
+        Assert.True(first);
+        Assert.False(second);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Theory]
+    [InlineData("gen/../../v1/tokens", "gen%2F..%2F..%2Fv1%2Ftokens")]
+    [InlineData("ref?audience=other", "ref%3Faudience%3Dother")]
+    [InlineData("ref#fragment", "ref%23fragment")]
+    [InlineData("ref with space", "ref%20with%20space")]
+    [InlineData("already%2Fencoded", "already%252Fencoded")]
+    public async Task ReleaseRsaKeyAsync_EscapesTheReferenceIntoExactlyOnePathSegment(
+        string keyRef,
+        string expectedSegment)
+    {
+        // THE SCHEMA DECLARES minLength 1 AND NO PATTERN, so the contract itself permits a reference
+        // carrying a separator, a query marker or a fragment marker. Concatenated unescaped, each of the
+        // rows above would reach a different route - or none - carrying part of the reference somewhere the
+        // service never looks. The last row proves the escaping is not double-decoded on the way out: an
+        // already-percent-encoded reference is escaped again, so what the service receives decodes back to
+        // exactly what the caller passed.
+        RecordingHandler handler = new RecordingHandler().Enqueue(HttpStatusCode.NoContent, json: null);
+        (SecurityClient client, _) = CreateClient(handler);
+
+        await client.ReleaseRsaKeyAsync(keyRef, TestContext.Current.CancellationToken);
+
+        Assert.Equal("/v1/crypto/rsa/keys/" + expectedSegment, Path(handler));
+    }
+
+    [Fact]
+    public async Task ReleaseRsaKeyAsync_CarriesTheBearerCredentialLikeEveryOtherC02Operation()
+    {
+        RecordingHandler handler = new RecordingHandler().Enqueue(HttpStatusCode.NoContent, json: null);
+        (SecurityClient client, _) = CreateClient(handler);
+
+        await client.ReleaseRsaKeyAsync(FakeKeyRef, TestContext.Current.CancellationToken);
+
+        AuthenticationHeaderValue? credential = handler.Requests[0].Headers.Authorization;
+        Assert.NotNull(credential);
+        Assert.Equal("Bearer", credential.Scheme);
+        Assert.Equal(RecordingHandler.AutoAnsweredCredential, credential.Parameter);
+
+        // Acquired through the SAME cached path the other seventeen use, so a release costs no extra
+        // issuance of its own.
+        Assert.Single(handler.TokenRequests);
+    }
+
+    [Fact]
+    public async Task ReleaseRsaKeyAsync_ThreadsTheCancellationTokenToTheTransport()
+    {
+        RecordingHandler handler = new RecordingHandler().Enqueue(HttpStatusCode.NoContent, json: null);
+        (SecurityClient client, _) = CreateClient(handler);
+
+        await client.ReleaseRsaKeyAsync(FakeKeyRef, TestContext.Current.CancellationToken);
+
+        Assert.True(handler.ObservedCancellableToken);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task ReleaseRsaKeyAsync_RefusesAnEmptyReferenceWithoutSendingAnything(string? keyRef)
+    {
+        // minLength 1 IS ENFORCED AT THE ORIGIN. Sending it would produce a 404 indistinguishable from a
+        // genuine "not held", so the caller would be told the key was already gone when in fact no request
+        // could have named it.
+        //
+        // ThrowsAny RATHER THAN Throws, MEASURED RATHER THAN ASSUMED: ArgumentException.ThrowIfNullOrWhiteSpace
+        // raises ArgumentNullException for a null and ArgumentException for the other two, and xunit's
+        // Throws demands an EXACT type match. The guard's published contract is "some argument exception",
+        // which is what these rows assert; narrowing to one concrete type per row would pin an implementation
+        // detail of the framework helper rather than the client's own promise.
+        RecordingHandler handler = new RecordingHandler();
+        (SecurityClient client, _) = CreateClient(handler);
+
+        await Assert.ThrowsAnyAsync<ArgumentException>(
+            () => client.ReleaseRsaKeyAsync(keyRef!, TestContext.Current.CancellationToken));
+
+        Assert.Empty(handler.Requests);
+        Assert.Empty(handler.TokenRequests);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.Forbidden)]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    public async Task ReleaseRsaKeyAsync_SurfacesEveryOtherRefusalAsATypedFailure(HttpStatusCode status)
+    {
+        // ONLY 404 IS AN ANSWER. A rejected credential, a caller without the scope and a service fault are
+        // all faults, and each carries the operation identifier so a caller can attribute it without
+        // parsing a message.
+        RecordingHandler handler = new RecordingHandler().Enqueue(
+            status,
+            "{\"title\":\"Refused\",\"status\":" + ((int)status).ToString(CultureInfo.InvariantCulture)
+            + "}",
+            "application/problem+json");
+        (SecurityClient client, _) = CreateClient(handler);
+
+        SecurityClientException failure = await Assert.ThrowsAsync<SecurityClientException>(
+            () => client.ReleaseRsaKeyAsync(FakeKeyRef, TestContext.Current.CancellationToken));
+
+        Assert.Equal("releaseRsaKey", failure.OperationId);
+        Assert.Equal((int)status, failure.StatusCode);
+        Assert.Equal("Refused", failure.Title);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.OK)]
+    [InlineData(HttpStatusCode.Accepted)]
+    [InlineData(HttpStatusCode.ResetContent)]
+    public async Task ReleaseRsaKeyAsync_RefusesASuccessStatusOtherThanTheDeclared204(
+        HttpStatusCode status)
+    {
+        // 204 IS THE ONLY SUCCESS THE DOCUMENT DECLARES. Another 2xx is the service answering outside its
+        // own published schema, and reporting it as a release would claim an outcome nobody described -
+        // narrowed with a defined error rather than widened with a guess.
+        RecordingHandler handler = new RecordingHandler().Enqueue(status, json: null);
+        (SecurityClient client, _) = CreateClient(handler);
+
+        SecurityClientException failure = await Assert.ThrowsAsync<SecurityClientException>(
+            () => client.ReleaseRsaKeyAsync(FakeKeyRef, TestContext.Current.CancellationToken));
+
+        Assert.Equal("releaseRsaKey", failure.OperationId);
+        Assert.Equal((int)status, failure.StatusCode);
+    }
+
+    [Fact]
+    public async Task AGeneratedKeyHasAReleasePathThroughTheReferenceItWasHandedBack()
+    {
+        // THE ROUND TRIP THIS OPERATION EXISTS FOR, and the one a consumer could not perform at all while
+        // the client published no release: generate, then hand the returned reference straight back. The
+        // release names the reference the generation answered with and nothing the test composed itself.
+        const string issued = "generated-keyref-for-tests";
+
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(
+                HttpStatusCode.OK,
+                "{\"publicKey\":\"p\",\"keyRef\":\"" + issued + "\",\"bits\":2048}")
+            .Enqueue(HttpStatusCode.NoContent, json: null);
+        (SecurityClient client, _) = CreateClient(handler);
+
+        GeneratedRsaKey generated = await client.GenerateRsaKeyAsync(
+            Enums.CRYPTO_RSA_BITS_2048,
+            pemFormat: null,
+            TestContext.Current.CancellationToken);
+
+        bool released = await client.ReleaseRsaKeyAsync(
+            generated.KeyRef,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(released);
+        Assert.Equal("/v1/crypto/rsa/keys", Path(handler));
+        Assert.Equal("/v1/crypto/rsa/keys/" + issued, Path(handler, 1));
+        Assert.Equal(HttpMethod.Post, handler.Requests[0].Method);
+        Assert.Equal(HttpMethod.Delete, handler.Requests[1].Method);
     }
 
     // ==============================================================================================
@@ -1310,7 +1536,7 @@ public sealed class SecurityClientCryptoTests
     // ==============================================================================================
     //  GROUP 10 - THE CREDENTIAL EVERY C-02 OPERATION PRESENTS
     //  ----------------------------------------------------------------------------------------------
-    //  Every one of the seventeen crypto operations inherits the document-level bearer requirement, so
+    //  Every one of the eighteen crypto operations inherits the document-level bearer requirement, so
     //  an unauthenticated crypto call is not merely unwise: once Security enforces its own contract
     //  every one of them answers 401 and the whole cryptographic surface becomes unreachable.
     // ==============================================================================================
@@ -1380,7 +1606,7 @@ public sealed class SecurityClientCryptoTests
 
         await client.GenerateGuidAsync(flags: null, TestContext.Current.CancellationToken);
 
-        // Two operations, two operation requests - and ONE issuance, because all seventeen resolve to a
+        // Two operations, two operation requests - and ONE issuance, because all eighteen resolve to a
         // single cache key. The clock does not move in this suite, so reuse is decided by the key.
         Assert.Equal(2, handler.Requests.Count);
         Assert.Single(handler.TokenRequests);

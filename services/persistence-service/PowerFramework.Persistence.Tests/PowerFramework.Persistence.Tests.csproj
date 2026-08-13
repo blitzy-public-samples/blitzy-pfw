@@ -77,19 +77,22 @@
     the artifact that gate reads, which is why coverlet.collector below is load bearing and must
     never be trimmed as an unused reference.
 
-    .github/workflows/ci.yml enforces it, in this project's own matrix leg, and reads the report's
-    top level line rate directly. That rate is the number for this service alone because the
-    repository root coverage.runsettings scopes the report to the four service assemblies: without
-    it the report would also cover the shared libraries and the generated protobuf stubs in
-    PowerFramework.Contracts, and its top level rate would read 28.11 percent for this service
-    rather than 81.74. The gate additionally asserts that the report contains EXACTLY ONE package
-    and that it is PowerFramework.Persistence, so a filter that silently stopped matching fails the
-    leg instead of quietly changing the subject of the measurement.
+    .github/workflows/ci.yml enforces it, in this project's own matrix leg. The collector runs
+    unconfigured, so the report it emits carries one Cobertura package per instrumented assembly -
+    this project also loads the shared libraries and the generated protobuf stubs in
+    PowerFramework.Contracts - and the gate SELECTS the package named PowerFramework.Persistence and
+    reads that package's line rate. Selecting the package by name IS the measurement scope, expressed
+    inline in the workflow rather than in a settings file, and there is no settings file anywhere in
+    this repository. The report's own top level rate is a much lower, meaningless number for this
+    service because it averages in code no Persistence test was ever meant to exercise; every other
+    package's rate is printed by the gate but never gated on, since the root solution leg owns them.
 
     Two consequences worth knowing before changing anything here. Removing or renaming
-    coverlet.collector, or dropping the settings file from the test command, makes the leg fail with
-    a structural error rather than a coverage number. And the leg does not fail fast against its
-    three siblings, so a shortfall here is reported alongside their verdicts rather than hiding them.
+    coverlet.collector makes the leg fail with a structural error rather than a coverage number, and
+    so does renaming this project's application assembly, because the gate fails outright when
+    PowerFramework.Persistence is absent from the report rather than silently measuring whatever else
+    is present. And the leg does not fail fast against its three siblings, so a shortfall here is
+    reported alongside their verdicts rather than hiding them.
 
     HAND-AUTHORED ON PURPOSE, NOT TEMPLATED.
     `dotnet new xunit3` does not exist in SDK 10.0.302 (it exits 103 and suggests searching

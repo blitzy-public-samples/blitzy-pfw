@@ -1267,6 +1267,20 @@ internal sealed class SecurityHostFactory : WebApplicationFactory<Program>
 
         string signingKey = _signingKey;
 
+        // THE ROSTER SECRETS ARE PART OF THE MINIMUM A HOST NEEDS IN ORDER TO START, not an extra. The
+        // issuance registry resolves every secret the shipped roster names EAGERLY and refuses to construct
+        // when one resolves to nothing, so a host that omitted them would fail during startup rather than on
+        // the readiness or contract property a row is asserting. They come from
+        // SecurityAppFactory.RosterSecretOverrides so this host and the four others in the assembly cannot
+        // drift, and they are supplied HERE - in this host's own in-memory configuration - rather than in
+        // the process environment, so nothing this host configures is observable by another test class.
+        builder.ConfigureAppConfiguration(configuration =>
+        {
+            ArgumentNullException.ThrowIfNull(configuration);
+
+            _ = configuration.AddInMemoryCollection(SecurityAppFactory.RosterSecretOverrides());
+        });
+
         builder.ConfigureServices(services =>
             services.Configure<SecurityOptions>(options =>
             {

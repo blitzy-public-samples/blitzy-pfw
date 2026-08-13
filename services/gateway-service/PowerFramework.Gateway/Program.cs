@@ -483,30 +483,33 @@ builder.Services
 // a declaration a closed door rather than an open one. The two deliberate exceptions below opt out
 // in the one place a reader looks for them.
 //
-// AN AUTHENTICATED CALLER IS THE WHOLE REQUIREMENT HERE, AND UNLIKE THE OTHER THREE SERVICES THAT IS
-// NOT AN OVERSIGHT. DataServices, Persistence and Security each require an operation-specific scope
-// AND a permitted caller identity on top of authentication, because each of them is an INTERNAL
-// receiver whose complete set of callers is enumerated in Security's issuance grant matrix. Gateway is
-// the INGRESS: nothing inside the system calls it, so it has no internal caller roster to check
-// against, and its callers are external clients that no internal matrix describes.
+// AN AUTHENTICATED CALLER IS THE FALLBACK'S WHOLE REQUIREMENT, AND IT IS NOT THIS SERVICE'S WHOLE
+// REQUIREMENT. Every protected route additionally names a SCOPE policy, registered just below by
+// AddScopeAuthorization() - so the fallback is the floor for a route that declared nothing, not the
+// ceiling for the routes that did.
 //
-// The authoritative wire document settles what that means, and it is authoritative for anything on the
-// wire. shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml applies `bearerAuth` with an EMPTY
-// scope array to every operation and states, under that scheme's own Scope heading, that every
-// operation requires the scheme except the anonymous health probe - it declares no per-operation scope
-// anywhere. It then attributes the 403 response to "The projected gRPC method returned
-// PermissionDenied": Gateway's forbidden answer is a RELAY of the downstream refusal, which is exactly
-// where the scope decision is made and enforced. Inventing a Gateway-side scope name would therefore
-// be a change to the published contract rather than a hardening of it, and it would fabricate an
-// external-client scope vocabulary the Agent Action Plan does not define.
+// THE SUPERSEDED ARGUMENT IS RECORDED RATHER THAN DELETED, BECAUSE IT WAS WRONG IN A WAY THAT COST
+// SOMETHING. An earlier revision reasoned that Gateway needs no scope check at all: it is the INGRESS,
+// nothing inside the system calls it, so it has no internal caller roster to check against; the
+// published document applies `bearerAuth` with an EMPTY scope array throughout and declares no
+// per-operation scope; and the 403 it declares was read as a RELAY of a downstream PermissionDenied.
+// Two of those three premises are true and the conclusion still does not follow:
 //
-// Two properties do the containment work instead, and neither depends on a scope here. Audience
-// validation above accepts only tokens minted for THIS service, so a token obtained for DataServices,
-// Persistence or Security is refused at this boundary with a 401 rather than reaching a projection.
-// And Security's grant matrix pre-grants NO caller the gateway audience at all - the shipped roster
-// carries exactly the internal call graph - so a service identity cannot mint itself an ingress token.
-// An external client is a deployment fact: its certificate identity and its grant are added to
-// Security:Callers by the deployment that has one, which is recorded in that settings file.
+//   * AN EMPTY ARRAY UNDER A BEARER SCHEME CARRIES NO SCOPE INFORMATION. OpenAPI defines the
+//     security-requirement array as a scope list for `oauth2` and `openIdConnect` schemes only, so for
+//     an `http`/`bearer` scheme an empty array is the sole meaningful value. Reading it as "no scope
+//     required" was an inference from a field that cannot say otherwise.
+//   * WITHOUT A SCOPE CHECK, ONE TOKEN REACHED EVERYTHING. Any token minted for this service's
+//     audience opened /v1/ping, /v1/capabilities and all thirty-nine /v1/datawindow projections alike,
+//     the issuance roster's per-identity least privilege was enforced nowhere in this service, and the
+//     403 the contract declares was unreachable at the one boundary external clients can reach.
+//
+// The document now states the requirement machine-readably as `x-required-scope` on every operation -
+// ping, capabilities, datawindow, and `none` for the anonymous probe and the eight reserved routes -
+// so the contract and this composition root are checkable against each other rather than merely
+// consistent-sounding. Audience validation above still does its own containment work, and Security
+// still pre-grants no caller the gateway audience; those remain true and are no longer load-bearing
+// on their own.
 //
 // Expressed through AddAuthorizationBuilder rather than AddAuthorization(options => ...) because the
 // ASP.NET Core analyzers direct the builder form for exactly this shape (ASP0025); the registration
@@ -515,7 +518,7 @@ builder.Services
 // AND THREE NAMED SCOPE POLICIES, BECAUSE A FALLBACK POLICY IS NOT AN ENTITLEMENT CHECK. Every
 // protected route used to require only that the caller be AUTHENTICATED, which every token this system
 // mints for Gateway's audience is - so one token reached /v1/ping, /v1/capabilities and all
-// thirty-nine /v1/datawindow operations alike. The issuance roster states least privilege per calling
+// forty /v1/datawindow operations alike. The issuance roster states least privilege per calling
 // identity and, until these policies existed, no surface in this service enforced it and the 403 the
 // contract declares was unreachable.
 //
@@ -535,14 +538,23 @@ builder.Services
 // EVERY POLICY REQUIRES AN AUTHENTICATED PRINCIPAL AS WELL AS THE SCOPE, so each is correct in
 // isolation rather than correct by virtue of the fallback above.
 // THE SCOPE HANDLER AND ITS PER-SCOPE POLICIES, REGISTERED FROM Authorization/ScopeAuthorization.cs.
-// Two independent remediations of the same finding arrived at this composition root: a declarative
-// requirement plus handler, and the three inline assertion policies below that the endpoints name. Both
-// read the same `scope` claim with the same ordinal, space-delimited semantics, so they agree by
-// construction; the requirement form is registered because ScopeAuthorizationTests drives it directly,
-// and the named form is registered because the endpoints reference `<Endpoint>.ScopePolicyName`.
+// ONE registration path, and the policy names are the SCOPE NAMES themselves - "ping", "capabilities",
+// "datawindow" - because that is what each endpoint passes to RequireAuthorization, reading it from
+// GatewayScopes so a route and its policy keep one spelling.
+//
+// 🔴 A SECOND, PARALLEL FAMILY USED TO BE REGISTERED HERE AND NOTHING REQUIRED IT. Two independent
+// remediations of the same finding arrived at this composition root: this declarative requirement plus
+// handler, and three inline assertion policies registered under `gateway:scope:<name>` names taken from
+// per-endpoint ScopePolicyName constants. The merge was left half-done - the endpoints name the bare
+// scope policies, so the three `gateway:scope:*` policies were required by NO route and enforced
+// nothing, which is precisely the failure mode this file warns about two paragraphs down and the half
+// that looks correct in review. They also carried a SECOND implementation of "is this scope granted",
+// duplicating ScopeHandler's clause for clause; two copies of an authorization predicate can diverge,
+// and only one of them was reachable. The duplicate policies, their constants and their local predicate
+// are removed: what remains is the family the routes actually require.
 //
 // AUTHENTICATION IS NOT AUTHORIZATION, AND THE FALLBACK BELOW ONLY DELIVERS THE FIRST. This service's
-// published contract declares a 403 on thirty-nine operations whose shared description says the token is
+// published contract declares a 403 on forty operations whose shared description says the token is
 // valid but does not carry the scope the operation requires, "deliberately distinguished from 401 so a
 // caller can tell a missing credential from an insufficient one". Until these policies existed nothing
 // here read the scope claim, so every authenticated route was reachable by any token addressed to this
@@ -566,25 +578,7 @@ builder.Services
     .AddAuthorizationBuilder()
     .SetFallbackPolicy(new AuthorizationPolicyBuilder()
         .RequireAuthenticatedUser()
-        .Build())
-    .AddPolicy(
-        PingEndpoints.ScopePolicyName,
-        policy => policy
-            .RequireAuthenticatedUser()
-            .RequireAssertion(static context =>
-                GrantsScope(context.User, PingEndpoints.RequiredScope)))
-    .AddPolicy(
-        CapabilityEndpoints.ScopePolicyName,
-        policy => policy
-            .RequireAuthenticatedUser()
-            .RequireAssertion(static context =>
-                GrantsScope(context.User, CapabilityEndpoints.RequiredScope)))
-    .AddPolicy(
-        DataServicesProxyEndpoints.ScopePolicyName,
-        policy => policy
-            .RequireAuthenticatedUser()
-            .RequireAssertion(static context =>
-                GrantsScope(context.User, DataServicesProxyEndpoints.RequiredScope)));
+        .Build());
 
 // --------------------------------------------------------------------------------------------------
 // 6. THE TWO TYPED CLIENTS - EXACTLY TWO, AND THESE TWO
@@ -1072,49 +1066,6 @@ static II18nProvider CreateLocaleProvider(string locale) => locale switch
 };
 
 /// <summary>
-/// Loads the client identity Gateway presents on the system's single mutual-TLS edge, or an empty
-/// collection when this deployment presents none.
-/// </summary>
-/// <param name="mutualTls">
-/// The validated <c>Gateway:MutualTls</c> group. Both members are filesystem paths naming material
-/// mounted from the orchestration secret layer; the type has no member that could carry a certificate
-/// body, a private key body or a passphrase, so there is nowhere for one to be placed.
-/// </param>
-/// <returns>
-/// A collection holding the one client certificate when the pair is configured, and an EMPTY
-/// collection when it is not. Empty is a legitimate result and not an error: it means this run does
-/// not reach the token-issuance edge, which a local bring-up without a generated certificate set
-/// genuinely is.
-/// </returns>
-/// <exception cref="InvalidOperationException">
-/// The pair is configured but the material cannot be read or does not parse. That is a structural
-/// fault and it stops the host, matching the fail-fast posture described in the file header - a
-/// deployment that meant to authenticate to the issuer and cannot has already lost every authenticated
-/// call it would make, so continuing would only defer the failure to first use.
-/// </exception>
-/// <remarks>
-/// <para>
-/// NO PATH IS EVER ECHOED INTO A MESSAGE, and the exception below names the two CONFIGURATION KEYS
-/// instead. A path is not itself a credential, but it names the location of one, and a startup log is
-/// exactly the wrong place to publish where a private key is mounted. The configuration key is
-/// sufficient for an operator to find the setting, which is the same rule
-/// <c>Configuration/GatewayOptions.cs</c> applies to its own validation messages.
-/// </para>
-/// <para>
-/// HALF A PAIR CANNOT REACH HERE. <c>GatewayOptions</c> validates the group as both-or-neither and the
-/// registration above validates on start, so by the time this runs the pair is either wholly present
-/// or wholly absent. The second check below is therefore a guard against a future caller rather than a
-/// reachable configuration state, and it is written as one rather than as an assumption.
-/// </para>
-/// <para>
-/// The material is read from a PEM certificate and a separate PEM key, which is the shape the
-/// generation recipe in <c>docs/ARCHITECTURE.md</c> produces and the shape the four
-/// <c>*_MTLS_CERT_PATH</c> / <c>*_MTLS_KEY_PATH</c> variables name. The resulting key is ephemeral,
-/// which is directly usable for TLS client authentication on Linux - the target operating system for
-/// every container in this refactor.
-/// </para>
-/// </remarks>
-/// <summary>
 /// Builds the primary handler for an outbound internal channel - the two gRPC clients and the
 /// readiness-probe client - with internal trust applied.
 /// </summary>
@@ -1215,7 +1166,17 @@ static void ConfigureGrpcOutboundResilience(
 /// <para>
 /// ATTEMPTS ARE COUNTED INCLUSIVELY HERE. The Polly setting is a number of RETRIES; a gRPC retry policy
 /// takes a number of ATTEMPTS, so it is one greater. Getting that wrong would silently change the number
-/// of calls a replay-safe read makes.
+/// of calls a replay-safe read makes. The increment is CHECKED - see
+/// <see cref="GatewayOptions.OutboundCallOptions.ResolveGrpcAttemptCount"/> for the negative count the
+/// unchecked form used to produce and every layer used to accept.
+/// </para>
+/// <para>
+/// 🔴 <b>A CONFIGURED ZERO INSTALLS NOTHING AT ALL, WHICH IS WHAT MAKES THE DISABLE REAL.</b> The setting
+/// was documented as disabling retry while this method consumed it unconditionally: zero produced
+/// <c>MaxAttempts = 1</c>, which the gRPC retry policy rejects, so the one value an operator would reach
+/// for to turn retry off could not be deployed. Returning early leaves <c>ServiceConfig</c> and the
+/// channel's own ceiling unset, which is the absence of a retry policy rather than a policy configured to
+/// do nothing - and the HTTP layer is disabled by predicate in the sibling method.
 /// </para>
 /// </remarks>
 static void ApplyGrpcRetry(
@@ -1225,7 +1186,12 @@ static void ApplyGrpcRetry(
     ArgumentNullException.ThrowIfNull(channelActions);
     ArgumentNullException.ThrowIfNull(outbound);
 
-    int attempts = outbound.MaxRetryAttempts + 1;
+    if (!outbound.RetriesEnabled)
+    {
+        return;
+    }
+
+    int attempts = outbound.ResolveGrpcAttemptCount();
     TimeSpan initialBackoff = outbound.RetryBaseDelay;
 
     channelActions.Add(channelOptions =>
@@ -1315,50 +1281,72 @@ static void ConfigureOutboundResilience(
     // ASSIGNED FROM THE SAME TWO SETTINGS THE gRPC LAYER READS, so the two layers cannot disagree about
     // how many times a replay-safe call is attempted. Both matched the package defaults before; they are
     // written down because a requirement satisfied only by a dependency's default is not being enforced.
-    resilience.Retry.MaxRetryAttempts = outbound.MaxRetryAttempts;
+    //
+    // 🔴 A CONFIGURED ZERO IS EXPRESSED AS A PREDICATE, NOT AS A COUNT, and it has to be: the resilience
+    // package declares Retry.MaxRetryAttempts in the range 1..int.MaxValue, so assigning zero made the
+    // SERVICE FAIL TO START - "The field <client>-standard.Retry.MaxRetryAttempts must be between 1 and
+    // 2147483647", observed on all three named pipelines - while the setting was documented as a disable.
+    // The strategy therefore names the smallest legal count and its ShouldHandle answers false for
+    // everything, so nothing is ever retried. See OutboundCallOptions.DisabledRetryPlaceholderAttempts.
+    resilience.Retry.MaxRetryAttempts = outbound.RetriesEnabled
+        ? outbound.MaxRetryAttempts
+        : GatewayOptions.OutboundCallOptions.DisabledRetryPlaceholderAttempts;
+
     resilience.Retry.Delay = outbound.RetryBaseDelay;
 
     resilience.Retry.BackoffType = DelayBackoffType.Exponential;
     resilience.Retry.UseJitter = true;
-    resilience.Retry.ShouldHandle = OutboundCallPolicy.ShouldRetryAsync;
+
+    resilience.Retry.ShouldHandle = outbound.RetriesEnabled
+        ? OutboundCallPolicy.ShouldRetryAsync
+        : OutboundCallPolicy.NeverRetryAtTheHttpLayerAsync;
 
     resilience.CircuitBreaker.ShouldHandle = OutboundCallPolicy.ShouldBreakAsync;
 }
 
 /// <summary>
-/// Whether the principal's <c>scope</c> claim set contains the named scope.
+/// Loads the client identity Gateway presents on the system's single mutual-TLS edge, or an empty
+/// collection when this deployment presents none.
 /// </summary>
-/// <param name="user">The authenticated principal.</param>
-/// <param name="required">The scope the operation requires.</param>
-/// <returns><see langword="true"/> when the scope is granted.</returns>
+/// <param name="mutualTls">
+/// The validated <c>Gateway:MutualTls</c> group. Both members are filesystem paths naming material
+/// mounted from the orchestration secret layer; the type has no member that could carry a certificate
+/// body, a private key body or a passphrase, so there is nowhere for one to be placed.
+/// </param>
+/// <returns>
+/// A collection holding the one client certificate when the pair is configured, and an EMPTY
+/// collection when it is not. Empty is a legitimate result and not an error: it means this run does
+/// not reach the token-issuance edge, which a local bring-up without a generated certificate set
+/// genuinely is.
+/// </returns>
+/// <exception cref="InvalidOperationException">
+/// The pair is configured but the material cannot be read or does not parse. That is a structural
+/// fault and it stops the host, matching the fail-fast posture described in the file header - a
+/// deployment that meant to authenticate to the issuer and cannot has already lost every authenticated
+/// call it would make, so continuing would only defer the failure to first use.
+/// </exception>
 /// <remarks>
-/// EXACT, ORDINAL AND SPACE-DELIMITED, matching <c>Authorization/ScopeAuthorization.cs</c>'s handler
-/// clause for clause: the claim is read under its bare wire spelling because inbound claim mapping is
-/// off, entries are compared ordinally with no prefix match and no wildcard, and empty entries are
-/// skipped so a doubled or trailing delimiter behaves like a well-formed value. Stated here as well as
-/// in the handler because the two forms must not be able to disagree about what "granted" means.
+/// <para>
+/// NO PATH IS EVER ECHOED INTO A MESSAGE, and the exception below names the two CONFIGURATION KEYS
+/// instead. A path is not itself a credential, but it names the location of one, and a startup log is
+/// exactly the wrong place to publish where a private key is mounted. The configuration key is
+/// sufficient for an operator to find the setting, which is the same rule
+/// <c>Configuration/GatewayOptions.cs</c> applies to its own validation messages.
+/// </para>
+/// <para>
+/// HALF A PAIR CANNOT REACH HERE. <c>GatewayOptions</c> validates the group as both-or-neither and the
+/// registration above validates on start, so by the time this runs the pair is either wholly present
+/// or wholly absent. The second check below is therefore a guard against a future caller rather than a
+/// reachable configuration state, and it is written as one rather than as an assumption.
+/// </para>
+/// <para>
+/// The material is read from a PEM certificate and a separate PEM key, which is the shape the
+/// generation recipe in <c>docs/ARCHITECTURE.md</c> produces and the shape the four
+/// <c>*_MTLS_CERT_PATH</c> / <c>*_MTLS_KEY_PATH</c> variables name. The resulting key is ephemeral,
+/// which is directly usable for TLS client authentication on Linux - the target operating system for
+/// every container in this refactor.
+/// </para>
 /// </remarks>
-static bool GrantsScope(ClaimsPrincipal user, string required)
-{
-    ArgumentNullException.ThrowIfNull(user);
-    ArgumentNullException.ThrowIfNull(required);
-
-    foreach (Claim claim in user.FindAll("scope"))
-    {
-        foreach (string granted in claim.Value.Split(
-            ' ',
-            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            if (string.Equals(granted, required, StringComparison.Ordinal))
-            {
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
 static X509Certificate2Collection LoadMutualTlsClientIdentity(
     GatewayOptions.MutualTlsClientOptions mutualTls)
 {
@@ -1593,16 +1581,6 @@ internal sealed class InternalTlsTrust
 }
 
 /// <summary>
-/// The reachable entry-point type for the in-process service tests.
-/// </summary>
-/// <remarks>
-/// LOAD BEARING, NOT CEREMONIAL. Top-level statements compile to an internal <c>Program</c> class, so
-/// without this declaration <c>WebApplicationFactory&lt;Program&gt;</c> in the sibling
-/// <c>PowerFramework.Gateway.Tests</c> project cannot name the entry point, the service-level tests
-/// cannot boot this host at all, and the per-service coverage gate becomes unreachable for every line
-/// in this file.
-/// </remarks>
-/// <summary>
 /// The data-protection key repository, held in this process's memory and never written to storage.
 /// </summary>
 /// <remarks>
@@ -1664,6 +1642,16 @@ internal sealed class InMemoryDataProtectionKeyRepository : IXmlRepository
     }
 }
 
+/// <summary>
+/// The reachable entry-point type for the in-process service tests.
+/// </summary>
+/// <remarks>
+/// LOAD BEARING, NOT CEREMONIAL. Top-level statements compile to an internal <c>Program</c> class, so
+/// without this declaration <c>WebApplicationFactory&lt;Program&gt;</c> in the sibling
+/// <c>PowerFramework.Gateway.Tests</c> project cannot name the entry point, the service-level tests
+/// cannot boot this host at all, and the per-service coverage gate becomes unreachable for every line
+/// in this file.
+/// </remarks>
 public partial class Program
 {
     /// <summary>

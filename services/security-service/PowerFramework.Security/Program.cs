@@ -456,10 +456,10 @@ builder.Services.AddSingleton<ClientCertificateTrust>();
 // --------------------------------------------------------------------------------------------------
 const string inboundAuthenticationSection = "Authentication:Jwt";
 
-// The log category the issuance-roster coherence report is written under. A NAME rather than a type, because
-// the report is a property of the composition root's startup gate rather than of any one component, and a
-// stable dotted category is what lets a deployment raise or silence it through the ordinary logging filters.
-const string IssuanceRosterCoherenceCategory = "PowerFramework.Security.IssuanceRosterCoherence";
+// The category the one non-fatal issuance-configuration report is written under. Named after the type that
+// produces it so a log filter and a source file are found from each other, and declared here rather than
+// inline so the string appears exactly once.
+const string issuanceRosterAuthorityCategory = "PowerFramework.Security.IssuanceRosterAuthority";
 
 // =================================================================================================
 //  DATA PROTECTION IS EPHEMERAL BY DELIBERATE CHOICE, AND THE CHOICE IS ABOUT KEY MATERIAL AT REST.
@@ -558,7 +558,15 @@ builder.Services
             // therefore has a fetch to govern. Nothing here relaxes it there. Should this handler ever
             // acquire an Authority, the platform default is already the safe value - true - so the
             // absence of an assignment cannot become a plaintext fetch by omission.
-            bearer.MapInboundClaims = inbound.GetValue("MapInboundClaims", false);
+            //
+            // 🔴 AND NOTHING IS ASSIGNED FROM CONFIGURATION AT THE END OF THIS BLOCK EITHER, WHICH IS A
+            // CORRECTION. A `bearer.MapInboundClaims = inbound.GetValue("MapInboundClaims", false)` line
+            // stood here - directly beneath prose about RequireHttpsMetadata, which is a different setting
+            // - and the literal assignment further down overwrote it unconditionally, so the read decided
+            // nothing at all. Worse than harmless for the same reason the removed RequireHttpsMetadata read
+            // was: it left a configuration path an operator could reasonably believe applied. The read is
+            // gone, the literal assignment below is the only one, and section 8 now REFUSES a host that
+            // configures the key rather than ignoring the value in silence.
 
             // ALL FOUR ARE ASSIGNED LITERALLY, NOT READ. Each removes an entire class of forgery, so
             // none is a deployment choice: without issuer validation a credential from any issuer is
@@ -633,7 +641,7 @@ builder.Services
 // AND THE CRYPTOGRAPHIC SURFACE GETS A NAMED POLICY OF ITS OWN, BECAUSE AUTHENTICATION IS NOT
 // AUTHORIZATION. The fallback below closes the door on a route that declares nothing; that policy decides
 // WHO may open the C-02 surface and for WHAT. Requiring only an authenticated principal meant any holder of
-// any token minted for this service's audience could drive all 17 operations - keyed HMAC, symmetric
+// any token minted for this service's audience could drive all 18 operations - keyed HMAC, symmetric
 // encryption and decryption, RSA signing and RSA key generation among them - whatever the credential was
 // obtained for and whichever caller it was minted for (CWE-862, CWE-863). Contract C-02 says who the
 // surface is for: Security serves DataServices, and DataServices requests exactly `security.crypto`.
@@ -905,34 +913,45 @@ RequireIssuableInboundAudience(
     ReadInboundAudience(app.Configuration, inboundAuthenticationSection),
     inboundAuthenticationSection);
 
-// AND THE FOUR TOKEN-VALIDATION SWITCHES ARE INVARIANT, WHICH THIS LINE MAKES ENFORCEABLE. Section 5
-// assigns all four literally, so a configured false takes no effect - and a setting that is silently
-// ignored is worse than one that is honoured, because an operator would believe it applied. Refusing to
-// start says plainly that the value is neither honoured nor honourable. Read from the BUILT host's
-// configuration for the same reason the two lines above are: this is the only vantage point from which
-// the final, fully-composed configuration is visible, so a value contributed by a later source is seen.
+// AND THE FIVE INVARIANT TOKEN-VALIDATION SETTINGS ARE ENFORCED HERE. Section 5 assigns all five
+// literally, so a configured value takes no effect - and a setting that is silently ignored is worse than
+// one that is honoured, because an operator would believe it applied. Refusing to start says plainly that
+// the value is neither honoured nor honourable. Read from the BUILT host's configuration for the same
+// reason the two lines above are: this is the only vantage point from which the final, fully-composed
+// configuration is visible, so a value contributed by a later source is seen.
 RequireInvariantTokenValidation(app.Configuration, inboundAuthenticationSection);
 
-// AND ONE DIVERGENCE IS REPORTED RATHER THAN REFUSED, WHICH IS THE OPPOSITE DECISION FROM THE THREE
-// GATES ABOVE AND IS TAKEN FOR A STATED REASON.
+// AND THE PERMISSION MODEL MUST BE SINGULAR, WHICH IS A FOURTH REFUSAL RATHER THAN A WARNING.
 //
-// `Security:Clients[n]:Audiences` and `:Scopes` are bound and then never consulted: the issuance decision
-// is taken entirely against the matrix folded from `Security:Callers` and `Security:CallerAuthorizations`,
-// which is deliberately the single enforcement point. The shipped settings already advertise more than the
-// matrix grants, so an operator reading the roster would conclude a caller may address audiences it will in
-// fact be refused for - and the reverse mistake, a grant for a subject no credential-roster entry names, is
-// a permission nobody can exercise.
+// THERE IS EXACTLY ONE AUTHORITATIVE PERMISSION MODEL: the deployment-wide audience roster and the grant
+// matrix folded from `Security:Callers` and `Security:CallerAuthorizations`. The per-client
+// `Security:Clients[n]:Audiences` and `:Scopes` lists that used to sit beside it were bound, frozen onto the
+// resolved roster entry and CONSULTED BY NOTHING - two surfaces describing one decision, which is how the
+// shipped settings came to advertise audiences and scopes the matrix withholds and how an operator could
+// edit an authorization list and change nothing at all (CWE-16, CWE-863). They are REMOVED, not enforced:
+// enforcing them would create a second gate able to refuse what the matrix grants, which is the divided
+// authority Tokens/TokenIssuer.cs rejects in terms.
 //
-// NOT ENFORCED, because enforcing the advertised lists would create a second permission gate able to refuse
-// what the matrix grants, which is the divided authority Tokens/TokenIssuer.cs rejects in terms. NOT A
-// REFUSAL TO START, because the shipped configuration diverges, so refusing would turn a documentation
-// defect into an outage. Reported once, at Warning, naming the keys and the identifiers - every one of which
-// is already written in a settings file and none of which is a credential.
-foreach (string divergence in IssuanceRosterCoherence.Describe(issuance))
+// THIS LINE MAKES THEIR RETURN FATAL, which is the half that has to be a refusal. A binder silently drops a
+// key no property matches, so a settings file carrying either member forward from an older revision would
+// read as working authorization configuration and do nothing - the removed defect in a new dress, and
+// invisible from the bound instance because the value never reaches it. The check reads the configuration
+// ROOT by key path, names every offending key in one message, and echoes no value.
+IssuanceRosterAuthority.Require(issuance, app.Configuration);
+
+// AND THE ROSTER/MATRIX CROSS-REFERENCE IS REPORTED AT ITS EARNED SEVERITY, WHICH IS NOT A REFUSAL - AND
+// THE REASON IS THE CERTIFICATE ARM, NOT TIMIDITY. `Security:Clients` says who may authenticate BY SHARED
+// SECRET; the matrix says what an authenticated identity may REQUEST. A grant naming a caller no credential
+// entry names is therefore not a duplicated permission but usually a caller that authenticates by client
+// certificate, whose identity Endpoints/TokenEndpoints.cs reads from the certificate's common name without
+// consulting this roster at all - a shape SecurityOptions documents by making an entry's secret-key name
+// optional. Refusing it would make a supported topology unstartable, which is how a diagnostic becomes an
+// outage. So it is stated once, at startup, naming only identifiers a settings file already carries.
+foreach (string divergence in IssuanceRosterAuthority.Describe(issuance))
 {
     app.Services
         .GetRequiredService<ILoggerFactory>()
-        .CreateLogger(IssuanceRosterCoherenceCategory)
+        .CreateLogger(issuanceRosterAuthorityCategory)
         .LogWarning("{Divergence}", divergence);
 }
 
@@ -1272,6 +1291,16 @@ static void RequireIssuableInboundAudience(
 /// other than the offending boolean is echoed. ALL FOUR are reported together rather than one at a time,
 /// so a deployment with several disabled is fixed in one pass rather than in four restarts.
 /// </para>
+/// <para>
+/// 🔴 <b>A FIFTH SETTING IS CHECKED HERE, AND ITS POLARITY IS THE OPPOSITE ONE.</b>
+/// <c>MapInboundClaims</c> is also assigned literally in section 5 - to <see langword="false"/> - and for
+/// this service it is load bearing rather than tidy: the legacy handler rewrites <c>scope</c> and
+/// <c>sub</c> into WS-Federation URIs, so with mapping on, every scope check would look for a claim that
+/// is no longer there and silently pass nothing. The required value is therefore <c>false</c> and a
+/// configured <c>true</c> is what must be refused, which is why it cannot join the loop above. It was
+/// previously READ from configuration in section 5 and then overwritten by the literal, so a configured
+/// value decided nothing while appearing to; the read is gone and this check is what replaces it.
+/// </para>
 /// </remarks>
 static void RequireInvariantTokenValidation(IConfiguration configuration, string sectionName)
 {
@@ -1299,21 +1328,34 @@ static void RequireInvariantTokenValidation(IConfiguration configuration, string
         }
     }
 
-    if (disabled.Count == 0)
+    if (disabled.Count > 0)
     {
-        return;
+        throw new InvalidOperationException(
+            $"Configuration key(s) {string.Join(", ", disabled)} are set to false. Each of the four "
+            + "inbound token-validation checks removes an entire class of forgery, so none of them is a "
+            + "deployment choice: without issuer validation a credential from any issuer is accepted - and "
+            + "this service is the issuer; without audience validation a credential minted for another "
+            + "service is replayable here; without lifetime validation the short lifetimes this service "
+            + "mints bound nothing; without signing-key validation the signature is not verified at all. "
+            + "The bearer handler is configured with all four enabled regardless of these values, so the "
+            + "settings would not take effect - and a setting that is silently ignored is worse than one "
+            + "that is honoured. Remove the key(s) or set them to true, and restart.");
     }
 
-    throw new InvalidOperationException(
-        $"Configuration key(s) {string.Join(", ", disabled)} are set to false. Each of the four inbound "
-        + "token-validation checks removes an entire class of forgery, so none of them is a deployment "
-        + "choice: without issuer validation a credential from any issuer is accepted - and this service "
-        + "is the issuer; without audience validation a credential minted for another service is "
-        + "replayable here; without lifetime validation the short lifetimes this service mints bound "
-        + "nothing; without signing-key validation the signature is not verified at all. The bearer "
-        + "handler is configured with all four enabled regardless of these values, so the settings would "
-        + "not take effect - and a setting that is silently ignored is worse than one that is honoured. "
-        + "Remove the key(s) or set them to true, and restart.");
+    // THE FIFTH SETTING, WHOSE REQUIRED VALUE IS FALSE. The default is again the safe one, so an absent
+    // key is the ordinary case; a configured TRUE is the fault, and a configured false is accepted because
+    // it agrees with the literal even though it changes nothing.
+    if (inbound.GetValue("MapInboundClaims", false))
+    {
+        throw new InvalidOperationException(
+            $"Configuration key '{sectionName}:MapInboundClaims' is set to true. Inbound claim mapping "
+            + "rewrites the standard 'scope' and 'sub' claim names into WS-Federation URIs, so the scope "
+            + "policy would look for claims that are no longer present and every scope check would "
+            + "silently pass nothing - an authorized-looking boundary that authorizes nothing. The bearer "
+            + "handler is configured with mapping OFF regardless of this value, so the setting would not "
+            + "take effect, and a setting that is silently ignored is worse than one that is honoured. "
+            + "Remove the key or set it to false, and restart.");
+    }
 }
 
 /// <summary>
@@ -1477,16 +1519,6 @@ internal sealed class CallerCertificateTrust
 }
 
 /// <summary>
-/// The reachable entry-point type for the in-process service tests.
-/// </summary>
-/// <remarks>
-/// LOAD BEARING, NOT CEREMONIAL. Top-level statements compile to an internal <c>Program</c> class, so
-/// without this declaration <c>WebApplicationFactory&lt;Program&gt;</c> in the sibling
-/// <c>PowerFramework.Security.Tests</c> project cannot name the entry point, the service-level tests
-/// cannot boot this host at all, and the per-service coverage gate becomes unreachable for every line in
-/// this file.
-/// </remarks>
-/// <summary>
 /// The data-protection key repository, held in this process's memory and never written to storage.
 /// </summary>
 /// <remarks>
@@ -1548,6 +1580,16 @@ internal sealed class InMemoryDataProtectionKeyRepository : IXmlRepository
     }
 }
 
+/// <summary>
+/// The reachable entry-point type for the in-process service tests.
+/// </summary>
+/// <remarks>
+/// LOAD BEARING, NOT CEREMONIAL. Top-level statements compile to an internal <c>Program</c> class, so
+/// without this declaration <c>WebApplicationFactory&lt;Program&gt;</c> in the sibling
+/// <c>PowerFramework.Security.Tests</c> project cannot name the entry point, the service-level tests
+/// cannot boot this host at all, and the per-service coverage gate becomes unreachable for every line in
+/// this file.
+/// </remarks>
 public partial class Program
 {
     /// <summary>

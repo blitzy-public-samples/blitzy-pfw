@@ -48,21 +48,26 @@ sites named in the requirements are **a floor, not a ceiling**.
 
 ## Current state of the artifacts this document references
 
-Some artifacts referenced below are **planned and not yet present in this repository**. They are named
-because they are where the corresponding work belongs, not because a reader can open them today:
+**Every artifact referenced below is present in the tree**, including the complete `orchestration/` set —
+[`../orchestration/docker-compose.yml`](../orchestration/docker-compose.yml),
+[`../orchestration/.env.example`](../orchestration/.env.example) and
+[`../orchestration/README.md`](../orchestration/README.md) — the solution and project files, the shared
+libraries, the protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service
+settings, [`PARITY.md`](PARITY.md) and the read-only legacy tree.
 
-| Artifact | What it will carry | State |
-| --- | --- | --- |
-| `orchestration/docker-compose.yml`, `orchestration/README.md` | Local orchestration and the readiness-gate bring-up. `orchestration/.env.example` is present; the manifest and its readme are not | **Planned — not yet present** |
+**Present is not the same claim as exercised.** This document reports on secret *handling*, not on runs;
+[`../orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised)
+is the only execution-status statement in this repository, and where this document says an edge is
+unexercised it is repeating that one rather than adding a second.
 
-Everything else this document references — the solution and project files, the shared libraries, the
-protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings,
-[`PARITY.md`](PARITY.md), `orchestration/.env.example` and
-the read-only legacy tree — **is present in the tree today**.
-
-**No control described in this document depends on those absent artifacts to be true.** The secret
-register, the locators and the severities are read from files that exist today; the orchestration layer
-is where injected values will *come from*, and its absence changes nothing about where the material is.
+**One distinction in this document survives the manifest's arrival and must not be blurred by it.** The
+manifest **injects paths**; it **mounts no material**. Every certificate, key and trust anchor named here
+arrives by path from the deployment's own secret layer — the canonical default being `/run/secrets/`
+([`orchestration/README.md`](../orchestration/README.md) §8.3) — and the manifest's only bind mount is the
+`persistence-db` volume. That is a deliberate design property, not a gap: it is what keeps every piece of
+key material out of the repository and out of every image layer (C-F). What it means for a reader is that
+"the variable is wired" and "the file is present in the container" are two separate facts, and this
+document is careful to say which one it is asserting.
 
 ---
 
@@ -75,7 +80,7 @@ is where injected values will *come from*, and its absence changes nothing about
 | [3. The remediation posture](#3-the-remediation-posture) | Never replicate, document, and rotate — never edit the legacy file; and the two operational follow-ups |
 | [4. Token topology](#4-token-topology) | One signing secret, one issuer, three verifiers, the mutual-TLS fallback, and nothing scaffolded for a deferred service |
 | [5. Credential-bearing fields on the new boundaries](#5-credential-bearing-fields-on-the-new-boundaries) | The per-field handling rules the contracts delegate here, and the deliberately ephemeral data-protection key ring |
-| [6. Statement redaction — the one control this refactor adds](#6-statement-redaction--the-one-control-this-refactor-adds) | Why a control is added rather than a behaviour preserved, and why that is not a behavioural change |
+| [6. Log hygiene — the two controls this refactor adds](#6-log-hygiene--the-two-controls-this-refactor-adds) | Why two controls are added rather than behaviours preserved, and why neither is a behavioural change: statement redaction (§6.1–§6.4) and caller-identifier neutralization (§6.5) |
 | [7. Cryptographic weak defaults are preserved as annotated defaults](#7-cryptographic-weak-defaults-are-preserved-as-annotated-defaults) | Eight weaknesses kept exactly as they are — four of them established by absence — and annotated rather than fixed |
 | [8. Constraint compliance and cross-references](#8-constraint-compliance-and-cross-references) | How this document honours each governing constraint, what it does not claim, and where to read next |
 
@@ -612,9 +617,11 @@ placeholder keys have a long history of reaching production unchanged.
 
 The template `orchestration/.env.example` carries the variable roster with the one signing entry left
 empty for exactly this reason: it tells an operator what to fill in without shipping anything to fill it
-in with. **That file, and the `orchestration/` directory holding it, are present in the tree** — an
-earlier revision of this section said otherwise. What is still **planned and absent** at this boundary is
-`orchestration/docker-compose.yml`, which will consume the template, and `orchestration/README.md`.
+in with. **That file, the manifest that consumes it and the operator's guide beside it are all present in
+the tree** — [`../orchestration/.env.example`](../orchestration/.env.example),
+[`../orchestration/docker-compose.yml`](../orchestration/docker-compose.yml) and
+[`../orchestration/README.md`](../orchestration/README.md). An earlier revision of this section said the
+last two were absent; they are not.
 
 #### What kind of key this is: RSA, not random bytes
 
@@ -629,26 +636,27 @@ instruction was incompatible with the published contract and is corrected here.*
 | --- | --- |
 | **Generation** | `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out security-signing.key` |
 | **Accepted form** | The key **material itself**, as a value rather than a path. In the template that is the single-line base64-of-DER form, because the Compose dotenv format has no line continuation and a PEM block cannot be written there; a secret store that can carry newlines may instead supply PEM, which Security tries first. An earlier revision of this document described the variable as a path to a mounted PEM file — that is not what the template declares, and the two statements are reconciled here in favour of the template, which is the artifact an operator actually fills in |
-| **Minimum size** | **2048 bits, enforced — see §4.1.1.** `Security:SigningKeyMinimumSizeBits` is a bound option measured by the options validator *and* again by `SigningKeyProvider` before signing credentials become reachable, so a 1024-bit key is refused at startup by name. Raisable to 3072 or 4096; a configured value below 2048 is itself refused |
+| **Size** | **Measured and annotated, never enforced — see §4.1.1.** `SigningKeyProvider` records the imported modulus as `SigningKeySizeBits` and logs one warning when it is below the 2048-bit annotation threshold `SecurityOptions.LegacyWeakSigningKeySizeBits`. Nothing refuses a short key: AAP §0.6.6.4 preserves 1024-bit RSA as a legal size and §0.2.2.5 forbids correcting a legacy weakness, so a 1024-bit key starts the host and mints. The generation command above produces 2048 bits, which draws no warning. There is no minimum-size setting to configure |
 | **Public half** | **Derived, never configured.** Security computes the public JWK from the private key and publishes it under the `kid` in `Security:SigningKeyId`. There is no public-key variable, and there must not be one: two independently configured halves of one key pair is a way to publish material that does not verify what is being signed |
 | **Rotation** | **Not implemented — see §4.1.1, and §4.2.1 for the convergence window.** Replace the configured secret value (or the object in the secret store that supplies it) and restart Security. No code change and no rebuild, and no other service is reconfigured. **An earlier revision of this row said every token signed with the previous key "stops verifying the moment the host restarts", and that is false of the three VERIFIERS:** each holds a cached copy of the published key set, so a pre-rotation token keeps verifying at those boundaries until the cache is refreshed, and a post-rotation token is refused there until it is. §4.2.1 states the bound and the order to rotate in |
 
-#### 4.1.1 What is enforced about this key, and what is only recommended
+#### 4.1.1 What is enforced about this key, what is only measured, and why the difference is a requirement
 
-This subsection exists because three rows above used to overstate the controls around this variable, and
-an overstated control is worse than a missing one: it is relied on. What follows was read off the code
-rather than off the settings file.
+This subsection exists because an overstated control is worse than a missing one: it is relied on. What
+follows was read off the code rather than off the settings file.
 
-> ⚠ **THIS SUBSECTION WAS WRONG ABOUT BOTH SETTINGS AND HAS BEEN CORRECTED.** It stated that
-> `Security:SigningKeyFormat` and `Security:SigningKeyMinimumSizeBits` bind to nothing, that changing
-> either changes nothing, and that **"a 1024-bit RSA key starts the host and mints tokens"**. All three
-> claims are false against the delivered code: both settings are bound, both are validated, and the size
-> floor is additionally enforced a second time inside the signing-key provider. The error ran in the
-> dangerous direction — it described active controls as inert, so a reader would have under-counted this
-> service's protections and read a legitimate startup refusal as a defect. **No behaviour changed in the
-> correction; only the description did.** The same paragraph even named the remediation it needed
-> ("anyone adding a real floor must … correct this subsection, `appsettings.json` and `BUILD.md` §8 in the
-> same change"); the floor was added and that half was missed, and this is it.
+> ⚠ **THE 2048-BIT FLOOR WAS WITHDRAWN, AND ITS WITHDRAWAL IS THE REQUIREMENT RATHER THAN A RELAXATION.**
+> An intermediate revision declared `Security:SigningKeyMinimumSizeBits`, defaulted it to 2048, refused
+> anything shorter in the options validator AND again inside the signing-key provider, and documented that
+> refusal here, in [`BUILD.md`](BUILD.md) §8 and in `appsettings.json`. AAP §0.6.6.4 requires each weak
+> legacy cryptographic default to be preserved **as an annotated default** and names 1024-bit RSA as one
+> that "remains a legal key size"; §0.2.2.5 forbids correcting a legacy defect at all. A floor that refused
+> a legacy-legal key was therefore a behaviour change dressed as hardening, and on the one service that
+> mints it converted a preserved allowance into a refusal to start. **The behaviour changed with this
+> correction, not only the description:** the option, both refusals and the settings leaf are gone, and what
+> replaces them is measurement plus a warning. Anyone reintroducing a floor is making a scope decision
+> against §0.6.6.4 and must change this subsection, [`BUILD.md`](BUILD.md) §8, `appsettings.json` and
+> `orchestration/.env.example` in the same edit.
 
 **The accepted format is a validated setting over a fixed acceptance sequence.**
 `Tokens/SigningKeyProvider.cs` always attempts the same closed sequence — PEM first, both the PKCS#8 and
@@ -662,29 +670,27 @@ leaf is not merely a record of the fixed behaviour: a deployment that names a fo
 implement (`Pkcs12` and `Jwk` being the plausible guesses) is told so at startup instead of having its
 expectation silently ignored.
 
-**A 2048-bit key-size floor IS enforced, in two places, deliberately.**
-`Security:SigningKeyMinimumSizeBits` is a bound property of `SecurityOptions`, defaulting to 2048, and:
+**THE KEY SIZE IS MEASURED AND ANNOTATED, AND NOTHING REFUSES A SHORT KEY.** There is no minimum-size
+option, and `PowerFramework.Security.Tests` asserts by reflection that none has been reintroduced. What the
+code does instead, all of it in `Tokens/SigningKeyProvider`:
 
-- `SecurityOptionsValidator` imports the configured material, measures the modulus, and refuses a short
-  key with a **named configuration failure** — this is what produces a readable startup message that
-  quotes the measured and required sizes and never the key; and
-- `Tokens/SigningKeyProvider` calls `RequireSufficientModulus` before signing credentials become reachable
-  at all — this is what makes the guarantee **structural**, so it holds on any construction path that does
-  not run options validation.
+- it records the imported modulus as `SigningKeySizeBits`, so the measured size is observable rather than
+  inferred;
+- it sets `SigningKeyIsLegacyWeak` when that size is below `SecurityOptions.LegacyWeakSigningKeySizeBits`
+  (2048) — an ANNOTATION THRESHOLD, named so it cannot be mistaken for a floor; and
+- it logs exactly one warning naming the measured size and the threshold when the verdict is true. The
+  warning never echoes the key.
 
-**A 1024-bit RSA key therefore does not start this host.** The floor may be raised — 3072 or 4096 — and it
-may **not** be lowered: a configured value below `AbsoluteMinimumSigningKeySizeBits` (2048) is itself
-refused. Both refusals are asserted by `PowerFramework.Security.Tests`.
+**A 1024-bit RSA key therefore starts this host and mints tokens**, which is the legacy allowance
+`CRYPTO_RSA_BITS_1024` [`ws_objects/pfw.shared.pbl.src/enums.sru:L965`] preserved on the issuer exactly as
+it is preserved on the C-02 key-generation surface, where the caller supplies the size. Both are asserted
+by test, and the annotation is what AAP §0.6.6.4 asks for in place of a correction: the weakness is
+visible, and it is not silently repaired.
 
-This floor applies to **this service's own signing identity and to nothing else.** The legacy's
-first-class 1024-bit allowance (`CRYPTO_RSA_BITS_1024`
-[`ws_objects/pfw.shared.pbl.src/enums.sru:L965`]) is reproduced verbatim on the C-02 key-generation
-surface, where the caller supplies the size and parity is the obligation. One surface preserves the legacy;
-the other protects a net-new trust root the legacy never had, which is precisely why a control here is not
-a correction of legacy behaviour (AAP G2, §0.6.6.4). Anyone changing the floor, its default or its absolute
-minimum must change this subsection, `appsettings.json`, [`BUILD.md`](BUILD.md) §8 and
-`orchestration/.env.example` in the same edit — all four stated the *opposite* together once, in the same
-direction.
+**What still fails closed is unusable material, and that is not a size judgement.** A value that cannot be
+imported as an RSA private key at all — `openssl rand` output being the case that actually happens — makes
+the host refuse to start, reported as unusable and nothing else, with the variable named and the value
+never echoed. The `/v1/crypto` surface's own weak defaults are annotated the same way and listed in §6.
 
 **Rotation is not implemented, and replacement is a hard cutover.** Security holds exactly **one** signing
 key and publishes exactly **one** JWK under the single `kid` in `Security:SigningKeyId`. There is no key
@@ -708,14 +714,20 @@ The operational consequence is therefore specific rather than reassuring:
   and a multi-key JWKS projection. Until that exists, plan a replacement as a scheduled restart, not as a
   rollover.
 
-**The transport identity is a separate set of files.** `POST /v1/tokens` authenticates its caller with a
-client certificate (§4.3), so Security additionally needs a server certificate and a client-CA to trust.
-The **server** certificate is not Security-specific: all three TLS listeners terminate with the same
-default material, supplied once through `TLS_CERTIFICATE_PATH` and `TLS_CERTIFICATE_KEY_PATH`, which bind
-to `Kestrel:Certificates:Default:Path` and `:KeyPath`. **Because one certificate serves three different
-hostnames and is probed locally at a fourth, it must carry every one of them as a subject alternative
-name — `security-service`, `dataservices-service`, `persistence-service`, `localhost` and `127.0.0.1` —
-or be replaced by one certificate per service.** A common-name-only certificate cannot authenticate the
+**The transport identity is a separate set of files.** `POST /v1/tokens` authenticates its caller with
+either a shared secret presented as an HTTP `Basic` credential or a client certificate — **either
+satisfies it** (§4.3) — so where the certificate scheme is used Security additionally needs a server
+certificate and a client-CA to trust.
+The **server** certificate is not Security-specific and not three-of-four: **all four services** terminate
+TLS with the same default material, supplied once through `TLS_CERTIFICATE_PATH` and
+`TLS_CERTIFICATE_KEY_PATH`, which the Compose manifest forwards to every service definition as
+`Kestrel:Certificates:Default:Path` and `:KeyPath`. One pair therefore covers **all four bound ports** —
+5101, 5102, 5104 and 5105, one listener per service. **Because one certificate is presented under four different service
+names and is probed locally at a fifth, it must carry every one of them as a subject alternative name —
+`security-service`, `dataservices-service`, `persistence-service`, `gateway-service`, `localhost` and
+`127.0.0.1` — or be replaced by one certificate per service.** Gateway is the easy omission because
+nothing else in the system calls it; an end-to-end suite and an operator both reach it by name.
+A common-name-only certificate cannot authenticate the
 other names, and every TLS client in the system rejects it for them; the SAN-bearing command set is in
 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.3.1 and is the canonical copy. What is Security-specific is the
 trust anchor it validates presented client certificates against, `SECURITY_MTLS_CLIENT_CA_PATH`, and the
@@ -746,12 +758,16 @@ withdrawn second mutual-TLS listener, and the server certificate now comes from 
 > stage needs no root-privileged step. A configured-but-unreadable anchor is a refusal to start.
 > `AllowAnyClientCertificate` is called nowhere in the repository.
 >
-> **What is not operable is the mount.** `orchestration/docker-compose.yml` does not exist, so nothing
-> places the file the variable names; with the path unset the callback defers to the platform's own
-> verdict. **The certificate alternative on the issuance edge is therefore unexercised end to end**, and
-> §4.3 repeats the point at its own point of use. That is a gap in ONE of the two accepted schemes:
-> `POST /v1/tokens` also accepts a shared secret as an HTTP `Basic` credential, which is what the
-> documented bring-up supplies, so no statement here should be read as "issuance is unauthenticated".
+> **What is not operable is a projection of *this* anchor.**
+> [`../orchestration/docker-compose.yml`](../orchestration/docker-compose.yml) projects the three
+> server-side TLS files as read-only secrets and deliberately projects nothing for the five `*_MTLS_*`
+> variables, injecting them verbatim as **container** paths — mutual TLS is the per-pair fallback the brief
+> declines to scaffold, and a *host* path set there refuses startup, measured rather than predicted. With
+> the path unset the callback defers to the platform's own verdict. **The certificate alternative on the
+> issuance edge is therefore unexercised end to end**, and §4.3 repeats the point at its own point of use.
+> That is a gap in ONE of the two accepted schemes: `POST /v1/tokens` also accepts a shared secret as an
+> HTTP `Basic` credential, which is what the documented bring-up supplies and what it exercised, so no
+> statement here should be read as "issuance is unauthenticated".
 
 [`BUILD.md`](BUILD.md) §8 and `orchestration/.env.example` §1 restate the variable roster, and the three
 must agree word for word.
@@ -764,17 +780,22 @@ must agree word for word.
 > tooling prevents that, so the control has to be the path itself.
 >
 > **The documented path is an environment file kept OUTSIDE the working tree**, referenced explicitly.
-> The copy step below runs today — `orchestration/.env.example` is present. The `docker compose` step
-> does not: `orchestration/docker-compose.yml` is **planned and absent**, so that line is the
-> specification for that work rather than a step a reader can run:
+> Every line below runs against the tree as it stands, and the copy is **guarded** so a second run cannot
+> overwrite a key already written into it:
 >
 > ```bash
-> install -d -m 700 "$HOME/.config/powerframework"
-> cp orchestration/.env.example "$HOME/.config/powerframework/pfw.env"
-> chmod 600 "$HOME/.config/powerframework/pfw.env"
+> set -euo pipefail
+> PFW_ENV="${XDG_CONFIG_HOME:-$HOME/.config}/powerframework/pfw.env"
+> install -d -m 700 "$(dirname "$PFW_ENV")"
+> if [ -e "$PFW_ENV" ]; then
+>   echo "Keeping the existing environment file at $PFW_ENV"
+> else
+>   cp orchestration/.env.example "$PFW_ENV"
+>   chmod 600 "$PFW_ENV"
+> fi
 > # populate SECURITY_JWT_SIGNING_KEY in that file -- it is an RSA PRIVATE key, not random bytes:
 > #   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -outform DER | base64 -w0
-> cd orchestration && docker compose --env-file "$HOME/.config/powerframework/pfw.env" up --build -d
+> cd orchestration && docker compose --env-file "$PFW_ENV" up --build -d
 > ```
 >
 > **The shape of that material is part of the secret handling rule, not an implementation detail.**
@@ -788,7 +809,8 @@ must agree word for word.
 > the DER encoding; where a secret store can carry newlines, the PEM form is accepted unchanged.
 >
 > The attached environment's own instruction is the in-tree form, `cp .env.example .env` followed by
-> `docker compose --env-file .env up`. It remains supported and [`BUILD.md`](BUILD.md) §8 records it —
+> `docker compose --env-file .env up`. It remains supported and
+> [`../orchestration/README.md`](../orchestration/README.md) §3.1 records it —
 > **but only with the precondition stated there**: add an ignore rule covering `orchestration/.env`
 > *before* writing any key into it, and never rely on the file being untracked to keep it unpublished.
 > An untracked secret is one `git add -A` away from a tracked one.
@@ -1018,7 +1040,7 @@ wrong: the pair has adopted it, since the published contract has required mutual
 moment it was authored. Without the settings the stack starts and then cannot issue a single credential,
 so their absence was a functional defect rather than restraint. The seven variables now present are the
 shared server certificate and key (`TLS_CERTIFICATE_PATH` / `TLS_CERTIFICATE_KEY_PATH` — not
-Security-specific, since all three TLS listeners terminate with the same default material), the trust
+Security-specific, since all four services terminate TLS with the same default material), the trust
 anchor Security validates presented client certificates against, and a client certificate and key for
 each of the two services that request tokens — Gateway and DataServices. **Persistence has none**,
 because it reads Security's anonymous key set and calls nothing else there, and provisioning a credential
@@ -1030,10 +1052,12 @@ for a caller that never authenticates would create material nothing consumes and
 > is loaded at startup and installed as Kestrel's `ClientCertificateValidation` callback, which chains a
 > presented certificate under `X509ChainTrustMode.CustomRootTrust` against that anchor alone. The OS trust
 > store is deliberately not the decider, which is why `services/security-service/Dockerfile` installs no
-> trust anchor and needs no root step. What is missing is the mount:
-> `orchestration/docker-compose.yml` does not exist, so nothing places the file
-> `SECURITY_MTLS_CLIENT_CA_PATH` names, and with the path unset the callback defers to the platform's own
-> verdict. **The certificate alternative on this edge is therefore declared and unexercised end to end** —
+> trust anchor and needs no root step. What no projection covers is this anchor:
+> [`../orchestration/docker-compose.yml`](../orchestration/docker-compose.yml) declares Compose secrets for
+> the three **server-side** TLS files only and injects `SECURITY_MTLS_CLIENT_CA_PATH` verbatim as a
+> container path with nothing projected behind it, so by default nothing places the file it names and with
+> the path unset the callback defers to the platform's own verdict. **The certificate alternative on
+> this edge is therefore declared and unexercised end to end** —
 > one of the two accepted schemes, alongside the shared secret the documented bring-up supplies — and
 > §4.1.1 says the same at its own point of use. The option not taken is recorded because it was a real
 > choice: copying the CA into the runtime stage and running `update-ca-certificates` there would have kept
@@ -1247,10 +1271,12 @@ to it.
 
 ---
 
-## 6. Statement redaction — the one control this refactor adds
+## 6. Log hygiene — the two controls this refactor adds
 
-Everywhere else, this refactor **preserves** legacy behaviour, including legacy defects. This is the one
-place it **adds** a control, so the justification is set out rather than assumed.
+Everywhere else, this refactor **preserves** legacy behaviour, including legacy defects. These are the
+only two places it **adds** a control, so the justification for each is set out rather than assumed.
+Both concern what reaches an operator's log: §6.1–§6.4 cover the statement text a database error carries,
+and §6.5 covers the caller-chosen identifiers a diagnostic names.
 
 ### 6.1 What the legacy does
 
@@ -1333,6 +1359,69 @@ annotated where it is reproduced so that a future reader cannot mistake a delibe
 for an implementation error. [`ARCHITECTURE.md`](ARCHITECTURE.md) §8.5 explains the exposure
 mechanically; [`CONTRACTS.md`](CONTRACTS.md) §8.3 names the clause-modification site at the contract
 level.
+
+### 6.5 Caller-chosen identifiers are neutralized before they reach a log record
+
+The second added control, and it is the same shape of decision as the first: a value that is entirely the
+caller's choice is written into a **rendered** operator record, and rendering is where it becomes
+dangerous.
+
+**What the exposure is.** Two of the values DataServices records for an operator arrive on the request and
+are chosen by whoever sends it: the **DataWindow handle** a request names, and the **column name** a
+rejected value was addressed by — a `NoSuchColumn` refusal carries the caller's own name verbatim so that
+an operator can see which column was meant. The shipped console and file logging providers render one
+record per line, so a caller that places a carriage return and a line feed inside one of those values
+**splits one record into two** and dictates the text of the second. The forged line can imitate this
+service's own diagnostics, so neither an operator reading the file nor a log-shipping pipeline parsing it
+can tell it from a real record. This is log forging, CWE-117, and it is the logging analogue of the
+statement exposure above: the value is legitimate to *carry*, and unsafe to *render*.
+
+**The control.**
+`shared/PowerFramework.Shared.Diagnostics/FaultDiagnostics.cs` renders one value safe for a record -
+`LogSafeText.Render`, shared by all three services that log so the rule is stated once rather than per
+service. Its rule is stated over Unicode **categories** rather than over a hand-picked list of characters,
+because reasoning about each one separately is how one gets missed:
+
+| Category | Why it is encoded |
+| --- | --- |
+| `Control` | Carriage return and line feed **end a record** in every line-oriented sink, which is the forging vector itself. The rest of the category travels with them, including `U+0085 NEXT LINE`, which several readers treat as a break |
+| `LineSeparator`, `ParagraphSeparator` | `U+2028` and `U+2029` are **not** control characters, so a check written only against an `IsControl` test admits them — yet they are line breaks to JSON-aware and JavaScript-based log viewers |
+| `Format` | The bidirectional overrides live here. They reorder the **visible** text of a line without changing its bytes, so a record can display an identifier other than the one it stores — the same class of deception as a forged second line |
+
+Three properties of the control are deliberate:
+
+- **Encoded, not stripped.** A stripped carriage return leaves a line that reads as an ordinary name,
+  which destroys exactly the evidence an operator investigating a forged record needs. The escape records
+  that a control character was sent, which one, and where in the value it sat. A backslash is doubled with
+  them, so a caller writing the escape sequence out in full cannot imitate one.
+- **Bounded in length.** Neither identifier has a length limit on the wire, so a record is capped and
+  states how many of the caller's own characters were discarded.
+- **The log only. The wire contract is untouched.** `RowValidationError.column_name` still carries the
+  caller's bytes exactly as they arrived, because the caller needs to recognise what it sent and a
+  structured protobuf field involves no rendering. Neutralizing the response as well would have changed a
+  published contract to solve a logging problem, which **C-B** forbids.
+
+**Why this is not a behavioural change either**, by the same argument §6.3 makes for redaction: the
+legacy delivered these diagnostics through `MessageBox`/`MessageBoxEx` dialogs, which have no log record
+to forge and no line-oriented sink behind them. The hazard is created by the decomposition — a service
+with a log file — so a control against it is required *by* the transition rather than layered on top of
+preserved behaviour. Nothing observable to a caller changes.
+
+**The standing rule, so it does not have to be rediscovered:** every string argument passed to a log
+record in Gateway, DataServices and Persistence goes through the neutralizer — handle, column name, session
+identifier, correlation identifier, principal, DBMS and server names — applied uniformly rather than only
+where a value is provably caller-chosen. A rule with exceptions has to be re-argued for every new record;
+for a server-minted value the call is a no-op, so uniformity costs nothing. Numeric arguments are
+deliberately left unwrapped and that is recorded rather than overlooked: a `long` cannot forge a record.
+
+**The exception-valued arguments are covered by the same file and a separate rule.** A raw exception
+rendered into a record carries a provider's own message, and a provider's message can carry the statement
+text §6.3 redacts — so `ExceptionChain.DescribeTypes` renders the *type* chain, outermost-first, bounded in
+depth and terminating on a cycle, and Persistence's `Errors/FaultRecord.cs` composes that chain with the
+redacted message. An exception OBJECT survives only where the framework's own sink will not render its
+message into a shipped record — `Debug` and `Trace`, which exist to inform a developer at a console — and
+in the documented terminal arms **C-B** requires be preserved verbatim from the legacy `systemerror`
+dialog.
 
 ---
 
@@ -1461,12 +1550,13 @@ Stated so that the register's limits are as legible as its findings:
   and the typed clients exist and the listener requests a certificate, but no container installs the
   trust anchor and no Compose manifest mounts it, so no presented client certificate has ever been
   validated. §4.1.1 and §4.3 both record that as a pending implementation with two named options.
-- **It does not claim that key rotation exists.** §4.1.1 states what is actually enforced: a fixed import
-  sequence whose failure refuses startup, a **bound and validated** format setting, a **bound and twice-
-  enforced** 2048-bit size floor — and exactly one published key with **no** rollover machinery. This
-  entry itself once asserted "**no** key-size floor of any kind" and that the two `appsettings.json`
-  leaves "bind to nothing"; both statements were false, and correcting them is why this bullet reads as it
-  now does. The rotation half was and remains true: there is one key, one `kid`, and no overlap window.
+- **It does not claim that key rotation exists, and it does not claim a size floor.** §4.1.1 states what is
+  actually enforced: a fixed import sequence whose failure refuses startup, a **bound and validated** format
+  setting — and exactly one published key with **no** rollover machinery. The key's **size is measured and
+  annotated, never enforced**: an intermediate revision of this document described a bound, twice-enforced
+  2048-bit floor, and that floor has since been withdrawn as the behaviour change it was, so a 1024-bit key
+  starts the host with one warning in the log. The rotation half was and remains true: there is one key, one
+  `kid`, and no overlap window.
 - **It does not claim any user-specified rule governs this work.** None exists (§1.2); the bar applied
   in their place is stated there rather than assumed.
 - **It reproduces no secret value of any kind** — the claim this document opens with, and the one every

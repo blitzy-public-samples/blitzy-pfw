@@ -116,6 +116,9 @@ using ColumnValue = PowerFramework.Contracts.Common.V1.ColumnValue;
 using CommonV1Extensions = PowerFramework.Contracts.Common.V1.CommonV1Extensions;
 using ConflictDetail = PowerFramework.Contracts.Common.V1.ConflictDetail;
 using ConflictRow = PowerFramework.Contracts.Common.V1.ConflictRow;
+using DataWindowRow = PowerFramework.Contracts.Common.V1.DataWindowRow;
+using DateValue = PowerFramework.Contracts.Common.V1.DateValue;
+using DecimalValue = PowerFramework.Contracts.Common.V1.DecimalValue;
 using DwBuffer = PowerFramework.Contracts.Common.V1.DwBuffer;
 using ExpansionMode = PowerFramework.Contracts.DataServices.V1.ExpansionMode;
 using ItemStatus = PowerFramework.Contracts.Common.V1.ItemStatus;
@@ -2722,6 +2725,130 @@ internal static class ScriptedPersistenceResponses
         messages.Add(StatusMessage(WireRetCode.Ok));
 
         return [.. messages];
+    }
+
+    /// <summary>
+    /// A complete retrieval whose single chunk carries REAL ROWS: one baselined row with all six of the
+    /// fixture's columns, and one insert-shaped row that has no prior state at all.
+    /// </summary>
+    /// <returns>The messages, in delivery order.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY A SECOND ROW-BEARING SCRIPT WHEN <see cref="QueryStream"/> EXISTS.</b> That one produces
+    /// EMPTY buffer segments, which is right for every assertion about chunking, ordering and lifecycle and
+    /// useless for an assertion about what a ROW carries. The concurrency contract is a statement about row
+    /// members, so a script whose rows do not exist cannot witness it.
+    /// </para>
+    /// <para>
+    /// <b>BOTH ROW SHAPES, BECAUSE THE CONTRACT DISTINGUISHES THEM AND ONLY THEM.</b> A retrieved row
+    /// carries one original per column and each original EQUALS its current value, because a retrieval is
+    /// what establishes the baseline. An insert-shaped row carries NO originals, because it has no prior
+    /// state - and that is now the only meaning an empty <c>original_values</c> has. The pair is what makes
+    /// "empty" and "absent" different claims rather than two spellings of one.
+    /// </para>
+    /// <para>
+    /// The values use the union arm each declared type implies rather than a uniform string:
+    /// <c>id</c> and <c>age</c> are <c>number</c>, <c>salary</c> is <c>decimal(2)</c> and therefore NOT a
+    /// double, <c>birth</c> is a <c>date</c>, and <c>name</c> and <c>address</c> are character columns
+    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14</c>].
+    /// </para>
+    /// </remarks>
+    public static ImmutableArray<QueryResponse> QueryStreamCarryingBaselinedAndInsertedRows()
+    {
+        CarrierBufferSegment primary = new() { Buffer = DwBuffer.Primary };
+
+        primary.Rows.Add(BaselinedFixtureRow(1L));
+        primary.Rows.Add(InsertShapedFixtureRow(2L));
+
+        CarrierState state = new();
+        state.Segments.Add(primary);
+
+        return
+        [
+            RowCountMessage(2L),
+            new QueryResponse
+            {
+                DataChunk = new QueryDataChunk
+                {
+                    State = state,
+                    ChunkCount = 1L,
+                    ChunkIndex = 1L,
+                    FullState = true,
+                },
+            },
+            StatusMessage(WireRetCode.Ok),
+        ];
+    }
+
+    /// <summary>
+    /// One retrieved row of the primary fixture: six columns, and six originals that agree with them.
+    /// </summary>
+    /// <param name="row">The one-based row ordinal.</param>
+    /// <returns>The row.</returns>
+    private static DataWindowRow BaselinedFixtureRow(long row)
+    {
+        DataWindowRow baselined = new()
+        {
+            Buffer = DwBuffer.Primary,
+            Row = row,
+            ItemStatus = ItemStatus.NotModified,
+        };
+
+        Add(1L, "id", new AnyValue { Int64Value = 7L });
+        Add(2L, "name", new AnyValue { StringValue = "Ada" });
+        Add(3L, "age", new AnyValue { Int64Value = 28L });
+        Add(4L, "address", new AnyValue { StringValue = "Marischal College" });
+        Add(5L, "salary", new AnyValue { DecimalValue = new DecimalValue { Value = "1200.00" } });
+        Add(6L, "birth", new AnyValue { DateValue = new DateValue { Value = "1815-12-10" } });
+
+        return baselined;
+
+        void Add(long columnId, string columnName, AnyValue value)
+        {
+            baselined.Columns.Add(new ColumnValue
+            {
+                ColumnName = columnName,
+                ColumnId = columnId,
+                Value = value,
+                ItemStatus = ItemStatus.NotModified,
+            });
+
+            // THE SAME VALUE, STATED TWICE, AND THAT IS THE POINT. A retrieval baselines every row, so the
+            // original and the current value agree - and the agreement is STATED rather than left to be
+            // inferred from an omission, because the two legal readings of an omission ("equal to current"
+            // and "no baseline exists") lead to a correct predicate and a silent overwrite respectively.
+            baselined.OriginalValues.Add(new ColumnValue
+            {
+                ColumnName = columnName,
+                ColumnId = columnId,
+                Value = value.Clone(),
+            });
+        }
+    }
+
+    /// <summary>
+    /// One insert-shaped row: columns, and no originals at all, because it has no prior state.
+    /// </summary>
+    /// <param name="row">The one-based row ordinal.</param>
+    /// <returns>The row.</returns>
+    private static DataWindowRow InsertShapedFixtureRow(long row)
+    {
+        DataWindowRow inserted = new()
+        {
+            Buffer = DwBuffer.Primary,
+            Row = row,
+            ItemStatus = ItemStatus.NewModified,
+        };
+
+        inserted.Columns.Add(new ColumnValue
+        {
+            ColumnName = "name",
+            ColumnId = 2L,
+            Value = new AnyValue { StringValue = "Grace" },
+            ItemStatus = ItemStatus.NewModified,
+        });
+
+        return inserted;
     }
 
     /// <summary>

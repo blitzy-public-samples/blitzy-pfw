@@ -38,33 +38,36 @@ marked TBD.
 ## Current state of the artifacts this document references
 
 [`BUILD.md`](BUILD.md) §1 defines the four status labels this documentation set uses; the ones that apply
-here are **present and verified**, **present but unexercised** and **planned — not yet present**.
+here are **present and verified** and **present but unexercised**. Nothing this document references is
+absent.
 
 | Artifact | What it carries | State |
 | --- | --- | --- |
-| [`docs/PARITY.md`](PARITY.md) | The characterization model, the fixture corpus, the determinism seam register and the eleven open risks | **Present.** Authored, linted with the six siblings under the shared policy at the head of this file, and cited by section number throughout the mapping below |
-| `characterization/**` | The paired recording store the model in `PARITY.md` describes | **Planned — not yet present** |
+| [`docs/PARITY.md`](PARITY.md) | The characterization model, the fixture corpus, the determinism seam register and the open risks | **Present but unexercised.** Authored, linted with the six siblings under the shared policy at the head of this file, and cited by section number throughout the mapping below |
+| [`characterization/README.md`](../characterization/README.md), `characterization/workflows/` | The capture model, 15 workflow definitions, their determinism masks and `workflow.schema.json` | **Present but unexercised.** `characterization/recordings/` holds no recording on either side |
+| [`orchestration/docker-compose.yml`](../orchestration/docker-compose.yml), [`orchestration/README.md`](../orchestration/README.md) | Local orchestration and the readiness-gate bring-up | **Present and verified.** The four-service bring-up was exercised — [`BUILD.md`](BUILD.md) §1.3 |
 
 Everything else this document references — the solution and project files, the shared libraries, the
-protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings,
-`orchestration/.env.example` and the read-only legacy tree — **is present in the tree today**.
+protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings, the
+complete `orchestration/` set and the read-only legacy tree — **is present in the tree today**.
 
 **So are the four services themselves, which is worth stating precisely because this document assigns
 capabilities to them.** Each of Gateway, DataServices, Persistence and Security has an application project
-with an entry point, its handler and domain tree, and a sibling test project: all twenty projects in the
-solution build in Release with **0 warnings and 0 errors**, and all ten test projects pass — **18,603
-tests passing, 0 failing, 4 skipped by design**. Every service test drives its own service **in process**,
-so the assignments below are backed by running code rather than by a plan alone.
+with an entry point, its handler and domain tree, and a sibling test project; all twenty projects build in
+Release with zero warnings and zero errors, all ten test projects pass, all four images build, and the four
+services have come up together as a stack. **The figures are in [`BUILD.md`](BUILD.md) §1.3, which is the
+canonical verification record, and are deliberately not restated here** — a mapping document that carries
+its own copy of a mutable total is a mapping document that will eventually contradict the record. The
+assignments below are therefore backed by running code rather than by a plan alone.
 
-What is still absent, and what a reader may expect to find:
+**The one thing that has not been done, and what it costs this document:**
 
-| Absent artifact | Consequence for this document |
+| Not done | Consequence for this document |
 | --- | --- |
-| `orchestration/docker-compose.yml` and `orchestration/README.md` | All four container definitions **are present** and [`BUILD.md`](BUILD.md) §7.1 describes what each does, but nothing assembles them, so **no whole-stack bring-up has been performed** and no assignment here has been observed across a network boundary |
-| `characterization/**` | **No paired legacy and .NET recording has been captured**, so no assignment here has been checked for behavioural parity against the oracle |
+| **No paired legacy and .NET recording has been captured.** `characterization/` and its 15 workflow definitions exist; `characterization/recordings/` is empty on both sides, because executing the oracle needs an Appeon PowerBuilder runtime that is not available here | **No assignment below has been checked for behavioural parity against the oracle.** Each is justified by capability cohesion and by source locators into the read-only legacy tree — which is what this document is for — and not by a comparison of outputs. [`PARITY.md`](PARITY.md) R4 tracks the gap |
 
-[`BUILD.md`](BUILD.md) §1.1 and §13 track all four, and [`PARITY.md`](PARITY.md) §1 states the parity
-position in full.
+[`BUILD.md`](BUILD.md) §13 carries the build and test position, and [`PARITY.md`](PARITY.md) §1 states the
+parity position in full.
 
 ---
 

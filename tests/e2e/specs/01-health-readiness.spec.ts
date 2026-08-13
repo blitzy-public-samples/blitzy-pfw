@@ -46,14 +46,31 @@
  *  the aggregate useful to the operator reading a failure, and it is the observable consequence of
  *  Gateway actually composing three upstream verdicts rather than reporting only on itself.
  *
- *  WHY THE BODY IS READ DEFENSIVELY RATHER THAN DESERIALIZED INTO A FIXED SHAPE
- *  ---------------------------------------------------------------------------
- *  These assertions are deliberately schema-agnostic: the body is read as text, parsed as JSON only
- *  if it parses, and inspected as a serialized document either way. That is a durability decision.
- *  The invariant contract C-10 actually publishes is "the aggregate names each upstream and reports a
- *  verdict"; the exact member spelling around it is the implementation's to choose and to version,
- *  and a deep structural equality here would fail on a contract-conformant document that had merely
- *  added a member. The three invariants below hold across every shape the contract permits.
+ *  🔴 WHY THE BODY IS NOW READ AGAINST THE PUBLISHED SHAPE, NOT DEFENSIVELY
+ *  -----------------------------------------------------------------------
+ *  This file used to state the opposite, and the reasoning was wrong on the facts. It read the body as
+ *  TEXT, parsed it as JSON only if it happened to parse, and inspected the serialized form either way -
+ *  on the argument that "the invariant contract C-10 actually publishes is 'the aggregate names each
+ *  upstream and reports a verdict'; the exact member spelling around it is the implementation's to
+ *  choose and to version".
+ *
+ *  `gateway.v1.yaml` says otherwise. `AggregateHealthReport` marks `status`, `service` and `upstreams`
+ *  REQUIRED, sets `additionalProperties: false`, fixes `service` as a `const`, pins `upstreams` at
+ *  exactly three items, and declares both status enumerations as closed sets. The member spelling is
+ *  not the implementation's to choose - it is what every client generated from the document reads.
+ *
+ *  What the tolerance bought was a suite that passed against documents no client can consume: a
+ *  plain-text `ok`, a bare quoted `"up"`, an upstream's own verdict mistaken for the aggregate's
+ *  because the last fallback searched the WHOLE body, and an upstream counted as "named" because the
+ *  word appeared in an unrelated member. Every one of those is now a failure.
+ *
+ *  ADDING A MEMBER IS STILL NOT A FAILURE, which was the legitimate half of the original concern: the
+ *  required members are asserted as present rather than as the complete key set, so a
+ *  contract-conformant document that grew `checkedAt` or `checks` still passes. The tolerance removed
+ *  is tolerance of a DIFFERENT shape, not of a richer one.
+ *
+ *  One assertion stays a text search and stays broad on purpose - the deferred-service guard. A
+ *  NEGATIVE assertion may be broader than the contract; a positive one may not.
  *
  *  WHAT THIS FILE DELIBERATELY DOES NOT DO
  *  ---------------------------------------
@@ -91,7 +108,7 @@
  * ==================================================================================================
  */
 
-import { expect, test } from '@playwright/test';
+import { expect, test, type APIResponse } from '@playwright/test';
 
 import {
   ALL_SERVICE_KEYS,
@@ -100,32 +117,62 @@ import {
   SERVICE_ENDPOINTS,
   anonymousHeaders,
   gatewayUrl,
-  type ServiceKey,
 } from '../fixtures';
 
-import { probeStackAvailability } from '../fixtures/live-stack';
+import { requireLiveStack } from '../fixtures/live-stack';
+
+import {
+  AGGREGATE_HEALTH_REPORT,
+  ALL_MEMBER_CONTRACTS,
+  CAPABILITY_ALL_MASK,
+  CAPABILITY_DESTINATION_TOKENS,
+  CAPABILITY_NAME_TOKENS,
+  CAPABILITY_VALUE_TOKENS,
+  DEFERRED_SERVICE_TOKENS,
+  GATEWAY_CONTRACT_PATH,
+  GATEWAY_SERVICE_TOKEN,
+  HEALTHY_STATUS_TOKEN,
+  HEALTH_CHECK_RESULT,
+  HEALTH_STATUS_TOKENS,
+  JSON_MEDIA_TYPE,
+  PING_AUTHENTICATED,
+  RESERVED_ROUTE_MARKER,
+  RESERVED_ROUTE_RET_CODE,
+  RESERVED_ROUTE_STATUS,
+  UPSTREAM_HEALTH,
+  UPSTREAM_SERVICE_TOKENS,
+  UPSTREAM_STATUS_TOKENS,
+  assertContractDeclaresShape,
+  assertContractDeclaresTokens,
+  assertContractTokensExhaustive,
+  assertEnumToken,
+  assertMediaType,
+  assertMembers,
+  describeShapeForFailure,
+  readRepositoryText,
+} from '../fixtures/contract-shape';
 
 /**
- * THE SINGLE EDIT POINT FOR HEALTHY-STATUS VOCABULARY.
+ * THE VERDICT IS ONE EXACT TOKEN, AND IT USED TO BE A VOCABULARY.
  *
- * Every assertion about a verdict reading "healthy" goes through this one pattern, so that the
- * vocabulary can be narrowed or widened in one place rather than being chased through a file full of
- * scattered string literals.
+ * This file once matched the aggregate verdict against `/\b(healthy|ok|up|pass)\b/i`, described as
+ * "deliberately tolerant across spellings ... the token an implementation chooses for the healthy end
+ * of it is not the thing this file exists to pin down." That reasoning was wrong about the contract.
+ * `AggregateHealthReport.status` is a CLOSED ENUMERATION of exactly three case-sensitive tokens
+ * — `Healthy`, `Degraded`, `Unhealthy` — and `Healthy` is the one that means ready. The pattern
+ * accepted three tokens the contract does not declare (`ok`, `up`, `pass`) in any casing, so a
+ * projection that changed its verdict vocabulary passed the readiness assertion, and an operator's
+ * gate keyed on `Healthy` would have broken while this suite stayed green.
  *
- * Two properties of the pattern are load bearing and are the reason it is written with word
- * boundaries rather than as a set of substring tests:
+ * The two properties the pattern was written for are preserved and strengthened rather than lost:
+ * `Unhealthy` cannot be read as healthy because the comparison is now equality against `Healthy`, and
+ * the `upstreams` member cannot be mistaken for the verdict because the verdict is read from the
+ * `status` member by name and from nowhere else.
  *
- *   * `\bhealthy\b` does NOT match `Unhealthy` — there is no word boundary between the `n` and the
- *     `h` — so a failed aggregate cannot be read as a healthy one. `Degraded` matches nothing here
- *     either, which is correct: not ready is not ready.
- *   * `\bup\b` does NOT match `upstreams`, so the member that carries the aggregate's parts cannot be
- *     mistaken for its verdict.
- *
- * It is deliberately tolerant across spellings rather than pinned to one enumeration value, because
- * what C-10 publishes is the presence of a verdict; the token an implementation chooses for the
- * healthy end of it is not the thing this file exists to pin down.
+ * {@link HEALTHY_STATUS_TOKEN} and {@link HEALTH_STATUS_TOKENS} live in `fixtures/contract-shape.ts`
+ * beside every other member set and token set this suite asserts, and the guard test at the end of
+ * this file re-derives them from the published contract so the two cannot drift.
  */
-const HEALTHY_STATUS_PATTERN = /\b(healthy|ok|up|pass)\b/i;
 
 /**
  * The four capability areas that are mapped in discovery but built in no part by this phase.
@@ -148,120 +195,130 @@ const DEFERRED_SERVICE_NAMES = ['DesignSystem', 'Documents', 'Integration', 'Scr
 const IN_SCOPE_SERVICE_COUNT = 4;
 
 /**
- * A health response body, read in the two forms the assertions need.
+ * THE DEFENSIVE READER IS GONE, AND ITS JOB SURVIVES AS A DIAGNOSTIC.
  *
- * Both members are always populated, so a caller never has to branch on whether parsing worked:
- * `serialized` is the canonical text to search, and `parsed` is the structured view when there was
- * one.
+ * A `HealthDocument` pair — the parsed value and a re-serialized searchable string — used to be the
+ * subject of every assertion in this file, with a header explaining that "these assertions are
+ * deliberately schema-agnostic ... a deep structural equality here would fail on a
+ * contract-conformant document that had merely added a member." The second half of that is true and is
+ * why `assertMembers` distinguishes REQUIRED from OPTIONAL members rather than demanding equality; the
+ * first half was the defect. `AggregateHealthReport` sets `additionalProperties: false`, so a member
+ * the schema does not declare is not an addition a conformant document may make — it is drift.
+ *
+ * What the pair genuinely bought was a good failure message for a body that did not parse, and that is
+ * preserved: `describeShapeForFailure` reports a body's structure — parsed or not, object or array,
+ * member names, length — WITHOUT quoting any value, and it is used only inside failure messages after
+ * an exact assertion has already decided the outcome.
  */
-interface HealthDocument {
-  /**
-   * The document in searchable text form — the re-serialized JSON when the body parsed, and the raw
-   * body otherwise. Re-serializing rather than searching the raw text normalises insignificant
-   * whitespace, so a pretty-printed document and a compact one are searched identically.
-   */
-  readonly serialized: string;
-
-  /**
-   * The parsed value, or `undefined` when the body was not JSON at all. Typed as `unknown` because
-   * nothing about the body is known before it is inspected, and asserting a shape onto it here would
-   * defeat the point of reading it defensively.
-   */
-  readonly parsed: unknown;
-}
 
 /**
- * Reads a response body into both forms the assertions need, without ever throwing.
+ * Read a health body as the EXACT aggregate the contract publishes.
  *
- * A parse failure is not an error to be raised here. It is one of the outcomes the assertions must
- * be able to report on, and reporting it as "the document does not name Persistence" — with the body
- * quoted in the failure message — is a far better diagnostic than a `SyntaxError` thrown from inside
- * a fixture with no indication of which service produced it.
+ * THIS REPLACED THREE TOLERANT READERS, and each is worth naming because each was the acceptance
+ * criterion for a claim it could not actually establish:
  *
- * @param body the response body exactly as it arrived
- * @returns the document in searchable and, where available, structured form
+ *   * `identityTokens(key)` accepted an upstream "named" under any of THREE spellings — the table
+ *     key, the display name or the project name — on the reasoning that "the wire form is the
+ *     implementation's choice". It is not: `UpstreamHealth.service` is a closed enumeration of
+ *     `persistence`, `dataservices` and `security`, so a document naming `PowerFramework.Persistence`
+ *     is a document a consumer branching on the token cannot read.
+ *   * `documentNames(serialized, token)` looked for a case-insensitive SUBSTRING ANYWHERE IN THE WHOLE
+ *     SERIALIZED BODY. A document that mentioned `persistence` inside a description, a URL or an error
+ *     string satisfied "Gateway aggregates Persistence" without carrying an upstream entry at all.
+ *   * `readAggregateStatus(document)` fell back from the `status` member to a bare JSON string and
+ *     finally to THE ENTIRE SERIALIZED BODY, which — combined with the healthy-vocabulary pattern —
+ *     meant a body containing the word "healthy" anywhere passed the readiness assertion.
+ *
+ * The exact read asserts the media type, then the aggregate's member set against
+ * `AggregateHealthReport`, then `status` against its closed enumeration, then every entry of
+ * `upstreams` against `UpstreamHealth` including both of its enumerations. Drift in any of those is
+ * now a failure rather than a tolerated spelling.
+ *
+ * @param response the health response, already known to have answered
+ * @returns the aggregate, narrowed, together with the raw text for diagnostics
  */
-function readHealthDocument(body: string): HealthDocument {
+async function readAggregate(
+  response: APIResponse,
+): Promise<{ readonly aggregate: Record<string, unknown>; readonly bodyText: string }> {
+  const bodyText: string = await response.text();
+
+  assertMediaType(
+    response.headers()['content-type'],
+    JSON_MEDIA_TYPE,
+    `${SERVICE_ENDPOINTS.gateway.displayName} ${HEALTH_PATH}`,
+  );
+
+  let parsed: unknown;
+
   try {
-    const parsed: unknown = JSON.parse(body);
-
-    return { parsed, serialized: JSON.stringify(parsed) };
+    parsed = JSON.parse(bodyText) as unknown;
   } catch {
-    return { parsed: undefined, serialized: body };
+    throw new Error(
+      `${SERVICE_ENDPOINTS.gateway.displayName} answered ${HEALTH_PATH} with a body that is not ` +
+        'parseable JSON, so it published no aggregate to inspect. Contract C-10 declares an ' +
+        `AggregateHealthReport object. ${describeShapeForFailure(bodyText)}.`,
+    );
   }
+
+  const aggregate: Record<string, unknown> = assertMembers(
+    parsed,
+    AGGREGATE_HEALTH_REPORT,
+    `Gateway's ${HEALTH_PATH} aggregate`,
+  );
+
+  return { aggregate, bodyText };
 }
 
 /**
- * The tokens by which one service may legitimately be named in a health document.
+ * The `upstreams` array, asserted to be exactly the three the contract declares.
  *
- * All three come from the endpoint table rather than from a literal in this file, which is what keeps
- * the naming assertion honest: if the table is ever repointed, this assertion follows it instead of
- * silently continuing to test a name nobody publishes any more. Accepting any of the three is
- * deliberate — the wire form is the implementation's choice, and a document that named
- * `PowerFramework.Persistence` or `Persistence` rather than `persistence` would still have named the
- * upstream, which is the invariant under test.
+ * `minItems: 3` and `maxItems: 3` on the published schema are what make the count assertable: the
+ * aggregate names three upstreams, never two and never four, so a Gateway that had stopped observing
+ * one of them fails here instead of passing on the two it still watched.
  *
- * @param key the upstream's stable key
- * @returns the accepted identity tokens for that upstream
+ * @param aggregate the narrowed aggregate
+ * @param bodyText the raw body, for the structural diagnostic only
+ * @returns each upstream entry keyed by its exact `service` token
  */
-function identityTokens(key: ServiceKey): readonly string[] {
-  const endpoint = SERVICE_ENDPOINTS[key];
+function readUpstreams(
+  aggregate: Record<string, unknown>,
+  bodyText: string,
+): ReadonlyMap<string, Record<string, unknown>> {
+  const upstreams: unknown = aggregate['upstreams'];
 
-  return [endpoint.key, endpoint.displayName, endpoint.projectName];
-}
+  if (!Array.isArray(upstreams)) {
+    throw new Error(
+      `Gateway's ${HEALTH_PATH} aggregate carries a non-array 'upstreams' member, so it names no ` +
+        `upstream individually. ${describeShapeForFailure(bodyText)}.`,
+    );
+  }
 
-/**
- * Tests whether a serialized document names a token, ignoring case.
- *
- * A case-insensitive substring test rather than a word-boundary one, and the choice is deliberate in
- * both directions it is used. For an upstream the tokens are distinctive enough that a substring
- * match cannot be satisfied by an unrelated word, and it tolerates a document that embeds the name
- * inside a longer identifier. For a deferred service the substring form is the conservative
- * direction: it is the harder test to pass, so it cannot miss a violation of the scope boundary by
- * being too literal about punctuation.
- *
- * @param document the serialized health document
- * @param token the identity token to look for
- * @returns true when the document names the token
- */
-function documentNames(document: string, token: string): boolean {
-  return document.toLowerCase().includes(token.toLowerCase());
-}
+  const byService = new Map<string, Record<string, unknown>>();
 
-/**
- * Extracts the aggregate verdict — Gateway's own status, never an upstream's.
- *
- * Resolution order, narrowest first, so that a structured document is always read structurally and
- * the whole-body fallback is reached only when there is no verdict member to read:
- *
- *   1. A `status` member on a parsed object. This is the aggregate's own verdict, and reading it
- *      by name is what keeps a healthy upstream from being mistaken for a healthy aggregate — a
- *      document reporting `Unhealthy` overall while one upstream is `Healthy` must fail, and it does,
- *      because only the aggregate member is consulted.
- *   2. A parsed JSON string, for a body that is a bare quoted verdict.
- *   3. The serialized body, for a body that is not JSON at all — a bare plain-text verdict, say.
- *      Widest and last, because it is the only form in which an upstream's verdict could be confused
- *      with the aggregate's, and it is reached only when no better source exists.
- *
- * @param document the health document to read
- * @returns the best available statement of the aggregate verdict
- */
-function readAggregateStatus(document: HealthDocument): string {
-  const parsed: unknown = document.parsed;
+  for (const entry of upstreams) {
+    const upstream: Record<string, unknown> = assertMembers(
+      entry,
+      UPSTREAM_HEALTH,
+      `an entry of Gateway's ${HEALTH_PATH} 'upstreams'`,
+    );
 
-  if (typeof parsed === 'object' && parsed !== null) {
-    const status: unknown = (parsed as Record<string, unknown>)['status'];
+    const service: string = assertEnumToken(
+      upstream['service'],
+      UPSTREAM_SERVICE_TOKENS,
+      "an upstream entry's 'service'",
+    );
 
-    if (typeof status === 'string') {
-      return status;
+    if (byService.has(service)) {
+      throw new Error(
+        `Gateway's ${HEALTH_PATH} aggregate names the upstream '${service}' more than once, so one ` +
+          'of the three it must report on is missing and a duplicate stands in its place.',
+      );
     }
+
+    byService.set(service, upstream);
   }
 
-  if (typeof parsed === 'string') {
-    return parsed;
-  }
-
-  return document.serialized;
+  return byService;
 }
 
 /**
@@ -269,8 +326,14 @@ function readAggregateStatus(document: HealthDocument): string {
  *
  * These three assertions are independent single-request reads that mutate nothing, so no ordering
  * relationship exists between them and declaring one would be a false statement about the file.
- * Serialized execution belongs to the two state-mutating workflows, which share `COMPANY` rows in a
- * single volume and therefore genuinely do depend on order.
+ *
+ * NO SPEC IN THIS SUITE DECLARES `mode: 'serial'` ANY LONGER. The two state-mutating workflows once
+ * did, to order tests that shared module-scope state; the concurrency workflow is now one atomic test
+ * with a step per former step, and the DataWindow workflow's tests each arrange their own row, so
+ * neither has an order left to declare. Serialization is still real, but it comes from where it always
+ * belonged — `fullyParallel: false` and `workers: 1` in the runner configuration, which is a
+ * repository-wide correctness decision about a shared `persistence-db` volume rather than a per-file
+ * one.
  */
 test.describe('Health and readiness (contract C-10)', () => {
   // ---------------------------------------------------------------------------
@@ -288,22 +351,23 @@ test.describe('Health and readiness (contract C-10)', () => {
   // The probe is memoised per worker, so this costs one request per worker and
   // not one per test.
   //
-  // TESTS TAGGED `@no-stack` ARE EXEMPT, and the tag is why this is a tag rather
-  // than a title match: several specs mix pure-fixture assertions in with HTTP
-  // ones, those assertions are exactly the part that still holds with nothing
-  // running, and skipping them would throw away the only coverage available
-  // before a bring-up. A tag is declarative and machine-read; a title substring
-  // would silently start skipping the moment someone reworded a test name, and
-  // two stack-free tests in this suite never carried the wording at all.
+  // ⚠ AN ABSENT STACK NOW FAILS A FULL ACCEPTANCE RUN RATHER THAN SKIPPING IT.
+  // This hook used to probe and then skip, which left the one state a
+  // misconfigured pipeline is in - nothing running - as the state that exited
+  // zero. `requireLiveStack` fails instead unless the run has explicitly
+  // acknowledged an absent stack with E2E_ALLOW_ABSENT_STACK, in which case it
+  // skips with a stated reason and the run is labelled api-partial-no-stack in
+  // every reported line so its result cannot be read as an acceptance result.
+  //
+  // THE DECISION LIVES IN ONE PLACE FOR ALL SIX SPECS. It was written out six
+  // times, once per spec, so the six could disagree about what an absent stack
+  // means - which mattered little while the answer was a skip and matters a great
+  // deal now that it gates acceptance. Tests tagged `@no-stack` are still exempt,
+  // and the tag is still why this is a tag rather than a title match; that
+  // reasoning now lives with the function.
   // ---------------------------------------------------------------------------
   test.beforeEach(async ({}, testInfo) => {
-    if (testInfo.tags.includes('@no-stack')) {
-      return;
-    }
-
-    const availability = await probeStackAvailability();
-
-    test.skip(!availability.reachable, availability.reason);
+    await requireLiveStack(testInfo);
   });
 
   test('Gateway answers /health anonymously with 200', async ({ request }) => {
@@ -367,7 +431,17 @@ test.describe('Health and readiness (contract C-10)', () => {
         'The readiness assertion in the preceding test is the one to read first.',
     ).toBe(true);
 
-    const document = readHealthDocument(await response.text());
+    const { aggregate, bodyText } = await readAggregate(response);
+
+    // THE BODY IS ASSERTED TO BE THE PUBLISHED MESSAGE BEFORE ANYTHING IS READ OUT OF IT, and that
+    // happens inside `readAggregate` above rather than here: it asserts the media type, refuses a body
+    // that is not parseable JSON with a structural diagnostic, and narrows the value through
+    // `assertMembers(AGGREGATE_HEALTH_REPORT)` — which requires `status`, `service` and `upstreams`
+    // spelled exactly as the schema declares them and rejects any member the schema does not declare,
+    // because `additionalProperties: false` makes those spellings the contract. A document carrying
+    // `state` or `Status` is a different message that no generated client can read, not a variant of
+    // this one, and it fails before a single assertion below runs. Restating those checks here would be
+    // a second copy of the contract to keep true; `aggregate` is already narrowed.
 
     // THE PRIMARY ASSERTION OF THIS FILE.
     //
@@ -377,51 +451,137 @@ test.describe('Health and readiness (contract C-10)', () => {
     // observable consequence of the aggregation, and it is what a bare "Gateway returned 200" check
     // cannot establish.
     //
+    // ASSERTED STRUCTURALLY NOW, NOT BY SUBSTRING. Each upstream must appear as an ENTRY of the
+    // `upstreams` array carrying its exact enumerated `service` token and its own `status` from the
+    // upstream verdict set. The previous form searched the whole serialized body for any of three
+    // spellings of the name, which a description, a URL or an error string could satisfy without the
+    // aggregate carrying an upstream entry at all.
+    //
     // Gateway is deliberately not in this roster: it aggregates its upstreams, and asserting that it
-    // names itself would make the readiness property circular.
+    // names itself would make the readiness property circular. Its own identity is asserted separately
+    // below, as the `service` member.
+    const upstreams: ReadonlyMap<string, Record<string, unknown>> = readUpstreams(
+      aggregate,
+      bodyText,
+    );
+
+    expect(
+      [...upstreams.keys()].sort(),
+      `${gateway.displayName} must name exactly the three upstreams contract C-10 declares, each as ` +
+        'its own entry. The published schema pins the array at three entries, so a Gateway that had ' +
+        'stopped observing one of them must fail here rather than pass on the two it still watched. ' +
+        `${describeShapeForFailure(bodyText)}.`,
+    ).toEqual([...UPSTREAM_SERVICE_TOKENS].sort());
+
     for (const key of GATEWAY_HEALTH_AGGREGATION_UPSTREAMS) {
       const upstream = SERVICE_ENDPOINTS[key];
-      const named: boolean = identityTokens(key).some((token: string) =>
-        documentNames(document.serialized, token),
+      const entry: Record<string, unknown> | undefined = upstreams.get(upstream.key);
+
+      expect(
+        entry,
+        `${gateway.displayName} published an aggregate with no entry for its upstream ` +
+          `${upstream.displayName} (${upstream.projectName}), which the contract identifies by the ` +
+          `exact token '${upstream.key}'. An unnamed upstream means Gateway is not aggregating it.`,
+      ).toBeDefined();
+
+      // Its own state, from the upstream verdict set — which adds `Unreachable` to the aggregate's
+      // three, because "Gateway could not reach it" is a distinct finding from "it reported failed"
+      // and an operator needs the two apart.
+      const upstreamStatus: string = assertEnumToken(
+        entry?.['status'],
+        UPSTREAM_STATUS_TOKENS,
+        `the '${upstream.key}' upstream's 'status'`,
       );
 
       expect(
-        named,
-        `${gateway.displayName} published a health document that never names its upstream ` +
-          `${upstream.displayName} (${upstream.projectName}). Contract C-10 requires the aggregate ` +
-          'to name each upstream with its own state, so an unnamed upstream means Gateway is not ' +
-          `aggregating it. The document was: ${document.serialized}`,
-      ).toBe(true);
+        upstreamStatus,
+        `${gateway.displayName} reports its upstream ${upstream.displayName} as ` +
+          `'${upstreamStatus}'. Gateway answers 200 only once all three upstreams are ` +
+          `'${HEALTHY_STATUS_TOKEN}', so a 200 carrying any other upstream verdict is an aggregate ` +
+          'that disagrees with its own parts.',
+      ).toBe(HEALTHY_STATUS_TOKEN);
     }
 
-    // The aggregate's own verdict, read through the single status pattern declared at the top of this
-    // file. Only Gateway's verdict is consulted — a healthy upstream inside an unhealthy aggregate
-    // must still fail, and it does.
+    // The reporting service's own identity. `const: gateway` on the published schema, so there is
+    // exactly one conforming value: this is Gateway's aggregate and not an upstream's own report
+    // forwarded verbatim, which is a confusion a document without this member could not rule out.
+    expect(
+      aggregate['service'],
+      `the aggregate must identify its reporter as '${GATEWAY_SERVICE_TOKEN}', which the published ` +
+        'schema pins as a single constant. Any other value means the body being read is not the ' +
+        'composition root\u2019s own report.',
+    ).toBe(GATEWAY_SERVICE_TOKEN);
+
+    // The aggregate's own verdict, read from the `status` member BY NAME and from nowhere else — no
+    // fallback to a bare string and none to the whole body. Only Gateway's verdict is consulted, so a
+    // healthy upstream inside an unhealthy aggregate must still fail, and it does.
+    //
+    // Compared against ONE EXACT TOKEN. The former pattern accepted `ok`, `up` and `pass` in any
+    // casing, none of which the contract declares.
     //
     // The converse direction — a healthy aggregate published over an upstream that is NOT ready — is
     // deliberately not inferred from this document at all. Gateway's own report is the wrong evidence
     // for it, because the report is exactly what would be wrong. The following test establishes it at
     // first hand instead, by asking each upstream directly.
-    const aggregateStatus: string = readAggregateStatus(document);
+    const aggregateStatus: string = assertEnumToken(
+      aggregate['status'],
+      HEALTH_STATUS_TOKENS,
+      `Gateway's ${HEALTH_PATH} aggregate 'status'`,
+    );
 
     expect(
       aggregateStatus,
-      `${gateway.displayName} did not report a healthy aggregate verdict. Gateway reports healthy ` +
-        'only once all three upstreams do, so a verdict that is anything else is a statement about ' +
-        `an upstream and not about Gateway alone. The document was: ${document.serialized}`,
-    ).toMatch(HEALTHY_STATUS_PATTERN);
+      `${gateway.displayName} did not report '${HEALTHY_STATUS_TOKEN}'. Gateway reports healthy only ` +
+        'once all three upstreams do, so a verdict that is anything else is a statement about an ' +
+        `upstream and not about Gateway alone. ${describeShapeForFailure(bodyText)}.`,
+    ).toBe(HEALTHY_STATUS_TOKEN);
+
+    // Every individual check, when the aggregate carries the optional `checks` member. Optional on the
+    // schema and therefore optional here: requiring it would invent a requirement (C-B). Present or
+    // absent, each entry that IS there must conform.
+    const checks: unknown = aggregate['checks'];
+
+    if (checks !== undefined) {
+      expect(
+        Array.isArray(checks),
+        "the aggregate's optional 'checks' member is declared an array, so a non-array value is a " +
+          'shape change rather than an omission.',
+      ).toBe(true);
+
+      for (const check of Array.isArray(checks) ? checks : []) {
+        const result: Record<string, unknown> = assertMembers(
+          check,
+          HEALTH_CHECK_RESULT,
+          "an entry of the aggregate's 'checks'",
+        );
+
+        assertEnumToken(
+          result['status'],
+          HEALTH_STATUS_TOKENS,
+          "a health check result's 'status'",
+        );
+      }
+    }
 
     // The scope boundary, asserted rather than assumed. The four deferred capability areas receive no
     // project, no container, no test and no partial implementation in this phase; they exist only as
     // reserved routing metadata on Gateway. One of them appearing in a health roster would mean
     // something had been built that must not be, and it would mean it silently.
+    //
+    // KEPT AS A WHOLE-BODY SUBSTRING SCAN, and deliberately so. Here the substring form is the
+    // CONSERVATIVE direction: it is the harder test to pass, so it cannot miss a scope violation by
+    // being too literal about punctuation or about which member the name appeared in. The exact
+    // member-set and enumeration assertions above already establish the positive claim; this is an
+    // additional prohibition on top of them, not a substitute for one.
+    const serialized: string = bodyText.toLowerCase();
+
     for (const deferred of DEFERRED_SERVICE_NAMES) {
       expect(
-        documentNames(document.serialized, deferred),
-        `${gateway.displayName} named the deferred capability area ${deferred} in its health ` +
-          'document. Nothing is built for it in this phase, so it has no health to report: a name ' +
-          'here means a reserved routing declaration has grown an implementation behind it. The ' +
-          `document was: ${document.serialized}`,
+        serialized.includes(deferred.toLowerCase()),
+        `${gateway.displayName} named the deferred capability area ${deferred} anywhere in its ` +
+          'health document. Nothing is built for it in this phase, so it has no health to report: a ' +
+          'name here means a reserved routing declaration has grown an implementation behind it. ' +
+          `${describeShapeForFailure(bodyText)}.`,
       ).toBe(false);
     }
   });
@@ -471,4 +631,131 @@ test.describe('Health and readiness (contract C-10)', () => {
       ).toBe(200);
     }
   });
+
+  test(
+    'every expected member set and enum token is re-derived from the published contract (no stack)',
+    { tag: '@no-stack' },
+    () => {
+      // ===================================================================
+      //  THE ANTI-DRIFT GUARD FOR EVERY EXACT ASSERTION IN THIS SUITE
+      //
+      //  The exact assertions this suite now makes are only as good as the
+      //  member sets and enum tokens they compare against, and those live in
+      //  `fixtures/contract-shape.ts` as constants. A constant is a SECOND
+      //  DESCRIPTION of the contract, and a second description drifts: rename
+      //  a member in `gateway.v1.yaml`, and without this test the suite would
+      //  keep asserting the old name and keep failing for a reason nobody
+      //  could act on — or worse, keep passing against a service that had
+      //  followed the contract while the test had not.
+      //
+      //  So the constants are RE-DERIVED here from the published document. The
+      //  check runs in both directions for members, which is what makes it a
+      //  guard rather than a spot check:
+      //
+      //    * every member the fixture names must still be declared by the
+      //      schema, and every member the fixture REQUIRES must still be
+      //      `required` there — requiring more than the contract does would
+      //      invent a requirement (C-B);
+      //    * every member the SCHEMA declares must be named by the fixture, so
+      //      a member added to the contract cannot go unasserted; and
+      //    * every token the fixture names must still be declared inside the
+      //      schema it was taken from.
+      //
+      //  IT NEEDS NO STACK, which is why it carries `@no-stack`: the contract
+      //  is a file in this repository. It is therefore the one assertion in
+      //  this file that runs before any bring-up, and it is deliberately in
+      //  the readiness spec rather than in a spec of its own — the suite's
+      //  inventory is a closed six-file set for a reviewed reason, and a
+      //  seventh file to hold one guard would trade that for nothing.
+      //
+      //  READ-ONLY AGAINST THE REPOSITORY, and nowhere near the legacy tree:
+      //  the single path read is the published OpenAPI document (C-C).
+      // ===================================================================
+      const document: string = readRepositoryText(GATEWAY_CONTRACT_PATH);
+
+      // Member sets, every one this suite asserts anywhere — not merely the
+      // ones this file uses. A guard that covered only its own file would
+      // leave the capability, reserved-route, retrieval and conflict shapes
+      // unguarded, and those are asserted by four other specs that have no
+      // reason to each re-read the contract.
+      for (const memberContract of ALL_MEMBER_CONTRACTS) {
+        expect(
+          () => assertContractDeclaresShape(document, memberContract),
+          `the member set fixtures/contract-shape.ts declares for schema ` +
+            `${memberContract.schema} must still agree with ` +
+            `${GATEWAY_CONTRACT_PATH}. The thrown message states which member ` +
+            'moved and in which direction.',
+        ).not.toThrow();
+      }
+
+      // Token sets, each verified inside the schema it was taken from. The
+      // schema name is part of the check: a token that had moved to another
+      // schema would satisfy a document-wide search and would still be wrong.
+      const tokenSets: readonly (readonly [string, readonly string[]])[] = [
+        ['AggregateHealthReport', HEALTH_STATUS_TOKENS],
+        ['AggregateHealthReport', [GATEWAY_SERVICE_TOKEN]],
+        ['UpstreamHealth', UPSTREAM_STATUS_TOKENS],
+        ['UpstreamHealth', UPSTREAM_SERVICE_TOKENS],
+        ['HealthCheckResult', HEALTH_STATUS_TOKENS],
+        ['PingResponse', [GATEWAY_SERVICE_TOKEN, String(PING_AUTHENTICATED)]],
+        ['ReservedRouteBody', DEFERRED_SERVICE_TOKENS],
+        ['ReservedRouteBody', [RESERVED_ROUTE_MARKER, String(RESERVED_ROUTE_STATUS), String(RESERVED_ROUTE_RET_CODE)]],
+        ['CapabilityReport', [String(CAPABILITY_ALL_MASK)]],
+        ['Capability', CAPABILITY_DESTINATION_TOKENS],
+        ['Capability', CAPABILITY_NAME_TOKENS],
+        ['Capability', CAPABILITY_VALUE_TOKENS.map((value: number) => String(value))],
+      ];
+
+      for (const [schema, tokens] of tokenSets) {
+        expect(
+          () => assertContractDeclaresTokens(document, schema, tokens),
+          `the tokens fixtures/contract-shape.ts declares for schema ${schema} ` +
+            `must still be declared inside that schema in ${GATEWAY_CONTRACT_PATH}.`,
+        ).not.toThrow();
+      }
+
+      // AND THE OPPOSITE DIRECTION, which is the one a probe proved was missing.
+      // Adding `Starting` to `UpstreamHealth.status` in the contract left the
+      // check above perfectly happy: every token it expected was still declared.
+      // But `assertEnumToken` compares against a CLOSED set, so a conformant
+      // response carrying the new token would have been rejected as
+      // non-conforming — a false accusation traceable to a stale fixture this
+      // guard had just pronounced healthy.
+      //
+      // Judged per SCHEMA against the union of every set drawn from it, because a
+      // schema may contribute several sets and the extractor attributes tokens to
+      // the schema rather than to the property. The unions are assembled from the
+      // same `tokenSets` table above, so a set added there is covered here without
+      // a second edit.
+      const unionBySchema = new Map<string, string[]>();
+
+      for (const [schema, tokens] of tokenSets) {
+        const union: string[] = unionBySchema.get(schema) ?? [];
+
+        union.push(...tokens);
+        unionBySchema.set(schema, union);
+      }
+
+      for (const [schema, knownTokens] of unionBySchema) {
+        expect(
+          () => assertContractTokensExhaustive(document, schema, knownTokens),
+          `schema ${schema} must declare no closed-enumeration token that ` +
+            'fixtures/contract-shape.ts does not name, or this suite would reject ' +
+            'a conforming response as non-conforming.',
+        ).not.toThrow();
+      }
+
+      // The healthy token must be a member of the closed set it is drawn from.
+      // Trivially true today and worth stating: were the enumeration ever
+      // renarrowed, a `HEALTHY_STATUS_TOKEN` left behind would compare against
+      // a value no conforming service could send, and every readiness assertion
+      // in this suite would fail with no indication that the fixture was the
+      // thing at fault.
+      expect(
+        HEALTH_STATUS_TOKENS,
+        `the token this suite treats as "ready" (${HEALTHY_STATUS_TOKEN}) must be ` +
+          'one of the verdicts the contract declares.',
+      ).toContain(HEALTHY_STATUS_TOKEN);
+    },
+  );
 });

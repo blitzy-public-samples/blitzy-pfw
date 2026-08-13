@@ -4,7 +4,7 @@
 // ======================================================================================================
 //
 // WHAT THIS FILE IS
-//   The thirty-nine routes through which Gateway projects `dataservices.v1.DataWindowService` (C-03)
+//   The forty routes through which Gateway projects `dataservices.v1.DataWindowService` (C-03)
 //   and `dataservices.v1.ColumnExpressionService` (C-04) onto HTTP. It is a TRANSLATION LAYER AND NOT A
 //   SECOND IMPLEMENTATION: it holds no DataWindow logic, no expression engine and no validator. Every
 //   route maps onto exactly one gRPC method, forwards the request payload, forwards the response
@@ -153,17 +153,28 @@
 //       a parser message can quote the offending body back, and a body is caller content that may
 //       contain anything, so it never reaches a response or a log record (C-F).
 //
-//   A8  FIVE OF THE THIRTY-NINE RESPONSE SCHEMAS ARE DELEGATED RATHER THAN MIRRORED, and the reason is
-//       mechanical. The contract mirrors `RetrieveResult`, the three event-gate responses and
-//       `ExpressionEventStreamResult` field for field, and those shapes are built on the legacy's
-//       preserved SCREAMING_SNAKE value sets - `RetCodeValue` and `DataWindowEventBit`. Declaring them
-//       here would mean declaring those identifiers here, and the repository-root .editorconfig scopes
-//       its naming-analyzer suppressions to a fixed list of seven files of which NO Gateway file is one,
-//       while Directory.Build.props sets TreatWarningsAsErrors - so the declaration would be a BUILD
-//       ERROR, not a style debate. It would also create a second source of truth for shapes
-//       PowerFramework.Contracts already publishes. Each of the five therefore declares the free-form
-//       envelope and names its exact message in `x-proto-response`, which is the same delegation
-//       mechanism the contract itself uses for its per-operation envelopes.
+//   A8  THE RUNTIME DOCUMENT SUMMARISES EVERY PROJECTED BODY; THE AUTHORED CONTRACT PUBLISHES THEM ALL
+//       CONCRETELY. `gateway.v1.yaml` declares all 120 messages and 15 enums of the projected closure
+//       member by member, closed to unknown members, with a `required` list stating what the wire
+//       carries - and the sibling test project cross-checks every one against its compiled descriptor
+//       on each build, so it cannot drift. `/openapi/v1.json`, served from this file's registrations,
+//       remains a summary: every projected body resolves to the free-form envelope and names its exact
+//       message in `x-proto-request` / `x-proto-response`.
+//
+//       That asymmetry is a decision, not an oversight, and it rests on two things. First, C-A leaves
+//       no shared home for a descriptor-to-schema generator - a service may not reach into another
+//       service's code, and PowerFramework.Contracts carries no behaviour - so building the schemas
+//       here would be a THIRD derivation of the same descriptors, in a third place, with the sibling
+//       projection needing a fourth. Second, the mechanical obstacle is real for the five MIRRORED
+//       response shapes: `RetrieveResult`, the three event-gate responses and
+//       `ExpressionEventStreamResult` are built on the legacy's preserved SCREAMING_SNAKE value sets -
+//       `RetCodeValue` and `DataWindowEventBit` - and the repository-root .editorconfig scopes its
+//       naming-analyzer suppressions to a fixed list of seven files of which NO Gateway file is one,
+//       while Directory.Build.props sets TreatWarningsAsErrors, so declaring those identifiers here
+//       would be a BUILD ERROR rather than a style debate.
+//
+//       WHAT THE OPEN ENVELOPE DOES NOT MEAN: it records this document's silence about the members, and
+//       never a permissiveness in the binder. A7 is what actually happens to an unrecognised member.
 //
 // WHAT THIS FILE DELIBERATELY DOES NOT CONTAIN - the negatives are part of the specification, and they
 // are mechanically checkable, which is the point
@@ -312,17 +323,6 @@ public static class DataServicesProxyEndpoints
     internal const string RequiredScope = "datawindow";
 
     /// <summary>
-    /// The authorization policy name carrying <see cref="RequiredScope"/>, so that the route and the
-    /// registration cannot drift apart.
-    /// </summary>
-    /// <remarks>
-    /// Composed from <see cref="RequiredScope"/> rather than written out, and prefixed with the service
-    /// name so that a policy name is never ambiguous in a log line that carries policies from more than
-    /// one service.
-    /// </remarks>
-    internal const string ScopePolicyName = "gateway:scope:" + RequiredScope;
-
-    /// <summary>
     /// The nested prefix carrying C-04's operations, so that the contract's own
     /// <c>/v1/datawindow/expression/**</c> spelling is produced by composition rather than repeated
     /// thirty-two times.
@@ -400,14 +400,6 @@ public static class DataServicesProxyEndpoints
     private const string ConflictExtensionMember = "conflict";
 
     /// <summary>
-    /// The only upstream any operation in this file reaches, spelled as the contract's own enumeration
-    /// spells it.
-    /// </summary>
-    /// <remarks>
-    /// Gateway never calls Persistence and never calls Security from these routes, so no other value can
-    /// legitimately appear on a problem this file produces.
-    /// </remarks>
-    /// <summary>
     /// The extension member that marks a terminal element as a stream this gateway terminated.
     /// </summary>
     /// <remarks>
@@ -441,6 +433,14 @@ public static class DataServicesProxyEndpoints
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
+    /// <summary>
+    /// The only upstream any operation in this file reaches, spelled as the contract's own enumeration
+    /// spells it.
+    /// </summary>
+    /// <remarks>
+    /// Gateway never calls Persistence and never calls Security from these routes, so no other value can
+    /// legitimately appear on a problem this file produces.
+    /// </remarks>
     private const string DataServicesUpstream = "dataservices";
 
     /// <summary>
@@ -481,7 +481,6 @@ public static class DataServicesProxyEndpoints
 
     /// <summary>The title accompanying <see cref="AlreadyExistsProblemType"/>.</summary>
     private const string AlreadyExistsProblemTitle = "Already exists";
-
 
     // --------------------------------------------------------------------------------------------------
     //  PROBLEM `detail` PROSE - FIXED, AND FIXED FOR A REASON (C-F, CWE-209)
@@ -679,9 +678,14 @@ public static class DataServicesProxyEndpoints
     // --------------------------------------------------------------------------------------------------
 
     /// <summary>The contract's shared success description for a projected operation.</summary>
+    /// <remarks>
+    /// It names the message rather than restating its members because the members are published, member
+    /// by member, by the schema of that name in the authored contract - see adjudication A8.
+    /// </remarks>
     private const string ProjectedSuccessDescription =
         "The projected gRPC method returned OK. The body is the canonical protobuf JSON mapping of the "
-        + "message named in this operation's x-proto-response extension.";
+        + "message named in this operation's x-proto-response extension, whose members the contract "
+        + "document publishes as a schema of the same name.";
 
     /// <summary>The contract's shared <c>400</c> description.</summary>
     private const string BadRequestDescription =
@@ -766,7 +770,6 @@ public static class DataServicesProxyEndpoints
         + "required BY the transition rather than being a behavioural improvement layered on top of it. "
         + "The body names which upstream failed.";
 
-
     // --------------------------------------------------------------------------------------------------
     //  THE OPERATOR LOG MESSAGE - ALLOWLISTED, exactly as Diagnostics/SystemErrorHandler.cs allowlists
     //  its non-structural form. What is passed identifies the fault WITHOUT QUOTING IT: the request's own
@@ -834,12 +837,21 @@ public static class DataServicesProxyEndpoints
     /// The response formatter. Thread-safe and stateless, so one instance serves every route.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// DEFAULT VALUES ARE FORMATTED - see adjudication A6. The canonical mapping omits them, which would
     /// drop REQUIRED members of the contract's own mirrored schemas: <c>RetrieveChunk</c> requires
     /// <c>rowCount</c>, <c>chunkIndex</c>, <c>final</c> and <c>cumulativeRowCount</c>, and every one of
     /// those is legitimately zero or false on a real chunk. Fields with explicit presence are unaffected
     /// and remain absent when unset, which preserves the contract's signal that a chunk carrying no
     /// buffer field is a mixed-buffer chunk whose rows are individually tagged.
+    /// </para>
+    /// <para>
+    /// IT IS ALSO WHAT KEEPS <c>DataWindowRow.originalValues</c> PRESENT ON EVERY ROW. A repeated field has
+    /// no explicit presence, so an empty one is a default value: without this setting an insert-shaped row -
+    /// the one row that legitimately has no prior state - would be serialized without the member, and the
+    /// member is REQUIRED by the schema. The distinction the schema draws is between an empty array and an
+    /// absent one, and only formatting defaults preserves it.
+    /// </para>
     /// </remarks>
     private static readonly JsonFormatter ResponseFormatter =
         new(JsonFormatter.Settings.Default.WithFormatDefaultValues(true));
@@ -857,7 +869,6 @@ public static class DataServicesProxyEndpoints
     private static readonly string ColumnExpressionServiceName =
         ColumnExpressionService.Descriptor.FullName;
 
-
     /// <summary>
     /// The name of the session-identifier parameter the two close operations take on the path and the
     /// event-gate read takes on the query string.
@@ -874,7 +885,7 @@ public static class DataServicesProxyEndpoints
         + "by DataServices, not by Gateway.";
 
     /// <summary>
-    /// Declares the thirty-nine <c>/v1/datawindow</c> operations on the supplied route builder.
+    /// Declares the forty <c>/v1/datawindow</c> operations on the supplied route builder.
     /// </summary>
     /// <param name="endpoints">The route builder the composition root is populating.</param>
     /// <returns>
@@ -895,7 +906,7 @@ public static class DataServicesProxyEndpoints
     /// <para>
     /// <b>The return type is deliberately the route builder and not a route handler builder or a group.</b>
     /// Handing back either would let a caller append <c>AllowAnonymous</c>, which takes precedence over
-    /// <c>RequireAuthorization</c> in endpoint metadata and would silently open thirty-nine authenticated
+    /// <c>RequireAuthorization</c> in endpoint metadata and would silently open forty authenticated
     /// routes from a different file. Withholding it makes that impossible.
     /// </para>
     /// <para>
@@ -1174,15 +1185,14 @@ public static class DataServicesProxyEndpoints
                 client.ApplyRowSelectStyleAsync(request, cancellationToken));
     }
 
-
     /// <summary>
-    /// Declares C-04's twenty-four projected operations: the paired expression session, the expression,
+    /// Declares C-04's twenty-five projected operations: the paired expression session, the expression,
     /// variable, foreign-variable, relative-column and flag surface, the four calculation entry points,
     /// the two gates, the two state reads and the event stream.
     /// </summary>
     /// <param name="group">The <c>/v1/datawindow/expression</c> group.</param>
     /// <remarks>
-    /// C-04 declares twenty-six methods. The two exclusions are <c>InvokeMethodChannel</c> and
+    /// C-04 declares twenty-seven methods. The two exclusions are <c>InvokeMethodChannel</c> and
     /// <c>TraceChannel</c>, both of which are bidirectional AND INVERTED - DataServices calls back into its
     /// client, because the legacy expects the application to implement the macro switch. An inverted stream
     /// has no request/response direction to project, so nothing here projects one.
@@ -1217,23 +1227,6 @@ public static class DataServicesProxyEndpoints
             static sessionId => new CloseExpressionSessionRequest { SessionId = sessionId },
             static (client, request, cancellationToken) =>
                 client.CloseExpressionSessionAsync(request, cancellationToken));
-
-        MapUnary<LoadRowsRequest, LoadRowsResponse>(
-            group,
-            new("/rows/load", "loadExpressionRows", "LoadRows", ContractSurface.ColumnExpression,
-                "Load rows into an expression session's DataWindow.",
-                "WITHOUT THIS, HALF OF C-04 IS UNREACHABLE. Every calculation operation evaluates against "
-                + "ROWS; a session's DataWindow is created empty, and `/v1/datawindow/retrieve` addresses a "
-                + "REGISTERED DATA-OBJECT NAME - such as `dw_sqlite` - and refuses a SESSION-SCOPED handle, "
-                + "which is spelled `<sessionId>/<ordinal>` and is minted by the session open. The two "
-                + "handle spaces are deliberately not interchangeable, because two handles opened over one "
-                + "definition are two independent DataWindows and that is what makes a co-resident foreign "
-                + "variable meaningful. Rows are APPENDED in request order, the ordinals are assigned by the "
-                + "service, and the response names the range created so a caller can calculate over exactly "
-                + "what it loaded.",
-                DeclaresNotFound: false),
-            static (client, request, cancellationToken) =>
-                client.LoadRowsAsync(request, cancellationToken));
 
         MapUnary<AddExpressionRequest, AddExpressionResponse>(
             group,
@@ -1501,14 +1494,13 @@ public static class DataServicesProxyEndpoints
             collectWithinWindow: true);
     }
 
-
     // ==================================================================================================
     //  REGISTRATION HELPERS
     //
     //  Three shapes, and exactly three, because the contract publishes exactly three: a body-bound unary
     //  POST, a session-scoped operation whose only argument is an identifier on the path or the query
     //  string, and a body-bound POST over a server stream. Driving every operation through one of the
-    //  three is what makes the thirty-nine impossible to drift apart, and what makes diffing them against
+    //  three is what makes the forty impossible to drift apart, and what makes diffing them against
     //  the contract a mechanical exercise.
     // ==================================================================================================
 
@@ -1757,7 +1749,6 @@ public static class DataServicesProxyEndpoints
             ApplyContractMetadataAsync(openApiOperation, context, operation, protoRequest, protoResponse));
     }
 
-
     // ==================================================================================================
     //  THE PROJECTION ITSELF
     // ==================================================================================================
@@ -1961,7 +1952,7 @@ public static class DataServicesProxyEndpoints
     /// <returns>Either the projected success or the translated failure.</returns>
     /// <remarks>
     /// <para>
-    /// ONE FAILURE PATH FOR ALL THIRTY-NINE ROUTES, deliberately. A per-route translation would let one
+    /// ONE FAILURE PATH FOR ALL FORTY ROUTES, deliberately. A per-route translation would let one
     /// route classify a status differently from its neighbour, and the status map is the substantive part
     /// of this projection - the place where a divergence would be least visible and most damaging.
     /// </para>
@@ -2255,13 +2246,13 @@ public static class DataServicesProxyEndpoints
     /// resource bound and not a performance claim - no performance objective is asserted anywhere in this
     /// refactor (AAP 0.8.5).
     /// </para>
-    /// </remarks>
-    /// <remarks>
+    /// <para>
     /// <b><see langword="internal"/> RATHER THAN <see langword="private"/> SO THE STREAMING CLAIM IS
     /// TESTABLE.</b> Two properties here are assertions about behaviour rather than shape - that the
     /// sequence is never drained whole, and that exceeding the bound abandons the document WITHOUT a
     /// closing bracket - and neither is observable from outside this assembly without an upstream that can
     /// be made to overproduce on demand. Only this service's own test assembly sees it.
+    /// </para>
     /// </remarks>
     internal sealed class StreamedSequenceResult<TResponse>(
         IAsyncEnumerator<TResponse> elements,
@@ -2692,7 +2683,6 @@ public static class DataServicesProxyEndpoints
         }
     }
 
-
     // ==================================================================================================
     //  THE STATUS MAP - THE SUBSTANTIVE PART OF THE PROJECTION
     // ==================================================================================================
@@ -2999,7 +2989,6 @@ public static class DataServicesProxyEndpoints
         return TypedResults.Problem(BuildProblem(httpContext, projection));
     }
 
-
     /// <summary>
     /// Builds the problem document a translated failure answers with.
     /// </summary>
@@ -3029,13 +3018,13 @@ public static class DataServicesProxyEndpoints
     /// send. The query string is excluded from every field of this document, because a caller that
     /// mistakenly placed a credential in one must not have it reflected back.
     /// </para>
-    /// </remarks>
-    /// <remarks>
+    /// <para>
     /// <b><see langword="internal"/> RATHER THAN <see langword="private"/> SO THE HEADER OBLIGATION IS
     /// TESTABLE.</b> This method is where the <c>Retry-After</c> a capacity refusal must carry is applied,
     /// and a header is not observable in the document it returns - so asserting it needs the method itself.
     /// The four call sites that answer with a problem all reach it, so exercising it here is exercising all
     /// four. Only this service's own test assembly sees it.
+    /// </para>
     /// </remarks>
     internal static ProblemDetails BuildProblem(HttpContext httpContext, StatusProjection projection)
     {
@@ -3326,7 +3315,7 @@ public static class DataServicesProxyEndpoints
     /// </summary>
     /// <param name="openApiOperation">The operation being described.</param>
     /// <remarks>
-    /// Guarded rather than unconditional: thirty-seven of the thirty-nine operations declare no parameter at
+    /// Guarded rather than unconditional: thirty-eight of the forty operations declare no parameter at
     /// all, and declaring one on them would publish an argument they do not accept.
     /// </remarks>
     private static void DescribeSessionIdParameter(OpenApiOperation openApiOperation)
@@ -3407,7 +3396,6 @@ public static class DataServicesProxyEndpoints
             BearerFormat = BearerCredentialFormat,
         };
     }
-
 
     // ==================================================================================================
     //  THE PROJECTION TABLE'S OWN TYPES
@@ -3596,12 +3584,12 @@ public static class DataServicesProxyEndpoints
     /// the two together is the published contract, not a reference; the mapping itself is stated in the
     /// contract documentation.
     /// </para>
-    /// </remarks>
-    /// <remarks>
+    /// <para>
     /// <b><see langword="internal"/> RATHER THAN <see langword="private"/> SO THE MAP ITSELF IS TESTABLE.</b>
     /// The risk here is a code sent to the wrong status or a tri-state value misclassified as a failure,
     /// and neither is observable from outside without a live upstream producing that exact code. Only this
     /// service's own test assembly can see it; C-A forbids any other reaching in.
+    /// </para>
     /// </remarks>
     internal static class InBandStatus
     {
@@ -3733,8 +3721,18 @@ public static class DataServicesProxyEndpoints
         /// THE UPSTREAM DIAGNOSTIC IS CARRIED WHEN THERE IS ONE. It is the legacy text and is relayed
         /// unchanged; the fixed prose is used only when the contract left it empty (constraint C-B).
         /// </para>
+        /// <para>
+        /// 🔴 <b><see langword="internal"/> RATHER THAN <see langword="private"/> SO THE PUBLISHED MAPPING
+        /// IS PINNABLE AS A TABLE, AND THAT IS THE ONLY WAY THE EQUIVALENCE CLAIM CAN BE TESTED AT ALL.</b>
+        /// Reaching this map through a deployed host exercises only the handful of outcomes a real
+        /// operation can be provoked into answering - which is exactly how six codes came to diverge
+        /// between the two published surfaces unnoticed. Calling it directly makes every arm assertable,
+        /// including the arms no test can provoke, so the two services' tables can be compared row for row.
+        /// It is visible to this service's own test assembly alone, through the
+        /// <c>InternalsVisibleTo</c> item the project file already declares.
+        /// </para>
         /// </remarks>
-        private static StatusProjection Project(long retCode, string? errorText)
+        internal static StatusProjection Project(long retCode, string? errorText)
         {
             (int HttpStatus, string Detail) mapped = retCode switch
             {
@@ -3922,30 +3920,38 @@ public static class DataServicesProxyEndpoints
 }
 
 /// <summary>
-/// The free-form JSON envelope every projected request and response body uses.
+/// The RUNTIME document's summary of every projected request and response body, whose authoritative
+/// member-by-member schema is published by <c>OpenApi/gateway.v1.yaml</c> under the name the operation's
+/// <c>x-proto-request</c> or <c>x-proto-response</c> extension gives.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Mirrors the contract's <c>ProtoPayload</c> schema: an object whose members are the canonical protobuf
-/// JSON mapping of the message the operation's <c>x-proto-request</c> or <c>x-proto-response</c> extension
-/// names. The two extensions are how the contract itself delegates its per-operation envelopes, and this
-/// type is the schema that delegation resolves to.
+/// <b>⚠ THIS TYPE IS A SUMMARY, AND THE PUBLISHED CONTRACT IS NOT.</b> The document served from
+/// <c>/openapi/v1.json</c> is a convenience mirror for whoever is holding this service; the CONTRACT a
+/// consumer is given is the authored <c>gateway.v1.yaml</c> in <c>PowerFramework.Contracts</c>. That
+/// document publishes all 120 messages and 15 enums of the projected closure CONCRETELY - every member,
+/// its canonical JSON name, its canonical scalar encoding, <c>additionalProperties: false</c>, and a
+/// <c>required</c> list stating what the wire actually carries - and the sibling test project compares
+/// every schema against its compiled descriptor on each build, so it cannot drift from the protocol
+/// definition.
 /// </para>
 /// <para>
-/// <b>Why the envelope is delegated rather than transcribed.</b> Transcribing all of them would create a
-/// second source of truth for well over a hundred messages, in a different language, with nothing keeping
-/// the two in step - and the first divergence would be silent. The <c>x-proto-*</c> extensions are the
-/// alternative: mechanical, one-to-one, and checkable against the generated types. An envelope carries no
-/// decision of its own - it names the operation's arguments - so delegating it costs a consumer nothing
-/// that the generated client does not already give them.
+/// <b>WHAT A CONSUMER MUST NOT INFER FROM THE OPEN SHAPE BELOW.</b> The extension-data member makes this
+/// an open object in the generated document, and that openness describes THIS DOCUMENT'S SILENCE about
+/// the members - never a permissiveness in the projection. <see cref="RequestParser"/> is
+/// <c>JsonParser.Default</c>, whose <c>IgnoreUnknownFields</c> is false, so a member the target message
+/// does not declare is answered with <c>400</c> rather than discarded - adjudication A7. The authored
+/// contract carried the same open shape until it was replaced by the concrete tier, and there it WAS a
+/// defect, because a contract's audience has nothing else to read.
 /// </para>
 /// <para>
-/// It is also the schema the five operations whose responses the contract MIRRORS field for field resolve
-/// to, and that is a recorded deviation rather than an oversight - see adjudication A8 in this file's
-/// header. Those shapes are built on the legacy's preserved <c>SCREAMING_SNAKE</c> value sets, and
-/// declaring them here would mean declaring those identifiers here, which the repository's analyzer
-/// configuration makes a build error in a Gateway file. Each of the five names its exact message in
-/// <c>x-proto-response</c> instead.
+/// <b>Why the summary remains here rather than being generated too.</b> Building the concrete schemas at
+/// runtime would put a third derivation of the same descriptors in a third place, and constraint C-A
+/// leaves no shared home for one: a service may not reach into another service's code, and
+/// <c>PowerFramework.Contracts</c> carries no behaviour. Adjudication A8's mechanical obstacle also still
+/// stands for the five MIRRORED response shapes - they are built on the legacy's preserved
+/// <c>SCREAMING_SNAKE</c> value sets, and declaring those identifiers in a Gateway file is a build error
+/// under the repository-root analyzer configuration.
 /// </para>
 /// <para>
 /// Declared in this file rather than in a file of its own: this folder permits exactly five files, and the

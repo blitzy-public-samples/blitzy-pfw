@@ -1304,6 +1304,16 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
     /// what makes it a test of the production path rather than of a double. Nothing is sent: the check
     /// performs no I/O at all, and the fixture's own transport reaches no socket.
     /// </para>
+    /// <para>
+    /// THE GENERATED IDENTITY IS OWNED RATHER THAN DELETED AT THE END, and the distinction is the whole of
+    /// this row's cleanup posture. The pair used to be removed by two <c>File.Delete</c> calls placed after
+    /// the last assertion, which means every failing assertion above them - and every exception thrown
+    /// anywhere between the write and the delete - left a live 2048-bit RSA PRIVATE KEY in the system
+    /// temporary directory under a name nothing would later recognise as this suite's. Ownership is now
+    /// expressed in the type system: <see cref="ClientIdentityFiles"/> is disposed by the <c>using</c>
+    /// declaration on EVERY path out of this method, including a failing one, and its removal failures are
+    /// raised rather than swallowed so that a key left behind is a visible failure instead of a silent one.
+    /// </para>
     /// </remarks>
     [Theory]
     [InlineData(true, HttpStatusCode.OK, HealthyToken)]
@@ -1313,28 +1323,31 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
         HttpStatusCode expectedStatus,
         string expectedEntry)
     {
+        // DECLARED BEFORE THE HOST so it is disposed AFTER it: `using` declarations release in reverse
+        // order, and the host must not outlive nothing it needs - it reads the pair once at startup, but
+        // releasing the material only once the host is gone keeps that ordering true whatever the host
+        // starts doing with it. Null on the unmounted row, where disposal is a no-op.
+        using ClientIdentityFiles? identity = mounted ? ClientIdentityFiles.Generate() : null;
+
         await using GatewayTestHostFixture host = CreateHostScriptedByParticipantName(
             UpstreamReadiness.Healthy,
             UpstreamReadiness.Healthy,
             UpstreamReadiness.Healthy);
 
-        string certificate = string.Empty;
-        string key = string.Empty;
-
-        if (mounted)
+        if (identity is not null)
         {
             // REAL MATERIAL ON DISK, because the composition root LOADS the pair eagerly at startup and
             // refuses to start on one it cannot read. A path pointing at nothing would therefore fail the
             // host build rather than exercise the readiness verdict - which is itself the correct
             // behaviour, and is asserted by the options and startup suites rather than here.
-            (certificate, key) = WriteClientIdentityPem();
-
             host.AdditionalSettings[
                 $"{GatewayOptions.SectionName}:{nameof(GatewayOptions.MutualTls)}"
-                + $":{nameof(GatewayOptions.MutualTlsClientOptions.CertificatePath)}"] = certificate;
+                + $":{nameof(GatewayOptions.MutualTlsClientOptions.CertificatePath)}"] =
+                identity.CertificatePath;
             host.AdditionalSettings[
                 $"{GatewayOptions.SectionName}:{nameof(GatewayOptions.MutualTls)}"
-                + $":{nameof(GatewayOptions.MutualTlsClientOptions.CertificateKeyPath)}"] = key;
+                + $":{nameof(GatewayOptions.MutualTlsClientOptions.CertificateKeyPath)}"] =
+                identity.KeyPath;
         }
 
         RestoreShippedTokenBootstrap(host);
@@ -1373,16 +1386,13 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
             raw,
             StringComparison.OrdinalIgnoreCase);
 
-        if (!mounted)
+        if (identity is null)
         {
             return;
         }
 
-        Assert.DoesNotContain(certificate, raw, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain(key, raw, StringComparison.OrdinalIgnoreCase);
-
-        File.Delete(certificate);
-        File.Delete(key);
+        Assert.DoesNotContain(identity.CertificatePath, raw, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(identity.KeyPath, raw, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -1420,43 +1430,6 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
             GatewayOptions.SecurityClientSecretConfigurationKey,
             string.Join(' ', refused.Failures),
             StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// Writes a freshly generated client certificate and its private key to two temporary PEM files.
-    /// </summary>
-    /// <returns>The certificate path and the key path, both of which the caller deletes.</returns>
-    /// <remarks>
-    /// GENERATED RATHER THAN COMMITTED. No certificate and no private key is committed to this repository
-    /// or embedded in any image, and a test fixture is not an exception to that: a key on disk in a
-    /// repository is a key, whatever it is labelled. The pair is produced fresh, used by one host, and
-    /// deleted.
-    /// </remarks>
-    private static (string Certificate, string Key) WriteClientIdentityPem()
-    {
-        using RSA key = RSA.Create(2048);
-
-        CertificateRequest request = new(
-            "CN=powerframework-gateway-readiness-test",
-            key,
-            HashAlgorithmName.SHA256,
-            RSASignaturePadding.Pkcs1);
-
-        using X509Certificate2 identity = request.CreateSelfSigned(
-            DateTimeOffset.UtcNow.AddMinutes(-5),
-            DateTimeOffset.UtcNow.AddMinutes(30));
-
-        string certificatePath = Path.Combine(
-            Path.GetTempPath(),
-            $"blitzy_gateway_client_{Guid.NewGuid():n}.crt");
-        string keyPath = Path.Combine(
-            Path.GetTempPath(),
-            $"blitzy_gateway_client_{Guid.NewGuid():n}.key");
-
-        File.WriteAllText(certificatePath, identity.ExportCertificatePem());
-        File.WriteAllText(keyPath, key.ExportPkcs8PrivateKeyPem());
-
-        return (certificatePath, keyPath);
     }
 
     /// <summary>
@@ -2654,5 +2627,103 @@ public sealed class HealthAggregationTests(GatewayTestHostFixture host) : IClass
         context.Request.Path = ReadinessRoute;
 
         return context;
+    }
+
+    /// <summary>
+    /// A freshly generated client certificate and its private key on disk, owned for the lifetime of one
+    /// test and removed when that lifetime ends.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// GENERATED RATHER THAN COMMITTED. No certificate and no private key is committed to this repository
+    /// or embedded in any image, and a test fixture is not an exception to that: a key on disk in a
+    /// repository is a key, whatever it is labelled. The pair is produced fresh for one host and removed
+    /// afterwards.
+    /// </para>
+    /// <para>
+    /// <b>A TYPE RATHER THAN A PAIR OF PATHS, WHICH IS THE FINDING THIS ANSWERS.</b> The generator this
+    /// replaces handed back two paths and left removal to two <c>File.Delete</c> calls at the end of the
+    /// caller, so the key survived on disk whenever anything between the write and those calls threw - which
+    /// is to say on exactly the runs where a human is least likely to go looking for it. Ownership expressed
+    /// as <see cref="IDisposable"/> makes the release unconditional: a <c>using</c> declaration runs it on
+    /// the success path, the assertion-failure path and the exception path alike.
+    /// </para>
+    /// <para>
+    /// <b>A DIRECTORY OF ITS OWN, GUID SCOPED.</b> Two loose files in the shared system temporary directory
+    /// are indistinguishable from any other run's, so a leak could neither be attributed nor swept; a
+    /// directory named for this suite and one run is both. It also means removal is ONE recursive delete
+    /// whose success covers everything written, rather than a delete per file that can half-succeed.
+    /// </para>
+    /// <para>
+    /// <b>REMOVAL FAILURES ARE RAISED, NOT SWALLOWED, and that is deliberate rather than careless.</b> A
+    /// swallowed failure here is a private key silently left on disk, which is the outcome the finding
+    /// names; surfacing it turns that into a visible test failure naming the directory. Double disposal is
+    /// idempotent - which is not the same thing as suppressing a failure, because the first call is still
+    /// the one that has to succeed.
+    /// </para>
+    /// </remarks>
+    private sealed class ClientIdentityFiles : IDisposable
+    {
+        private readonly string _directory;
+        private bool _disposed;
+
+        private ClientIdentityFiles(string directory, string certificatePath, string keyPath)
+        {
+            _directory = directory;
+            CertificatePath = certificatePath;
+            KeyPath = keyPath;
+        }
+
+        /// <summary>Gets the path of the PEM-encoded certificate.</summary>
+        internal string CertificatePath { get; }
+
+        /// <summary>Gets the path of the PEM-encoded PKCS#8 private key.</summary>
+        internal string KeyPath { get; }
+
+        /// <summary>Generates a self-signed client identity and writes it to a private directory.</summary>
+        /// <returns>The owner of the written pair.</returns>
+        internal static ClientIdentityFiles Generate()
+        {
+            string directory = Path.Combine(
+                Path.GetTempPath(),
+                $"pfw-gateway-client-identity-{Guid.NewGuid():n}");
+
+            Directory.CreateDirectory(directory);
+
+            string certificatePath = Path.Combine(directory, "client.crt");
+            string keyPath = Path.Combine(directory, "client.key");
+
+            using RSA key = RSA.Create(2048);
+
+            CertificateRequest request = new(
+                "CN=powerframework-gateway-readiness-test",
+                key,
+                HashAlgorithmName.SHA256,
+                RSASignaturePadding.Pkcs1);
+
+            using X509Certificate2 identity = request.CreateSelfSigned(
+                DateTimeOffset.UtcNow.AddMinutes(-5),
+                DateTimeOffset.UtcNow.AddMinutes(30));
+
+            File.WriteAllText(certificatePath, identity.ExportCertificatePem());
+            File.WriteAllText(keyPath, key.ExportPkcs8PrivateKeyPem());
+
+            return new ClientIdentityFiles(directory, certificatePath, keyPath);
+        }
+
+        /// <inheritdoc/>
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+
+            // NO try/catch. A directory that cannot be removed is a private key still on disk, and the
+            // caller has to be told - see the remarks.
+            Directory.Delete(_directory, recursive: true);
+        }
     }
 }

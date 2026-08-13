@@ -169,41 +169,46 @@ public sealed class GatewayOptionsTests
     {
         var upstreams = new GatewayOptions().Upstreams;
 
-        // 5112 IS DATASERVICES' gRPC ENDPOINT AND 5104 IS SECURITY, per the port map in
-        // docs/ARCHITECTURE.md 4.1. The documented band stays 5101-5105 with 5103 reserved, and 5112 is
-        // an ADDITIONAL address the attached environment never names rather than a reassignment of one it
-        // does - which is why adding it deviates from nothing the environment fixes.
+        // 5102 IS DATASERVICES AND 5104 IS SECURITY, per the port map of AAP 0.3.2.2 and
+        // docs/ARCHITECTURE.md 4.1. The documented band is 5101-5105 with 5103 reserved, and every
+        // address a service holds for another names a port inside it.
         //
         // BOTH HALVES ARE ASSERTED, AND EACH FOR ITS OWN REASON.
         //
         // THE SCHEME: every listener in this estate is TLS, and the DEFAULT is the part that matters. A
         // deployment that binds this section supplies its own address; one that forgets gets this value,
         // so a cleartext default fails silently in the one case where nobody is looking - and every
-        // request on both edges carries a bearer token (CWE-319).
+        // request on both edges carries a bearer token (CWE-319). TLS is also what makes ONE port able to
+        // carry both surfaces at all: ALPN selects the protocol version during the handshake.
         //
-        // THE PORT: DataServices declares two endpoints, Http1 on 5102 and Http2 on 5112, so that a
-        // readiness probe and a gRPC channel each reach a listener that can answer it. Gateway calls
-        // C-03 and C-04 over gRPC, so it must name the HTTP/2 half.
-        Assert.Equal("https://localhost:5112", upstreams.DataServices);
+        // THE PORT: DataServices declares ONE endpoint, `https://+:5102` with `Protocols:
+        // Http1AndHttp2`, which answers the readiness probe over HTTP/1.1 and the C-03/C-04 gRPC
+        // contracts over HTTP/2. Gateway calls those contracts over gRPC and names that same 5102. An
+        // earlier revision defaulted this to 5112, a second Http2-only endpoint outside the documented
+        // band; it was withdrawn because AAP 0.3.2.2 assigns C-03 and C-04 to 5102, so a channel built on
+        // 5112 reached a port the map does not give those contracts.
+        Assert.Equal("https://localhost:5102", upstreams.DataServices);
         Assert.Equal("https://localhost:5104", upstreams.Security);
     }
 
     [Fact]
-    public void TheDataServicesUpstreamNeverNamesTheHttp11Endpoint()
+    public void TheDataServicesUpstreamNamesTheAssignedPortAndNotAWithdrawnOne()
     {
         // A REGRESSION GUARD WITH A SPECIFIC FAILURE IN MIND, NOT A RESTATEMENT OF THE TEST ABOVE.
         //
-        // `https://localhost:5102` is the value that looks correct from every angle except the one that
-        // matters: right service, right host, inside the documented band, and it is exactly what the
-        // readiness gate probes. It is nonetheless unusable HERE, because Gateway reaches this upstream
-        // over gRPC and gRPC needs HTTP/2, while 5102 is declared `Http1`.
+        // `https://localhost:5112` is the value that looks plausible from every angle except the one that
+        // matters: right service, right host, right scheme, and it is what this default USED to be while
+        // DataServices bound a second Http2-only listener there. Nothing binds 5112 now. A channel built
+        // on it fails at connect, BEFORE any request reaches DataServices, so nothing in DataServices
+        // logs it - the symptom is a Gateway 502 on every /v1/datawindow route and the cause is two
+        // characters of port.
         //
-        // The failure that value produces is why this is asserted separately from the equality above:
-        // every call fails during transport negotiation, BEFORE the request reaches DataServices.
-        // Nothing in DataServices logs it, so the symptom is a Gateway 502 on every /v1/datawindow route
-        // and the cause is two characters of port.
-        Assert.EndsWith(":5112", new GatewayOptions().Upstreams.DataServices, StringComparison.Ordinal);
-        Assert.DoesNotContain(":5102", new GatewayOptions().Upstreams.DataServices, StringComparison.Ordinal);
+        // The positive half is asserted here too rather than left to the equality above, because the
+        // discriminating property is that the CALL address and the PROBE address now agree: 5102 carries
+        // both surfaces, so naming anything else is the defect.
+        Assert.EndsWith(":5102", new GatewayOptions().Upstreams.DataServices, StringComparison.Ordinal);
+        Assert.DoesNotContain(":5112", new GatewayOptions().Upstreams.DataServices, StringComparison.Ordinal);
+        Assert.DoesNotContain(":5111", new GatewayOptions().Upstreams.DataServices, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -219,14 +224,17 @@ public sealed class GatewayOptionsTests
         Assert.Equal("https://localhost:5102", probes.DataServices);
         Assert.Equal("https://localhost:5104", probes.Security);
 
-        // THE PROBE AND THE CALL EDGE NAME DIFFERENT ENDPOINTS OF THE SAME SERVICE, AND THAT IS THE
-        // POINT OF ASSERTING IT. A probe speaks HTTP/1.1, so it must reach DataServices' Http1 endpoint
-        // on 5102; Gateway's gRPC channel must reach the Http2 endpoint on 5112. Pointing either at the
-        // other's port fails - an HTTP/1.1 GET /health against an Http2 endpoint answers 400 and the
-        // readiness gate never opens, and a gRPC channel against an Http1 endpoint fails every call
-        // during negotiation. The two members were already separate types for a topology reason; they
-        // additionally carry different addresses, which is why neither can be aliased to the other.
-        Assert.NotEqual(new GatewayOptions().Upstreams.DataServices, probes.DataServices);
+        // THE PROBE AND THE CALL EDGE NAME THE SAME ENDPOINT OF THE SAME SERVICE, AND THAT IS WHAT IS
+        // ASSERTED. DataServices binds one `Http1AndHttp2` listener on 5102: ALPN gives the probe HTTP/1.1
+        // and the gRPC channel HTTP/2 on that single port, so both members carry 5102. An earlier revision
+        // split them - probe on 5102, channel on a second Http2-only 5112 - and this row asserted they
+        // DIFFERED; the split was withdrawn because AAP 0.3.2.2 assigns C-03 and C-04 to 5102.
+        //
+        // THE TWO MEMBERS STAY SEPARATE ANYWAY, AND THE REASON IS AUTHORITY RATHER THAN ADDRESS. The probe
+        // group authorises one anonymous GET /health; the upstream group is a call address a gRPC channel
+        // is built from. Aliasing one to the other would let a change of call address silently move the
+        // probe, and vice versa, which is exactly the substitution the sibling rows below forbid.
+        Assert.Equal(new GatewayOptions().Upstreams.DataServices, probes.DataServices);
     }
 
     [Fact]
@@ -908,6 +916,110 @@ public sealed class GatewayOptionsTests
 
         Assert.NotNull(options.ValidIssuers);
         Assert.NotNull(options.ValidAudiences);
+    }
+
+    // ==============================================================================================
+    //  THE RETRY COUNT - THE ONE SETTING WHOSE DOCUMENTED DOMAIN WAS NOT ITS DEPLOYABLE DOMAIN
+    // ==============================================================================================
+
+    /// <summary>
+    /// The retry count is accepted across its whole documented domain and refused outside it.
+    /// </summary>
+    /// <param name="attempts">The configured value.</param>
+    /// <param name="accepted">Whether the validator must accept it.</param>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE TWO BOUNDS EXIST FOR TWO DIFFERENT OBSERVED FAILURES, AND NEITHER WAS A THEORY.</b>
+    /// </para>
+    /// <para>
+    /// ZERO was documented as disabling retries and validated only against being negative, while both
+    /// retry layers consumed it unconditionally - and neither accepts it. The resilience package declares
+    /// its retry strategy's count in the range one to <see cref="int.MaxValue"/>, so a configured zero
+    /// made the host FAIL TO START: "The field &lt;client&gt;-standard.Retry.MaxRetryAttempts must be
+    /// between 1 and 2147483647", raised for all three named pipelines at once. So the single value an
+    /// operator would reach for to turn retry off was the one value that could not be deployed. The
+    /// composition root now branches on it, and this row is what keeps zero a legal configuration.
+    /// </para>
+    /// <para>
+    /// <see cref="int.MaxValue"/> was legal and SILENTLY BROKE RETRY rather than failing. The gRPC layer
+    /// increments the count to an attempt count, and unchecked <c>int.MaxValue + 1</c> wraps to
+    /// <see cref="int.MinValue"/>; the channel and its retry policy both ACCEPTED that negative count and
+    /// the pipeline built successfully - a service that started, reported itself healthy and had a
+    /// nonsensical retry policy. The ceiling refuses the input instead, and the increment is checked so
+    /// the arithmetic cannot fail quietly even if the ceiling were ever widened.
+    /// </para>
+    /// <para>
+    /// THE ROWS ARE THE BOUNDARIES AND THEIR NEIGHBOURS, because a range check is exactly where an
+    /// off-by-one hides: the two accepted extremes, the two values just outside them, and the extreme that
+    /// caused the overflow.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1, true)]
+    [InlineData(3, true)]
+    [InlineData(GatewayOptions.OutboundCallOptions.MaxRetryAttemptsCeiling, true)]
+    [InlineData(GatewayOptions.OutboundCallOptions.MaxRetryAttemptsCeiling + 1, false)]
+    [InlineData(-1, false)]
+    [InlineData(int.MaxValue, false)]
+    public void TheRetryCountIsAcceptedAcrossItsDocumentedDomainAndRefusedOutsideIt(
+        int attempts,
+        bool accepted)
+    {
+        GatewayOptions options = ValidOptions();
+        options.Outbound.MaxRetryAttempts = attempts;
+
+        ValidationResult[] failures = Validate(options);
+
+        if (accepted)
+        {
+            Assert.Empty(failures);
+
+            return;
+        }
+
+        ValidationResult failure = Assert.Single(failures);
+
+        Assert.Contains(
+            "Outbound:MaxRetryAttempts",
+            failure.ErrorMessage ?? string.Empty,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Zero answers "no retrying", and every accepted positive value answers the count plus one.
+    /// </summary>
+    /// <remarks>
+    /// THE TWO DERIVED READINGS ARE ASSERTED TOGETHER because the composition root branches on the first
+    /// and consumes the second, so a build where they disagreed would install a retry policy for a
+    /// deployment that asked for none. The attempt count is INCLUSIVE - a gRPC retry policy counts
+    /// attempts where this setting counts retries - and the increment is checked, which is why the
+    /// int.MaxValue row above is refused by validation rather than left to wrap.
+    /// </remarks>
+    [Fact]
+    public void TheRetryCountAnswersWhetherRetryingIsEnabledAndTheInclusiveAttemptCount()
+    {
+        GatewayOptions.OutboundCallOptions outbound = new();
+
+        Assert.Equal(3, outbound.MaxRetryAttempts);
+        Assert.True(outbound.RetriesEnabled);
+        Assert.Equal(4, outbound.ResolveGrpcAttemptCount());
+
+        outbound.MaxRetryAttempts = 0;
+        Assert.False(outbound.RetriesEnabled);
+
+        outbound.MaxRetryAttempts = 1;
+        Assert.True(outbound.RetriesEnabled);
+        Assert.Equal(2, outbound.ResolveGrpcAttemptCount());
+
+        outbound.MaxRetryAttempts = GatewayOptions.OutboundCallOptions.MaxRetryAttemptsCeiling;
+        Assert.Equal(11, outbound.ResolveGrpcAttemptCount());
+
+        // THE CHECKED ARITHMETIC IS ASSERTED RATHER THAN ASSUMED. Validation refuses this value, so this
+        // is the guard behind the guard: if the ceiling were ever widened to int.MaxValue the increment
+        // would THROW instead of wrapping to a negative count that every layer accepts.
+        outbound.MaxRetryAttempts = int.MaxValue;
+        Assert.Throws<OverflowException>(() => outbound.ResolveGrpcAttemptCount());
     }
 
     [Fact]

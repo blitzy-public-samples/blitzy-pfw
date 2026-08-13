@@ -41,6 +41,7 @@ using PowerFramework.Contracts.Common.V1;
 using PowerFramework.Contracts.DataServices.V1;
 using PowerFramework.Contracts.Persistence.V1;
 using Xunit;
+using Xunit.Sdk;
 
 namespace PowerFramework.Contracts.Tests;
 
@@ -387,8 +388,8 @@ public sealed class GatewayContractTests
             checkedOperations++;
         }
 
-        // 51 operations, less the one anonymous /health and the eight reserved-route operations.
-        Assert.Equal(42, checkedOperations);
+        // 50 operations, less the one anonymous /health and the eight reserved-route operations.
+        Assert.Equal(41, checkedOperations);
     }
 
     // ==============================================================================================
@@ -972,8 +973,8 @@ public sealed class GatewayContractTests
             }
         }
 
-        // 40 projected operations, each naming a request and a response.
-        Assert.Equal(80, checkedNames);
+        // 39 projected operations, each naming a request and a response.
+        Assert.Equal(78, checkedNames);
     }
 
     [Fact]
@@ -1044,7 +1045,7 @@ public sealed class GatewayContractTests
             checkedOperations++;
         }
 
-        Assert.Equal(40, checkedOperations);
+        Assert.Equal(39, checkedOperations);
     }
 
     [Fact]
@@ -1125,6 +1126,62 @@ public sealed class GatewayContractTests
         // individually.
         Assert.Equal(["EventChain", "InvokeMethodChannel", "TraceChannel"], bidirectional);
         Assert.Empty(projectedRpcs.Intersect(bidirectional, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void TheProjectedOperationCountsAreDerivedFromTheDescriptorsRatherThanRestated()
+    {
+        // EVERY COUNT THIS DOCUMENT AND ITS SIBLING PROSE STATE IS COMPUTED HERE FROM THE COMPILED
+        // DESCRIPTORS, so a method added to either service cannot leave a number behind.
+        //
+        // The counts have drifted exactly that way TWICE, in opposite directions. `LoadRows` was added
+        // to C-04, taking it from 26 methods to 27 and the projection from 39 operations to 40, and
+        // roughly forty prose statements across both services, their tests, this document and
+        // docs/CONTRACTS.md went on saying 26, 24 and 39; the method was then withdrawn, and the same
+        // forty statements went on saying 27, 25 and 40. A count restated in prose is a fact with no
+        // owner; this test is the owner.
+        OpenApiDocument document = Document;
+
+        Dictionary<string, int> declaredByService = DataservicesV1Reflection.Descriptor.Services
+            .ToDictionary(
+                static service => service.Name,
+                static service => service.Methods.Count,
+                StringComparer.Ordinal);
+
+        Dictionary<string, int> projectableByService = DataservicesV1Reflection.Descriptor.Services
+            .ToDictionary(
+                static service => service.Name,
+                static service => service.Methods.Count(static rpc => !rpc.IsClientStreaming),
+                StringComparer.Ordinal);
+
+        // C-03 declares sixteen and projects fifteen; C-04 declares twenty-six and projects
+        // twenty-four. These four numbers are the ones the prose spells out, in this one place.
+        Assert.Equal(16, declaredByService["DataWindowService"]);
+        Assert.Equal(15, projectableByService["DataWindowService"]);
+        Assert.Equal(26, declaredByService["ColumnExpressionService"]);
+        Assert.Equal(24, projectableByService["ColumnExpressionService"]);
+
+        // AND THE DOCUMENT AGREES, PER CONTRACT, rather than only in total. A total alone could be
+        // satisfied by projecting one C-04 method too many and one C-03 method too few.
+        Dictionary<string, int> publishedByContract = Operations(document)
+            .Select(static entry => Extension(entry.Operation, "x-contract-id"))
+            .OfType<string>()
+            .GroupBy(static id => id, StringComparer.Ordinal)
+            .ToDictionary(static group => group.Key, static group => group.Count(), StringComparer.Ordinal);
+
+        Assert.Equal(projectableByService["DataWindowService"], publishedByContract["C-03"]);
+        Assert.Equal(projectableByService["ColumnExpressionService"], publishedByContract["C-04"]);
+
+        // THIRTY-NINE PROJECTIONS, which is the number every projection-wide statement in both services
+        // uses: one shared failure path, one authorization posture, one status map.
+        Assert.Equal(39, publishedByContract["C-03"] + publishedByContract["C-04"]);
+
+        // THE INGRESS'S OWN OPERATIONS ARE COUNTED SEPARATELY, so the 39 cannot absorb one of them.
+        // C-09 carries /v1/ping, /v1/capabilities and the four reserved routes' eight methods; C-10
+        // carries /health and the readiness half.
+        Assert.Equal(9, publishedByContract["C-09"]);
+        Assert.Equal(2, publishedByContract["C-10"]);
+        Assert.Equal(50, publishedByContract.Values.Sum());
     }
 
     [Fact]
@@ -1468,8 +1525,8 @@ public sealed class GatewayContractTests
         // being updated, fails here. It is the cheapest possible guard against the document and the
         // specification drifting apart, which is the failure that produced finding I-2 in the first
         // place - a contract documented as published while absent.
-        Assert.Equal(47, document.Paths.Count);
-        Assert.Equal(51, Operations(document).Count());
+        Assert.Equal(46, document.Paths.Count);
+        Assert.Equal(50, Operations(document).Count());
     }
 
     [Fact]
@@ -1483,9 +1540,15 @@ public sealed class GatewayContractTests
         {
             // `ProblemDetails` MUST be open - RFC 9457 defines extension members and `retCode` is one.
             // `ConflictProblemDetails` composes it through allOf and inherits that openness.
-            // `ProtoPayload` MUST be open - its authority is the .proto, so this placeholder cannot
-            // enumerate its members without becoming the second source of truth it exists to avoid.
-            if (name is "ProblemDetails" or "ConflictProblemDetails" or "ProtoPayload")
+            //
+            // THOSE TWO ARE THE WHOLE EXEMPTION LIST, AND IT USED TO HAVE A THIRD ENTRY. `ProtoPayload`
+            // was one open object standing in for every projected request and response body, exempted
+            // here on the grounds that its authority was the .proto. That was the defect: the projection
+            // binds every request with the STRICT canonical parser, which REJECTS a member the target
+            // message does not declare, so an open schema published a permissiveness the runtime does not
+            // have. It is gone, replaced by concrete generated schemas for the complete closure - which
+            // is why the reached count below rose from 32 to 125.
+            if (name is "ProblemDetails" or "ConflictProblemDetails")
             {
                 continue;
             }
@@ -1513,15 +1576,21 @@ public sealed class GatewayContractTests
             // Closing them makes that a detectable mistake.
             Assert.False(
                 schema.AdditionalPropertiesAllowed,
-                $"Schema '{name}' permits unknown members. Only ProblemDetails (RFC 9457 extension "
-                    + "members) and ProtoPayload (authority delegated to the .proto) may.");
+                $"Schema '{name}' permits unknown members. Only ProblemDetails and its conflict "
+                    + "specialization may, because RFC 9457 defines extension members. Every other "
+                    + "schema in this document is closed, because the projection's canonical parser "
+                    + "rejects a member the target message does not declare.");
 
             checkedSchemas++;
         }
 
         // AND THE CHECK ACTUALLY REACHED SOMETHING. Without this, a change that made every schema
         // non-object - or misspelled the exemption list - would pass an empty loop silently.
-        Assert.Equal(32, checkedSchemas);
+        //
+        // 125 OF THE DOCUMENT'S 144 SCHEMAS ARE OBJECTS THAT CLOSE THEMSELVES. The remaining 19 are the
+        // two open problem shapes skipped above, the 15 string enums and the two array projections, none
+        // of which has members for the keyword to constrain.
+        Assert.Equal(125, checkedSchemas);
     }
 
     [Fact]
@@ -1575,5 +1644,156 @@ public sealed class GatewayContractTests
             // without the documentation following.
             Assert.Contains(tag.Name!, used);
         }
+    }
+
+    // ==============================================================================================
+    //  THE PER-OPERATION SCOPE REQUIREMENT
+    //
+    //  🔴 WHY THIS SECTION EXISTS AT ALL. This document applies `bearerAuth: []` to every operation but
+    //  one, and for an `http`/`bearer` security scheme an empty array is the ONLY meaningful value -
+    //  OpenAPI defines the security-requirement array as a scope list for `oauth2` and `openIdConnect`
+    //  schemes alone. That silence was read, in Security's own base settings guidance, as "the gateway
+    //  itself requires no scope", and an operator following it granted an external caller a single
+    //  placeholder scope. The token MINTED, because issuance intersects requested scopes with the grant
+    //  and a narrowing is a success - and then every route the caller reached answered 403. Nothing
+    //  refused at provisioning time and the symptom appeared three layers away from its cause.
+    //
+    //  So the requirement is now stated per operation as `x-required-scope`, over a CLOSED set of four
+    //  values, and the assertions below hold the document to it. The binding to the code that enforces
+    //  it - the three RequiredScope constants on the Gateway endpoint files - is asserted in
+    //  ServiceConfigurationCoherenceTests, which is the file in this project that may read service
+    //  source.
+    // ==============================================================================================
+
+    /// <summary>The extension naming the scope an operation requires.</summary>
+    private const string RequiredScopeExtensionName = "x-required-scope";
+
+    /// <summary>The sentinel meaning "no scope requirement" rather than a scope of that name.</summary>
+    internal const string NoScopeRequiredSentinel = "none";
+
+    /// <summary>The three scopes this ingress enforces, plus the no-requirement sentinel.</summary>
+    internal static readonly string[] PublishedRequiredScopes =
+        ["ping", "capabilities", "datawindow", NoScopeRequiredSentinel];
+
+    /// <summary>
+    /// Every operation declares an <c>x-required-scope</c> drawn from the closed set, so a reader never
+    /// has to infer an entitlement from a field that cannot express one.
+    /// </summary>
+    /// <remarks>
+    /// BOTH DIRECTIONS, AND THE SECOND IS THE ONE THAT MATTERS. An absent extension is caught by the
+    /// per-operation loop; a value outside the closed set is caught by the membership check, which is
+    /// what stops a future route inventing a scope name that no policy registers and no grant carries.
+    /// The counts are asserted too, so the test cannot pass by examining nothing.
+    /// </remarks>
+    [Fact]
+    public void EveryOperationDeclaresARequiredScopeFromTheClosedSet()
+    {
+        Dictionary<string, int> observed = new(StringComparer.Ordinal);
+        int operations = 0;
+
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in Operations(Document))
+        {
+            string? scope = Extension(operation, RequiredScopeExtensionName);
+
+            Assert.False(
+                string.IsNullOrWhiteSpace(scope),
+                $"{method} {route} declares no '{RequiredScopeExtensionName}', so a consumer cannot tell "
+                    + "which scope its token must carry - and an empty bearer scope array cannot tell it "
+                    + "either.");
+
+            Assert.Contains(scope!, PublishedRequiredScopes, StringComparer.Ordinal);
+
+            observed[scope!] = observed.GetValueOrDefault(scope!) + 1;
+            operations++;
+        }
+
+        Assert.Equal(50, operations);
+
+        // THE CENSUS, so that a route silently changing families is a failure rather than a wash.
+        Assert.Equal(1, observed["ping"]);
+        Assert.Equal(1, observed["capabilities"]);
+        Assert.Equal(39, observed["datawindow"]);
+        Assert.Equal(9, observed[NoScopeRequiredSentinel]);
+    }
+
+    /// <summary>
+    /// Each operation's declared scope is the one its route family enforces, and the nine that require
+    /// none are exactly the anonymous probe and the eight reserved-family operations.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE FAMILY IS DERIVED FROM THE ROUTE rather than listed, so a new route added to a family inherits
+    /// the assertion instead of escaping it, and a route added OUTSIDE all four families fails with a
+    /// message naming it.
+    /// </para>
+    /// <para>
+    /// THE RESERVED FAMILIES REQUIRE NO SCOPE DELIBERATELY (decision D5, constraint C-D). A capability
+    /// scope for a route that reaches no capability would invent an entitlement for a service this phase
+    /// must not implement, no grant in the issuance roster carries such a scope, and so every caller
+    /// would receive 403 - making the reserved 501 answer, which is the whole reason those routes exist,
+    /// unreachable.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void EveryOperationsDeclaredScopeMatchesItsRouteFamily()
+    {
+        int checkedOperations = 0;
+
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in Operations(Document))
+        {
+            string expected = route switch
+            {
+                "/health" => NoScopeRequiredSentinel,
+                "/v1/ping" => "ping",
+                "/v1/capabilities" => "capabilities",
+                _ when route.StartsWith("/v1/datawindow/", StringComparison.Ordinal) => "datawindow",
+                _ when route.StartsWith("/v1/design/", StringComparison.Ordinal)
+                    || route.StartsWith("/v1/documents/", StringComparison.Ordinal)
+                    || route.StartsWith("/v1/integration/", StringComparison.Ordinal)
+                    || route.StartsWith("/v1/scripting/", StringComparison.Ordinal) =>
+                    NoScopeRequiredSentinel,
+                _ => throw FailException.ForFailure(
+                    $"{method} {route} belongs to no known route family, so this test cannot say which "
+                        + "scope it should require. Add the family here and to the bearer scheme's Scope "
+                        + "table in gateway.v1.yaml.")
+            };
+
+            Assert.Equal(expected, Extension(operation, RequiredScopeExtensionName));
+
+            checkedOperations++;
+        }
+
+        Assert.Equal(50, checkedOperations);
+    }
+
+    /// <summary>
+    /// The bearer scheme explains that its empty scope array is not a statement about scope, and points
+    /// at the extension that is.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 A PROSE ASSERTION, AND IT IS EARNING ITS PLACE. The misreading this text prevents was made once,
+    /// in Security's provisioning guidance, and it cost a documented bring-up that authenticated and was
+    /// then refused on every route. Deleting the explanation would make the same inference available
+    /// again with nothing to contradict it, so the explanation is pinned rather than trusted.
+    /// </remarks>
+    [Fact]
+    public void TheBearerSchemeExplainsThatAnEmptyScopeArrayIsNotAScopeRequirement()
+    {
+        string description = Document.Components!.SecuritySchemes!["bearerAuth"].Description!;
+
+        Assert.Contains(RequiredScopeExtensionName, description, StringComparison.Ordinal);
+        Assert.Contains("oauth2", description, StringComparison.Ordinal);
+        Assert.Contains("openIdConnect", description, StringComparison.Ordinal);
+
+        foreach (string scope in PublishedRequiredScopes)
+        {
+            Assert.Contains(scope, description, StringComparison.Ordinal);
+        }
+
+        // The sentinel is explained rather than merely used, because "none" reads like a scope name.
+        Assert.Contains(
+            "means **no scope requirement**",
+            description,
+            StringComparison.Ordinal);
     }
 }

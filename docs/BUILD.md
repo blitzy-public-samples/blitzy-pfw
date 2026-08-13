@@ -43,16 +43,16 @@ work **verbatim, from a clean checkout, for each of the four services independen
 
 > **State of that command today, measured rather than assumed.** It works, for all four services. Every
 > one of them restores, builds in Release with `0 Warning(s)` and `0 Error(s)`, and runs its full test
-> suite green — and with the repository-root `coverage.runsettings` applied, each clears the 80% line
-> floor of §10 on its own Cobertura report. The `CS5001` an earlier revision of this document reported
+> suite green — and each clears the 80% line floor of §10 on its own assembly's package within its own
+> Cobertura report. The `CS5001` an earlier revision of this document reported
 > for the four service *application* projects is no longer reachable: every one now carries a
-> `Program.cs` and produces an entry point. §13 records exactly what has and has not been exercised, and
-> the runtime claims it still does **not** make.
+> `Program.cs` and produces an entry point.
 >
 > What the command does **not** prove is anything about a running system: it builds and tests each
 > service **in process**, so no image is built by it, no service is started by it, and no request crosses
-> a network boundary because of it. Two images have separately been built and run — see §1.3 — and that is
-> a different exercise from this command. §8.3 and §13 hold that line at their own points of use.
+> a network boundary because of it. The container path was exercised separately — all four images and a
+> four-service bring-up, recorded in [§1.3](#13-the-canonical-verification-record) — and that is a
+> different exercise from this command. §8.3 and §13 hold that line at their own points of use.
 
 **Read §2 before anything else.** It carries two findings that were observed directly and that break the
 build if a reader misses them. A reader who stops after the first screen must still have seen both.
@@ -71,26 +71,31 @@ itself:
 | The characterization model, the fixture corpus, coverage mechanics in context and the determinism seams | [`docs/PARITY.md`](PARITY.md) |
 | The legacy build-definition anomalies in full, and the full-estate object mapping | [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) |
 | Secret locators, severities, required actions and the token-topology register | [`SECRETS.md`](SECRETS.md) |
-| Compose bring-up detail and the readiness gates step by step | `orchestration/README.md` |
+| Compose bring-up detail, the readiness gates step by step, and **the single statement of what has and has not been exercised** | [`orchestration/README.md`](../orchestration/README.md) |
 | The cross-service contract inventory | [`CONTRACTS.md`](CONTRACTS.md) |
 | The four deferred destinations, which receive no project and no container in this phase | [`DEFERRED.md`](DEFERRED.md) |
 
 ## Current state of the artifacts this document references
 
-Some artifacts referenced below are **planned and not yet present in this repository**. They are named
-because they are where the corresponding work belongs, not because a reader can open them today:
+**Every artifact referenced below is present in the tree.** That includes the solution and project files,
+the shared libraries, the protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, **all
+four service applications with their handler trees and test projects**, **all four container definitions**
+(§7.1), `.github/workflows/ci.yml` (§10), the per-service settings,
+[`PARITY.md`](PARITY.md), the complete `orchestration/` set — the manifest, `orchestration/.env.example`
+and `orchestration/README.md` — the Playwright bootstrap and specs under `tests/e2e/`, the
+`characterization/` scaffolding, and the read-only legacy tree.
 
-| Artifact | What it will carry | State |
+One artifact is present as **structure without content**, and the distinction matters because a reader
+looking for a recording will not find one:
+
+| Artifact | What is present | What is not |
 | --- | --- | --- |
-| `orchestration/docker-compose.yml`, `orchestration/README.md` | Local orchestration and the readiness-gate bring-up. `orchestration/.env.example` is already present; the manifest and its readme are not | **Planned — not yet present** |
-| `characterization/` | The paired legacy and target recording store | **Planned — not yet present** |
+| `characterization/` | The capture specification (`README.md`), the workflow definitions (`workflows/`, fifteen of them) and their JSON Schema, and the two recording roots | **No recording, on either side.** `recordings/legacy/` and `recordings/dotnet/` are empty, so no paired comparison has been made |
 
-Everything else this document references — the solution and project files, the shared libraries, the
-protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, **all four service
-applications with their handler trees and test projects**, **all four container definitions** (§7.1),
-`.github/workflows/ci.yml` and `coverage.runsettings` (§10), the per-service settings,
-[`PARITY.md`](PARITY.md), `orchestration/.env.example`, the Playwright specs under `tests/e2e/specs/` and
-the read-only legacy tree — **is present in the tree today**.
+**Present in the tree is not the same claim as exercised.** For what has actually been run, this document
+defers to one place —
+[`orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised)
+— rather than keeping a second account that would drift from it.
 
 ### The status vocabulary this documentation set uses
 
@@ -104,27 +109,27 @@ intention is how a build reference becomes misleading. Four labels are used, her
 | **Present and verified** | The artifact is in the tree **and** a command was run over it in this repository, with its output quoted |
 | **Present but unexercised** | The artifact is in the tree; no run stands behind the claim. Static review only |
 | **Validated only on a throwaway skeleton** | The **command shape** was proven against a one-test skeleton project outside this repository. It is evidence about the command and the toolchain, never about this repository's code |
-| **Planned — not yet present** | No artifact exists. The text is the specification the work will be built against |
+| **Planned — not yet present** | No artifact exists. The text is the specification the work will be built against. **Exactly one thing in this repository still carries this label**: the paired characterization recordings, whose per-workflow directories are labelled so in `characterization/recordings/legacy/README.md` and `characterization/recordings/dotnet/README.md` because they need a PowerBuilder oracle run. Nothing *this* document references carries it |
 
-Applied to the commands in this document:
+Applied to the commands in this document. **No figure appears in this list**: §1.3 is the single canonical
+record of every measured number, and repeating one here is how the last set of them came to disagree with
+each other across six documents.
 
-1. **Present and verified.** `dotnet restore` (audit-clean), and the build and test of the six shared and
-   contracts projects — `0 Warning(s)`, `0 Error(s)`, and **8,278 tests passing, 0 failing**, measured by
-   running `dotnet test <project> -c Release` once per test project. §5.5 lists the six with their
-   individual counts.
-2. **The four services, likewise built and tested.** Each application project compiles in Release with
-   zero warnings and zero errors, each test project runs, and together they add **10,325 passing tests**
-   and 4 skipped — bringing the whole solution to **18,603 passing, 4 skipped, 0 failing**. The four skips
-   are the pinyin oracle characterization hooks, which require paired legacy recordings that do not exist
-   yet. Every one of the four also clears its coverage floor: Gateway 88.77%, DataServices 91.19%,
-   Persistence 88.05%, Security 91.68%.
-3. **Enforced in CI, and separately verified by hand.** `.github/workflows/ci.yml` runs the per-service
-   command shape above in four independent matrix legs and gates each on its own report; the gate step was
-   also extracted verbatim from that workflow and run locally against all four real reports, passing for
-   all four and failing correctly under four different injected faults. §13 says plainly what has and has
-   not been exercised — notably that the workflow has not yet run on a GitHub-hosted runner.
-4. **Planned — not yet present.** The Compose bring-up, the health probes, the CI pipeline, the container
-   images and the Playwright run. Where a command belongs to this kind, the surrounding text says so.
+1. **Present and verified — the build and test path.** `dotnet restore` (audit-clean), the whole-solution
+   Release build, and every one of the ten test projects. Counts, coverage rates and the exact commands are
+   in [§1.3](#13-the-canonical-verification-record).
+2. **Present and verified — the container path.** All four images build, and the four-service Compose
+   bring-up reached full health with its ordered readiness gates observed. [§1.3](#13-the-canonical-verification-record)
+   records what was run and what answered.
+3. **Present and verified — the coverage gate's arithmetic.** The gate step was extracted verbatim from
+   `.github/workflows/ci.yml` and run locally against all four real reports, passing for all four and
+   failing correctly under four different injected faults.
+4. **Present but unexercised.** The CI workflow **as a pipeline** — it is authored and its gate is
+   expressed, but it has not run on a GitHub-hosted runner — and the Playwright suite's full run, which
+   needs an issuance identity provisioned against a live stack.
+5. **Present but unexercised, and the one that matters most.** Behavioural parity against the
+   PowerBuilder oracle. The capture model and 15 workflow definitions exist; no recording does, because
+   the oracle needs the PowerBuilder runtime. **No parity claim is made anywhere in this document.**
 
 ---
 
@@ -145,6 +150,7 @@ Applied to the commands in this document:
 13. [Closing note: what this document claims and does not claim](#13-closing-note-what-this-document-claims-and-does-not-claim)
 14. [Markdown lint policy for this documentation set](#14-markdown-lint-policy-for-this-documentation-set)
 15. [Per-service configuration keys](#15-per-service-configuration-keys)
+16. [The authoritative target-file inventory](#16-the-authoritative-target-file-inventory)
 
 ---
 
@@ -173,7 +179,7 @@ C-L) rather than reproduced.
 ### 1.2 What was verified by execution
 
 This build architecture was **validated by execution, not designed on paper.** A throwaway skeleton was
-constructed with **.NET SDK 10.0.302** and the exact documented per-service command of §5 was run
+constructed with the pinned .NET SDK and the exact documented per-service command of §5 was run
 against it end to end. It produced:
 
 - **`Build succeeded.` with `0 Warning(s)` and `0 Error(s)`**, under `TreatWarningsAsErrors` and central
@@ -186,35 +192,131 @@ the pinned SDK and reading what it printed — rather than recalled from memory.
 distinguishes the solution-filter code that the repository records repository-wide from the codes a
 misused filter surfaces on this SDK, and §13 summarises that distinction.
 
-### 1.3 What was not verified — stated plainly
+### 1.3 The canonical verification record
 
-**No verified multi-service container bring-up is claimed anywhere in this document.** The reason is no
-longer that nothing exists to bring up — **all four container definitions are authored (§7.1) and so is
-`.github/workflows/ci.yml` (§10)** — but that nothing assembles them into a stack:
-`orchestration/docker-compose.yml` and `orchestration/README.md` are absent, so the §8 bring-up and its
-ordered health probes have not been exercised and the health-condition chain has no expression anywhere in
-the tree. Two images, Security and Persistence, were built and run and reached Docker health `healthy`
-([`ARCHITECTURE.md`](ARCHITECTURE.md) §10.6 records both runs, including the five ways the Persistence
-probe was driven negative); Gateway and DataServices have not been built here.
+**This subsection is the single source of every measured figure about this repository.** No other
+document in this set — and no other section of this one — carries its own copy of a test total, a coverage
+rate or a container result; each links here instead. That rule exists because the alternative was tried:
+the same figures were maintained by hand in six documents and ended up publishing three different test
+totals and two different coverage rates for the same tree, which made the prose an unauditable log rather
+than a record. **A figure anywhere else in this documentation set that disagrees with the block below is a
+defect in that document.**
 
-**Container correctness for the stack is therefore not asserted, by review or by anything else.** Once the
-Compose manifest is authored, correctness will rest on definition-and-manifest review plus the CI pipeline
-of §10 — that is the intended assurance mechanism, and naming it is not the same as reporting that it has
-run. Neither has happened. §8.3 restates this at the point of use, so a reader who
-arrives there directly still sees it.
+The block is machine-readable on purpose, so a reader can diff it against a fresh run rather than
+re-reading paragraphs, and so the next person to change it has to change one thing:
 
-**What "unexercised" does and does not mean here, because the four services themselves ARE tested.** Every
-service test drives its own service **in process**, through `WebApplicationFactory` or a test host, so the
-handler behaviour, the status translation, the capability gate, the reserved routes and token issuance are
-all covered by passing tests. What an in-process host does **not** exercise is the deployed topology: no
-TLS handshake, no ALPN protocol negotiation, no real gRPC channel, no client-certificate presentation, no
-container health probe and no Compose `depends_on` ordering. Two of those gaps have been closed outside the
-test suites, by the two container runs of [`ARCHITECTURE.md`](ARCHITECTURE.md) §10.6 rather than by any
-test: a real TLS handshake with chain verification, and a real container health probe reaching `healthy`
-and driven negative. The rest stand. **No request in this system has crossed a real network boundary
-between two services.**
+```json
+{
+  "recordVersion": 1,
+  "measuredOn": "2026-08-13",
+  "environment": {
+    "dotnetSdk": "10.0.302",
+    "netCoreAppRuntime": "10.0.10",
+    "aspNetCoreAppRuntime": "10.0.10",
+    "targetFramework": "net10.0",
+    "docker": "29.7.0",
+    "dockerStorageDriver": "overlay2",
+    "host": "linux-x64 container"
+  },
+  "build": {
+    "command": "dotnet build PowerFramework.slnx -c Release",
+    "result": "Build succeeded.",
+    "warnings": 0,
+    "errors": 0,
+    "projects": 20
+  },
+  "tests": {
+    "commandPerService": "cd services/<service-name> && dotnet test -c Release --collect:\"XPlat Code Coverage\"",
+    "commandPerSharedProject": "cd shared/<project>.Tests && dotnet test -c Release",
+    "projects": [
+      { "project": "shared/PowerFramework.Shared.Kernel.Tests",                      "passed": 1750, "skipped": 0, "failed": 0 },
+      { "project": "shared/PowerFramework.Shared.Diagnostics.Tests",                 "passed":  637, "skipped": 0, "failed": 0 },
+      { "project": "shared/PowerFramework.Shared.Eventful.Tests",                    "passed":  777, "skipped": 0, "failed": 0 },
+      { "project": "shared/PowerFramework.Shared.Localization.Tests",                "passed":  526, "skipped": 0, "failed": 0 },
+      { "project": "shared/PowerFramework.Shared.Containers.Tests",                  "passed":  202, "skipped": 0, "failed": 0 },
+      { "project": "shared/PowerFramework.Contracts.Tests",                          "passed": 4671, "skipped": 0, "failed": 0 },
+      { "project": "services/gateway-service/PowerFramework.Gateway.Tests",          "passed": 1044, "skipped": 0, "failed": 0 },
+      { "project": "services/dataservices-service/PowerFramework.DataServices.Tests","passed": 5745, "skipped": 0, "failed": 0 },
+      { "project": "services/persistence-service/PowerFramework.Persistence.Tests",  "passed": 4506, "skipped": 0, "failed": 0 },
+      { "project": "services/security-service/PowerFramework.Security.Tests",        "passed": 2052, "skipped": 0, "failed": 0 }
+    ],
+    "sharedSubtotalPassed": 8563,
+    "serviceSubtotalPassed": 13347,
+    "totalPassed": 21910,
+    "totalSkipped": 0,
+    "totalFailed": 0,
+    "skipReason": "None. NOTHING SKIPS. The pinyin oracle characterization hooks used to skip unless a paired legacy recording existed, which meant they protected nothing on the shipped tree; they now assert an equivalence true in both worlds - characterized if and only if recorded - so they execute on every run and assert today's BLOCKED state, and they fail the day a recording lands without being wired in."
+  },
+  "coverage": {
+    "gate": "0.80 line rate, per service, from that service's own coverage.cobertura.xml",
+    "scopedBy": "the gate selects this service's own package from the report by assembly name, inline in .github/workflows/ci.yml; no settings file exists anywhere in this repository",
+    "perService": [
+      { "service": "gateway-service",      "assembly": "PowerFramework.Gateway",      "lineRate": 0.8908, "linesCovered":  4205, "linesValid":  4720, "branchRate": 0.7361, "packagesInReport": 5 },
+      { "service": "dataservices-service", "assembly": "PowerFramework.DataServices", "lineRate": 0.9323, "linesCovered": 18466, "linesValid": 19805, "branchRate": 0.8354, "packagesInReport": 7 },
+      { "service": "persistence-service",  "assembly": "PowerFramework.Persistence",  "lineRate": 0.9175, "linesCovered": 12833, "linesValid": 13986, "branchRate": 0.8300, "packagesInReport": 6 },
+      { "service": "security-service",     "assembly": "PowerFramework.Security",     "lineRate": 0.9174, "linesCovered":  4266, "linesValid":  4650, "branchRate": 0.8113, "packagesInReport": 3 }
+    ],
+    "allFourClearTheFloor": true
+  },
+  "containers": {
+    "imageBuildCommand": "docker build -f services/<service-name>/Dockerfile -t <tag> .",
+    "imagesBuilt": ["security-service", "persistence-service", "dataservices-service", "gateway-service"],
+    "imagesBuiltCount": 4,
+    "bringUpCommand": "docker compose -f orchestration/docker-compose.yml --env-file <file outside the working tree> up -d",
+    "bringUpOperatorPrecondition": "The manifest declares three top-level Compose secrets sourced from TLS_CERTIFICATE_PATH, TLS_CERTIFICATE_KEY_PATH and INTERNAL_TLS_CA_PATH and projects them read-only at /run/secrets/internal-tls/{server.crt,server.key,ca.crt} in all four services; all three sources carry the :? form, so an unset or absent path aborts bring-up by name. The persistence-db volume needs no operator step - the schema provisioner applies pending migrations at startup.",
+    "allFourReachedDockerHealthy": true,
+    "healthOrderObserved": ["security-service", "persistence-service", "dataservices-service", "gateway-service"],
+    "observed": {
+      "healthAnonymous200": [5101, 5102, 5104, 5105],
+      "pingWithoutToken401": [5101, 5102, 5104, 5105],
+      "pingWithToken200": [5102, 5105],
+      "gatewayAggregateNamedUpstreamsHealthy": ["persistence", "dataservices", "security"],
+      "tokenMintedByScheme": ["clientCredential", "mutualTls"],
+      "outOfRosterAudienceRefused": 403,
+      "jwksAndDiscoveryAnonymous200": true,
+      "deferredRoutes501": ["/v1/design/**", "/v1/documents/**", "/v1/integration/**", "/v1/scripting/**"],
+      "failFastConfirmed": [
+        "An unreadable client-CA made Security refuse to start, with a names-only message publishing no path.",
+        "A fresh persistence-db volume made Persistence answer 503 naming the unprovisioned database until the migration was applied, and the dependency chain held DataServices and Gateway back."
+      ]
+    }
+  },
+  "notVerified": [
+    "Behavioural parity against the PowerBuilder oracle. characterization/recordings/ is empty on both sides; the oracle needs the PowerBuilder runtime, which this environment does not have.",
+    "The CI workflow as a pipeline. .github/workflows/ci.yml is authored and its gate is expressed, but it has not run on a GitHub-hosted runner; the gate's arithmetic was checked by running the same commands locally.",
+    "A full Playwright end-to-end run, which needs an issuance identity provisioned against a live stack."
+  ]
+}
+```
 
-The distinction matters and is held throughout: §1.2 is claimed and quotes its output, §1.3 is disclaimed.
+Three things about that record deserve saying in prose, because they are the parts a reader is most
+likely to misread.
+
+**A coverage report carries one package per instrumented assembly, and the gate SELECTS the service's own
+by name.** That selection is the measurement-scope filter, and it is what makes the number trustworthy
+rather than merely plausible: a service's test project reaches its application project and, through it, the
+shared libraries and the generated protocol stubs that arrive by `ProjectReference`, so each report carries
+several packages and `packagesInReport` above records how many. The CI gate of §10 therefore checks three
+things, not one: that exactly one report *file* was produced, so it is unambiguous which one is read; that
+the service's own assembly appears among the packages at all, because a leg whose report does not name it
+measured something other than the service it claims to; and that THAT package's line rate clears the floor.
+Every other package's rate is printed and never gated on — holding a service's verdict to the shared
+libraries' rate would be the masking C-H forbids, in the other direction. The report's own top-level rate
+is not the gate and must never be read as one.
+
+**"All four containers healthy" is a claim about the dependency chain, not about four independent
+processes.** The order in `healthOrderObserved` is the order Compose opened the gates in, and it is the
+chain §8 describes: Security first because it is the root of the trust graph and depends on nothing;
+Gateway last because it reports healthy only once its three upstreams do. A stack where all four happened
+to be healthy but the conditions were absent would look identical in `docker compose ps` and prove
+nothing.
+
+**What an in-process test host still does not do.** Every service test drives its own service in process,
+through `WebApplicationFactory` or a test host, so handler behaviour, status translation, the capability
+gate, the reserved routes and token issuance are covered by passing tests — but an in-process host performs
+no TLS handshake, no ALPN negotiation, no real gRPC channel setup and no client-certificate exchange.
+Those gaps are closed by the container evidence above rather than by any test, and the distinction is worth
+keeping: a passing test suite and a healthy stack are different kinds of evidence about different things.
 
 ### 1.4 No performance claim appears in this document
 
@@ -310,7 +412,7 @@ reading when the idea occurs to you, it tells you not to:
 | `Directory.Build.props` | Solution-filter mechanisms among the things deliberately not configured |
 | `.editorconfig` | Its MSBuild-file section notes that no filter is authored for the format to match |
 
-**Additional diagnostics you may encounter on the pinned SDK 10.0.302.** Recorded because a build
+**Additional diagnostics you may encounter on the pinned SDK.** Recorded because a build
 reference should tell you what you will actually see, and because these confirm the prohibition rather
 than soften it — a misused filter fails in **all three verbs** in every case:
 
@@ -440,7 +542,7 @@ grep -rnE '<PackageReference[^>]*(Version|VersionOverride)=' --include='*.csproj
 
 ```xml
 <!-- In Directory.Packages.props, once, for the whole repository: -->
-<PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
+<PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.11" />
 ```
 
 **The reason is drift prevention.** This is the mechanism that forces the two mandatory security pins of
@@ -479,7 +581,7 @@ reached purely by `ProjectReference`. MSBuild's default behaviour when building 
 **unset** the parent configuration for any referenced project it cannot find in the solution
 configuration table, so that project falls back to its own default.
 
-Measured on SDK 10.0.302 **before this was addressed**: `dotnet build -c Release` in a service directory
+Measured **before this was addressed**: `dotnet build -c Release` in a service directory
 built the two listed projects into `bin/Release` while every shared project it references landed in
 `bin/Debug` — and those Debug assemblies were then copied into the application's Release output. The
 command reported a clean Release build throughout, so nothing surfaced the mismatch.
@@ -548,7 +650,7 @@ replacement for them. A single collapsed solution would be a failure mode, not a
 
 | Requirement | Version | Needed for |
 | --- | --- | --- |
-| .NET SDK | **10.0.302** | Everything. Pinned by repository-root `global.json` |
+| .NET SDK | **10.0.303** | Everything. Pinned by repository-root `global.json`. It is the SDK of the 2026-08-11 security release of the 10.0 channel (runtime **10.0.11**) — see §11.3 |
 | Node.js | **`>=22.12.0`**, declared as the floor in `tests/e2e/package.json`; v22.23.2 verified on the authoring host | The end-to-end tests of §9 **only** |
 | npm | **`npm@11.18.0`**, pinned as `packageManager` in `tests/e2e/package.json`; verified sufficient on the authoring host | The end-to-end tests of §9 **only** |
 
@@ -557,14 +659,14 @@ rather than `@playwright/test`'s own `>= 20`. It is set to the version the envir
 documents as its requirement, so that a host satisfying `engines` also satisfies the environment: a
 manifest whose floor is *below* the environment's would let `npm ci` succeed on a host the environment
 considers unsupported, which is a check that passes without checking anything.
-| Docker + Compose v2 | — | The Compose path of §8 **only** — and see §1.3: that path is unexercised |
+| Docker + Compose v2 | — | The Compose path of §8 **only**. Nothing else in this document needs it |
 
 The SDK pin, in full:
 
 ```json
 {
   "sdk": {
-    "version": "10.0.302",
+    "version": "10.0.303",
     "rollForward": "latestFeature"
   }
 }
@@ -585,8 +687,8 @@ of the read-only oracle (§1.5), and `.dockerignore` keeps them out of every ima
 ## 5. Per-service build and test — the primary path
 
 This is the primary build path, and it is the path that must work from a clean checkout for each service
-independently (C-I). It is also the path the **planned** CI workflow of §10 will run — that workflow does
-not exist yet, so nothing in this section is evidence that a pipeline has executed it.
+independently (C-I). It is also the path the CI workflow of §10 runs, in four independent matrix legs —
+that workflow is present in the tree, and §10 is precise about which parts of it have been run here.
 
 ### 5.1 The verbatim command
 
@@ -615,16 +717,13 @@ build produced by the preceding step.
 ### 5.2 The four services, concretely
 
 Service directory names, project names and ports are identical to those in
-[`ARCHITECTURE.md`](ARCHITECTURE.md). **The root `README.md` does not yet list them** — appending a
-.NET section to it is planned and not yet done, so it cannot currently be used to cross-check this
-table.
+[`ARCHITECTURE.md`](ARCHITECTURE.md), and the root [`README.md`](../README.md) carries the same roster with
+the same ports, so the two can be cross-checked against each other.
 
 | Service directory | Application project | Test project | Port | Listener |
 | --- | --- | --- | --- | --- |
-| `services/persistence-service` | `PowerFramework.Persistence` | `PowerFramework.Persistence.Tests` | **5101** | `https://+:5101`, `Http1` — REST and the readiness probe |
-| `services/persistence-service` | `PowerFramework.Persistence` | — | 5111 | `https://+:5111`, `Http2` — gRPC C-05..C-08 |
-| `services/dataservices-service` | `PowerFramework.DataServices` | `PowerFramework.DataServices.Tests` | **5102** | `https://+:5102`, `Http1` — REST, the readiness probe and the thin projection |
-| `services/dataservices-service` | `PowerFramework.DataServices` | — | 5112 | `https://+:5112`, `Http2` — gRPC C-03, C-04 |
+| `services/persistence-service` | `PowerFramework.Persistence` | `PowerFramework.Persistence.Tests` | **5101** | `https://+:5101`, `Http1AndHttp2` — gRPC C-05..C-08, REST and the readiness probe |
+| `services/dataservices-service` | `PowerFramework.DataServices` | `PowerFramework.DataServices.Tests` | **5102** | `https://+:5102`, `Http1AndHttp2` — gRPC C-03/C-04, REST, the readiness probe and the thin projection |
 | *(reserved)* | — | — | **5103** | commented-out Phase-2 slot |
 | `services/security-service` | `PowerFramework.Security` | `PowerFramework.Security.Tests` | **5104** | `https://+:5104`, `Http1` |
 | `services/gateway-service` | `PowerFramework.Gateway` | `PowerFramework.Gateway.Tests` | **5105** | `https://+:5105`, `Http1` |
@@ -632,19 +731,24 @@ table.
 Port 5103 is left reserved rather than reassigned; see [`ARCHITECTURE.md`](ARCHITECTURE.md) for the
 reasoning and for the transport chosen per service.
 
-**EVERY LISTENER TERMINATES TLS, AND THE TWO GRPC-CARRYING SERVICES DECLARE TWO ENDPOINTS EACH.** TLS
-is not hardening here: every boundary in this list is created by the decomposition itself, every request
-across one carries a bearer token, and Security additionally publishes the key set the whole estate
-verifies against — so a cleartext listener would make every token replayable and the key set
-substitutable (CWE-319). Two endpoints per gRPC-carrying service is retained rather than forced: each
-endpoint pins ONE protocol version, so a probe and a gRPC channel each address a listener that can only
-answer the thing it is for, and misaddressing either fails immediately instead of at a later layer. The documented ports keep exactly the meaning
-the environment gave them and 5111/5112 add addresses it never named. Two earlier revisions are recorded
-because both were withdrawn: one put a second listener per service on a parallel 5151–5155 band plus a
-third for the token endpoint, and one declared TLS everywhere and rewrote the documented gate's scheme to
-match — the first contradicted the fixed port map, the second made the documented bring-up unstartable.
-None of this affects the build commands in this section; [`ARCHITECTURE.md`](ARCHITECTURE.md) §4.1 carries
-the map with its measurements, and it is the map a *caller* must configure against.
+**EVERY LISTENER TERMINATES TLS, EACH SERVICE BINDS EXACTLY ONE, AND FOR THE TWO GRPC-CARRYING SERVICES
+TLS IS WHAT MAKES ONE ENOUGH.** TLS is not hardening here: every boundary in this list is created by the
+decomposition itself, every request across one carries a bearer token, and Security additionally publishes
+the key set the whole estate verifies against — so a cleartext listener would make every token replayable
+and the key set substitutable (CWE-319). It is also a functional dependency on 5101 and 5102, because
+`Http1AndHttp2` is resolved by TLS application-protocol negotiation: over TLS one endpoint serves an
+HTTP/1.1 probe and an HTTP/2 gRPC call, while on cleartext Kestrel disables HTTP/2 outright and serves
+HTTP/1.1 only — which would take every gRPC contract off the air while `/health` kept answering 200.
+
+**Three earlier revisions of this arrangement are recorded because all three were withdrawn.** One put a
+second listener per service on a parallel 5151–5155 band plus a third for the token endpoint; one declared
+TLS everywhere and rewrote the documented gate's scheme to match; and one gave each gRPC-carrying service a
+second `Http2`-only endpoint on 5111 and 5112 so that every listener pinned a single protocol version. The
+first contradicted the fixed port map, the second made the documented bring-up unstartable, and the third
+served published contracts on ports AAP 0.3.2.2 never names while the ports it does assign them carried
+only the probe. None of this affects the build commands in this section;
+[`ARCHITECTURE.md`](ARCHITECTURE.md) §4.1 carries the map with its measurements, and it is the map a
+*caller* must configure against.
 
 ```bash
 # Gateway - the composition root and sole ingress
@@ -694,69 +798,91 @@ services/<service-name>/<project>.Tests/TestResults/<run-guid>/coverage.cobertur
 ```
 
 `coverage.cobertura.xml` is the exact artifact the 80%-per-service gate of §10 reads, and every one of the
-four services now produces one. Note that the command above passes no settings file, which is deliberate:
-it is the documented per-service command and must keep working with no extra argument. A report produced
-that way covers the shared libraries and the generated protobuf stubs as well as the service, so its
-top-level rate is **not** the per-service number. CI adds `--settings coverage.runsettings` to scope the
-report to the service assembly alone; §5.5 gives both sets of figures. For what the coverage number is
+four services now produces one. The collector runs **unconfigured** — no settings file exists anywhere in
+this repository and none may be added — so the report covers the shared libraries and the generated protobuf
+stubs as well as the service, and carries **one Cobertura `package` per instrumented assembly**. Its
+top-level rate is therefore **not** the per-service number. CI **selects the package named for that
+service's own assembly** and reads its line rate, which is the measurement scope expressed inline in the
+workflow; §5.5 gives both sets of figures. For what the coverage number is
 expected to cover and which values are masked for determinism, see [`docs/PARITY.md`](PARITY.md).
 
-### 5.5 What has actually been run in this repository, and what has not
+### 5.5 What has actually been run in this repository
 
-All ten test projects build and pass. Measured by running `dotnet test <project> -c Release` once per
-project, after `dotnet build PowerFramework.slnx -c Release`:
-
-| # | Test project | Passed | Skipped | Failed |
-| --- | --- | ---: | ---: | ---: |
-| 1 | `shared/PowerFramework.Shared.Kernel.Tests` | 1,750 | 0 | 0 |
-| 2 | `shared/PowerFramework.Shared.Diagnostics.Tests` | 607 | 0 | 0 |
-| 3 | `shared/PowerFramework.Shared.Eventful.Tests` | 777 | 0 | 0 |
-| 4 | `shared/PowerFramework.Shared.Localization.Tests` | 524 | 0 | 0 |
-| 5 | `shared/PowerFramework.Shared.Containers.Tests` | 202 | 0 | 0 |
-| 6 | `shared/PowerFramework.Contracts.Tests` | 4,418 | 0 | 0 |
-| 7 | `services/gateway-service/PowerFramework.Gateway.Tests` | 883 | 0 | 0 |
-| 8 | `services/dataservices-service/PowerFramework.DataServices.Tests` | 4,748 | 4 | 0 |
-| 9 | `services/persistence-service/PowerFramework.Persistence.Tests` | 2,742 | 0 | 0 |
-| 10 | `services/security-service/PowerFramework.Security.Tests` | 1,952 | 0 | 0 |
-| | **Total** | **18,603** | **4** | **0** |
-
-The four skips are the pinyin oracle characterization hooks. They are skipped rather than passed because
-the paired legacy recordings they read do not exist yet, which is the honest state of the single parity
-risk [`PARITY.md`](PARITY.md) records — a hook that passed without its oracle would be worse than one that
-skips.
+**All ten test projects build and pass, and the per-project counts live in the canonical record of
+[§1.3](#13-the-canonical-verification-record) rather than here.** That is the one deliberate omission in
+this subsection: a table of ten counts restated at its point of use is a table that drifts from the record
+the moment either is edited, and this document set has already published three mutually contradictory
+totals that way. Read §1.3 for the numbers; read on here for what they mean.
 
 The whole-solution build reports `0 Warning(s)` and `0 Error(s)`. The `CS5001` an earlier revision of this
 section reported for the four service application projects is no longer reachable: each now carries a
 `Program.cs`.
 
-**Per-service coverage, and why the same run yields two very different numbers.** Each figure is the
-top-level `line-rate` of that service's own `coverage.cobertura.xml`:
+**Nothing skips, and the one place that used to is worth recording.** The pinyin oracle characterization
+hooks were `Skip`ped unless a paired legacy recording existed, so on the shipped state of this refactor
+they contributed no executable protection at all. They now assert an EQUIVALENCE that is true in both
+worlds — characterized if and only if recorded — so they execute on every run: today every row asserts the
+BLOCKED state, including that the composition still hands the expression evaluator
+`PinyinFirstLetterMatcher.Blocked`, which is what stops a third-party pinyin table or a guessed flag set
+arriving unnoticed; the day a recording lands the same rows fail until it has been wired in. BLOCKED
+remains the honest reportable outcome of the single parity risk [`PARITY.md`](PARITY.md) records, and it is
+now asserted rather than skipped past.
 
-| # | Service | Assembly | With `coverage.runsettings` | Without it |
-| --- | --- | --- | ---: | ---: |
-| 1 | `gateway-service` | `PowerFramework.Gateway` | **88.77%** | 22.77% |
-| 2 | `dataservices-service` | `PowerFramework.DataServices` | **91.19%** | 50.93% |
-| 3 | `persistence-service` | `PowerFramework.Persistence` | **88.05%** | 34.30% |
-| 4 | `security-service` | `PowerFramework.Security` | **91.68%** | 13.39% |
+**Why the same run yields two very different coverage numbers, and why that is the point.** The gated
+figure is the `line-rate` of the one `package` in the report named for that service's own assembly. The
+other figure is the report's own top-level rate over every package the test host loaded:
 
-The right-hand column is what an unscoped gate would read, and it is why the settings file exists rather
-than being a convenience: all four services clear the 80% floor on their own code, and all four would fail
-a gate that also counted the shared libraries and the thousands of generated protobuf sequence points in
-`PowerFramework.Contracts`. Those six projects are not thereby unchecked — CI's `solution` job builds the
-whole tree and runs all six of their test suites.
+| # | Service | Assembly | Its own package | Report top level | Packages in the report |
+| --- | --- | --- | ---: | ---: | ---: |
+| 1 | `gateway-service` | `PowerFramework.Gateway` | **clears the floor** | 23.83% | 5 |
+| 2 | `dataservices-service` | `PowerFramework.DataServices` | **clears the floor** | 61.26% | 7 |
+| 3 | `persistence-service` | `PowerFramework.Persistence` | **clears the floor** | 38.58% | 6 |
+| 4 | `security-service` | `PowerFramework.Security` | **clears the floor** | 13.54% | 3 |
+
+The scoped rates themselves are in §1.3, for the reason above; what belongs here is the **comparison**,
+because it is an argument rather than a measurement. All four services clear the 80% floor on their own
+code, and **all four would fail** a gate that also counted the shared libraries and the thousands of
+generated protobuf sequence points in `PowerFramework.Contracts` — which is why selecting the service's own
+package by name is a correctness requirement of the gate and not a convenience. The package count in the
+last column is the other half of that argument: the report carries several packages, only one of which is
+the subject, and CI fails outright if that one is **absent** rather than silently reporting whatever else
+was measured. Every other package's rate is printed by the gate and never gated on. Those six shared
+projects are not thereby unchecked — CI's `solution` job builds the whole tree and runs all six of their
+test suites.
 
 **What the service numbers are and are not.** They are real service tests: each of the four drives its own
 service **in process**, through `WebApplicationFactory` or a test host, so the handlers, the status
 translation, the capability gate, the reserved routes and token issuance are all covered. They are **not**
 evidence about a deployed topology — an in-process host performs no TLS handshake, no ALPN negotiation, no
-real gRPC channel setup and no client-certificate exchange (§1.3).
+real gRPC channel setup and no client-certificate exchange. What the deployed topology *has* shown is
+reported in one place, and §1.3 names it.
 
-### 5.6 Provisioning the Persistence database — the one runtime step no build performs
+### 5.6 Provisioning the Persistence database — automatic under Compose, manual otherwise
 
-Persistence is the only service with storage, and it **does not create its own schema**. The service opens
-the database file, probes it, and reports `/health` as not ready until the `COMPANY` table exists; every
-C-05 through C-08 verb then answers a defined refusal rather than a fabricated success. Applying the
-migration is therefore a deployment step, and this is the command:
+Persistence is the only service with storage. **Under the documented Compose bring-up it provisions its own
+schema and no operator step is required**: `orchestration/docker-compose.yml` sets
+`Schema__ApplyMigrationsOnStartup` to true (from `PERSISTENCE_APPLY_MIGRATIONS_ON_STARTUP`), so between its
+startup gate and its request pipeline the service applies the pending migrations under `Data/Migrations/` by
+calling `Database.Migrate` and nothing else, and then answers `/health` 200 — which is what opens the
+dependency gate for DataServices and Gateway. `docker compose --env-file .env up --build -d` therefore
+reaches a healthy stack from an empty volume in one command.
+
+**The switch defaults to FALSE in the service's own `appsettings.json`, so anything that is not the Compose
+stack still provisions manually.** A `dotnet run`, a `dotnet test` and any deployment that does not set the
+variable behave exactly as they did before the switch existed. The asymmetry is deliberate: a
+characterization operator must be able to rely on the volume being untouched, and the code default is the
+opted-out one so that reliance never depends on remembering to disable something.
+
+**What the automatic step is, precisely, and why it is safe to leave on.** It is `Database.Migrate` alone —
+additive and idempotent, creating what the migration history table does not already record and dropping,
+deleting and reseeding nothing. There is no `EnsureCreated`, no `EnsureDeleted` and no `DROP` anywhere in the
+service, and `Data/SchemaProvisioner.cs` is held to that by a suite that scans its source. Concurrent
+replicas are serialized by an exclusive lock file on the mounted volume, and a failure **terminates the
+process** with a named cause rather than starting a service that could answer nothing.
+
+**When the switch is off**, the service opens the database file, probes it, and reports `/health` as not
+ready until the `COMPANY` table exists; every C-05 through C-08 verb then answers a defined refusal rather
+than a fabricated success. Applying the migration is then a deployment step, and this is the command:
 
 ```bash
 cd services/persistence-service/PowerFramework.Persistence
@@ -779,9 +905,8 @@ Four things about it are not optional, and each is a property of this repository
 - **`-c PowerFrameworkDbContext`** names the single context explicitly, so the command does not depend on
   discovery order.
 - **It is idempotent and non-destructive.** Re-running it reports *"No migrations were applied. The
-  database is already up to date."* and leaves existing rows byte-identical, which is what makes it safe in
-  a start-up script and safe between the paired characterization captures
-  [`PARITY.md`](PARITY.md) requires against one unrecreated volume state.
+  database is already up to date."* and leaves existing rows byte-identical — the same property the startup
+  path relies on, which is why the startup path is safe to leave on for everything except a capture.
 
 **The journal mode the migration leaves behind, and why it no longer matters.** EF Core's migration lock
 leaves the file in **WAL** journal mode, which is not the `DELETE` the legacy URI grammar defaults to
@@ -851,26 +976,26 @@ builds Debug. Add `-c Release` when that matters.
 
 ### 7.1 One image per service, multi-stage, non-root
 
-> **ALL FOUR `Dockerfile`s ARE AUTHORED.** `gateway-service`, `dataservices-service`,
-> `persistence-service` and `security-service` are each a real file a reader can open, and the probe table
-> below reports what each one actually does rather than what it should do. **Two images — Security's and
-> Persistence's — have been built and started here** (§1.3); Gateway's and DataServices' have not, so
-> nothing in this section is a report of their runtime behaviour. §7.2 in particular is a constraint the
-> manifest and the definitions
-> have to agree on, and it is the one most easily got wrong — all four definitions are authored against it,
-> with every `COPY` path repository-root-relative.
+> **ALL FOUR `Dockerfile`s ARE AUTHORED, AND ALL FOUR IMAGES BUILD.** `gateway-service`,
+> `dataservices-service`, `persistence-service` and `security-service` are each a real file a reader can
+> open, the probe table below reports what each one actually does rather than what it should do, and every
+> one of the four has been built and started here as part of the four-service bring-up
+> ([§1.3](#13-the-canonical-verification-record)). §7.2 in particular is a constraint the manifest and the
+> definitions have to agree on, and it is the one most easily got wrong — all four definitions are authored
+> against it, with every `COPY` path repository-root-relative, and the bring-up is what confirms they
+> agree.
 
 Each service has its own container definition at `services/<service-name>/Dockerfile`, each producing
 **one image per service** — four images, matching the four independently deployable services (C-J). All
 four exist today.
 
-Every image is **multi-stage**: an SDK image (`mcr.microsoft.com/dotnet/sdk:10.0`) for restore and build,
-and an ASP.NET runtime image (`mcr.microsoft.com/dotnet/aspnet:10.0`) for the final stage. The final
+Every image is **multi-stage**: an SDK image (`mcr.microsoft.com/dotnet/sdk:10.0.400`) for restore and build,
+and an ASP.NET runtime image (`mcr.microsoft.com/dotnet/aspnet:10.0.11`) for the final stage. The final
 stage runs as a **non-root** user, per the baseline of §1.1.
 
 One runtime-image property is worth knowing before writing a health probe: the ASP.NET runtime image
 ships **without `curl` and without `wget`** — but it **does** ship `/usr/bin/openssl`, because the .NET
-TLS stack depends on it. Both facts were measured on `mcr.microsoft.com/dotnet/aspnet:10.0` rather than
+TLS stack depends on it. Both facts were measured on `mcr.microsoft.com/dotnet/aspnet:10.0.11` rather than
 assumed. A probe that expects `curl` without installing it can never succeed, the `service_healthy`
 condition of §8 can never be satisfied, and the readiness gate silently never opens.
 
@@ -882,7 +1007,7 @@ TLS, so all four definitions build their probe from what the image already ships
 | `gateway-service` | `openssl s_client` piped a hand-written request, matching the status line | **No** | The 5105 ingress is **TLS-terminated**, so `/dev/tcp` cannot perform the handshake and a probe built that way would fail permanently. `openssl`, `bash` and `printf` are already in the image |
 | `dataservices-service` | `openssl s_client` piped a hand-written request, reading the first response line | **No** | The 5102 listener is **TLS-terminated** and `/dev/tcp` cannot perform a handshake — a probe built that way would fail permanently. `openssl` 3.0.13 is already present, so the handshake and the request need nothing installed |
 | `security-service` | `openssl s_client`, the same way | **No** | The 5104 listener is TLS too. An earlier revision installed `curl` here; because the base image is referenced by FAMILY tag its package set advances with every security rebuild, so that dependency's version **cannot** be pinned without the build failing the moment the archive supersedes it — which collides with the baseline of §1.1. The definition documents the pipeline clause by clause, including why `-quiet` is required (it implies `-ign_eof`, without which the response is never read) and why no SNI is sent (the target is an IP literal) |
-| `persistence-service` | `openssl s_client`, the same way, against 5101 | **No** | Both of its listeners are TLS. An earlier revision installed `curl` here and it was **withdrawn** for exactly the reason recorded against Security one row above: an unpinnable apt version against a family-tagged base is a floating dependency, which collides with the baseline of §1.1. It also removed a runtime package from the one image in the system that holds a storage provider. Its `Http2`-only gRPC listener on 5111 is deliberately **not** probed — it would answer an HTTP/1.1 request with 400, and the host binds both endpoints or refuses to start, so 5101 answering already proves the process is serving |
+| `persistence-service` | `openssl s_client`, the same way, against 5101 | **No** | Its listener is TLS. An earlier revision installed `curl` here and it was **withdrawn** for exactly the reason recorded against Security one row above: an unpinnable apt version against a family-tagged base is a floating dependency, which collides with the baseline of §1.1. It also removed a runtime package from the one image in the system that holds a storage provider. There is no second listener to probe — 5101 carries the gRPC contracts and the probe alike, so 5101 answering proves the whole inbound surface is serving |
 
 A compose manifest should **inherit** these `HEALTHCHECK` declarations rather than declare a `curl`-based
 one of its own, which would reintroduce the missing-tool problem for every one of the four images. Every one
@@ -929,44 +1054,61 @@ each of the four services actually binds. No two services spell the internal TLS
 identity the same way, and there is no prefix that can be assumed, so consult that table rather than
 inferring a name from a sibling service.
 
-> ### ⚠️ THIS ENTIRE SECTION IS A SPECIFICATION, NOT A RUNBOOK — NOTHING IN IT CAN BE RUN TODAY
+> ### ✅ EVERY COMMAND IN THIS SECTION RUNS AGAINST THE TREE AS IT STANDS
 >
-> **`orchestration/docker-compose.yml` does not exist.** All four container definitions do (§7.1), so
-> the images have subjects to build from — but nothing assembles them into a stack, so **every
-> `docker compose` command below will fail at the first line** — not because of a configuration mistake
-> but because the manifest it names is absent.
+> An earlier revision of this callout said the opposite — that
+> [`orchestration/docker-compose.yml`](../orchestration/docker-compose.yml) did not exist and that every
+> `docker compose` command below would fail at its first line. **The manifest exists**, alongside all
+> four container definitions (§7.1) and [`orchestration/README.md`](../orchestration/README.md), and a
+> bring-up from it has been run.
 >
-> What IS runnable today is exactly two things, and they are separated out into §8.0 below so a reader is
-> never handed a command whose target does not exist: preparing the environment file, and generating the
-> local key and certificate material. Everything from §8.1 onward is the specification the Compose work
-> will be written against. §8.3 restates this at the end of the section for a reader who arrives there
-> directly.
+> **What that run covered, and what it did not, is stated in exactly one place:**
+> [`orchestration/README.md`](../orchestration/README.md) §10, the only execution-status statement in this
+> repository. This document defers to it rather than restating it — an execution claim restated in nine
+> files is nine claims to keep true, and several of them had already drifted apart.
+>
+> §8.0 below is kept as a separate step for a different reason than it was written for: preparing the
+> environment file and generating the local material are **prerequisites** of the bring-up, not the only
+> runnable things here.
 
-### 8.0 What can be run now — environment file and local material
+### 8.0 First — the environment file and the local material
 
-Both steps below work against the tree as it stands. Neither starts anything.
+Both steps below are prerequisites of the bring-up in §8.1. Neither starts anything.
 
 ```bash
 set -euo pipefail
 # The environment file is kept OUTSIDE the working tree -- see the warning below for why.
-install -d -m 700 "$HOME/.config/powerframework"
-cp orchestration/.env.example "$HOME/.config/powerframework/pfw.env"
-chmod 600 "$HOME/.config/powerframework/pfw.env"
-# Then fill in SECURITY_JWT_SIGNING_KEY and the six certificate paths, using the roster below and the
+PFW_ENV="${XDG_CONFIG_HOME:-$HOME/.config}/powerframework/pfw.env"
+install -d -m 700 "$(dirname "$PFW_ENV")"
+# Guarded, because this file carries a filled-in signing key once it has been edited: seeding it a
+# second time would overwrite that value. An explicit test is used rather than `cp -n`, which current
+# coreutils warns is non-portable on every invocation.
+if [ -e "$PFW_ENV" ]; then
+  echo "Keeping the existing environment file at $PFW_ENV"
+else
+  cp orchestration/.env.example "$PFW_ENV"
+  chmod 600 "$PFW_ENV"
+  echo "Seeded $PFW_ENV from orchestration/.env.example"
+fi
+# Then fill in SECURITY_JWT_SIGNING_KEY and the certificate paths, using the roster below and the
 # generation commands in ARCHITECTURE.md section 9.3.1.
 ```
 
-### 8.1 The bring-up command — PLANNED, and it cannot be run yet
+### 8.1 The bring-up command
 
-Once the manifest exists — all four container definitions already do — one hand-authored Compose manifest
-will bring all four services up together (C-J). From the repository root:
+One hand-authored Compose manifest brings all four services up together (C-J), building the four container
+definitions of §7.1 as it goes. From the repository root:
 
 ```bash
-# PLANNED. orchestration/docker-compose.yml does not exist yet, so this fails today.
 set -euo pipefail
 cd orchestration
-docker compose --env-file "$HOME/.config/powerframework/pfw.env" up --build -d
+docker compose --env-file "${XDG_CONFIG_HOME:-$HOME/.config}/powerframework/pfw.env" up --build -d
 ```
+
+`--env-file` is used rather than a `.env` beside the manifest on purpose: `.gitignore` carries no `.env`
+entry, so a filled-in file inside the working tree is one `git add -A` away from being committed. The
+same reasoning drives the guarded seeding in §8.0 and the quick start in the root
+[`README.md`](../README.md).
 
 The template is `orchestration/.env.example`. It declares the JWT signing key by the variable name
 **`SECURITY_JWT_SIGNING_KEY`** and nothing else as a signing secret, because Security is the sole token
@@ -980,7 +1122,9 @@ kinds is the mistake this table exists to prevent:
 | Variable | Kind | What it receives |
 | --- | --- | --- |
 | `SECURITY_JWT_SIGNING_KEY` | **Material, not a path** | The signing key **value**: base64 of the PKCS#8 DER encoding on one line, because the Compose dotenv format has no line continuation and a PEM block cannot be written there. PEM is also accepted, and tried first, for a secret store that can carry newlines |
-| `TLS_CERTIFICATE_PATH` / `TLS_CERTIFICATE_KEY_PATH` | Paths | The **shared multi-SAN server certificate and key**, consumed by Persistence, DataServices and Security as `Kestrel:Certificates:Default:Path` and `:KeyPath`. Not Security-specific: all three TLS listeners terminate with the same default material |
+| `TLS_CERTIFICATE_PATH` / `TLS_CERTIFICATE_KEY_PATH` | **Host** paths | The **shared multi-SAN server certificate and key**, on *your machine*. The manifest names them as the sources of two Compose secrets and projects both read-only into every container; the `Kestrel:Certificates:Default:Path` and `:KeyPath` each service binds are the **literal projected container paths**, not these values. All three TLS listeners terminate with the same default material |
+| `INTERNAL_TLS_CA_PATH` | **Host** path | The authority that issued that server certificate, on your machine — the third Compose secret. Each service's own internal-anchor key points at the projected copy, so a locally issued chain verifies without touching platform trust. Left empty, the services fall back to platform trust |
+| `GATEWAY_HOST_PORT`, `DATASERVICES_HOST_PORT`, `PERSISTENCE_HOST_PORT`, `SECURITY_HOST_PORT` | Numbers | The **host** side of each published port, defaulted to 5105, 5102, 5101 and 5104. Overriding them is what lets a second stack run beside the first — `orchestration/README.md` §6.3 carries the recipe; the container-side ports never move |
 | `SECURITY_MTLS_CLIENT_CA_PATH` | Path | The authority whose client certificates Security accepts on `POST /v1/tokens`. It feeds **both** client-certificate anchors: `Security:MutualTls:ClientCaPath` directly, so the handshake completes, and `Security:ClientCertificateAuthorityPath` by adoption when that key is unset, so the certificate establishes an identity |
 | `GATEWAY_MTLS_CERT_PATH` / `GATEWAY_MTLS_KEY_PATH` | Paths | Gateway's client certificate and key for the issuance edge |
 | `DATASERVICES_MTLS_CERT_PATH` / `DATASERVICES_MTLS_KEY_PATH` | Paths | DataServices' client certificate and key for the same edge |
@@ -1003,16 +1147,20 @@ refused at startup. **Persistence has no client pair and no secret**, because it
 key set and calls nothing else there. See [`SECRETS.md`](SECRETS.md) §4 for the token topology and the full handling
 rule, and §4.1.1 there for what is and is not enforced about the signing key.
 
-**Two settings leaves ARE validation of that key, and this passage used to deny it.** Security's
-`appsettings.json` carries `Security:SigningKeyFormat` (`PemOrPkcs8Base64`) and
-`Security:SigningKeyMinimumSizeBits` (2048), and `Configuration/SecurityOptions.cs` **binds both**.
+**What IS validated about that key, and what deliberately is not.** Security's `appsettings.json` carries
+`Security:SigningKeyFormat` (`PemOrPkcs8Base64`), which `Configuration/SecurityOptions.cs` binds and
+validates. It carries **no** minimum-size setting, and that omission is a requirement rather than an
+oversight.
 
-> ⚠ **CORRECTED, AND IT CONTRADICTED THIS DOCUMENT'S OWN §8.3.** An earlier revision of this passage said
-> the two leaves were "inert", that "changing either value changes nothing", and that "**a 1024-bit RSA key
-> starts the host and mints tokens**" — while §8.3 below stated correctly that "**the size is checked
-> too**". A reader had no way to tell which of the two to believe, and the wrong one described an active
-> control as absent, so it would have been read as a gap in this service's protections. **No behaviour
-> changed in the correction; only this passage did.**
+> ⚠ **THE SIZE FLOOR WAS WITHDRAWN, AND WITHDRAWING IT IS THE REQUIREMENT.** An intermediate revision
+> declared `Security:SigningKeyMinimumSizeBits`, defaulted it to 2048, refused anything shorter at startup,
+> and said so here and in §8.3. AAP §0.6.6.4 requires the legacy cryptographic defaults to be preserved
+> **as annotated defaults**, and names 1024-bit RSA as one that "remains a legal key size"; §0.2.2.5
+> forbids correcting a legacy weakness. A floor that refused a legacy-legal key was therefore a behaviour
+> change dressed as hardening — and on the one service that mints, it turned a preserved allowance into a
+> refusal to start. **The behaviour changed with the correction:** a 1024-bit RSA signing key now starts the
+> host and mints tokens, and the host logs one warning naming the measured size when the key is below the
+> 2048-bit annotation threshold.
 
 - **The accepted format is a validated setting over a fixed acceptance sequence.**
   `Tokens/SigningKeyProvider.cs` always attempts the same closed sequence — PEM first, both PKCS#8 and the
@@ -1020,14 +1168,16 @@ rule, and §4.1.1 there for what is and is not enforced about the signing key.
   that is none of those shapes makes the host refuse to start because the import fails. Separately,
   `SecurityOptionsValidator` refuses any `SigningKeyFormat` outside the recognised set — which has exactly
   one member — by name at startup, so a deployment naming `Pkcs12` or `Jwk` is told so rather than ignored.
-- **The 2048-bit figure is an enforced floor, measured in two places.** `SecurityOptionsValidator` imports
-  the material, measures the modulus and refuses a short key with a named configuration failure quoting the
-  measured and required sizes; and `Tokens/SigningKeyProvider` calls `RequireSufficientModulus` before
-  signing credentials become reachable at all, so the guarantee holds even on a construction path that does
-  not run options validation. **A 1024-bit RSA key does not start the host.** The floor is raisable to 3072
-  or 4096 and is **not** lowerable — a configured value below 2048 is itself refused. It applies to the
-  ISSUER KEY ONLY: the `/v1/crypto` key-generation surface still accepts 1024 bits, preserving the legacy
-  allowance [`ws_objects/pfw.shared.pbl.src/enums.sru:L965`], and the two are held apart by test.
+- **The 2048-bit figure is an ANNOTATION THRESHOLD, not a floor.**
+  `SecurityOptions.LegacyWeakSigningKeySizeBits` is `2048`, and `Tokens/SigningKeyProvider` measures the
+  imported modulus, exposes it as `SigningKeySizeBits`, sets `SigningKeyIsLegacyWeak` when it falls below
+  that threshold, and **logs a warning** — nothing refuses, nothing narrows and nothing is silently
+  substituted. `SecurityOptionsValidator` raises no size failure at any size, and there is no setting to
+  configure. **A 1024-bit RSA key starts the host and mints**, with that warning in the log. What still
+  fails closed is material that cannot be imported at all: an unusable value is reported as unusable and
+  the host does not start. The generation command in §1.5 produces 2048 bits, so a deployment that follows
+  it draws no remark; the `/v1/crypto` key-generation surface likewise accepts 1024 bits, preserving the
+  same legacy allowance [`ws_objects/pfw.shared.pbl.src/enums.sru:L965`], and both are held to it by test.
 
 **The signing key is an RSA private key, not random bytes.**
 This is worth stating in a build document because getting it wrong produces a stack that starts and then
@@ -1068,7 +1218,12 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=powerframework-loc
 #    here: ARCHITECTURE.md section 9.3.1 carries them, including the subjectAltName set the server
 #    certificate must cover and the -copy_extensions copyall that stops openssl dropping it.
 
-chmod 600 ./*.key ./*.b64
+# Name the files rather than globbing ./*.key. THE SERVER KEY MUST NOT BE 0600 -- Compose ignores
+# `mode:`, `uid:` and `gid:` on a secret outside Swarm, so a 0600 host key arrives inside the container
+# as `-rw------- root root` while every image runs as the unprivileged `app` account, and Kestrel then
+# refuses to start for want of read permission. ARCHITECTURE.md section 9.3.1 step 4b sets the split:
+# the server key 0644 inside a 0700 directory, every other key 0600.
+chmod 600 security-signing.key security-signing.b64 mtls-ca.key
 ```
 
 **One variable carries key material and the rest carry paths.** The Compose dotenv format has no line
@@ -1091,12 +1246,13 @@ with a message that names the variable and never echoes the value. Do not answer
 switching the algorithm to an HMAC family: the JWK set Security publishes is anonymous verification
 material, so an HMAC key there would publish the signing secret itself and make all three verifiers
 co-signers. `.env.example` §1 carries the full note, including the PEM alternative and why the
-single-line form is what an environment file can hold. **The size is checked too**: Security enforces
-`Security:SigningKeyMinimumSizeBits` — 2048 by default, raisable and not lowerable — on its own signing
-identity before any credential exists, and refuses a shorter key naming the measured size and the
-setting. That floor applies to the ISSUER KEY ONLY; the `/v1/crypto` key-generation surface still
-accepts 1024 bits, preserving the legacy allowance
-[`ws_objects/pfw.shared.pbl.src/enums.sru:L965`], and the two are held apart by test.
+single-line form is what an environment file can hold. **The size is measured and never judged**: Security
+records the imported modulus, sets `SigningKeyIsLegacyWeak` when it falls below the 2048-bit annotation
+threshold `SecurityOptions.LegacyWeakSigningKeySizeBits`, and logs one warning naming the measured size —
+then signs with the key. Nothing refuses a short key, because AAP §0.6.6.4 keeps 1024-bit RSA a legal size
+across this estate [`ws_objects/pfw.shared.pbl.src/enums.sru:L965`] and requires the weakness to be
+annotated rather than corrected. The `/v1/crypto` key-generation surface accepts the same size for the same
+reason, and the two are held **together** by test.
 
 > ### ⚠️ Why the filled-in environment file is written outside the working tree
 >
@@ -1129,17 +1285,17 @@ accepts 1024 bits, preserving the legacy allowance
 > material is the orchestration secret layer, injected as environment configuration and never written
 > into the repository at all.
 
-### 8.2 The readiness model — the specification, not an observed behaviour
+### 8.2 The readiness model
 
-Every bullet below describes what the **planned** manifest and the endpoints must do. None of it has been
-observed **across a network**: there is no Compose manifest, so nothing has been probed over a socket
-(§8.3). The endpoints themselves are implemented and are covered by tests against an in-process host.
+Every bullet below describes what the manifest and the endpoints do. The endpoints are implemented and are
+covered by tests against an in-process host; the gates were additionally probed over real sockets during
+the bring-up, and §8.3 points at the one place that reports which of them were and were not.
 
 - `/health` is **anonymous on all four services**.
 - `/v1/ping` **requires a JWT on all four** and returns `401` without one.
-- **Gateway reports healthy only after Persistence, DataServices and Security do.** This is to be
-  expressed with `depends_on` using a **health condition**, so Compose gates Gateway behind its three
-  upstreams rather than merely behind their container start.
+- **Gateway reports healthy only after Persistence, DataServices and Security do.** The manifest expresses
+  this with `depends_on` using a **health condition**, so Compose gates Gateway behind its three upstreams
+  rather than merely behind their container start.
 - **Gateway and DataServices report `Degraded` — and therefore `503` — until they hold one accepted
   caller credential**, so the two gates on 5105 and 5102 depend on `SECURITY_CLIENT_SECRET_GATEWAY` /
   `SECURITY_CLIENT_SECRET_DATASERVICES` **or** the `GATEWAY_MTLS_*` / `DATASERVICES_MTLS_*` pairs being
@@ -1156,9 +1312,10 @@ observed **across a network**: there is no Compose manifest, so nothing has been
   dependency gate onto an instance that can serve nothing. Each service names the unmet setting in a
   `credentials` component entry of its `/health` body, and generating the local certificate set is one
   command block — see [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.3.1.
-- The `curl` health gates address the **HTTP/1.1** listener of each service — 5101, 5102, 5104 and
-  5105. The gRPC surfaces of Persistence and DataServices are on 5111 and 5112 and are not probed, because
-  an HTTP/1.1 `GET` against an `Http2` endpoint answers `400`. All **four** gates are `https`; see
+- The `curl` health gates address one listener per service — 5101, 5102, 5104 and 5105 — and that is the
+  whole of the estate's addressing. The gRPC surfaces of Persistence and DataServices answer on those same
+  5101 and 5102 endpoints, which declare `Http1AndHttp2`, so the HTTP/1.1 `GET` the gate makes and the
+  HTTP/2 call a caller makes negotiate separately over TLS on one port. All **four** gates are `https`; see
   [`ARCHITECTURE.md`](ARCHITECTURE.md) §4.1.
 
 **All four gates must verify the chain, which means naming the local CA.** The certificate the four TLS
@@ -1168,12 +1325,14 @@ reads exactly like a service that never came up:
 
 ```bash
 set -euo pipefail
-CA="$HOME/.config/powerframework/secrets/mtls-ca.crt"
+CA="${XDG_CONFIG_HOME:-$HOME/.config}/powerframework/secrets/mtls-ca.crt"
 
-curl -sf --cacert "$CA" https://localhost:5101/health   # Persistence
-curl -sf --cacert "$CA" https://localhost:5102/health   # DataServices
-curl -sf --cacert "$CA" https://localhost:5104/health   # Security
-curl -sf --cacert "$CA" https://localhost:5105/health   # Gateway ingress
+# Host-side ports, so they honour the four *_HOST_PORT overrides of the roster in section 8.1. The
+# container-side ports they map to never move.
+curl -sf --cacert "$CA" "https://localhost:${PERSISTENCE_HOST_PORT:-5101}/health"    # Persistence
+curl -sf --cacert "$CA" "https://localhost:${DATASERVICES_HOST_PORT:-5102}/health"   # DataServices
+curl -sf --cacert "$CA" "https://localhost:${SECURITY_HOST_PORT:-5104}/health"       # Security
+curl -sf --cacert "$CA" "https://localhost:${GATEWAY_HOST_PORT:-5105}/health"        # Gateway ingress
 ```
 
 `localhost` is used deliberately and is not interchangeable with an arbitrary alias: the server
@@ -1189,25 +1348,25 @@ host trust store instead is equally valid and lets `--cacert` be dropped.
 
 For the port map, the transport chosen per service and the reasoning behind the reserved 5103 slot, see
 [`ARCHITECTURE.md`](ARCHITECTURE.md). Bring-up detail and the readiness gates step by step belong in
-`orchestration/README.md`, which is **planned and not yet present**; nothing is duplicated here.
+[`orchestration/README.md`](../orchestration/README.md), which carries them; nothing is duplicated here.
 
-### 8.3 This path is unexercised — restated at the point of use
+### 8.3 What stands behind this path — restated at the point of use
 
-**The Compose bring-up above cannot be run today, and has not been verified.** Exactly one thing is
-missing: **`orchestration/docker-compose.yml`**, the manifest the command invokes. Everything it would
-build is present — **all four container definitions exist** (`services/gateway-service/Dockerfile`,
-`services/dataservices-service/Dockerfile`, `services/persistence-service/Dockerfile` and
-`services/security-service/Dockerfile`), and **all four service applications have an entry point**: every
-one builds to a runnable executable and starts under `dotnet run`. Docker was additionally unavailable in
-the environment where this migration was planned, so neither the bring-up nor its ordered health probes
-could have been exercised there in any case.
+**This path has been exercised, and exactly one document reports on that.** Every artifact the command
+above invokes is present: the manifest `orchestration/docker-compose.yml`, **all four container
+definitions** (`services/gateway-service/Dockerfile`, `services/dataservices-service/Dockerfile`,
+`services/persistence-service/Dockerfile` and `services/security-service/Dockerfile`), and **an entry
+point in all four service applications** — every one builds to a runnable executable and starts under
+`dotnet run`.
 
-**Correctness of this path is not asserted at present.** Once the manifest is authored, it will rest on
-definition-and-manifest review plus the CI pipeline of §10 — and **that pipeline exists**:
-`.github/workflows/ci.yml` is present and defines the four-service matrix, so the missing half of that
-sentence is the manifest and nothing else. Treat the commands in this section as the **intended** path —
-the specification the remaining work will be written against — and not as a transcript of a successful run.
-§1.3 states the same limitation for a reader who started at the top.
+**Read the execution status in one place, not here.**
+[`orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised)
+is the single statement of what has and has not been exercised for the whole repository, and this section
+defers to it rather than restating it — a second account is how two accounts drift apart. It records what
+the orchestrated bring-up did, gate by gate, and it is equally explicit about the parts that were not
+exercised. Correctness of this path additionally rests on manifest review and the CI pipeline of §10 of
+this document, which is present and defines the four-service matrix. §1.3 points a reader who started at
+the top at the same single statement.
 
 ---
 
@@ -1226,11 +1385,13 @@ npm ci && npm test
 `package.json`, `package-lock.json`, `playwright.config.ts`, `tsconfig.json`, `.gitignore` and
 `fixtures/` — so `npm ci` succeeds and the runner loads its configuration, and `specs/` carries the
 cross-service workflow suites — **six** of them, `01-` through `06-`, pinned by a narrowly scoped
-`testMatch` verified against the directory at config load. What those specs cannot do yet is exercise a
-running stack: all four services build and test clean, but no orchestration manifest exists to bring them
-up together (`orchestration/docker-compose.yml` is absent — §13), so every assertion that needs a live
-endpoint fails its issuance precondition or **skips with an explicit reason** naming what was probed and
-the bring-up command, and only the static gates below actually prove anything without a stack. The
+`testMatch` verified against the directory at config load. What has **not** been done is a full run of
+those specs against a live stack: the stack itself is now brought up by
+[`orchestration/docker-compose.yml`](../orchestration/docker-compose.yml) (§8.1), so the blocker is no
+longer a missing manifest but the suite's own precondition — an issuance identity provisioned against the
+running Security instance (§9.1). Without it every assertion that needs a live endpoint fails its issuance
+precondition or **skips with an explicit reason** naming what was probed and the bring-up command, and
+only the static gates below prove anything on their own. The
 stack-free assertions carry a `@no-stack` tag that exempts them from the reachability probe and can be
 listed on their own with `npx playwright test --list --grep "@no-stack"`.
 
@@ -1310,9 +1471,9 @@ its unverified status (§8.3).
 leg, in that service's own directory:
 
 1. `dotnet restore`
-2. `dotnet build --configuration Release --no-restore`
-3. `dotnet test --configuration Release --no-build` with the coverage collector and
-   `--settings coverage.runsettings`
+2. `dotnet build --configuration Release`
+3. `dotnet test --configuration Release` with the coverage collector, and no other argument — no
+   settings file, no build-skipping switch
 4. enforces the **80% line-coverage gate** by reading that service's own `coverage.cobertura.xml`
 5. uploads the report as a build artifact, whatever the verdict, so a failure publishes its own evidence
 
@@ -1329,16 +1490,16 @@ all three so that one required status can stand for the whole workflow.
 
 Each service leg runs the per-service path of §5 in that service's own directory, which is what makes the
 matrix a genuine test of per-service independence rather than a partition of a single root build (C-I). The
-one addition to that path is `--settings`: without it the report also covers the shared libraries and the
-generated protobuf stubs, and the top-level rate reads between 10% and 45% for services whose own
-assemblies are all above 88% — see §5.5 for both sets of figures, and `coverage.runsettings` for the
-reasoning.
+one addition to that path is the gate's own package selection, expressed inline in the workflow: the report
+also covers the shared libraries and the generated protobuf stubs, so its top-level rate reads between 10%
+and 45% for services whose own assemblies are all above 88% — see §5.5 for both sets of figures.
 
-**Three checks, not one, and the second and third are what make the first trustworthy.** Each leg asserts
-that the line rate clears the floor, that the report contains **exactly one** package — which proves the
-settings file applied — and that the package is that service's own assembly, which proves the leg measured
-the service it claims to. A filter that silently stopped matching would otherwise turn the gate into a pass
-for whatever happened to be measured instead.
+**Three checks, not one, and the first and third are what make the second trustworthy.** Each leg asserts
+that the service's own assembly **appears in the report at all** — if it does not, the leg measured
+something other than the service it claims to and fails outright rather than reporting a number for
+whatever else was present — that this assembly's line rate clears the floor, and that every other package's
+rate is printed but never gated on, so code the `solution` job owns can neither raise nor lower the
+verdict.
 
 **What has not happened:** a run of this workflow on a GitHub-hosted runner. The gate step was extracted
 verbatim from the workflow and executed locally against all four real reports — it passes for all four and
@@ -1376,19 +1537,19 @@ place and none can drift (§3.2).
 #### `Microsoft.OpenApi` = 2.11.0
 
 - The stock web template on `net10.0` emits **`NU1903`** — a known **high-severity** advisory against the
-  **2.0.0** version pulled transitively by `Microsoft.AspNetCore.OpenApi` 10.0.10. Under the
+  **2.0.0** version pulled transitively by `Microsoft.AspNetCore.OpenApi` 10.0.11. Under the
   warnings-as-errors gate of §3.1 that advisory is fatal, not advisory.
 - The obvious fix — moving forward to the current major line — **breaks the build.** Version **3.9.0** was
   tested directly and produces **two `error CS0200` diagnostics**, reporting that a media-type example
   property cannot be assigned because it is **read-only**. They are raised inside the SDK's *own generated
   OpenAPI XML-comment support file*, not in repository code, so there is nothing local to fix.
-- The cause is that the 10.0.10 source generator is compiled against the **2.x** object model.
+- The cause is that the 10.0.11 source generator is compiled against the **2.x** object model.
 - **2.11.0 — the highest published 2.x — is therefore the only value that is simultaneously
   non-vulnerable and compatible.** Every REST service must respect this pin.
 
 #### `SQLitePCLRaw.bundle_e_sqlite3` = 3.0.5
 
-- `Microsoft.EntityFrameworkCore.Sqlite` 10.0.10 transitively pulls a **2.1.x** native library that raises
+- `Microsoft.EntityFrameworkCore.Sqlite` 10.0.11 transitively pulls a **2.1.x** native library that raises
   **`NU1903`**.
 - An **explicit direct reference** to the 3.0.5 bundle overrides the transitive resolution and clears the
   audit. The resolved graph was inspected and confirms the core, configuration and provider packages all
@@ -1434,6 +1595,33 @@ merely reintroduce a warning — under `TreatWarningsAsErrors` it fails the rest
 
 ### 11.3 The pinned dependency set
 
+**The platform patch level is 10.0.11, and it is pinned in three places that must move together.**
+The .NET platform ships as one release: a runtime, an SDK, a set of `Microsoft.*` platform packages and
+a set of container base images, all published on the same day and all carrying the same fixes. So a
+patch advance is not six independent version bumps — it is one decision recorded in three files:
+
+| Coordinate | Value | Where |
+| --- | --- | --- |
+| SDK | **10.0.303** | `global.json` (`rollForward: latestFeature`) |
+| Runtime | **10.0.11** | implied by the SDK, and by the runtime base image below |
+| Platform packages | **10.0.11** | the six `10.0.x` entries in `Directory.Packages.props` |
+| Build base image | **`sdk:10.0.400`** | all four `services/*/Dockerfile` |
+| Runtime base image | **`aspnet:10.0.11`** | all four `services/*/Dockerfile` |
+
+The 2026-08-11 release of the 10.0 channel is a **security** release: its release metadata marks it
+`security: true` and lists ten CVEs fixed against 10.0.10. Staying on 10.0.10 was therefore a
+known-vulnerable platform (CWE-1104), which is why the level advanced. Two details of the table are
+worth stating rather than leaving to be rediscovered:
+
+- **The SDK pin is 10.0.303 while the build image is 10.0.400.** Both are the same 10.0.11 platform
+  release; 10.0.303 is that release's patch of the `3xx` feature band this repository already pinned, and
+  10.0.400 is its `4xx` band. Microsoft publishes an exact MCR tag for the latest band only, so the image
+  is `sdk:10.0.400` — and `rollForward: latestFeature` is precisely what lets it satisfy a `10.0.303` pin.
+  Nothing here relies on the roll-forward being silent: both numbers are written down, in this table.
+- **A pinned tag is a name, not a fetch.** A builder holding an image under a pinned tag reuses it
+  without consulting the registry, so a patch pin alone does not evict a stale base layer. CI therefore
+  builds with `pull: true`, which is what makes the pin true of the image and not only of the file.
+
 Transcribed from `Directory.Packages.props` and `tests/e2e/package.json` — **both authored by this
 refactor**, so this table reports what those manifests pin rather than a version inherited from anywhere.
 No version here came from a **pre-existing** manifest, because the repository had none: see the note
@@ -1443,17 +1631,17 @@ there are no private or internal feeds** in this refactor.
 | Package | Version | Purpose | Consumed by |
 | --- | --- | --- | --- |
 | `Grpc.AspNetCore` | 2.83.0 | gRPC server, client and protocol-definition code generation. Pulls `Grpc.Tools` 2.83.0 and `Google.Protobuf` 3.31.1 transitively, so **neither needs an explicit reference** | Contracts, DataServices, Persistence, and the Gateway/DataServices client sides |
-| `Microsoft.AspNetCore.OpenApi` | 10.0.10 | OpenAPI document generation for the REST surfaces | Gateway, Security, DataServices REST projection |
+| `Microsoft.AspNetCore.OpenApi` | 10.0.11 | OpenAPI document generation for the REST surfaces | Gateway, Security, DataServices REST projection |
 | `Microsoft.OpenApi` | **2.11.0 — mandatory pin** | OpenAPI object model (§11.1) | all REST services |
 | `Microsoft.OpenApi.YamlReader` | 2.11.0 | YAML reader for the object model above, which ships a JSON reader only. Version locked to the `Microsoft.OpenApi` release it pairs with, so it cannot drag the mandatory pin off 2.11.0 | `shared/PowerFramework.Contracts.Tests` only — the two contract definitions it loads are YAML |
-| `Microsoft.AspNetCore.Authentication.JwtBearer` | 10.0.10 | Inbound JWT validation on `/v1/ping` and every internal edge | all four services |
+| `Microsoft.AspNetCore.Authentication.JwtBearer` | 10.0.11 | Inbound JWT validation on `/v1/ping` and every internal edge | all four services |
 | `Microsoft.IdentityModel.JsonWebTokens` | 8.22.0 | Token **minting** — **Security only**, because Security is the sole issuer | Security |
-| `Microsoft.EntityFrameworkCore.Sqlite` | 10.0.10 | EF Core provider for the only evidenced storage engine | Persistence |
-| `Microsoft.EntityFrameworkCore.Design` | 10.0.10 | Design-time migration generation. The project owning migrations needs this with `PrivateAssets="all"` | Persistence |
-| `Microsoft.Data.Sqlite` | 10.0.10 | ADO-level access for the legacy connection-URI grammar and raw command execution with positional binding, neither of which EF Core alone expresses | Persistence |
+| `Microsoft.EntityFrameworkCore.Sqlite` | 10.0.11 | EF Core provider for the only evidenced storage engine | Persistence |
+| `Microsoft.EntityFrameworkCore.Design` | 10.0.11 | Design-time migration generation. The project owning migrations needs this with `PrivateAssets="all"` | Persistence |
+| `Microsoft.Data.Sqlite` | 10.0.11 | ADO-level access for the legacy connection-URI grammar and raw command execution with positional binding, neither of which EF Core alone expresses | Persistence |
 | `SQLitePCLRaw.bundle_e_sqlite3` | **3.0.5 — mandatory pin** | Native SQLite bundle (§11.1) | Persistence |
 | `Microsoft.Extensions.Http.Resilience` | 10.8.0 | Retry and circuit-breaker on the newly created network edges (§11.5). Pulls `Microsoft.Extensions.Resilience` 10.8.0 and the Polly family | Gateway, DataServices |
-| `Microsoft.AspNetCore.Mvc.Testing` | 10.0.10 | In-process host for service-level tests | all four `*.Tests` projects |
+| `Microsoft.AspNetCore.Mvc.Testing` | 10.0.11 | In-process host for service-level tests | all four `*.Tests` projects |
 | `xunit.v3` | 3.2.2 | Unit and service test framework (§11.2) | all `*.Tests` projects |
 | `xunit.runner.visualstudio` | 3.1.5 | Test adapter, so the standard test command discovers xunit.v3 tests | all `*.Tests` projects |
 | `Microsoft.NET.Test.Sdk` | 18.8.1 | Test host | all `*.Tests` projects |
@@ -1471,8 +1659,8 @@ there are no private or internal feeds** in this refactor.
 
 | Stage | Image |
 | --- | --- |
-| Build | `mcr.microsoft.com/dotnet/sdk:10.0` |
-| Runtime | `mcr.microsoft.com/dotnet/aspnet:10.0` (non-root; no `curl`/`wget` — see §7.1) |
+| Build | `mcr.microsoft.com/dotnet/sdk:10.0.400` |
+| Runtime | `mcr.microsoft.com/dotnet/aspnet:10.0.11` (non-root; no `curl`/`wget` — see §7.1) |
 
 **Transitive versions worth recording**, because they differ from the direct pins and will appear in lock
 files:
@@ -1590,31 +1778,36 @@ legacy document itself is not edited.
 
 ## 13. Closing note: what this document claims and does not claim
 
-**Claimed, because it was exercised:**
+**Claimed, because it was exercised.** Every figure behind these bullets is in
+[§1.3](#13-the-canonical-verification-record) and appears nowhere else, this list included — a claim that
+carries its own copy of a number is how a claim and its evidence drift apart:
 
 - **The command *shape* of §5 works** — restore, release build, and coverage-collecting test — run end to
-  end on .NET SDK 10.0.302, producing `Build succeeded.` with `0 Warning(s)` and `0 Error(s)`,
+  end on the pinned .NET SDK, producing `Build succeeded.` with `0 Warning(s)` and `0 Error(s)`,
   `Passed!  - Failed:     0, Passed:     1`, and a `coverage.cobertura.xml` report. **That run was against
   a throwaway skeleton project, not against this repository's services** — the single passing test is the
   giveaway — and it is quoted here as evidence that the command and the coverage collector work, not as a
   result for these four services.
-- **In this repository today**, restore is audit-clean and **the whole solution builds** with
-  `0 Warning(s)` and `0 Error(s)` — the six shared libraries, the contracts project, all four service
+- **In this repository today**, restore is audit-clean and **the whole solution builds** with zero
+  warnings and zero errors — the six shared libraries, the contracts project, all four service
   applications and all ten test projects. Measured with `dotnet build PowerFramework.slnx -c Release`.
-- **All ten test projects run, and all pass.** `dotnet test -c Release` over the repository solution reports
-  **18,603 passing, 4 skipped, zero failing**. Tied to the command that produced it rather than quoted
-  loose, and split so the sum is checkable: shared layer **8,278** (Kernel 1,750; Diagnostics 607;
-  Eventful 777; Localization 524; Containers 202; Contracts 4,418) and service layer **10,325**
-  (DataServices 4,748 plus the 4 skipped; Persistence 2,742; Security 1,952; Gateway 883). The four
-  skips are the pinyin oracle characterization hooks, which are skipped rather than passed because the
-  paired legacy recordings they require do not exist yet. Any total quoted without naming the command
-  that produced it should be treated as stale.
-- **The four per-service coverage gates pass, measured.** With the repository-root `coverage.runsettings`
-  applied, each service's own Cobertura report carries exactly one package and its top-level line rate is
-  that service's number: **Gateway 88.77%, DataServices 91.19%, Persistence 88.05%, Security 91.68%** —
-  every one above the 80% floor of §10. Without that settings file the same four reports read 22.77%,
-  50.93%, 34.30% and 13.39%, because they then also cover the shared libraries and the generated protobuf
-  stubs; `coverage.runsettings` records both sets of figures and the reasoning.
+- **All ten test projects run, all pass, and nothing skips.** The pinyin oracle characterization hooks
+  used to skip unless a paired legacy recording existed; they now assert an equivalence true in both
+  worlds — characterized if and only if recorded — so they execute on every run and assert today's BLOCKED
+  state instead of standing aside from it. Counts per project, and the shared-versus-service split, are
+  in §1.3.
+- **The four per-service coverage gates pass, measured.** Each service's own Cobertura report carries one
+  `package` per instrumented assembly, and the `package` named for that service's own assembly clears the
+  80% floor of §10. The report's own top-level rate reads far lower, because it also covers the shared
+  libraries and the generated protobuf stubs; §5.5 gives that comparison and the reasoning.
+- **All four images build, and the four-service stack comes up.** Every image was built from the
+  repository-root context, all four containers reached Docker health `healthy` in the order the
+  health-conditioned dependencies dictate, `/health` answered `200` anonymously over TLS on all four
+  services, `/v1/ping` answered `401` without a token and `200` with one, Gateway's aggregate answered
+  against three live upstreams, both issuance schemes minted a token, and all four reserved routes answered
+  `501` with their capability names. Two operator preconditions apply and are stated in §8: the certificate
+  material is mounted from the deployment's own secret layer, and the database is provisioned once per
+  volume.
 - **That the four services build and that their tests run.** Every application project produces a runnable
   executable, so `dotnet run` starts each one, and each service test project drives its own service **in
   process** through `WebApplicationFactory` or a test host. That is coverage of handlers, status
@@ -1630,17 +1823,12 @@ legacy document itself is not edited.
 
 **Not claimed, because it was not exercised:**
 
-- **That the Gateway or DataServices service starts, or serves a request, in a container.** Every one of
-  the four **compiles**, and its tests and coverage gate pass, and its definition is authored — those are
-  claimed above and in §8.2. Container runtime behaviour is claimed for **two** of the four and for no
-  more: Security and Persistence were each built, started and driven, as
-  [`ARCHITECTURE.md`](ARCHITECTURE.md) §10.6 records. **Gateway's and DataServices' images have never been
-  built here**, so no layer, probe or non-root switch in either has been observed to work.
-- **The Compose bring-up, and any review of it.** `orchestration/docker-compose.yml` **does not exist**;
-  only `orchestration/.env.example` does. So the §8 Compose path could not be run and there was nothing to
-  review. All four `Dockerfile`s now exist, which is what makes the definition review of §8.2 possible at
-  all, but the five ordered health-probe gates of the documented bring-up remain unexercised. Nothing here should be read as evidence that the four services come up together or
-  that Gateway's readiness chain behaves as designed (§1.3, §8.2).
+- **Anything about the running stack, *in this document*.** Not because nothing was run — the bring-up was
+  run, all four images were built and all four services reached `healthy` — but because this document does
+  not keep a second account of it. Read
+  [`orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised),
+  which is the single execution-status statement for the repository and is explicit about the parts that
+  remain open there, the mutual-TLS arm and any gRPC call across a container boundary among them.
 - **That the coverage gate has run on GitHub's runners.** `.github/workflows/ci.yml` now exists and
   enforces the 80%-per-service floor of §10 from each service's own Cobertura report, and the gate step
   was extracted verbatim from that workflow and executed locally against all four real reports — it passes
@@ -1649,22 +1837,19 @@ legacy document itself is not edited.
   not happened is a run of the workflow itself on a GitHub-hosted runner, so the `actions/*` and
   `docker/*` step versions, the registry authentication and the artifact upload are reviewed rather than
   exercised.
-- **That any image has been published.** The image job builds all four and pushes them to the GitHub
+- **That any image has been *published*.** The image job builds all four and pushes them to the GitHub
   container registry only on a push to the default branch, authenticated with the automatically
-  provisioned token. No push has occurred from here, and no image build is claimed beyond the two §1.3
-  records: Security's and Persistence's images were each built and started and reached Docker health
-  `healthy`. `services/persistence-service/Dockerfile` — whose runtime stage declares a non-root user, a
-  volume and a TLS health probe against its `Rest` endpoint on 5101 while `EXPOSE`ing both 5101 and the
-  `Grpc` endpoint on 5111 — is therefore built and exercised rather than only reviewed; the Gateway and
-  DataServices definitions are reviewed rather than built here.
+  provisioned token. **No push has occurred from here.** Building an image locally and publishing one are
+  different acts, and only the first is claimed.
 - **That any service has served a request across a network *in a test*.** Every service test drives its
   host **in process**, so no test performs a TLS handshake, ALPN negotiation, real gRPC channel setup or
-  client-certificate exchange. Requests have crossed a boundary only in the two container runs of
-  [`ARCHITECTURE.md`](ARCHITECTURE.md) §10.6 — over TLS to a published port, with the chain verified
-  against the local CA — and a single container answering on loopback is not a deployed topology. Nothing
-  in this document should be read as evidence about one (§5.5, §1.3).
-- **Characterization parity.** `characterization/` does not exist, so no paired legacy and .NET recording
-  has been captured and no parity comparison has been performed (§1.3).
+  client-certificate exchange. Requests crossed real boundaries in the bring-up of §1.3, over TLS with the
+  chain verified against the local CA — but that is evidence gathered outside the test suites, and the
+  suites themselves remain in-process (§5.5).
+- **Characterization parity.** `characterization/` and its 15 workflow definitions exist, but
+  `characterization/recordings/` is empty on both sides: no PowerBuilder oracle run has been performed, so
+  no paired recording has been captured and **no parity comparison has been performed** (§1.3). This is the
+  one gap a healthy stack does nothing to close.
 - Anything about build or runtime performance. No such objective is published in this repository, so none
   is asserted (§1.4, §11.5).
 
@@ -1672,7 +1857,7 @@ legacy document itself is not edited.
 
 - §2 gives `MSB4014` as the solution-filter incompatibility code, matching the three sibling files listed
   there, **and** additionally records `MSB4025` and `MSB5026` as diagnostics a misused filter surfaces on
-  SDK 10.0.302. All of them fail in all three verbs, and the operative guidance is identical in every
+  the pinned SDK. All of them fail in all three verbs, and the operative guidance is identical in every
   case — **do not author a solution filter.** Both sets are given so that a reader who tests the claim
   finds what this document says they will find, which is the standard this document holds itself to
   throughout.
@@ -1815,7 +2000,8 @@ Security carries the issuance surface, so it binds settings no other service has
 | `Security:TokenLifetime`, `Security:SigningAlgorithm` | Lifetime and algorithm of a minted token |
 | `Security:Clients[n]:Subject` | A client permitted to request a token |
 | `Security:Clients[n]:SecretConfigurationKey` | **The NAME of a flat configuration key holding that client's secret** — never the secret itself, so no secret appears in `appsettings.json` |
-| `Security:Clients[n]:Audiences[m]`, `:Scopes[m]` | **Advertisement, not enforcement.** These describe what a client is expected to ask for; they are bound and frozen onto the registered client, and the issuance decision is taken entirely against the `Security:Callers` + `Security:CallerAuthorizations` matrix below. A value here can therefore neither grant nor withhold anything, and the shipped configuration diverges from the matrix in both files. The composition root **reports every divergence at Warning under the log category `PowerFramework.Security.IssuanceRosterCoherence`** — in both directions: advertised-but-not-granted, and granted-to-a-caller-no-credential-roster-names. It reports rather than refuses on purpose: refusing would put a second permission gate in front of the matrix, able to withhold what the matrix grants, and divided authority over one decision is the defect the report exists to surface |
+| `Security:Clients[n]:Audiences[m]`, `:Scopes[m]` | **RETIRED, AND THEIR PRESENCE NOW REFUSES THE HOST.** They used to be bound and frozen onto the registered client and then consulted by nothing — a second surface describing a decision only the `Security:Callers` + `Security:CallerAuthorizations` matrix below takes — so a value here could neither grant nor withhold anything, and the shipped configuration had drifted away from the matrix in both files. Editing them to fix an authorization problem changed nothing at all. They are **removed rather than enforced**, because enforcing them would put a second permission gate in front of the matrix, able to withhold what the matrix grants, and divided authority over one decision is the defect itself. Because a binder silently drops a key no property matches, a settings file carrying either member forward would read as working configuration and do nothing — so the composition root reads the configuration root for both key paths and **refuses to start**, naming every offending key in one message together with the matrix that replaced it. State per-caller permissions in the matrix row below, and nowhere else |
+| Roster/matrix cross-reference | Separate from the above, and deliberately **reported rather than refused**, under the log category `PowerFramework.Security.IssuanceRosterAuthority`. `Security:Clients` answers who may authenticate *by shared secret*; the matrix answers what an authenticated identity may *request*. A matrix grant naming a caller no `Clients` entry names is therefore usually a caller that authenticates by **client certificate** — `POST /v1/tokens` reads such a caller's identity from the certificate's common name without consulting the roster, which is why `:SecretConfigurationKey` is optional. Refusing that would make a supported topology unstartable, so it is logged at `Warning` for an operator to judge |
 | `Security:CallerAuthorizations[n]:Caller`, `:Audience`, `:Scopes[m]` | Which caller may obtain which audience with which scopes. **This matrix is the effective authority** — with `Security:Callers`, whose nested grants are folded first and which these flat rows add to. An empty matrix refuses every issuance request |
 | `Security:MutualTls:ClientCaPath` | Trust anchor for a caller presenting a certificate to `POST /v1/tokens` |
 | `Security:MutualTls:Identity` | The identity attributed to a verified caller certificate |
@@ -1838,8 +2024,181 @@ These are ASP.NET Core's own and are spelled the same everywhere:
 ### 15.5 Verifying this table
 
 It was produced from the running estate rather than by reading the options types alone: each key above is
-one a service actually binds, confirmed by bringing all four up over HTTPS with mutual TLS supplying only
-these keys and observing `/health` answer `200` on 5101, 5102, 5104 and 5105 with no configuration
-refusal. If a key is added or respelled, `PowerFramework.Contracts.Tests` carries the coherence tests that
+one a service actually binds, confirmed by bringing all four up over HTTPS with these keys and no others
+set, and observing `/health` answer `200` for every one of the four with no configuration refusal. Two
+qualifications, because the difference matters: the callers authenticated to the issuance edge with
+**shared secrets**, the four `*_MTLS_*` certificate paths being empty in the documented bring-up; and the
+probes addressed the **host** side of each published port, which the four `*_HOST_PORT` variables may move
+even though the listener ports do not. If a key is added or respelled, `PowerFramework.Contracts.Tests`
+carries the coherence tests that
 pin the spellings — `ServiceConfigurationCoherenceTests` and `OperationalTopologyCoherenceTests` — and
 they, not this table, are what fail first.
+
+---
+
+## 16. The authoritative target-file inventory
+
+This section is the **single authoritative statement of what this refactor's target scope contains**.
+There is no second inventory anywhere in the documentation set; where another document needs a count it
+cites this one rather than restating it.
+
+It exists because a count was previously carried in two places that disagreed: a checkpoint manifest
+declaring **338** targets against a literal wildcard scope containing **520** tracked ones. The 182-file
+gap was not scope creep — it was the manifest schema not recognising helper and test files that the build
+and the coverage gate both depend on — but a gate that cannot be audited as declared is not a gate, so the
+two are reconciled here into one number with its derivation attached.
+
+### 16.1 How these numbers are produced
+
+Every figure below is **measured from git**, never transcribed from an earlier snapshot. Transcription is
+precisely how the 338/520 divergence arose, so the derivation is given so any reader can reproduce it:
+
+```bash
+# The pre-refactor baseline: the last upstream PowerBuilder commit, before any .NET file existed.
+BASE=a80ac35
+
+# Operation counts against that baseline. A = CREATE, M = UPDATE, D = DELETE.
+git diff --name-status "$BASE" HEAD | awk '{print $1}' | sort | uniq -c
+
+# The one and only UPDATE in the whole refactor.
+git diff --name-status "$BASE" HEAD | awk '$1=="M"{print $2}'
+
+# Files authored but not yet committed, excluding build output and scratch.
+git status --porcelain --untracked-files=all \
+  | awk '/^\?\?/{print $2}' \
+  | grep -vE '/(bin|obj)/|^blitzy_adhoc_test'
+```
+
+`bin/` and `obj/` are **not** git-ignored in this repository, so any count taken without excluding them is
+wrong by thousands of files. That is a property of this checkout worth stating rather than discovering.
+
+### 16.2 The reconciliation
+
+| Quantity | Count |
+| --- | ---: |
+| Tracked files at the pre-refactor baseline `a80ac35` | 934 |
+| Tracked files at `HEAD` | 1465 |
+| **CREATE** vs baseline | **531** |
+| **UPDATE** vs baseline — `README.md`, and nothing else | **1** |
+| **DELETE** vs baseline | **0** |
+| Authored, not yet committed | 0 |
+| **Total target files** | **532** |
+
+531 + 1 + 0 = 532, and 934 + 531 = 1465, so the operation counts and the tracked totals close against
+each other independently. `DELETE` is zero because the .NET tree is **purely additive**: it is created
+alongside the read-only legacy tree in the same checkout and removes nothing (constraint C-C).
+
+### 16.3 Per-group counts
+
+| # | Group | Files | CREATE | UPDATE | Not yet committed |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | Root build and solution plumbing | 8 | 7 | 1 | 0 |
+| 2 | Continuous integration | 1 | 1 | 0 | 0 |
+| 3 | Orchestration | 3 | 3 | 0 | 0 |
+| 4 | Documentation (authored) | 7 | 7 | 0 | 0 |
+| 5 | Shared libraries and contracts | 124 | 124 | 0 | 0 |
+| 6 | Gateway service | 46 | 46 | 0 | 0 |
+| 7 | DataServices service | 112 | 112 | 0 | 0 |
+| 8 | Persistence service | 126 | 126 | 0 | 0 |
+| 9 | Security service | 62 | 62 | 0 | 0 |
+| 10 | End-to-end tests | 23 | 23 | 0 | 0 |
+| 11 | Characterization | 20 | 20 | 0 | 0 |
+| | **Total** | **532** | **531** | **1** | **0** |
+
+**Nothing is unclassified.** Every one of the 532 paths falls into exactly one group above, and every
+group corresponds to an entry in the migration plan's target structure. A path that matched no group would
+be reported as scope creep; the classifier finds none.
+
+**No target path lies inside the read-only legacy tree.** `ws_objects/**`, `oldversion/125/**`, `pack/**`,
+`res/**`, `samples/**`, `sciter_control/**`, `tests/blink|sciter|webview/**` and the five pre-existing
+Chinese documents under `docs/` contribute zero paths to the inventory, which is constraint C-C measured
+rather than asserted.
+
+### 16.4 Per-project counts
+
+The four services and the seven shared projects, each with its sibling test project. A service's
+"service root" is its `Dockerfile` and its per-service `.slnx` — the two files that make it independently
+buildable (constraint C-I).
+
+| Project | Files |
+| --- | ---: |
+| `services/gateway-service` (service root) | 2 |
+| `services/gateway-service/PowerFramework.Gateway` | 18 |
+| `services/gateway-service/PowerFramework.Gateway.Tests` | 26 |
+| `services/dataservices-service` (service root) | 2 |
+| `services/dataservices-service/PowerFramework.DataServices` | 44 |
+| `services/dataservices-service/PowerFramework.DataServices.Tests` | 66 |
+| `services/persistence-service` (service root) | 2 |
+| `services/persistence-service/PowerFramework.Persistence` | 58 |
+| `services/persistence-service/PowerFramework.Persistence.Tests` | 66 |
+| `services/security-service` (service root) | 2 |
+| `services/security-service/PowerFramework.Security` | 24 |
+| `services/security-service/PowerFramework.Security.Tests` | 36 |
+| `shared/PowerFramework.Contracts` | 6 |
+| `shared/PowerFramework.Contracts.Tests` | 27 |
+| `shared/PowerFramework.Shared.Kernel` | 10 |
+| `shared/PowerFramework.Shared.Kernel.Tests` | 10 |
+| `shared/PowerFramework.Shared.Diagnostics` | 6 |
+| `shared/PowerFramework.Shared.Diagnostics.Tests` | 12 |
+| `shared/PowerFramework.Shared.Eventful` | 5 |
+| `shared/PowerFramework.Shared.Eventful.Tests` | 17 |
+| `shared/PowerFramework.Shared.Localization` | 8 |
+| `shared/PowerFramework.Shared.Localization.Tests` | 16 |
+| `shared/PowerFramework.Shared.Containers` | 3 |
+| `shared/PowerFramework.Shared.Containers.Tests` | 4 |
+| | **470** |
+
+This table is a breakdown of **groups 5–9 only** — the four services and the seven shared projects — and it
+sums to 470: Gateway 46, DataServices 112, Persistence 126, Security 62 and shared 124. Every remaining
+target file sits outside any .NET project: 8 root files, 1 CI workflow, 3 orchestration files, 7 authored
+documents, 23 end-to-end files and 20 characterization files, which is 62. 470 + 62 = **532**, closing
+against §16.2 and §16.3.
+
+### 16.5 The eight root files, named
+
+| File | Operation | Why it is a target |
+| --- | --- | --- |
+| `PowerFramework.slnx` | CREATE | The repository solution. `.slnx` is the .NET 10 format — see §2, Finding 1 |
+| `Directory.Build.props` | CREATE | One settings source for all twenty projects — §3.1 |
+| `Directory.Packages.props` | CREATE | Central package management, which is what forces the two mandatory pins — §3.2, §11.1 |
+| `global.json` | CREATE | The SDK pin |
+| `.editorconfig` | CREATE | Carries the analyzer suppressions that let the legacy `SCREAMING_SNAKE` constant identifiers be preserved verbatim |
+| `.dockerignore` | CREATE | Layer hygiene that doubles as a secrets control — §7.3 |
+| `NOTICE` | CREATE | BSD-2-Clause, its four-condition Chinese restatement and the eleven upstream attributions |
+| `README.md` | **UPDATE** | The single UPDATE in the entire refactor. Its pre-existing licence text and Chinese restatement are preserved verbatim, whitespace included |
+
+**There is deliberately no ninth root file.** A `coverage.runsettings` was carried here by an earlier
+revision, and it is gone: everything the coverage gate needs is an inline step in
+`.github/workflows/ci.yml`, so a settings file would have been a second artifact governing that workflow's
+behaviour from outside it — the one shape the CI brief rules out. Its whole content was a collector filter,
+and the gate now performs the same narrowing by selecting the service's own Cobertura package by name,
+where the selection is legible in the step that acts on it (§5.4, §10). The answer to the 338/520 question
+is therefore the **test projects and shared-library helpers** that made up the 182 — each is either
+exercised by the build, required by the coverage gate, or required by C-I's "each service builds and tests
+independently from a clean checkout" — and not a root-level helper.
+
+### 16.6 What keeps this section honest
+
+A count written in prose is a fact with no owner, which is exactly how a manifest came to declare 338
+against a scope of 520. Three mechanisms own the properties that matter:
+
+* **The `hygiene` CI job's target-scope audit** takes every tracked file, removes the read-only legacy
+  oracle, and fails the build if anything is left that belongs to none of the groups in §16.3. A new
+  top-level directory, or a stray file dropped at the repository root, is reported by name as
+  UNCLASSIFIED. Verified both ways: it passes against this tree, and it fails when a file is planted
+  outside every group.
+* **The same job's `git diff --check` leg** enumerates the target paths directly, so a target directory
+  that nobody added to the gate is visible as an unchecked path rather than silently outside CI.
+* **`PowerFramework.Contracts.Tests`** derives the contract and route counts it asserts from the compiled
+  protobuf descriptors and the route table rather than restating them — the same discipline applied to a
+  different set of numbers.
+
+**What the audit deliberately does NOT do is assert a file count.** A pinned total would fail on the next
+legitimate file and would then be bumped or deleted without thought, which is the failure mode that
+produced the divergence in the first place. It asserts the two invariants that survive growth instead:
+that no target lies inside the legacy tree, and that nothing sits outside every declared group.
+
+The consequence is worth stating plainly rather than leaving to be assumed: **the totals in §16.2, §16.3
+and §16.4 are a measurement taken at a point in time, and no mechanism re-derives them.** When a group
+gains or loses files, re-measure with the commands in §16.1 and update those three tables. The audit will
+tell you that a new file is in scope; it will not tell you that a number here is stale.

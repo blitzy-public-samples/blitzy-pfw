@@ -94,11 +94,10 @@
 #      application through the options pattern; no path to either appears in this file.
 #    * Nothing for a deferred capability (constraint C-D). DesignSystem, Documents, Integration and
 #      ScriptBridge have no stage, layer, label, port, environment variable or build input here.
-#    * No port outside the two this service binds. It is gRPC-primary with a thin REST projection
-#      consumed only by Gateway, and each of those gets its own TLS endpoint so that a listener accepts
-#      only what it is for and misaddressing fails at negotiation rather than at the wrong surface -
-#      recorded in full in the runtime stage. So 5102 carries REST and 5112 carries gRPC, and nothing
-#      else is bound. Port 5103 is the deliberately reserved Phase-2 DesignSystem slot and is untouched.
+#    * No port outside the one this service binds. It is gRPC-primary with a thin REST projection
+#      consumed only by Gateway, and BOTH arrive on ONE TLS endpoint carrying HTTP/1.1 and HTTP/2 -
+#      5102, the port AAP 0.3.2.2 assigns it - recorded in full in the runtime stage. Nothing else is
+#      bound. Port 5103 is the deliberately reserved Phase-2 DesignSystem slot and is untouched.
 #    * No extra tooling. No shell utility, package, debugging agent or telemetry sidecar is installed
 #      into either stage; the readiness probe uses only what the runtime image already ships.
 #    * No performance, latency, throughput or availability claim, and no trimming, single-file,
@@ -135,11 +134,21 @@
 # --------------------------------------------------------------------------------------------------
 # STAGE 1 - BUILD
 #
-# mcr.microsoft.com/dotnet/sdk:10.0 is matched to global.json, which pins SDK 10.0.302 with
-# rollForward: latestFeature. Measured on this tag: DOTNET_SDK_VERSION=10.0.302 - the pinned version
-# exactly, so the pin is satisfied without a rollForward hop.
+# THE BUILD IMAGE IS PINNED TO A PATCH REVISION, NOT TO THE 10.0 FAMILY TAG, AND THE DIFFERENCE IS A
+# SECURITY PROPERTY RATHER THAN A STYLE ONE. `mcr.microsoft.com/dotnet/sdk:10.0.400` is the SDK of the
+# 2026-08-11 security release of the 10.0 channel (runtime 10.0.11, ten CVEs fixed against 10.0.10).
+# An earlier revision used the family tag `sdk:10.0` on the reasoning that a rebuild would then pick a
+# security patch up by itself. IT DOES NOT: a family tag that is already present locally is reused as
+# it stands, so a builder holding a pre-patch `10.0` layer rebuilds on the vulnerable base and reports
+# success. A patch revision cannot go stale silently - advancing it is a diff a reviewer sees - and CI
+# additionally builds with `pull: true` so the reviewed digest is fetched rather than assumed
+# (CWE-1104).
+#
+# Measured on this tag: DOTNET_SDK_VERSION=10.0.400 and `dotnet --version` = 10.0.400. global.json
+# pins SDK 10.0.303 with rollForward: latestFeature, and 10.0.400 satisfies that pin by rolling
+# forward one feature band within 10.0 - both are the same 10.0.11 platform release.
 # --------------------------------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0.400 AS build
 
 WORKDIR /src
 
@@ -244,15 +253,22 @@ RUN dotnet publish services/dataservices-service/PowerFramework.DataServices/Pow
 # --------------------------------------------------------------------------------------------------
 # STAGE 2 - RUNTIME (the one and only final image)
 #
-# mcr.microsoft.com/dotnet/aspnet:10.0, matched to the Microsoft.AspNetCore.App runtime this refactor
-# builds against. Measured on this tag: ASPNET_VERSION=10.0.10 and DOTNET_VERSION=10.0.10.
+# THE RUNTIME IMAGE IS PINNED TO A PATCH REVISION FOR THE SAME REASON THE BUILD IMAGE IS.
+# `mcr.microsoft.com/dotnet/aspnet:10.0.11` is the runtime of the 2026-08-11 security release, matched
+# to the Microsoft.AspNetCore.App version this refactor builds against and to the six platform package
+# pins in Directory.Packages.props. Measured on this tag: ASPNET_VERSION=10.0.11 and
+# DOTNET_VERSION=10.0.11 with APP_UID=1654 backed by a real `app` account, on Ubuntu 24.04 LTS, and it
+# ships NEITHER curl NOR wget.
+#
+# NOT the sdk image, which carries a compiler and a package cache a running service has no use for,
+# and NOT the non-ASP.NET `runtime` image, which carries no Kestrel and no ASP.NET Core hosting.
 #
 # NOT the sdk image, which carries a compiler, a package cache and a shell toolchain that a running
 # service has no use for. NOT the non-ASP.NET `runtime` image either: this is an ASP.NET Core service
 # hosting Kestrel, gRPC endpoints, Minimal API endpoints and an OpenAPI document, and it would fail
 # to start without the shared framework this image provides.
 # --------------------------------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
+FROM mcr.microsoft.com/dotnet/aspnet:10.0.11 AS final
 
 WORKDIR /app
 
@@ -271,7 +287,7 @@ COPY LICENSE NOTICE ./
 # than this one.
 COPY --from=build /app/publish ./
 
-# THE LISTENING PORTS ARE 5102 AND 5112, AND BOTH ARE FIXED IN CONFIGURATION RATHER THAN HERE
+# THE LISTENING PORT IS 5102, AND IT IS FIXED IN CONFIGURATION RATHER THAN HERE
 # (constraint C-L). READ THIS BEFORE ADDING AN ADDRESS VARIABLE BELOW - the obvious "fix" is
 # measurably wrong for this service.
 #
@@ -279,15 +295,16 @@ COPY --from=build /app/publish ./
 # /health is anonymous and /v1/ping requires a bearer token and returns 401 without one. All three
 # were verified against the built image, not assumed.
 #
-# appsettings.json in the published output declares TWO TLS Kestrel endpoints, one per protocol
-# version:
+# appsettings.json in the published output declares ONE TLS Kestrel endpoint carrying both protocol
+# versions:
 #
-#     Rest  https://+:5102  Protocols Http1  - anonymous /health, authenticated /v1/ping, and the
-#                                              thin REST projection of C-03 and C-04
-#     Grpc  https://+:5112  Protocols Http2  - contracts C-03 and C-04 (C-04 carries two inverted
-#                                              streams), whose only caller is Gateway
+#     Rest  https://+:5102  Protocols Http1AndHttp2  - anonymous /health, authenticated /v1/ping, the
+#                                                      thin REST projection of C-03 and C-04, AND
+#                                                      contracts C-03 and C-04 themselves (C-04 carries
+#                                                      two inverted streams), whose only caller is
+#                                                      Gateway
 #
-# BOTH TERMINATE TLS, AND THAT IS NOT NEGOTIABLE HERE. Decomposition creates this service's first-ever
+# IT TERMINATES TLS, AND THAT IS NOT NEGOTIABLE HERE. Decomposition creates this service's first-ever
 # listener - the legacy library opened no socket at all (AAP 0.1.4) - so "no new attack surface" means
 # every newly created surface is protected from the outset. What crosses this one is DataWindow row
 # data and the bearer credential authorizing it; carrying either in cleartext is CWE-319. The
@@ -297,31 +314,30 @@ COPY --from=build /app/publish ./
 # 0.8.3. Certificate, key and anchor paths arrive from the orchestration secret layer through
 # environment keys; none is baked into this image and no thumbprint or password appears in it (C-F).
 #
-# WHY TWO ENDPOINTS AND NOT ONE, GIVEN THAT ALPN OVER TLS WOULD CARRY BOTH. Because one endpoint per
-# protocol version means a listener accepts only what it is for, so misaddressing fails at negotiation
-# instead of arriving at the wrong surface: name 5112 with an HTTP/1.1 client and the connection fails
-# immediately, whereas a merged endpoint answers a misdirected gRPC caller with a 404 from the REST
-# surface, which is much harder to read. Collapsing them onto 5102 with Protocols "Http1AndHttp2" is a
-# supported arrangement and needs no code change; it is simply not the shipped default.
+# 🔴 WHY ONE ENDPOINT AND NOT TWO. Because AAP 0.3.2.2 assigns this service 5102 as "gRPC primary +
+# thin REST projection" - one port, both kinds - and ALPN over TLS carries both there. An earlier
+# revision bound a second HTTP/2-only listener so that a listener accepted only what it was for and a
+# misaddressed client failed at negotiation rather than getting a 404 from the wrong surface. That
+# diagnostic gain is real and it is not a promise this contract makes; what the split DID do was publish
+# C-03 and C-04 at an address the plan does not assign, while the manifest, the readiness gates, the
+# e2e fixture and Gateway's own upstream setting all address the assigned one.
 #
 # ONE MEASUREMENT IS RECORDED HERE BECAUSE IT RULES OUT THE CLEARTEXT ALTERNATIVE ON FUNCTIONAL
 # GROUNDS AS WELL AS SECURITY ONES. On a CLEARTEXT endpoint Kestrel cannot carry HTTP/1.1 and HTTP/2
-# together at all. Measured on SDK 10.0.302: an endpoint with Protocols "Http1AndHttp2" and no TLS
+# together at all. Measured on the pinned SDK: an endpoint with Protocols "Http1AndHttp2" and no TLS
 # logs, at warning level, "HTTP/2 is not enabled for [::]:PORT ... TLS is not enabled. HTTP/2 requires
 # TLS application protocol negotiation. Connections to this endpoint will use HTTP/1.1", and an HTTP/2
 # prior-knowledge request to it fails outright. Configured for "Http2" alone the same endpoint serves
 # gRPC but answers a plain HTTP/1.1 GET /health with 400. A cleartext estate therefore could never
 # have merged the two versions either.
 #
-# WHY 5112 IS NOT AN ENCROACHMENT ON THE PORT MAP. The environment fixes the ports it DOCUMENTS -
-# /health and /v1/ping on 5101-5105 - and documents no gRPC address whatsoever, so nothing it fixes is
-# being moved. 5112 sits outside that band precisely so it cannot collide with it, and 5103 stays the
-# reserved Phase-2 DesignSystem slot with nothing provisioned for it here: no stage, no variable, no
-# build input (C-D). The retained map:
+# THE PORT MAP IS THE PLAN'S, UNCHANGED AND NOW UNEXTENDED. The collapse removes a port from the
+# deployment rather than adding one, and 5103 stays the reserved Phase-2 DesignSystem slot with nothing
+# provisioned for it here: no stage, no variable, no build input (C-D). The map:
 #
-#     5101  Persistence     REST /health and /v1/ping;  5111 carries its gRPC contracts
-#     5102  DataServices    REST /health, /v1/ping and the REST projection - THIS IMAGE
-#     5112  DataServices    gRPC contracts C-03 and C-04 - THIS IMAGE
+#     5101  Persistence     REST /health, /v1/ping AND its gRPC contracts
+#     5102  DataServices    REST /health, /v1/ping, the REST projection AND contracts C-03 and C-04 -
+#                           THIS IMAGE
 #     5103  RESERVED - deliberately unallocated
 #     5104  Security        REST, and the system's sole token issuer
 #     5105  Gateway         REST + OpenAPI, the documented composition-root access URL
@@ -337,26 +353,24 @@ COPY --from=build /app/publish ./
 #
 # and then binds the configured endpoints regardless. The instruction below therefore CLEARS the value
 # this base image ships (aspnet:10.0 sets ASPNETCORE_HTTP_PORTS=8080) rather than replacing it. The
-# documented channel for moving either listener is the configuration key itself,
-# Kestrel__Endpoints__Rest__Url or Kestrel__Endpoints__Grpc__Url, because the environment provider is
-# added after appsettings.json and wins on an identical key.
+# documented channel for moving the listener is the configuration key itself,
+# Kestrel__Endpoints__Rest__Url, because the environment provider is added after appsettings.json and
+# wins on an identical key.
 #
 # NO CERTIFICATE, NO KEY AND NO TRUST ANCHOR IS BAKED INTO THIS IMAGE, AND NONE MAY BE (constraint C-F).
-# BOTH endpoints terminate TLS - appsettings.json declares Rest at https://+:5102 and Grpc at
-# https://+:5112 - so the server material and the trust anchor are MOUNTED READ-ONLY at run time from
-# the orchestration secret layer and named to the application by configuration key
+# THE endpoint terminates TLS - appsettings.json declares Rest at https://+:5102 with Protocols
+# Http1AndHttp2 - so the server material and the trust anchor are MOUNTED READ-ONLY at run time from the
+# orchestration secret layer and named to the application by configuration key
 # (Kestrel__Certificates__Default__Path and __KeyPath, and INTERNAL_TLS_TRUSTED_CA_PATH). Nothing in
-# this file holds a path to material, and no path is a build input. A deployment that would rather serve
-# both protocol versions on ONE address collapses the pair by pointing Kestrel__Endpoints__Rest__Url at
-# https://+:5102 with Protocols Http1AndHttp2 and clearing the Grpc endpoint - ALPN then negotiates both
-# versions there, with no change to this file.
+# this file holds a path to material, and no path is a build input. TLS is also what makes the single
+# endpoint work at all: ALPN negotiates the version per connection, which a cleartext endpoint cannot
+# do, as the measurement above records.
 ENV ASPNETCORE_HTTP_PORTS=""
 
 # EXPOSE documents the contract and does not create it; the binding above comes from configuration.
-# TWO ports, because this service binds two TLS endpoints - the documented REST port and the HTTP/2
-# port its gRPC contracts need, one protocol version each, for the reason recorded above. Only the
-# first is named by the attached environment; the second is internal to the orchestration network.
-EXPOSE 5102 5112
+# ONE port, because this service binds ONE TLS endpoint carrying both protocol versions - the port the
+# attached environment names and AAP 0.3.2.2 assigns.
+EXPOSE 5102
 
 # Production, stated explicitly rather than relied upon. Unset resolves to Production by framework
 # default, so this changes no behaviour on a clean host - it is set because appsettings.Development.
@@ -415,9 +429,10 @@ USER $APP_UID
 # `depends_on: condition: service_healthy` chain that gates Gateway behind it. A compose manifest
 # should INHERIT this healthcheck rather than declare its own.
 #
-# THE PROBE NAMES 5102 AND MUST NEVER NAME 5112. The REST endpoint is HTTP/1.1 and the gRPC endpoint
-# is HTTP/2-only; an HTTP/1.1 request to the latter answers 400, so a probe pointed there would report
-# this service permanently unhealthy and the chain gating Gateway could never open.
+# THE PROBE NAMES 5102, WHICH IS THE ONLY LISTENER. It carries HTTP/1.1 and HTTP/2 together, so this
+# HTTP/1.1 request and the gRPC contracts reach the same address. A probe aimed at an HTTP/2-ONLY
+# endpoint answers 400, so a deployment that splits the listener again must keep this probe on the
+# version-negotiating half or the chain gating Gateway can never open.
 #
 # VERIFICATION IS PERFORMED, AND AN EARLIER REVISION OF THIS PROBE WAS WRONG TO SKIP IT. That revision
 # argued that a loopback probe tests whether the service answers rather than whether a public chain

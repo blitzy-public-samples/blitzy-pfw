@@ -1,8 +1,10 @@
 // ==================================================================================================
 //  CryptoEndpoints - CONTRACT C-02 security.v1.CryptoService
-//  The widest published surface in this service: 17 authenticated REST operations that project the
-//  seven Crypto/* providers - and therefore 63 of the 65 declarations of the legacy cryptographic
-//  class at ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L9-L73 - onto HTTP.
+//  The widest published surface in this service: 18 authenticated REST operations. SEVENTEEN project
+//  the seven Crypto/* providers - and therefore 63 of the 65 declarations of the legacy cryptographic
+//  class at ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L9-L73 - onto HTTP; the EIGHTEENTH releases a
+//  private key this service retained and projects no legacy declaration at all, because the legacy
+//  retains nothing to release.
 //  ------------------------------------------------------------------------------------------------
 //  TWO INSTRUCTIONS DOMINATE EVERYTHING ELSE IN THIS FILE
 //
@@ -24,7 +26,7 @@
 //  is NO generated C# type for C-02: every request and response type below is hand-authored and
 //  conforms to that document by review plus the assertions in the sibling test project.
 //
-//  Everything the document fixes is taken from it verbatim - the 17 paths, the 17 operation
+//  Everything the document fixes is taken from it verbatim - the 18 paths, the 18 operation
 //  identifiers, the member names, the required-member sets, the enumeration values, the security
 //  requirement and the declared status codes. Four questions it settles that a reader might otherwise
 //  expect to be open here, recorded because each had a plausible alternative:
@@ -263,8 +265,9 @@ using PowerFramework.Shared.Kernel;
 namespace PowerFramework.Security.Endpoints;
 
 /// <summary>
-/// Declares and serves contract C-02, <c>security.v1.CryptoService</c>: the 17 authenticated
-/// operations that publish the legacy cryptographic surface.
+/// Declares and serves contract C-02, <c>security.v1.CryptoService</c>: the 18 authenticated
+/// operations that publish the legacy cryptographic surface - seventeen covering its overloads and one
+/// authored release for the private keys this service retains on their behalf.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -290,18 +293,18 @@ public static class CryptoEndpoints
     /// </remarks>
     private const string RouteGroupPrefix = "/v1/crypto";
 
-    /// <summary>The tag the authored contract groups all 17 operations under.</summary>
     /// <summary>The scope a caller must hold to reach any operation in this contract.</summary>
     /// <remarks>
     /// <para>
     /// EVIDENCED BY THE ONLY CALLER IN THE REPOSITORY, NOT INVENTED HERE. DataServices requests exactly
     /// this scope when it obtains a token addressed to this service
-    /// [services/dataservices-service/PowerFramework.DataServices/Clients/SecurityClient.cs:L1976],
+    /// [services/dataservices-service/PowerFramework.DataServices/Clients/SecurityClient.cs:L2232, its
+    /// <c>CryptoScope</c> constant],
     /// and that request is the whole of the evidence for what this surface's scope is called. A name
     /// chosen here instead would have refused the one caller the system has.
     /// </para>
     /// <para>
-    /// ONE SCOPE FOR ALL 17 OPERATIONS rather than one per operation. The published contract groups them
+    /// ONE SCOPE FOR ALL 18 OPERATIONS rather than one per operation. The published contract groups them
     /// under a single tag and a single security requirement, the legacy surface they reproduce is one
     /// object [ws_objects/pfw.crypto.pbl.src/n_crypto.sru], and no caller in this system needs a subset -
     /// so a finer vocabulary would be scope names nothing requests, which is a permission model that
@@ -321,6 +324,11 @@ public static class CryptoEndpoints
     /// </remarks>
     internal static string ScopePolicyName => SecurityScopes.PolicyNameFor(RequiredScope);
 
+    /// <summary>The tag the authored contract groups all 18 operations under.</summary>
+    /// <remarks>
+    /// Applied through the same single route group as the prefix and the authorization requirement, so an
+    /// operation added later cannot be published untagged.
+    /// </remarks>
     private const string TagName = "CryptoService";
 
     /// <summary>The security-scheme key the generated document declares the bearer requirement under.</summary>
@@ -1246,7 +1254,7 @@ public static class CryptoEndpoints
     // ==============================================================================================
 
     /// <summary>
-    /// Maps the 17 operations of contract C-02 onto a single authenticated route group.
+    /// Maps the 18 operations of contract C-02 onto a single authenticated route group.
     /// </summary>
     /// <param name="endpoints">The route builder to declare the routes on.</param>
     /// <returns>
@@ -1257,11 +1265,19 @@ public static class CryptoEndpoints
     /// </exception>
     /// <remarks>
     /// <para>
+    /// <b>EIGHTEEN PUBLISHED, SEVENTEEN PROJECTING - two numbers that are easy to conflate and are kept
+    /// apart deliberately.</b> Seventeen POST operations between them project ALL 63 of the legacy
+    /// surface's cryptographic overloads. The eighteenth,
+    /// <c>DELETE /v1/crypto/rsa/keys/{keyRef}</c>, is AUTHORED and projects nothing: the legacy had no
+    /// key store, so it had nothing to release. Prose that says "17" about the published surface is
+    /// wrong by one, and prose that says "18" about the legacy projection is wrong by one the other way.
+    /// </para>
+    /// <para>
     /// The single public member of this file, matching the one-registration-method-per-endpoint-file
     /// shape the whole folder uses and that <c>Program.cs</c> calls once per file.
     /// </para>
     /// <para>
-    /// A ROUTE GROUP RATHER THAN 17 INDEPENDENT DECLARATIONS, and that is a safety property rather
+    /// A ROUTE GROUP RATHER THAN 18 INDEPENDENT DECLARATIONS, and that is a safety property rather
     /// than a tidiness one: <see cref="AuthorizationEndpointConventionBuilderExtensions.RequireAuthorization{TBuilder}(TBuilder)"/>
     /// and the published tag are applied ONCE to the group, so a route added to this file later cannot
     /// be published anonymously by forgetting a line. Every route below inherits both.
@@ -1290,7 +1306,7 @@ public static class CryptoEndpoints
             //
             // AND THE POLICY IS NAMED, WHICH IT DID NOT USED TO BE. The parameterless form required an
             // authenticated principal and nothing more, so any holder of any token minted for this
-            // service's audience could drive all 17 cryptographic operations - keyed HMAC, symmetric
+            // service's audience could drive all 18 cryptographic operations - keyed HMAC, symmetric
             // encryption and decryption, RSA signing and RSA key generation among them - regardless of
             // what that credential was obtained for and regardless of which caller it was minted for
             // (CWE-862, CWE-863). Contract C-02 says who this surface is for: Security serves
@@ -1311,7 +1327,7 @@ public static class CryptoEndpoints
         // THE FORBIDDEN STATUS IS DECLARED AT THE GROUP, BECAUSE THE SCOPE REQUIREMENT IS AT THE GROUP.
         // Every operation here can now answer 403 for a reason that has nothing to do with its own
         // parameters - a valid token that is not scoped `security.crypto` - so the status belongs to the
-        // group exactly as the requirement producing it does. The eleven keyRef-taking operations also
+        // group exactly as the requirement producing it does. The TEN reference-resolving operations also
         // declare it individually for their own second cause, an unpermitted reference; the generator
         // keys a response by its status, so the two declarations describe one response rather than
         // duplicating it. Declaring it here is what makes an operation added to this file inherit the
@@ -1319,19 +1335,34 @@ public static class CryptoEndpoints
         group.ProducesProblem(StatusCodes.Status403Forbidden);
 
         // ------------------------------------------------------------------------------------------
-        // WHY EVERY OPERATION BELOW DECLARES 403, INCLUDING THE SEVEN THAT RESOLVE NO REFERENCE.
+        // WHY EVERY OPERATION BELOW DECLARES 403, INCLUDING THE EIGHT THAT RESOLVE NO REFERENCE AT ALL.
         //
-        // The group's scope policy applies to all seventeen, so a token that is valid, addressed to
+        // The group's scope policy applies to all eighteen, so a token that is valid, addressed to
         // this service and unexpired is still refused when its caller was never granted this
         // contract's scope. That makes 403 reachable on EVERY operation - not only on the ten that
         // resolve a caller-supplied reference and can refuse one.
         //
-        // It is declared per operation rather than once on the group because the ten reference-bearing
+        // THE THREE COUNTS, MEASURED RATHER THAN ESTIMATED, BECAUSE THEY ARE EASY TO CONFLATE:
+        //   * NINE take a keyRef. Eight carry one in the request body - hmac, hmac-file, both
+        //     symmetric operations and all four RSA operations that CONSUME a key - and the release
+        //     operation takes one as a path parameter. POST /v1/crypto/rsa/keys is NOT among them,
+        //     because it RETURNS a reference instead of resolving one, which is why it alone among the
+        //     RSA operations declares no 404.
+        //   * TEN resolve a reference of SOME kind, the tenth being hash-file, which resolves a fileRef
+        //     through the same allow-listed store mechanism rather than a keyRef. Reference resolution,
+        //     not key resolution, is what makes a 404 reachable, so these ten are exactly the ten that
+        //     declare one.
+        //   * EIGHT therefore resolve nothing at all, and their 403 has only the scope cause.
+        //
+        // It is declared per operation rather than once on the group because the ten reference-resolving
         // operations must ALSO keep their own 403, and a published document that under-declares a
         // status the service produces is the specific defect this file's contract-conformance rows
-        // exist to catch. The authored document mirrors this: the reference-bearing ten point their
-        // 403 at the reference-refusal component, whose description covers both conditions, and the
-        // other seven point theirs at the scope-refusal component.
+        // exist to catch. In the authored document sixteen of the seventeen POST operations point their
+        // 403 at the reference-refusal component, whose description covers BOTH causes and is therefore
+        // correct for an operation that resolves nothing too; key generation points at the
+        // scope-refusal component because scope is its only cause; and the release operation declares
+        // its 403 inline, because it is the one operation whose refusal names an owner rather than a
+        // store.
         // ------------------------------------------------------------------------------------------
 
         // ------------------------------------------------------------------------------------------
@@ -3742,7 +3773,7 @@ public static class CryptoEndpoints
     /// </exception>
     /// <remarks>
     /// <para>
-    /// Applied to the ROUTE GROUP, so all 17 operations acquire the requirement from one registration
+    /// Applied to the ROUTE GROUP, so all 18 operations acquire the requirement from one registration
     /// and a route added later cannot be published as anonymous by omission.
     /// </para>
     /// <para>
@@ -3815,7 +3846,7 @@ public static class CryptoEndpoints
 //  This type is the OTHER HALF of the contract-level secrets rule. The seven providers under Crypto/
 //  were authored to take ALREADY-RESOLVED material and to read no configuration of their own; that is
 //  the structural half. This is where the resolution actually happens, and it happens in exactly one
-//  place so that there is one implementation of the rule to review rather than seventeen.
+//  place so that there is one implementation of the rule to review rather than eighteen.
 //
 //  RAW KEY MATERIAL NEVER CROSSES THE WIRE INBOUND. Not as a key, not as a passphrase, not as a PEM
 //  block, not as an initialization vector, and not as an "advanced" alternative to a reference. The
@@ -5748,7 +5779,7 @@ public sealed record BlobReverseResponse(
     [property: JsonPropertyName("succeeded")] bool Succeeded);
 
 /// <summary>
-/// The authorization policy the 17 cryptographic operations of contract C-02 are served under: who may
+/// The authorization policy all 18 cryptographic operations of contract C-02 are served under: who may
 /// call, and what they must hold.
 /// </summary>
 /// <remarks>

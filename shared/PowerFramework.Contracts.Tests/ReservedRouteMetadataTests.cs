@@ -593,6 +593,22 @@ public sealed class ReservedRouteMetadataTests(OpenApiContractDocuments document
         "getJsonWebKeySet",
         "JsonWebKey",
         "JsonWebKeySet",
+
+        // -------- The context menu's image resource NAME: the in-scope headless half. --------
+        //
+        // The REST projection of `dataservices.v1.ContextMenuItem.image`, which is already exempt by
+        // exact descriptor name in ExemptProtoFullNames above - read that entry for the full AAP 0.2.1.3
+        // Correction 4 position. In short: the item model is the IN-SCOPE headless half, this member
+        // carries the image resource NAME and nothing more, and resolving that name to a picture and
+        // drawing it is the deferred half.
+        //
+        // IT NEEDED NO ENTRY UNTIL THE PAYLOAD SCHEMAS BECAME CONCRETE, and that is the point rather
+        // than an inconvenience. While every projected body was delegated to one open `ProtoPayload`
+        // schema, this sweep had no property names to inspect on the DataWindow surface at all - it
+        // passed because there was nothing there, which is the silent failure mode the file banner's
+        // guard exists to catch. The Tier 3 schemas put 436 members in front of it, and this is the one
+        // it reports.
+        "image",
     ];
 
     // ==============================================================================================

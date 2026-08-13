@@ -501,13 +501,16 @@ internal sealed class ScriptedPayloadCodec : IChangesetPayloadCodec
     }
 
     /// <inheritdoc/>
-    public long TryApply(DataWindowBufferStore target, CarrierState? state)
+    public long TryApply(
+        DataWindowBufferStore target,
+        CarrierState? state,
+        CarrierBaselineTrust baselineTrust)
     {
         ArgumentNullException.ThrowIfNull(target);
 
         _appliedStates.Add(state is null ? null : state.Clone());
 
-        return ApplyResult ?? _real.TryApply(target, state);
+        return ApplyResult ?? _real.TryApply(target, state, baselineTrust);
     }
 }
 

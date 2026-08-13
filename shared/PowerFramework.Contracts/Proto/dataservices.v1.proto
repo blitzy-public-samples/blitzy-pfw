@@ -261,11 +261,21 @@ enum OrderingDiscipline {
   //
   // AND THE REASON IT DOES NOT IS WORTH RECORDING, because "MAY reorder" invites the opposite guess.
   // One dispatch consumes several tokens from the shared space (the chain's outcome report and the
-  // result write each take one), so the number a client must send next is one past the highest token
-  // it has SEEN on the stream - which means it cannot know its second token without reading the
-  // first response, and therefore cannot pipeline. Since one gRPC stream delivers a sender's messages
-  // in order, a displaced arrival is not a transport artifact at all: it is a sender defect, and the
-  // predecessor a buffer would wait for does not exist. A defined error is the honest answer.
+  // result write each take one), so the number a client FOLLOWING THE CONVENTION sends next is one
+  // past the highest token it has SEEN on the stream - which it cannot know without reading the
+  // response. Since one gRPC stream delivers a sender's messages in order, a displaced arrival is not
+  // a transport artifact at all: it is a sender defect, and the predecessor a buffer would wait for
+  // does not exist. A defined error is the honest answer.
+  //
+  // ⚠ THAT CONVENTION IS NOT AN ENFORCEMENT, AND THE DIFFERENCE IS A RESOURCE BOUND RATHER THAN A
+  // PEDANTRY. Because the ENFORCED rule is "above the mark" rather than "the immediate successor", a
+  // client may legitimately pipeline this group by leaving gaps - send 10, 20 and 30 without reading
+  // anything - and the server dispatches all three, in arrival order. No client of any kind is obliged
+  // to read its responses either. So the server does not assume a depth: `EventChain` holds at most
+  // DataServices:EventChain:MaxPendingNotifications notifications awaiting dispatch and refuses the
+  // next one with RESOURCE_EXHAUSTED, because notifications are dispatched ONE AT A TIME and a
+  // dispatch that raises a semantic question blocks until the client answers it. The ceiling sits far
+  // above any burst a client that reads its stream produces; the refusal is never a silent drop.
   ORDERING_DISCIPLINE_SEQUENCED = 2;
 }
 
@@ -3011,6 +3021,19 @@ message ColumnRef {
 
 // The expression session. It scopes the DataWindow handles that replace `foreignvardata.expsvc`, which
 // is the ONLY reason it exists - see ForeignVarRef.
+//
+// HANDLE FORMS - WHICH SERVICE ACCEPTS WHICH, stated here because the two spaces look alike and mixing
+// them up is the mistake this contract cannot silently absorb:
+//   * A REGISTERED DATA-OBJECT NAME, for example "dw_sqlite". This is what
+//     `DataWindowService.Retrieve`, `Update`, `EventChain` and every headless-model operation address. It
+//     names a transcribed DataWindow definition, and the service resolves it to the ONE shared model set
+//     for that definition.
+//   * A SESSION-SCOPED HANDLE, spelled "<session_id>/<one-based ordinal>" and MINTED BY this operation
+//     from the data-object names it was given. This is what every operation on the
+//     `ColumnExpressionService` addresses, and it is the form a foreign reference names - a foreign
+//     reference is resolvable only inside ONE session, which is the whole reason the session exists.
+// The two are NOT interchangeable in either direction, and each service refuses the other's form with
+// E_INVALID_ARGUMENT rather than silently resolving it.
 message OpenExpressionSessionRequest {
   // The DataWindows to make CO-RESIDENT in this session. Every DataWindow a foreign variable may
   // reference MUST be listed here, because a foreign reference is resolvable only inside one session.
@@ -3034,69 +3057,6 @@ message CloseExpressionSessionRequest {
 message CloseExpressionSessionResponse {
   common.v1.RetCode.Value ret_code = 1;
   bool was_open = 2;
-}
-
-// The rows to place into a session's DataWindow, so the calculation operations have something to
-// evaluate against.
-//
-// HANDLE FORMS - WHICH OPERATION ACCEPTS WHICH, stated here because the two spaces look alike and the
-// confusion is what made this gap invisible:
-//   * A REGISTERED DATA-OBJECT NAME, for example "dw_sqlite". This is what
-//     `DataWindowService.Retrieve`, `Update`, `EventChain` and every headless-model operation address. It
-//     names a transcribed DataWindow definition, and the service resolves it to the ONE shared model set
-//     for that definition.
-//   * A SESSION-SCOPED HANDLE, spelled "<session_id>/<one-based ordinal>" and MINTED BY
-//     `OpenExpressionSession` from the data-object names it was given. This is what every operation on
-//     THIS service addresses, including this one. It exists because a session's DataWindow is a private
-//     surface: two handles opened over the same definition are two independent DataWindows, which is
-//     precisely what makes a co-resident foreign variable meaningful (see ForeignVarRef).
-// The two are NOT interchangeable in either direction, and each refuses the other's form with
-// E_INVALID_ARGUMENT rather than silently resolving it - a silent resolution would make a caller's rows
-// land in a surface it did not name.
-//
-// APPEND, NEVER REPLACE. Each call adds its rows after whatever the DataWindow already holds, and the
-// response reports the resulting count and the ordinal of the first row it created so a caller can address
-// exactly what it just loaded. There is no clear operation and none is invented: the abstract host surface
-// this engine drives publishes `InsertRow` and no delete, so a caller wanting a different row set opens a
-// new session - which is also the unit the foreign-variable scoping rule is written in terms of.
-//
-// THE COLUMN ADDRESSING IS THE CONTRACT'S OWN. `common.v1.ColumnValue` carries both identifiers and marks
-// the name optional, so a row may address by ordinal alone; where BOTH are present they must agree, and a
-// disagreement is refused rather than resolved in favour of one - exactly as the update path refuses it,
-// and for the same reason: the value would otherwise land in whichever column one identifier named while
-// the caller believed the other.
-message LoadRowsRequest {
-  string session_id = 1;
-
-  // The SESSION-SCOPED handle, "<session_id>/<ordinal>". A registered data-object name is refused.
-  string datawindow_handle = 2;
-
-  // The rows, in the order they are to be created. `buffer` and `row` on each row are IGNORED: this
-  // operation appends to the Primary buffer and assigns the ordinals, and honouring a caller-supplied
-  // ordinal would let two calls disagree about which row is which. Every row is created with item status
-  // NewModified, which is what `InsertRow` produces and what an unbaselined scratch row is.
-  repeated common.v1.DataWindowRow rows = 3;
-}
-
-message LoadRowsResponse {
-  common.v1.RetCode.Value ret_code = 1;
-
-  // How many rows this call created. Zero with an OK code means the request carried no row, which is a
-  // legitimate no-op rather than a fault.
-  int64 rows_loaded = 2;
-
-  // The one-based ordinal of the FIRST row this call created, or 0 when it created none. With
-  // `rows_loaded` this names the exact range the caller may now calculate over, without a second call to
-  // ask how many rows there were before.
-  int64 first_row = 3;
-
-  // The Primary buffer's row count after the call - what `RowCount()` now answers, and therefore the
-  // upper bound `CalcAll` iterates to.
-  int64 row_count = 4;
-
-  // Set when a column reference could not be resolved or a value could not be written. Carries the
-  // column identity the request used, so a caller can correct the reference it sent.
-  StructuredError error = 5;
 }
 
 // ---- Expression add / set / get / remove / remove-all ----
@@ -4087,63 +4047,43 @@ service ColumnExpressionService {
   //
   //   1. OpenExpressionSession  -> mints the `<sessionId>/<ordinal>` handle every route below takes.
   //   2. SetEnabled(true)       -> the engine is created INERT and does NOT auto-enable.
-  //   3. LoadRows               -> the session's DataWindow is created EMPTY; calculation needs rows.
-  //   4. AddExpression / AddVariable / ...  -> bind what is to be evaluated.
-  //   5. Calc / CalcAll / CalcEmpty / CalcItem.
+  //   3. AddExpression / AddVariable / ...  -> bind what is to be evaluated.
+  //   4. Calc / CalcAll / CalcEmpty / CalcItem.
   //
-  // Steps 2 and 3 are the two that are easy to miss, and each fails in its own way:
+  // STEP 2 IS THE ONE THAT IS EASY TO MISS. Skipping it answers `ret_code = FAILED`, which the Gateway
+  // projects as **502**. That reads like an upstream outage and is not one - the engine is merely inert,
+  // which is entirely caller-correctable. The code is nevertheless PRESERVED rather than narrowed to a
+  // 4xx, because FAILED is the ORACLE'S OWN answer for this condition at four separate call sites
+  // [n_cst_dwsvc_columnexp.sru:L1158, :L1201, :L1976, :L2087], and `docs/CONTRACTS.md` 12.1 freezes
+  // FAILED -> 502 for every operation on the surface. Narrowing it here would either change a preserved
+  // return code (C-B) or fork the status map for one service. Documented instead, which is why this
+  // block exists. Auto-enabling on open was considered and rejected: it would make the engine's
+  // observable state depend on which operation happened to be called first, and the enable flag is
+  // itself part of the ported surface (`#Enabled`, `of_setenabled`).
   //
-  //   * SKIPPING STEP 2 answers `ret_code = FAILED`, which the Gateway projects as **502**. That reads
-  //     like an upstream outage and is not one - the engine is merely inert, which is entirely
-  //     caller-correctable. The code is nevertheless PRESERVED rather than narrowed to a 4xx, because
-  //     FAILED is the ORACLE'S OWN answer for this condition at four separate call sites
-  //     [n_cst_dwsvc_columnexp.sru:L1158, :L1201, :L1976, :L2087], and `docs/CONTRACTS.md` 12.1 freezes
-  //     FAILED -> 502 for every operation on the surface. Narrowing it here would either change a
-  //     preserved return code (C-B) or fork the status map for one service. Documented instead, which is
-  //     why this block exists.
-  //   * SKIPPING STEP 3 does NOT fail: `CalcAll` and `CalcEmpty` answer OK having iterated zero rows, and
-  //     `Calc` answers E_INVALID_ARGUMENT because row 1 is out of range on an empty buffer. A caller
-  //     seeing "OK, 0 results" has almost certainly missed this step rather than found an empty answer.
+  // ⚠ WHERE THE ROWS A CALCULATION EVALUATES OVER COME FROM, AND THE PHASE-1 GAP THAT FOLLOWS. Every
+  // calculation below evaluates against ROWS of the DataWindow its handle names, and THIS PHASE PUBLISHES
+  // NO OPERATION THAT PLACES A ROW INTO ONE. That is the frozen contract's shape rather than an omission
+  // here: AAP 0.4.3's C-04 inventory carries no row-loading member, C-03 publishes none either, and
+  // C-03's `Retrieve` streams its rows TO THE CALLER rather than into a service-side model. In the oracle
+  // the DataWindow is a control owned by the APPLICATION and populated by the application's own
+  // retrieval, so the population half sits on the presentation side of the split and is a reserved
+  // Gateway extension point (AAP 0.3.5, 0.4.4).
   //
-  // Auto-enabling on open, or loading implicitly on first calc, were both considered and rejected: either
-  // would make the engine's observable state depend on which operation happened to be called first, and
-  // the enable flag is itself part of the ported surface (`#Enabled`, `of_setenabled`).
+  // The observable consequence is stated rather than papered over: against an unpopulated DataWindow
+  // `CalcAll` and `CalcEmpty` answer OK having iterated zero rows, and `Calc` answers
+  // E_INVALID_ARGUMENT because row 1 is out of range on an empty buffer. A caller seeing "OK, 0 results"
+  // has found this gap rather than an empty answer. The BINDING half of the engine - add / set / get an
+  // expression, add / set a variable, the relative-column and flag setters, the two inverted streams -
+  // is complete and exercisable. A mutator that loaded rows inline was NOT added: it is absent from the
+  // frozen C-04 inventory, and widening a reviewed contract to close a documented gap is the one repair
+  // this refactor may not make (AAP 0.8.1 - a documented gap beats a half-built surface).
+  //
   // The session that scopes the DataWindow handles replacing `foreignvardata.expsvc`. This is the ONLY
   // reason the session exists, and cross-session foreign references are BLOCKED WITH A DEFINED ERROR -
   // see ForeignVarRef.
   rpc OpenExpressionSession(OpenExpressionSessionRequest) returns (OpenExpressionSessionResponse);
   rpc CloseExpressionSession(CloseExpressionSessionRequest) returns (CloseExpressionSessionResponse);
-
-  // 🔴 THE OPERATION THAT MAKES THE CALCULATION HALF OF THIS SERVICE REACHABLE AT ALL.
-  //
-  // Every calculation operation below evaluates against ROWS of the session's DataWindow, and until this
-  // existed there was no published way to put a row into one: a session's DataWindow is created empty, and
-  // `dataservices.v1.DataWindowService.Retrieve` addresses a REGISTERED data-object name and refuses a
-  // session-scoped handle - correctly, because the two handle spaces are different things (see the
-  // HANDLE FORMS block on LoadRowsRequest). So `Calc` answered E_INVALID_ARGUMENT for row 1 of every
-  // session, `CalcAll` and `CalcEmpty` iterated zero rows, and only the BINDING half of the engine -
-  // add / set / get an expression, add / set a variable - could be exercised end to end.
-  //
-  // AN INLINE ROW SET RATHER THAN A RETRIEVE INTO THE SESSION, and the choice is deliberate. Persistence
-  // is the only service that reaches storage (AAP 0.1.1), a session's DataWindow is a SCRATCH surface for
-  // evaluation rather than a queried result set, and a caller that wants stored rows already has
-  // `DataWindowService.Retrieve` to fetch them and can hand the answer straight back here. Routing a
-  // retrieve through an expression session would have given DataServices a second, differently-scoped path
-  // to storage for no behaviour that is not already available by composing two published operations.
-  //
-  // A SEPARATE OPERATION RATHER THAN AN INLINE ROW SET ON `Calc`, because the engine CACHES: its
-  // tri-state calculation cache, its dirty propagation and its reverse dependency index all assume rows
-  // that persist between calls. Loading once and then calculating many times is the shape the engine was
-  // built for; carrying rows on every Calc would make an evaluation call mutate the surface it evaluates.
-  //
-  // ONE SESSION, ONE DATAWINDOW. Two sessions over the same data-object name hold two INDEPENDENT
-  // DataWindows: rows loaded into one are invisible to the other and its ordinals start again at 1. That
-  // is what makes the co-residency rule above meaningful, and it is why a caller wanting a different row
-  // set opens a new session rather than looking for a clear operation. It is also not free - the host
-  // factory is retentive per data-object name for C-03's benefit, so an expression session deliberately
-  // takes an ISOLATED host (see IDataWindowHostFactory.CreateIsolated). Without that, this operation
-  // would put one caller's rows into another caller's session.
-  rpc LoadRows(LoadRowsRequest) returns (LoadRowsResponse);
 
   // Expressions: `of_addexp` [:L172]; `of_setexp` x4 [:L174-L177]; `of_getexp` x2 [:L127, :L130];
   // `of_remove` x2 [:L131-L132]; `of_removeall` [:L125].

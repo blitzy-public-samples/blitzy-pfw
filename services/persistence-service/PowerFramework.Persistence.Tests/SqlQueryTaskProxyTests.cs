@@ -1734,7 +1734,10 @@ public sealed class SqlQueryTaskProxyTests
             return DataWindowBufferStore.DataStoreSuccess;
         }
 
-        public long TryApply(DataWindowBufferStore target, CarrierState? state)
+        public long TryApply(
+            DataWindowBufferStore target,
+            CarrierState? state,
+            CarrierBaselineTrust baselineTrust)
         {
             ApplyCalls++;
             Targets.Add(target);

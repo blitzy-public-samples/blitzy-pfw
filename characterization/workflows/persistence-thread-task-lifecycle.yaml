@@ -1514,12 +1514,13 @@ sharedVolume:
 
 # The honest state of this workflow, and the schema's enum has exactly one member so
 # that nothing here can imply otherwise. NO capture has been taken on either side. The
-# legacy half needs a PowerBuilder toolchain that is not present, and the environment
-# this store was authored in had NO DOCKER INSTALLED AND NO DAEMON AVAILABLE, so the
-# compose bring-up that the capture rule is expressed against could not have been
-# exercised there in any case; no health gate is claimed as passed. Nothing above is a
-# verified result - every statement in this file is either a citation of read-only
-# legacy source or a specification of a capture still to be run.
+# legacy half needs a PowerBuilder toolchain that is not present. The compose bring-up
+# that the capture rule is expressed against HAS been exercised - orchestration/README.md
+# section 10 is this repository's only execution-status statement and records it gate by
+# gate, including that the persistence-db volume provisioned itself and survived a plain
+# teardown - but a bring-up records nothing, so neither half of this pair exists. Nothing
+# above is a verified result: every statement in this file is either a citation of
+# read-only legacy source or a specification of a capture still to be run.
 executionStatus: specified-not-executed
 
 # Cross-references only. Naming a sibling never merges two workflows: each pair stays

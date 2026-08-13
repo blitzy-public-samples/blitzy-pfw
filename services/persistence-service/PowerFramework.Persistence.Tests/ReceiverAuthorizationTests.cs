@@ -441,6 +441,27 @@ public sealed class ReceiverAuthorizationTests
         private readonly byte[] _key = RandomNumberGenerator.GetBytes(32);
 
         /// <summary>
+        /// The data directory THIS host is configured with, unique to this instance.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// PER INSTANCE, AND THAT REPLACED A FIXED NAME. This host used to be pointed at one constant path
+        /// under the system temporary directory, shared by every run of the suite and by every process
+        /// running it. Two concurrent runs on one agent - routine under a parallel batch - then shared a
+        /// directory and a SQLite file, and residue from a run that did not finish was visible to the next.
+        /// Neither has anything to do with the authorization behaviour these rows assert, which is exactly
+        /// why it must not be able to influence them.
+        /// </para>
+        /// <para>
+        /// NOTHING NEEDS TO PRE-CREATE IT: the service creates its own data directory during startup
+        /// [<c>Program.cs:L1658</c>], so a fresh path is the ordinary case rather than a fault.
+        /// </para>
+        /// </remarks>
+        private readonly string _dataDirectory = Path.Combine(
+            Path.GetTempPath(),
+            string.Create(CultureInfo.InvariantCulture, $"pfw-receiver-authorization-{Guid.NewGuid():n}"));
+
+        /// <summary>
         /// Mints a credential this host accepts, for a chosen identity and scope set.
         /// </summary>
         /// <param name="subject">The identity the token claims.</param>
@@ -500,9 +521,8 @@ public sealed class ReceiverAuthorizationTests
             builder.UseSetting("Jwt:Audience", TrustedAudience);
             builder.UseSetting("Jwt:RequireHttpsMetadata", "true");
             builder.UseSetting("Jwt:PermittedCallers:0", PermittedCaller);
-            builder.UseSetting(
-                "Sqlite:DataDirectory",
-                Path.Combine(Path.GetTempPath(), "pfw-receiver-authorization"));
+            // THIS HOST'S OWN DIRECTORY. See _dataDirectory for why it is per instance.
+            builder.UseSetting("Sqlite:DataDirectory", _dataDirectory);
 
             builder.ConfigureServices(services => services.Configure<JwtBearerOptions>(
                 JwtBearerDefaults.AuthenticationScheme,
@@ -521,5 +541,32 @@ public sealed class ReceiverAuthorizationTests
         /// <param name="value">The bytes to encode.</param>
         /// <returns>The encoded segment.</returns>
         private static string Encode(byte[] value) => System.Buffers.Text.Base64Url.EncodeToString(value);
+
+        /// <summary>
+        /// Disposes the host and then removes this instance's data directory.
+        /// </summary>
+        /// <param name="disposing">Whether managed state is being released.</param>
+        /// <remarks>
+        /// UNCONDITIONAL, and in this ORDER. Every row creates its host with <c>using</c>, so this runs on
+        /// the failure path too - which is the path that used to leave a directory behind. The base
+        /// disposal stops the host and closes the engine's handle on the database file, so it has to
+        /// complete before the directory can be removed. No <c>catch</c>: the directory is one this
+        /// instance composed and owns exclusively, and a suppressed teardown is indistinguishable from one
+        /// that worked.
+        /// </remarks>
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+
+            if (!disposing)
+            {
+                return;
+            }
+
+            if (Directory.Exists(_dataDirectory))
+            {
+                Directory.Delete(_dataDirectory, recursive: true);
+            }
+        }
     }
 }

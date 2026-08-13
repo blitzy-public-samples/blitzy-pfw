@@ -112,6 +112,34 @@ internal enum UpdateRowValidationKind
     /// The value cannot be represented in the type the definition declares for that column.
     /// </summary>
     InvalidValue,
+
+    /// <summary>
+    /// The row's originals become a generated where clause and the column states none, so the update
+    /// carries no concurrency baseline for it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>A DISTINCT MEMBER BECAUSE IT IS A DISTINCT FAULT, AND THE MOST CONSEQUENTIAL ONE THIS
+    /// VALIDATOR CAN REPORT.</b> <c>updatewhere=1</c> builds the generated statement's where clause from
+    /// the ORIGINAL value of every marked column (AAP 0.6.3.2), so a column with no stated original
+    /// leaves the receiving codec with nothing to compare against. Substituting the caller's own current
+    /// value - which is what happened before this check existed - produces a predicate built from the
+    /// values being written: an ordinary update then compares a row against itself and can never detect a
+    /// lost race, and an update whose KEY changed addresses the row named by the NEW key instead of the
+    /// row the caller read. Both are silent: the statement succeeds and reports success.
+    /// </para>
+    /// <para>
+    /// <b>REPORTED ONLY FOR THE ROWS WHOSE BASELINE IS ACTUALLY READ, which is the predicate rather than
+    /// the row shape.</b> Persistence generates a <c>DELETE ... WHERE</c> for every row of the
+    /// <c>Delete!</c> buffer whatever its status, and an <c>UPDATE ... WHERE</c> - or a DELETE plus an
+    /// INSERT when the key moved under <c>updatekeyinplace=no</c> - for every <c>DataModified!</c> row in a
+    /// modifiable buffer. A <c>New!</c>/<c>NewModified!</c> row generates an <c>INSERT</c>, which has no
+    /// where clause and no prior state to describe, and a <c>NotModified!</c> row in a modifiable buffer
+    /// generates no statement at all. Asking either for a baseline would refuse conforming payloads while
+    /// preventing nothing.
+    /// </para>
+    /// </remarks>
+    MissingOriginalValue,
 }
 
 /// <summary>
@@ -198,6 +226,32 @@ internal sealed class UpdateRowValidator
         + "ordinal. A column is addressed by its one-based ordinal, and the name must be the name that "
         + "ordinal carries; no value was applied.";
 
+    /// <summary>
+    /// The untranslated text of the missing-baseline refusal. A <see cref="Formatting.Sprintf"/> template
+    /// on the same terms as <see cref="UnknownColumnTemplate"/>: ONE-BASED placeholders, and the arguments
+    /// travel beside the rendered text so a consumer can re-render it.
+    /// </summary>
+    /// <remarks>
+    /// It names WHAT to send rather than only what is missing, because the corrective action is not
+    /// guessable from the fault: the caller must echo the value it read for that column into
+    /// <c>original_values</c>. It names WHICH rows the requirement covers too, so a caller inserting rows
+    /// or echoing unchanged ones does not read it as a demand it cannot satisfy.
+    /// </remarks>
+    internal const string MissingOriginalTemplate =
+        "Column '{1}' at ordinal {2} carries no original value. This row generates a statement whose "
+        + "where clause is built from the ORIGINAL value of every column the row carries, so each one must "
+        + "appear in original_values - echo the value the retrieval answered for it. The requirement covers "
+        + "deleted rows and rows stamped DataModified; an inserted or unchanged row needs no baseline. "
+        + "Nothing was applied.";
+
+    /// <summary>The title the missing-baseline refusal carries.</summary>
+    /// <remarks>
+    /// NOT the oracle's localized 错误, for the same reason the unknown-column title is not: this refusal
+    /// is not one of the oracle's dialogs, and borrowing its translated title would claim a provenance it
+    /// does not have.
+    /// </remarks>
+    internal const string MissingOriginalTitle = "Missing concurrency baseline";
+
     /// <summary>The title the unknown-column refusal carries.</summary>
     /// <remarks>
     /// NOT the oracle's localized 错误, deliberately: this refusal is not one of the oracle's dialogs,
@@ -238,10 +292,20 @@ internal sealed class UpdateRowValidator
     /// stopping at the first turns one correction into as many round trips as there are faults.
     /// </para>
     /// <para>
-    /// ORIGINAL VALUES ARE NOT VALIDATED, and that is deliberate. An original is a value the caller
+    /// AN ORIGINAL'S VALUE IS NOT TYPE-CHECKED, and that is deliberate. An original is a value the caller
     /// READ BACK from a retrieval - it describes what storage held, not what the caller is writing - so
-    /// refusing it would refuse a payload assembled correctly from this service's own answer. It is
-    /// compared, never applied.
+    /// refusing it on type grounds would refuse a payload assembled correctly from this service's own
+    /// answer. It is compared, never applied.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>ITS PRESENCE, HOWEVER, IS REQUIRED, AND THAT IS THE THIRD QUESTION THIS VALIDATOR ANSWERS.</b>
+    /// A row that is not insert-shaped must state the original of every column it carries, because those
+    /// originals become the optimistic-concurrency predicate downstream and a caller cannot be a
+    /// trustworthy source of a value it is simultaneously overwriting. Persistence refuses the same shape
+    /// on its own authority [<c>Buffers/ChangesetCodec.cs</c>
+    /// <c>CarrierBaselineTrust.RequiredOnChangedRows</c>]; checking it HERE as well is not duplication for
+    /// its own sake - it is what turns a generic invalid-update-data code from the far side of the
+    /// boundary into a per-column answer naming the column whose baseline is missing.
     /// </para>
     /// </remarks>
     internal ImmutableArray<UpdateRowValidationFailure> Validate(
@@ -256,12 +320,43 @@ internal sealed class UpdateRowValidator
 
         foreach (DataWindowRow row in rows)
         {
+            // 🔴 THE ROWS WHOSE ORIGINALS BECOME A WHERE CLAUSE, which is what the baseline requirement is
+            // scoped to - and the scope is the PREDICATE rather than the row shape. Persistence generates a
+            // `DELETE ... WHERE` for every row of the Delete! buffer whatever its status, because
+            // membership in that buffer IS the pending delete, and an `UPDATE ... WHERE` - or, when the key
+            // moved under updatekeyinplace=no, a DELETE plus an INSERT - for every DataModified! row in a
+            // modifiable buffer [Tasks/SqlUpdateCarrier.ApplyUpdate]. A New!/NewModified! row generates an
+            // INSERT, which has no where clause and no prior state to describe, and a NotModified! row in a
+            // modifiable buffer generates NO STATEMENT AT ALL - so asking either for a baseline would
+            // refuse conforming payloads while preventing nothing. Computed once per row because it is a
+            // property of the row.
+            bool baselineBecomesAPredicate =
+                row.Buffer == DwBuffer.Delete || row.ItemStatus == ItemStatus.DataModified;
+
+            HashSet<long> statedOriginals = [];
+
+            if (baselineBecomesAPredicate)
+            {
+                foreach (ColumnValue original in row.OriginalValues)
+                {
+                    _ = statedOriginals.Add(original.ColumnId);
+                }
+            }
+
             foreach (ColumnValue column in row.Columns)
             {
                 if (ResolveColumn(host, column, out string columnType) is { } unresolvable)
                 {
                     failures.Add(BuildUnknownColumn(row, column, unresolvable));
                     continue;
+                }
+
+                if (baselineBecomesAPredicate && !statedOriginals.Contains(column.ColumnId))
+                {
+                    // REPORTED AND THE VALUE CHECK IS STILL RUN BELOW, because the two faults are
+                    // independent and a caller correcting a payload needs both: a column may be missing
+                    // its baseline AND carry a value its column cannot hold.
+                    failures.Add(BuildMissingOriginal(row, column, columnType));
                 }
 
                 if (!IsRepresentable(column.Value, columnType))
@@ -432,13 +527,37 @@ internal sealed class UpdateRowValidator
 
         if (StringValidator.OwnsColType(columnType))
         {
-            // A char column takes any scalar: PowerBuilder's own coercion to string is total, and the
-            // declared WIDTH is deliberately not enforced (see the file header - preserved defect).
-            return true;
+            // A char column takes any SCALAR: PowerBuilder's own coercion to string is total over the
+            // scalar types, and the declared WIDTH is deliberately not enforced (see the file header -
+            // preserved defect).
+            //
+            // 🔴 A BLOB IS NOT A SCALAR AND IS REFUSED. There is no legacy coercion from `blob` to
+            // `string` - PowerScript requires an explicit codec call, which is a DIFFERENT operation
+            // with a DIFFERENT result - so admitting one here invents behaviour the oracle does not
+            // have, and what actually happened downstream was worse than an invention: the bytes were
+            // bound to a character column verbatim, so a write-then-read answered a value the caller
+            // never sent. The refusal is the same defined error every other unrepresentable value gets.
+            //
+            // The unknown arm falls THROUGH to the fail-closed switch below rather than being accepted
+            // here, so a new wire arm cannot enter a character column unvalidated either.
+            return value.KindCase switch
+            {
+                AnyValue.KindOneofCase.BlobValue => false,
+                AnyValue.KindOneofCase.StringValue
+                    or AnyValue.KindOneofCase.BoolValue
+                    or AnyValue.KindOneofCase.Int64Value
+                    or AnyValue.KindOneofCase.Uint64Value
+                    or AnyValue.KindOneofCase.DoubleValue
+                    or AnyValue.KindOneofCase.DecimalValue
+                    or AnyValue.KindOneofCase.DateValue
+                    or AnyValue.KindOneofCase.TimeValue
+                    or AnyValue.KindOneofCase.DatetimeValue => true,
+                _ => false,
+            };
         }
 
-        bool numeric = NumberValidator.IsDecimalCoercionColumnType(columnType)
-            || NumberValidator.IsLongCoercionColumnType(columnType);
+        bool integral = NumberValidator.IsLongCoercionColumnType(columnType);
+        bool numeric = NumberValidator.IsDecimalCoercionColumnType(columnType) || integral;
 
         // The temporal tests are ordered datetime-before-date because the legacy's five-character
         // truncation makes "datet" and "date" two different arms and "datetime" would otherwise match
@@ -465,10 +584,19 @@ internal sealed class UpdateRowValidator
             // A numeric arm fits a numeric column and nothing else. A number sent for a `date` column is
             // a categorical mismatch: the legacy's date coercion takes edit TEXT, and there is no
             // reading under which an int64 is a date.
+            //
+            // 🔴 AND FITTING THE FAMILY IS NOT ENOUGH - THE SUBTYPE DECIDES. Three refusals live in
+            // IsRepresentableNumber and each one was reachable and silent before it existed: a non-finite
+            // double, which SQLite stores as NULL so a NaN written to a NOT NULL column either fails at
+            // the driver or reads back as an absent value; a fractional value for a `long` column, where
+            // the legacy's own coercion is Long(), which TRUNCATES, so the stored value is not the value
+            // sent; and a negative value for `ulong`, whose domain begins at zero. Each is a value the
+            // DECLARED type cannot hold, which is exactly the question this validator exists to answer.
             AnyValue.KindOneofCase.Int64Value
                 or AnyValue.KindOneofCase.Uint64Value
                 or AnyValue.KindOneofCase.DoubleValue
-                or AnyValue.KindOneofCase.DecimalValue => numeric,
+                or AnyValue.KindOneofCase.DecimalValue =>
+                numeric && IsRepresentableNumber(value, integral, columnType),
 
             // Each temporal arm fits its own column type. datetime into a `date` column and back are
             // refused rather than silently truncated or widened, because either would store a value the
@@ -481,12 +609,149 @@ internal sealed class UpdateRowValidator
             // either, so there is no behaviour to preserve and nothing to guess at.
             AnyValue.KindOneofCase.BoolValue or AnyValue.KindOneofCase.BlobValue => false,
 
-            // IsNull and None are handled above; the switch is exhaustive over the remaining arms and
-            // this arm exists so a NEW arm added to the contract is accepted rather than silently
-            // refused - widening a published message must not retroactively invalidate payloads.
-            _ => true,
+            // 🔴 IsNull and None are handled above, so this arm is reachable only for an arm added to
+            // `common.v1.AnyValue` AFTER this validator was written - AND IT FAILS CLOSED. It used to
+            // accept, on the reasoning that widening a published message must not retroactively
+            // invalidate payloads. That reasoning belongs to a READ path; on the WRITE path it inverts
+            // into the defect this whole validator exists to prevent, because an arm this code cannot
+            // reason about is precisely an arm it cannot say is representable - and the value would then
+            // travel on to be bound to a column of a type nothing checked it against. A new arm is
+            // taught to this switch in the same change that adds it to the contract, and until then it
+            // is refused with a defined error rather than admitted on trust (AAP 0.1.5).
+            _ => false,
         };
     }
+
+    /// <summary>
+    /// Whether a numeric wire value can be held by the numeric subtype a column declares.
+    /// </summary>
+    /// <param name="value">The value, known to be one of the four numeric arms.</param>
+    /// <param name="integral">
+    /// <see langword="true"/> for a column the legacy coerces with <c>Long()</c> - <c>long</c> or
+    /// <c>ulong</c> - and <see langword="false"/> for one it coerces with <c>Dec()</c>.
+    /// </param>
+    /// <param name="columnType">The declared type, for the signed-versus-unsigned distinction.</param>
+    /// <returns><see langword="true"/> when the declared subtype can hold the value.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS IS VALIDATION AND NOT COERCION, WHICH IS THE C-B LINE.</b> Nothing here converts, rounds,
+    /// truncates or clamps a value: the ported <c>dwnvl*</c> coercions are the legacy's own and are used
+    /// as PREDICATES only, exactly as they already were for the text arm. The legacy's coercing behaviour
+    /// belongs to the item-change path, where edit text becomes a buffer value; the update path receives
+    /// buffer values already, so coercing one here would CHANGE a value the caller sent rather than
+    /// judging it.
+    /// </para>
+    /// <para>
+    /// THE THREE REFUSALS, EACH WITH ITS OWN REASON:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item>
+    ///     <description>
+    ///     <b>NON-FINITE.</b> <c>NaN</c>, <c>+∞</c> and <c>-∞</c> are legal <c>double</c> values and no
+    ///     legal DataWindow numeric value: PowerBuilder has no literal for any of them, and the storage
+    ///     engine behind this contract records a non-finite REAL as <c>NULL</c>, so accepting one turns a
+    ///     write into a null - or into a NOT NULL violation from the driver - with nothing in the
+    ///     response saying so.
+    ///     </description>
+    ///   </item>
+    ///   <item>
+    ///     <description>
+    ///     <b>FRACTIONAL INTO AN INTEGRAL COLUMN.</b> The legacy coerces a <c>long</c> column with
+    ///     <c>Long()</c>, which TRUNCATES rather than rounds, so admitting 3.7 would store 3 - a value
+    ///     the caller did not send, arrived at silently. The column type is what makes it a fault: the
+    ///     identical value is fine for <c>decim</c>, <c>real</c> or <c>numbe</c>.
+    ///     </description>
+    ///   </item>
+    ///   <item>
+    ///     <description>
+    ///     <b>OUT OF DOMAIN.</b> A negative value for an <c>ulong</c> column is outside the type's
+    ///     domain, and a magnitude beyond <see cref="long"/> for a signed integral column cannot be
+    ///     represented at all. Both are refused rather than wrapped.
+    ///     </description>
+    ///   </item>
+    /// </list>
+    /// <para>
+    /// A DECIMAL ARM CARRIES CANONICAL TEXT [<c>common.v1.DecimalValue</c>], so an unparseable one is
+    /// refused here too rather than being left to fail inside the receiving codec, where the answer would
+    /// be a generic invalid-payload code instead of a per-column one.
+    /// </para>
+    /// </remarks>
+    private static bool IsRepresentableNumber(AnyValue value, bool integral, string columnType)
+    {
+        switch (value.KindCase)
+        {
+            case AnyValue.KindOneofCase.Int64Value:
+                // An int64 fits any numeric column except an unsigned one it is negative for.
+                return !(value.Int64Value < 0L && IsUnsignedIntegralColumnType(columnType));
+
+            case AnyValue.KindOneofCase.Uint64Value:
+                // A uint64 is non-negative by construction; for a SIGNED integral column it must still
+                // fit, because the carrier's own long domain is what will hold it.
+                return !integral
+                    || IsUnsignedIntegralColumnType(columnType)
+                    || value.Uint64Value <= long.MaxValue;
+
+            case AnyValue.KindOneofCase.DoubleValue:
+                double number = value.DoubleValue;
+
+                if (!double.IsFinite(number))
+                {
+                    return false;
+                }
+
+                if (!integral)
+                {
+                    return true;
+                }
+
+                return number == Math.Truncate(number)
+                    && number >= (IsUnsignedIntegralColumnType(columnType) ? 0d : long.MinValue)
+                    && number <= long.MaxValue;
+
+            case AnyValue.KindOneofCase.DecimalValue:
+                if (!decimal.TryParse(
+                        value.DecimalValue?.Value,
+                        NumberStyles.Float,
+                        CultureInfo.InvariantCulture,
+                        out decimal exact))
+                {
+                    return false;
+                }
+
+                if (!integral)
+                {
+                    return true;
+                }
+
+                return exact == decimal.Truncate(exact)
+                    && exact >= (IsUnsignedIntegralColumnType(columnType) ? 0m : long.MinValue)
+                    && exact <= long.MaxValue;
+
+            default:
+                // Unreachable: the caller dispatches this method on the four numeric arms alone. Fails
+                // closed for the same reason the caller's own default arm does.
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether an integral column type is the UNSIGNED one of the pair the legacy's <c>Long()</c> arm
+    /// covers.
+    /// </summary>
+    /// <param name="columnType">The declared type.</param>
+    /// <returns><see langword="true"/> for <c>ulong</c>.</returns>
+    /// <remarks>
+    /// Matched through the same five-character truncation the legacy dispatches on
+    /// [<c>se_cst_dw.sru:L236</c>], so <c>"unsigned long"</c> truncates to <c>"unsig"</c> and matches
+    /// nothing here exactly as it matches nothing there. The token is read from
+    /// <see cref="NumberValidator.LongCoercionColumnTypePrefixes"/> rather than restated, so the pair
+    /// cannot drift apart.
+    /// </remarks>
+    private static bool IsUnsignedIntegralColumnType(string columnType) =>
+        string.Equals(
+            NumberValidator.ColumnTypePrefix(columnType),
+            NumberValidator.LongCoercionColumnTypePrefixes[1],
+            StringComparison.Ordinal);
 
     /// <summary>
     /// Whether text coerces to the declared type, through the ported reporting coercions.
@@ -584,6 +849,63 @@ internal sealed class UpdateRowValidator
                 // NO CATEGORY IS CLAIMED. This refusal has no oracle and therefore no translation
                 // table answered for it; reporting CAT_DWSVC would tell a characterization comparison
                 // that one did. Zero is "none", matching StructuredError.category's own contract.
+                localizationCategory: 0L,
+                localized: false,
+                arguments,
+                RetCode.E_INVALID_ARGUMENT));
+    }
+
+    /// <summary>Builds the missing-baseline refusal.</summary>
+    /// <param name="row">The row the column was in.</param>
+    /// <param name="column">The column that stated no original.</param>
+    /// <param name="columnType">The declared type, reported for the operator's benefit.</param>
+    /// <returns>The failure.</returns>
+    /// <remarks>
+    /// <para>
+    /// A DEFINED ERROR WITH NO ORACLE, AND IT SAYS SO. In process there is no such condition to reproduce
+    /// - the runtime maintains a row's originals itself, so a caller cannot omit one - which makes this a
+    /// fault the boundary newly permits and therefore a defined error rather than a translated dialog
+    /// (AAP 0.1.5). It reports <c>localized = false</c> and claims NO localization category, because
+    /// claiming one would tell a characterization comparison that a translation table answered when none
+    /// did. That is the identical posture the unknown-column refusal takes, for the identical reason.
+    /// </para>
+    /// <para>
+    /// THE TEXT CARRIES ONLY WHAT THE CALLER ALREADY SENT - a column name and an ordinal - and never a
+    /// value, an exception detail or anything read out of storage (CWE-209, C-F).
+    /// </para>
+    /// <para>
+    /// THE CODE IS <c>E_INVALID_ARGUMENT</c> AND NOT <c>E_INVALID_DATA</c>, because what is wrong is the
+    /// SHAPE of the request rather than a value in it: the payload omitted a member the update contract
+    /// requires. It is also what makes the row's outcome code the structural one, since
+    /// <c>Grpc/DataWindowService.BuildValidationRefusal</c> reports the structural code whenever any
+    /// addressing-or-shape fault is present - a caller must fix the shape before its values mean
+    /// anything. Both codes project to HTTP 400 at the ingress, so the choice changes the diagnosis a
+    /// caller reads rather than the status.
+    /// </para>
+    /// </remarks>
+    private static UpdateRowValidationFailure BuildMissingOriginal(
+        DataWindowRow row,
+        ColumnValue column,
+        string columnType)
+    {
+        ImmutableArray<string> arguments =
+        [
+            column.ColumnName,
+            column.ColumnId.ToString(CultureInfo.InvariantCulture),
+        ];
+
+        return new UpdateRowValidationFailure(
+            row.Buffer,
+            row.Row,
+            column.ColumnName,
+            column.ColumnId,
+            columnType,
+            UpdateRowValidationKind.MissingOriginalValue,
+            RetCode.E_INVALID_ARGUMENT,
+            ValidationStructuredError.Create(
+                MissingOriginalTitle,
+                MissingOriginalTemplate,
+                DialogSeverity.StopSign,
                 localizationCategory: 0L,
                 localized: false,
                 arguments,

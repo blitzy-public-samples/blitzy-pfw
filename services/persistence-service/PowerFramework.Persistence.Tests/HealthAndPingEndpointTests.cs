@@ -140,21 +140,25 @@
 //
 //   8. ONE DIVERGENCE FROM THIS FILE'S OWN BRIEF, RECORDED RATHER THAN QUIETLY RESOLVED (C-K). The
 //      brief for this file asks it to assert that the REST routes and the gRPC surface share ONE
-//      PLAINTEXT Kestrel endpoint with HTTP/1.1 and HTTP/2 both enabled on port 5101. The service does
-//      NOT ship that arrangement, and the reason is recorded in appsettings.json and was measured on
-//      SDK 10.0.302 rather than assumed: a single CLEARTEXT endpoint declaring `Http1AndHttp2` does not
-//      serve HTTP/2 at all - Kestrel warns that HTTP/2 requires TLS application-protocol negotiation
-//      and serves HTTP/1.1 only, which would take all four gRPC contracts off the air while leaving
-//      the REST routes answering 200. What ships instead is TWO TLS endpoints, `Rest https://+:5101`
-//      pinned to HTTP/1.1 and `Grpc https://+:5111` pinned to HTTP/2, so that a probe and a gRPC
-//      channel each reach a listener that can only answer the thing it is for.
+//      Kestrel endpoint with HTTP/1.1 and HTTP/2 both enabled on port 5101, in PLAINTEXT. One endpoint
+//      on 5101 carrying both versions is exactly what ships; the plaintext half does not, and the
+//      reason is recorded in appsettings.json and was measured on this toolchain rather than assumed:
+//      a single CLEARTEXT endpoint declaring `Http1AndHttp2` does not serve HTTP/2 at all - Kestrel
+//      warns that HTTP/2 requires TLS application-protocol negotiation and serves HTTP/1.1 only, which
+//      would take all four gRPC contracts off the air while leaving the REST routes answering 200.
+//      What ships is therefore ONE TLS endpoint, `Rest https://+:5101` with `Http1AndHttp2`, where
+//      ALPN gives a probe HTTP/1.1 and a gRPC channel HTTP/2 on that one port - measured on a
+//      throwaway host before it was asserted here.
 //
-//      Asserting the brief's arrangement would therefore encode a claim the service deliberately does
-//      not satisfy, and a test that fails for being right about the wrong thing is worse than no test.
+//      A REVISION BETWEEN THE TWO SPLIT THEM ACROSS TWO TLS ENDPOINTS, 5101 pinned to HTTP/1.1 and a
+//      second port pinned to HTTP/2, so each listener could only answer what it was for. That was
+//      withdrawn: AAP 0.3.2.2 assigns contracts C-05 through C-08 to 5101, so serving them anywhere
+//      else put a published contract on a port the map does not give it.
+//
 //      This file asserts the arrangement that SHIPS, and separately asserts the substance the brief is
 //      protecting - that ONE application, ONE route table and ONE pipeline carry both REST routes AND
 //      all four gRPC contracts, and that an HTTP/1.1 request for the readiness route is answered by
-//      that same host. The listener split is a deployment fact that lives in configuration; the shared
+//      that same host. The listener is a deployment fact that lives in configuration; the shared
 //      composition is the property a test can actually hold.
 //
 //   9. WHAT IS DELIBERATELY NOT HERE.
@@ -1448,8 +1452,8 @@ public sealed class HealthAndPingEndpointTests
     }
 
     /// <summary>
-    /// The configured listeners pin one protocol version each, both over TLS, and leave the reserved
-    /// port unbound.
+    /// The one configured listener carries both protocol versions over TLS on the assigned port, and the
+    /// reserved port stays unbound.
     /// </summary>
     /// <returns>A task representing the assertion.</returns>
     /// <remarks>
@@ -1460,13 +1464,25 @@ public sealed class HealthAndPingEndpointTests
     /// recompile, and configuration is consequently the only honest place to assert the arrangement.
     /// </para>
     /// <para>
-    /// WHY THE SPLIT IS ASSERTED RATHER THAN TOLERATED. A single CLEARTEXT endpoint declaring both
-    /// protocol versions does NOT serve HTTP/2 - measured on this toolchain, Kestrel warns that HTTP/2
-    /// requires TLS application-protocol negotiation and then serves HTTP/1.1 only, which would take all
-    /// four gRPC contracts off the air while the readiness probe kept answering 200. That is the worst
-    /// available failure shape, because the gate would open onto a service that could serve nothing. So
-    /// each endpoint declares TLS and pins ONE version, and a probe or a channel aimed at the wrong
-    /// address fails at the transport rather than somewhere less attributable.
+    /// WHY TLS IS ASSERTED RATHER THAN TOLERATED, AND WHY IT IS THE LOAD-BEARING HALF. A single CLEARTEXT
+    /// endpoint declaring both protocol versions does NOT serve HTTP/2 - measured on this toolchain,
+    /// Kestrel warns that HTTP/2 requires TLS application-protocol negotiation and then serves HTTP/1.1
+    /// only, which would take all four gRPC contracts off the air while the readiness probe kept answering
+    /// 200. That is the worst available failure shape, because the gate would open onto a service that
+    /// could serve nothing. Over TLS the same declaration works exactly as written: ALPN gives a probe
+    /// HTTP/1.1 and a channel HTTP/2 on one port, measured on a throwaway host before being asserted here.
+    /// TLS is additionally required in its own right - every request across this listener carries a bearer
+    /// token and this is the only service holding a storage provider, so a readable channel would expose
+    /// the credential and the data it authorises together.
+    /// </para>
+    /// <para>
+    /// ONE ENDPOINT, ON THE PORT THE MAP ASSIGNS, AND THE WITHDRAWN SECOND ONE IS ASSERTED ABSENT. A
+    /// revision before this one split the surfaces across two TLS endpoints - 5101 pinned to
+    /// <c>Http1</c> and a second port pinned to <c>Http2</c> - so that each listener could only answer
+    /// what it was for. AAP 0.3.2.2 assigns contracts C-05 through C-08 to 5101, so that arrangement
+    /// served published contracts on a port the map does not give them; it was collapsed onto the assigned
+    /// port. The absence of a second endpoint is asserted rather than assumed, because re-adding one is
+    /// how the surfaces would drift apart again.
     /// </para>
     /// <para>
     /// AND THE RESERVED PORT STAYS UNBOUND (constraint C-D). The documented port band assigns 5103 to a
@@ -1475,7 +1491,7 @@ public sealed class HealthAndPingEndpointTests
     /// </para>
     /// </remarks>
     [Fact]
-    public async Task TheConfiguredListenersPinOneProtocolVersionEachOverTls()
+    public async Task TheConfiguredListenerCarriesBothProtocolVersionsOverTlsOnTheAssignedPort()
     {
         await using HealthAndPingHost host = HealthAndPingHost.Create(
             storage: ScriptedStorageCheck.Reporting(HealthStatus.Healthy));
@@ -1483,30 +1499,25 @@ public sealed class HealthAndPingEndpointTests
         IConfiguration configuration = host.Services.GetRequiredService<IConfiguration>();
 
         string restUrl = configuration["Kestrel:Endpoints:Rest:Url"] ?? string.Empty;
-        string grpcUrl = configuration["Kestrel:Endpoints:Grpc:Url"] ?? string.Empty;
 
         Assert.Equal("https://+:5101", restUrl);
-        Assert.Equal("Http1", configuration["Kestrel:Endpoints:Rest:Protocols"]);
+        Assert.Equal("Http1AndHttp2", configuration["Kestrel:Endpoints:Rest:Protocols"]);
 
-        Assert.Equal("https://+:5111", grpcUrl);
-        Assert.Equal("Http2", configuration["Kestrel:Endpoints:Grpc:Protocols"]);
-
-        // Neither is plaintext, because every request across either carries a bearer token and this is
-        // the only service holding a storage provider - a readable channel would expose the credential
-        // and the data it authorises together.
+        // It is not plaintext, because every request across it carries a bearer token and this is the only
+        // service holding a storage provider - and because HTTP/2 is unavailable without TLS at all.
         Assert.StartsWith("https://", restUrl, StringComparison.Ordinal);
-        Assert.StartsWith("https://", grpcUrl, StringComparison.Ordinal);
 
-        // Neither endpoint declares the combined protocol set, which under TLS would work and is
-        // deliberately not used: it would let each address accept traffic it is not the address for.
-        Assert.DoesNotContain(
-            "Http1AndHttp2",
+        // EXACTLY ONE ENDPOINT. A second would put a published contract back on a port AAP 0.3.2.2 does
+        // not assign it, which is precisely what was withdrawn.
+        Assert.Equal(
+            ["Rest"],
             configuration
                 .GetSection("Kestrel:Endpoints")
                 .GetChildren()
-                .Select(section => section["Protocols"] ?? string.Empty)
-                .ToArray(),
-            StringComparer.Ordinal);
+                .Select(section => section.Key)
+                .OrderBy(static key => key, StringComparer.Ordinal));
+
+        Assert.Null(configuration["Kestrel:Endpoints:Grpc:Url"]);
 
         // The reserved Phase-2 slot is not bound by this service.
         Assert.DoesNotContain(
@@ -2059,6 +2070,16 @@ public sealed class HealthAndPingEndpointTests
                 ["Jwt:Audience"] = TrustedAudience,
                 ["Jwt:RequireHttpsMetadata"] = "true",
                 ["Sqlite:DataDirectory"] = _storageDirectory,
+
+                // STARTUP PROVISIONING OFF, SO THIS FILE'S SUBJECT STAYS REACHABLE. Switched ON, the
+                // startup sequence applies pending migrations before the pipeline is built, which would
+                // repair the unprovisioned engine these cases report on - and would create the database
+                // file the unreachable-engine case asserts the absence of. This IS the shipped default, so
+                // the line is written out rather than relied upon: it pins the posture these cases need
+                // against a later default, and it is the same posture a characterization capture run uses.
+                // The provisioning behaviour itself is asserted against the real graph in
+                // CompositionRootTests and against the step directly in SchemaProvisionerTests.
+                ["Schema:ApplyMigrationsOnStartup"] = "false",
             };
 
             // LAST, so a case can override any of the four above - which is how the startup-gate case

@@ -2400,6 +2400,16 @@ public sealed class DataWindowServiceContractTests
     /// spelling is the one its own helper's siblings already use.
     /// </para>
     /// <para>
+    /// 🔴 <b>E_INVALID_HANDLE IS THE ONE ROW THAT MOVED, AND IT MOVED BECAUSE THE TWO HELPERS DID NOT MERELY
+    /// SPELL IT DIFFERENTLY - THEY ANSWERED DIFFERENTLY.</b> This path used to give it
+    /// <c>FailedPrecondition</c> while the theory above gave it <c>NotFound</c>, and the published projection
+    /// declares no <c>FailedPrecondition</c> row: that status falls to the canonical mapping and reaches the
+    /// caller as <c>400</c> carrying <c>E_INVALID_ARGUMENT</c>, replacing the originating code rather than
+    /// re-spelling it. So a caller naming a handle the upstream no longer holds was told on one path that it
+    /// could not be found and on the other that its argument was malformed. Both paths now answer
+    /// <c>NotFound</c>.
+    /// </para>
+    /// <para>
     /// AND THE DATABASE ERROR STILL TRAVELS ON EVERY ROW. The chunk is asserted alongside the status,
     /// because the payload claim and the classification claim are independent and a fix to one must not
     /// quietly cost the other.
@@ -2416,7 +2426,7 @@ public sealed class DataWindowServiceContractTests
     [InlineData(WireRetCode.ENotExists, StatusCode.NotFound)]
     [InlineData(WireRetCode.EVarNotFound, StatusCode.NotFound)]
     [InlineData(WireRetCode.EMemberNotFound, StatusCode.NotFound)]
-    [InlineData(WireRetCode.EInvalidHandle, StatusCode.FailedPrecondition)]
+    [InlineData(WireRetCode.EInvalidHandle, StatusCode.NotFound)]
     [InlineData(WireRetCode.EInvalidTransaction, StatusCode.FailedPrecondition)]
     [InlineData(WireRetCode.EAccessDenied, StatusCode.PermissionDenied)]
     [InlineData(WireRetCode.ENoSupport, StatusCode.Unimplemented)]

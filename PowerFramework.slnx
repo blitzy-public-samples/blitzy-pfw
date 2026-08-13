@@ -192,8 +192,8 @@
   <Folder Name="/services/">
 
     <!--
-      DataServices, ports 5102 REST and 5112 gRPC: the DataWindow retrieval, validation and update
-      triple, the 22 event DataWindow chain, and the column expression engine.
+      DataServices, port 5102 carrying REST and gRPC on one endpoint: the DataWindow retrieval,
+      validation and update triple, the 22 event DataWindow chain, and the column expression engine.
     -->
     <Project Path="services/dataservices-service/PowerFramework.DataServices/PowerFramework.DataServices.csproj" />
     <Project Path="services/dataservices-service/PowerFramework.DataServices.Tests/PowerFramework.DataServices.Tests.csproj" />
@@ -206,8 +206,8 @@
     <Project Path="services/gateway-service/PowerFramework.Gateway.Tests/PowerFramework.Gateway.Tests.csproj" />
 
     <!--
-      Persistence, ports 5101 REST and 5111 gRPC: the only service that generates or executes SQL
-      and the only one holding a storage provider.
+      Persistence, port 5101 carrying REST and gRPC on one endpoint: the only service that generates
+      or executes SQL and the only one holding a storage provider.
     -->
     <Project Path="services/persistence-service/PowerFramework.Persistence/PowerFramework.Persistence.csproj" />
     <Project Path="services/persistence-service/PowerFramework.Persistence.Tests/PowerFramework.Persistence.Tests.csproj" />

@@ -2662,14 +2662,17 @@ internal sealed class ScriptedChangesetCodec : IChangesetPayloadCodec
     }
 
     /// <inheritdoc/>
-    public long TryApply(DataWindowBufferStore target, CarrierState? state)
+    public long TryApply(
+        DataWindowBufferStore target,
+        CarrierState? state,
+        CarrierBaselineTrust baselineTrust)
     {
         ArgumentNullException.ThrowIfNull(target);
 
         ApplyCalls++;
         LastApplied = state;
 
-        return ApplyResult ?? _inner.TryApply(target, state);
+        return ApplyResult ?? _inner.TryApply(target, state, baselineTrust);
     }
 }
 
@@ -3036,8 +3039,16 @@ internal sealed class FakeDataWindowCarrier : DataWindowBufferStore, IIdentityVa
 
     /// <summary>Applies a changeset onto this carrier - the legacy <c>SetChanges</c>.</summary>
     /// <param name="state">The payload to apply.</param>
+    /// <param name="baselineTrust">
+    /// Which baseline rule to apply. Defaults to
+    /// <see cref="CarrierBaselineTrust.RequiredOnChangedRows"/> - the reading the production update
+    /// carrier uses - so a test that says nothing gets the update path's strictness. A test staging a
+    /// TRANSFER, which is the other caller of this codec, passes
+    /// <see cref="CarrierBaselineTrust.AsStated"/> explicitly.
+    /// </param>
     /// <returns>The datastore success or failure value.</returns>
     /// <remarks>
+    /// <para>
     /// <b>A PRESERVED DEFECT GOVERNS HOW THIS MAY BE USED (C-B).</b> The legacy records that
     /// <c>Reset</c> MUST NOT be used to clear data before applying a changeset, because doing so makes
     /// the application fail to apply
@@ -3045,10 +3056,20 @@ internal sealed class FakeDataWindowCarrier : DataWindowBufferStore, IIdentityVa
     /// that changeset application may LOSE ROWS on a sorted DataWindow larger than one block
     /// [<c>:L148</c>], worked around by moving rows through a temporary datastore. Neither defect is
     /// corrected here or in the production codec.
+    /// </para>
+    /// <para>
+    /// THE DEFAULT IS THE STRICTER OF THE TWO READINGS ON PURPOSE. This double stands in for the
+    /// carrier the update task applies its payload onto [<c>Tasks/SqlUpdateCarrier.SetChanges</c>],
+    /// where the originals become the <c>updatewhere=1</c> predicate, so a test that forgets to say
+    /// which reading it wants gets the one that refuses a fabricated baseline rather than the one that
+    /// infers it.
+    /// </para>
     /// </remarks>
-    internal long SetChanges(CarrierState? state)
+    internal long SetChanges(
+        CarrierState? state,
+        CarrierBaselineTrust baselineTrust = CarrierBaselineTrust.RequiredOnChangedRows)
     {
-        return Changeset.TryApply(this, state);
+        return Changeset.TryApply(this, state, baselineTrust);
     }
 
     /// <summary>Captures this carrier's full state - the legacy <c>GetFullState</c>.</summary>
@@ -4394,12 +4415,61 @@ public sealed class TestDoublesSanityTests
         FakeDataWindowCarrier target = new();
         target.SetColumnNames(["id", "age"]);
 
-        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, target.SetChanges(state));
+        // A GetChanges-then-SetChanges round trip IS THE TRANSFER PATH, so it is read as one. The encoder
+        // omits an original wherever it equals the current value, which is a positive statement that the
+        // column did not move - column 1 above was seeded and never edited, so no original is emitted for
+        // it. AsStated honours that encoding.
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            target.SetChanges(state, CarrierBaselineTrust.AsStated));
         Assert.Equal(1L, target.RowCount());
         Assert.Equal(41L, target.GetItemValue(1L, 2, DwBuffer.Primary));
         Assert.Equal(
             ItemStatus.DataModified,
             target.GetItemStatus(1L, ItemStatusMachine.RowStatusColumn, DwBuffer.Primary));
+
+        // 🔴 AND THE UPDATE READING - this double's DEFAULT - REFUSES A PAYLOAD WITH AN UNSTATED
+        // BASELINE, which is what proves the two readings are genuinely different rather than one rule
+        // with a spare argument. On the update path an unstated baseline is refused rather than read as
+        // the caller's own current value, because it is the value the WHERE clause compares against. This
+        // is the arm that answers `E_INVALID_DATA` at `Tasks/SqlUpdateTask` STEP 5
+        // [n_cst_thread_task_sqlupdate.sru:L343-L344].
+        //
+        // THE PAYLOAD IS BUILT BY STRIPPING AN ORIGINAL RATHER THAN BY ROUND-TRIPPING ONE, and that is a
+        // consequence of the encoder being correct rather than a weakening of this assertion. THIS
+        // codec emits an original for EVERY column, agreeing or not, because AAP 0.6.3.2 admits no
+        // exemption - so no state it produces can exercise the strict arm at all. The threat model the
+        // arm exists for is a NON-CONFORMING PRODUCER, so the payload is made non-conforming here,
+        // exactly as one would arrive: column 1's baseline removed and nothing else touched.
+        CarrierState understated = state.Clone();
+        DataWindowRow understatedRow = understated.Segments
+            .Single(segment => segment.Buffer == DwBuffer.Primary)
+            .Rows
+            .Single();
+
+        Assert.Equal(2, understatedRow.OriginalValues.Count);
+
+        ColumnValue removed = understatedRow.OriginalValues.Single(value => value.ColumnId == 1);
+
+        Assert.True(understatedRow.OriginalValues.Remove(removed));
+        Assert.Equal(2, understatedRow.Columns.Count);
+
+        FakeDataWindowCarrier strict = new();
+        strict.SetColumnNames(["id", "age"]);
+
+        Assert.Equal(DataWindowBufferStore.DataStoreFailure, strict.SetChanges(understated));
+        Assert.Equal(0L, strict.RowCount());
+
+        // AND THE SAME PAYLOAD IS ACCEPTED UNDER THE RETRIEVE READING, which is what makes the pair a
+        // genuine discrimination: `AsStated` reads the absence as "did not move" and the strict default
+        // reads it as "no baseline was supplied".
+        FakeDataWindowCarrier lenient = new();
+        lenient.SetColumnNames(["id", "age"]);
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            lenient.SetChanges(understated, CarrierBaselineTrust.AsStated));
+        Assert.Equal(1L, lenient.RowCount());
 
         source.Changeset.EncodeResult = DataWindowBufferStore.DataStoreFailure;
 

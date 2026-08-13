@@ -35,7 +35,7 @@
 //      3 endpoints carry IAllowAnonymous  -> GET /health
 //                                            GET /.well-known/jwks.json
 //                                            GET /.well-known/openid-configuration
-//     20 endpoints carry IAuthorizeData   -> GET /v1/ping, POST /v1/tokens and the 17 C-02 operations
+//     20 endpoints carry IAuthorizeData   -> GET /v1/ping, POST /v1/tokens and the 18 C-02 operations
 //      1 endpoint carries neither         -> the generated contract document, which is consequently
 //                                            governed by the fallback policy and answers 401 to an
 //                                            anonymous caller exactly as the twenty explicit ones do
@@ -186,7 +186,7 @@
 
 // Deliberately NO serialization-helper import: every protected row sends a request with NO BODY at all,
 // because authorization runs before model binding, so this suite serializes nothing and consequently
-// takes no dependency on the seventeen cryptographic request schemas that belong to the parity suites.
+// takes no dependency on the sixteen cryptographic request schemas that belong to the parity suites.
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
@@ -351,9 +351,12 @@ public sealed class AuthorizationTests
     /// The verb every operation in the protected table other than ping is reached with.
     /// </summary>
     /// <remarks>
-    /// All seventeen cryptographic operations and issuance are declared with it, including the ones
+    /// All seventeen cryptographic POST projections and issuance are declared with it, including the ones
     /// that look like reads, so that payloads, digests and references never reach a request line and
-    /// therefore never reach an access log, a proxy cache or a browser history.
+    /// therefore never reach an access log, a proxy cache or a browser history. The eighteenth
+    /// cryptographic operation - the authored release - is the one exception and is a DELETE, because it
+    /// genuinely deletes a named server-side resource; what it carries on its request line is an opaque
+    /// <c>keyRef</c>, which names key material without being redeemable for any.
     /// </remarks>
     private const string PostMethod = "POST";
 
@@ -523,7 +526,8 @@ public sealed class AuthorizationTests
     /// EIGHT ENTRIES, CHOSEN SO THAT NO FAMILY CAN HIDE. Ping and issuance are both here because both
     /// are named in the contract as protected. The remaining six are one representative of each SHAPE
     /// FAMILY of the cryptographic surface - unkeyed digest, keyed digest, symmetric, asymmetric, random
-    /// and encoding - which matters because those seventeen operations are declared in family groups: an
+    /// and encoding - which matters because the contract's eighteen operations are declared in family
+    /// groups: an
     /// operation that lost its authorization requirement would take its whole family with it, and a
     /// table that sampled only one family would not notice.
     /// </para>
@@ -553,7 +557,7 @@ public sealed class AuthorizationTests
     /// NO ROW ASSERTS SUCCESS, AND NO ROW SENDS A REQUEST BODY. Success on these addresses belongs to the
     /// issuance and cryptographic parity suites. Sending no body is not laziness: authorization runs
     /// BEFORE model binding - measured, not assumed - so a body would change nothing about the outcome
-    /// while coupling this suite to seventeen request schemas it has no business knowing. Every row
+    /// while coupling this suite to sixteen request schemas it has no business knowing. Every row
     /// consequently also proves the ordering, because a service that bound the body first would answer a
     /// bad-request status instead of an unauthorized one.
     /// </remarks>
@@ -836,7 +840,7 @@ public sealed class AuthorizationTests
     /// runs before model binding, so a protected address answers 401 to a request carrying nothing at
     /// all; if the pipeline were ever reordered so that binding came first, these rows would start
     /// reporting a bad-request status and the table would catch it. It also keeps this suite free of any
-    /// knowledge of the seventeen cryptographic request schemas, which belong to the parity suites.
+    /// knowledge of the sixteen cryptographic request schemas, which belong to the parity suites.
     /// </para>
     /// </remarks>
     [Theory]
@@ -1518,27 +1522,37 @@ public sealed class AuthorizationTests
 
         // THE CANDIDATE MUST BE GRANTED TO THE MINTING SUBJECT, NOT MERELY SERVED BY THE DEPLOYMENT, and
         // that is the whole of what changed here. The issuer applies two gates: the deployment-wide
-        // audience roster and then the caller's own entry. Taking the first audience the deployment
-        // serves would name one this file's subject may not address, and the issuer would refuse to mint
-        // at all - so the row would fail during its own SETUP, before reaching the replay it exists to
-        // assert. Reading the caller's granted set gives an audience that mints and that this host
-        // nevertheless refuses inbound, which is exactly the credential the row needs.
+        // audience roster and then the GRANT MATRIX. Taking the first audience the deployment serves would
+        // name one this file's subject may not address, and the issuer would refuse to mint at all - so the
+        // row would fail during its own SETUP, before reaching the replay it exists to assert. Reading the
+        // matrix gives an audience that mints and that this host nevertheless refuses inbound, which is
+        // exactly the credential the row needs.
+        //
+        // READ FROM THE MATRIX AND NOT FROM THE CREDENTIAL DIRECTORY. The directory answers who may
+        // authenticate; it carries no permission member at all, because a second surface describing one
+        // decision is what let a roster advertise audiences the matrix refused.
         Assert.True(
             primary.Services
                 .GetRequiredService<IssuanceClientRegistry>()
                 .TryResolveSubject(TokenSubject, out RegisteredIssuanceClient? registered),
-            $"This host's issuance roster registers no subject '{TokenSubject}', so no token can be "
+            $"This host's credential directory registers no subject '{TokenSubject}', so no token can be "
             + "minted for it at all.");
 
-        string? unaccepted = registered.PermittedAudiences
+        Assert.Equal(TokenSubject, registered.Subject);
+
+        string? unaccepted = IssuanceFixture
+            .EffectiveGrants(primary.ResolveSecurityOptions())
+            .Where(grant =>
+                string.Equals(grant.Caller, TokenSubject, StringComparison.Ordinal)
+                && grant.Scopes.Count > 0)
+            .Select(static grant => grant.Audience)
             .FirstOrDefault(candidate =>
                 !string.Equals(candidate, accepted, StringComparison.Ordinal));
 
         return unaccepted ?? throw new InvalidOperationException(
-            "This host's issuance roster grants the minting subject no audience other than the one this "
+            "This host's grant matrix permits the minting subject no audience other than the one this "
             + "host accepts inbound, so the replay case cannot be constructed against it. Widen that "
-            + "caller's granted audiences before the host starts. This message echoes no configured "
-            + "value.");
+            + "caller's grants before the host starts. This message echoes no configured value.");
     }
 
     /// <summary>

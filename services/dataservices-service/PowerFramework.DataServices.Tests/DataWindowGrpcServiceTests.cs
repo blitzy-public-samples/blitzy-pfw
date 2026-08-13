@@ -906,9 +906,9 @@ public sealed class DataWindowGrpcRetrieveTests(DataServicesTestHostFactory host
 
         // AND THE ABANDONED CALL STILL GAVE ITS UPSTREAM HANDLES BACK. A cancellation is the path most
         // likely to leak them, because it is the one path that does not run to the end of the method
-        // body; the release must therefore be unconditional. Polled briefly because the server's own
-        // unwind races the client's observation of the status - the assertion is that it happens, not
-        // that it has already happened at the instant the client noticed.
+        // body; the release must therefore be unconditional. Awaited rather than polled because the
+        // server's own unwind races the client's observation of the status - the assertion is that the
+        // release happens, not that it has already happened at the instant the client noticed.
         await WaitForUpstreamReleaseAsync();
 
         Assert.True(
@@ -918,11 +918,33 @@ public sealed class DataWindowGrpcRetrieveTests(DataServicesTestHostFactory host
                 + $"[{string.Join(", ", host.PersistenceEdge.HeldQueryTaskIds)}].");
     }
 
+    /// <summary>Yields until the upstream edge holds nothing.</summary>
+    /// <returns>A task that completes once every upstream handle has been given back.</returns>
+    /// <remarks>
+    /// <para>
+    /// TOKEN-DRIVEN AND UNBOUNDED, AND THE OLD SHAPE WAS WORSE THAN MERELY SLOW. It retried up to fifty
+    /// times at twenty milliseconds and then RETURNED NORMALLY, so an expired bound did not report itself at
+    /// all - it handed a still-leaking edge to the caller's assertion, which then failed as though the
+    /// release had never been attempted. The truth in that case is "a one-second budget elapsed on a loaded
+    /// agent", and the two are indistinguishable in the failure message.
+    /// </para>
+    /// <para>
+    /// There is now no attempt count and no delay: the loop yields until the edge is clear, and only the
+    /// test's own cancellation token can end it early. A release that genuinely never happens - the leak
+    /// this case exists to catch - is ended by the runner's timeout, the separate liveness bound that
+    /// belongs outside the assertion, and the caller's assertion still names exactly which handles were
+    /// held. Nothing here asserts a duration (AAP 0.8.5).
+    /// </para>
+    /// </remarks>
     private async Task WaitForUpstreamReleaseAsync()
     {
-        for (int attempt = 0; attempt < 50 && !host.PersistenceEdge.NothingIsStillHeld; attempt++)
+        while (!host.PersistenceEdge.NothingIsStillHeld)
         {
-            await Task.Delay(TimeSpan.FromMilliseconds(20), TestContext.Current.CancellationToken);
+            TestContext.Current.CancellationToken.ThrowIfCancellationRequested();
+
+            // Hands the scheduler the continuation carrying the server's unwind. No duration, so nothing
+            // here can expire; a release that never happens is ended by the runner, not by this loop.
+            await Task.Yield();
         }
     }
 
@@ -3134,4 +3156,3 @@ public sealed class DataWindowGrpcEventGateTests(WireEventChainHostFixture fixtu
             },
             cancellationToken: TestContext.Current.CancellationToken)).SessionId;
 }
-

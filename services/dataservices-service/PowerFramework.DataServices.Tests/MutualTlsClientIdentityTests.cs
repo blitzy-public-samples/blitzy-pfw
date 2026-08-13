@@ -1,7 +1,7 @@
 // ==================================================================================================
 //  MutualTlsClientIdentityTests.cs
 //  ------------------------------------------------------------------------------------------------
-//  SUBJECT   PowerFramework.DataServices.DataServicesComposition.LoadMutualTlsClientIdentity
+//  SUBJECT   PowerFramework.DataServices.DataServicesComposition.LoadSecurityClientIdentity
 //            the X509Certificate2Collection singleton and its eager resolve in Program.cs
 //            the primary message handler the SecurityClient registration composes
 //
@@ -34,6 +34,17 @@
 //  file-system error names the path, and discarding it to keep the chain clean would trade a diagnosable
 //  startup failure for a mysterious one. It is safe for the same reason the eager resolve is - a startup
 //  exception reaches the operator channel and never a caller.
+//
+//  WHY THE SUBJECT OF THIS FILE CHANGED, AND WHAT WAS WRONG BEFORE. These tests used to call a helper
+//  named `LoadMutualTlsClientIdentity`, which had NO production call site: the singleton registration in
+//  `Program.cs` has always used `LoadSecurityClientIdentity`. Two near-identical loaders coexisted, and
+//  the tested one was the dead one - so every assertion here about refusal wording described diagnostics
+//  no deployment could ever emit. The two genuinely differed on that point: the dead helper quoted the
+//  GROUP key plus bare property names, while the live one quotes both FULLY-QUALIFIED configuration keys,
+//  which is why the two constants below are spelled out in full rather than reduced to the group. A test
+//  that passes against an unreachable implementation is worse than no test, because it reports confidence
+//  it has not earned. The duplicate is deleted and every assertion below now runs against the loader the
+//  deployed registration calls.
 // ==================================================================================================
 
 using System.Globalization;
@@ -104,7 +115,7 @@ public sealed class MutualTlsClientIdentityTests
         Assert.False(unset.IsConfigured);
 
         X509Certificate2Collection identity =
-            DataServicesComposition.LoadMutualTlsClientIdentity(unset);
+            DataServicesComposition.LoadSecurityClientIdentity(unset);
 
         // EMPTY RATHER THAN NULL, deliberately: the handler registration then has one shape to handle
         // instead of two, and the eager resolve can assert that the singleton composed without asserting
@@ -153,19 +164,21 @@ public sealed class MutualTlsClientIdentityTests
         Assert.True(half.IsConfigured);
 
         InvalidOperationException refusal = Assert.Throws<InvalidOperationException>(
-            () => DataServicesComposition.LoadMutualTlsClientIdentity(half));
+            () => DataServicesComposition.LoadSecurityClientIdentity(half));
 
+        // BOTH KEYS, FULLY QUALIFIED, AND THAT PRECISION IS THE POINT RATHER THAN PEDANTRY. An operator
+        // has to be able to tell which half is missing, and a bare `CertificatePath` does not locate a
+        // setting in a file with several sections. It is also the assertion that DISCRIMINATES this loader
+        // from the dead duplicate this file used to exercise: that one quoted the group key plus the bare
+        // property names, so it would satisfy a `Contains(GroupKey)` and a `Contains(nameof(...))` check
+        // while failing these two. Asserting the group alone is what let the tests pass against an
+        // implementation no deployment could reach.
+        Assert.Contains(CertificatePathKey, refusal.Message, StringComparison.Ordinal);
+        Assert.Contains(CertificateKeyPathKey, refusal.Message, StringComparison.Ordinal);
+
+        // The group prefix follows from the two above, and is asserted separately so a future message that
+        // dropped the section prefix from both keys still fails loudly.
         Assert.Contains(GroupKey, refusal.Message, StringComparison.Ordinal);
-
-        // Both key names, because an operator has to be able to tell which half is missing.
-        Assert.Contains(
-            nameof(MutualTlsClientOptions.CertificatePath),
-            refusal.Message,
-            StringComparison.Ordinal);
-        Assert.Contains(
-            nameof(MutualTlsClientOptions.CertificateKeyPath),
-            refusal.Message,
-            StringComparison.Ordinal);
 
         Assert.DoesNotContain(certificatePath, refusal.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(keyPath, refusal.Message, StringComparison.Ordinal);
@@ -187,9 +200,14 @@ public sealed class MutualTlsClientIdentityTests
         };
 
         InvalidOperationException refusal = Assert.Throws<InvalidOperationException>(
-            () => DataServicesComposition.LoadMutualTlsClientIdentity(unreadable));
+            () => DataServicesComposition.LoadSecurityClientIdentity(unreadable));
 
+        // Fully qualified, for the reason the half-configured theory above records: it is what tells this
+        // loader's diagnostics apart from the deleted duplicate's.
+        Assert.Contains(CertificatePathKey, refusal.Message, StringComparison.Ordinal);
+        Assert.Contains(CertificateKeyPathKey, refusal.Message, StringComparison.Ordinal);
         Assert.Contains(GroupKey, refusal.Message, StringComparison.Ordinal);
+
         Assert.DoesNotContain(certificatePath, refusal.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(keyPath, refusal.Message, StringComparison.Ordinal);
 
@@ -222,7 +240,7 @@ public sealed class MutualTlsClientIdentityTests
 
         // Consistent with the options group's own reading: whitespace is absence, and absence is not a
         // fault. Asserted so the pairing between IsConfigured and the loader cannot drift apart.
-        Assert.Empty(DataServicesComposition.LoadMutualTlsClientIdentity(whitespace));
+        Assert.Empty(DataServicesComposition.LoadSecurityClientIdentity(whitespace));
     }
 
     /// <summary>
@@ -240,7 +258,7 @@ public sealed class MutualTlsClientIdentityTests
         using TemporaryClientIdentity material = TemporaryClientIdentity.Create();
 
         X509Certificate2Collection identity =
-            DataServicesComposition.LoadMutualTlsClientIdentity(material.Options);
+            DataServicesComposition.LoadSecurityClientIdentity(material.Options);
 
         X509Certificate2 loaded = Assert.Single(identity);
 

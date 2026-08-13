@@ -994,20 +994,30 @@ public sealed class CommandServiceTests
     }
 
     /// <summary>
-    /// ⚠ A PRESENT-BUT-BLANK statement is refused at the BOUNDARY, on both entry points, while the
-    /// worker's emptiness guard stays an emptiness guard.
+    /// ⚠ A PRESENT-BUT-BLANK statement is ACCEPTED and stored VERBATIM, because the oracle's guard is an
+    /// emptiness test and this port may not be stricter than the behaviour it preserves.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The oracle tests <c>sql = ""</c> and not blankness [<c>:L45</c>, <c>:L65-L68</c>], so a run of
-    /// spaces passed both guards, reached the provider, and was answered as a SUCCESS THAT DID NOTHING -
-    /// measured against the shipped provider, a whitespace-only command returns a row count of <c>-1</c>
-    /// without raising anything. Refusing it here turns a silent no-op into an actionable answer while
-    /// leaving both preserved guards untouched.
+    /// <b>THE GUARD BEING PRESERVED IS <c>sql = ""</c> AND NOTHING WIDER.</b> The oracle writes
+    /// <c>if sql = "" then return RetCode.E_INVALID_SQL</c> [<c>:L45</c>] and repeats the same emptiness
+    /// test in the task body [<c>:L65-L68</c>]. Neither tests blankness, so a run of spaces is accepted,
+    /// installed on the task and later submitted - and whatever the provider answers for it is the
+    /// answer the legacy gave.
     /// </para>
     /// <para>
-    /// The code is <c>E_INVALID_SQL</c> - the contract's own bad-statement code - rather than
-    /// <c>E_INVALID_ARGUMENT</c>, so a blank statement is classified the way an empty one is.
+    /// 🔴 <b>A BOUNDARY BLANKNESS REFUSAL WAS ADDED HERE AND HAS BEEN WITHDRAWN, AND THIS ROW IS WHAT
+    /// STOPS IT COMING BACK.</b> It answered <c>E_INVALID_SQL</c> with its own diagnostic for a
+    /// whitespace-only statement, on the reasoning that submitting one is a success that did nothing and
+    /// an actionable refusal is better. That reasoning is a JUDGEMENT ABOUT THE LEGACY'S DESIGN, not a
+    /// statement about its behaviour, and acting on it made the port refuse input the legacy accepts.
+    /// Constraint C-B and AAP G2 forbid that in either direction: a port that is stricter than its
+    /// oracle has changed behaviour exactly as much as one that is laxer, and "the legacy defect is
+    /// documented, never corrected" is the whole posture of this refactor.
+    /// </para>
+    /// <para>
+    /// STORED VERBATIM AND NOT TRIMMED, which is the second half of the claim: the value that reaches the
+    /// worker is the value the caller sent, character for character.
     /// </para>
     /// </remarks>
     /// <param name="blank">The blank statement under test.</param>
@@ -1016,7 +1026,7 @@ public sealed class CommandServiceTests
     [InlineData("   ")]
     [InlineData("\t")]
     [InlineData("\r\n")]
-    public async Task SetSqlRefusesAPresentButBlankStatement(string blank)
+    public async Task SetSqlAcceptsAPresentButBlankStatementVerbatim(string blank)
     {
         Harness harness = new();
         TaskHandle handle = await CreateTask(harness);
@@ -1025,19 +1035,24 @@ public sealed class CommandServiceTests
             new SetCommandSqlRequest { Task = handle, Sql = blank },
             Context);
 
-        Assert.Equal(WireRetCode.EInvalidSql, response.Status.RetCode);
-        Assert.Contains("only of whitespace", response.Status.ErrorText, StringComparison.Ordinal);
+        Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
 
-        // ATOMIC: nothing was installed, so the task still holds no statement.
-        Assert.Equal(string.Empty, Resolve(harness, handle).Worker.Sql);
+        // VERBATIM: not trimmed, not normalised, not rejected.
+        Assert.Equal(blank, Resolve(harness, handle).Worker.Sql);
     }
 
     /// <summary>
-    /// The same refusal on <c>Exec</c>'s optional statement field, so the two entry points cannot disagree
-    /// about one statement - and nothing is executed.
+    /// The same acceptance on <c>Exec</c>'s optional statement field, so the two entry points agree - and
+    /// the statement really is submitted rather than quietly dropped.
     /// </summary>
+    /// <remarks>
+    /// THE EXECUTION IS THE POINT. A refusal at the boundary and a silent no-op are both distinguishable
+    /// from what the legacy does, which is to hand the text to the provider and report what came back; this
+    /// row reads the execution seam to say that is what happens, and reads the statement recorded there to
+    /// say the text arrived unaltered.
+    /// </remarks>
     [Fact]
-    public async Task ExecRefusesAPresentButBlankStatementAndExecutesNothing()
+    public async Task ExecAcceptsAPresentButBlankStatementAndSubmitsIt()
     {
         Harness harness = new();
         TaskHandle handle = await CreateTask(harness);
@@ -1046,16 +1061,17 @@ public sealed class CommandServiceTests
             new ExecRequest { Task = handle, Sql = "   " },
             Context);
 
-        Assert.Equal(WireRetCode.EInvalidSql, response.Status.RetCode);
-        Assert.Contains("only of whitespace", response.Status.ErrorText, StringComparison.Ordinal);
-        Assert.Equal(0, harness.Engine.ExecuteCalls);
+        Assert.Equal(WireRetCode.Ok, response.Status.RetCode);
+        Assert.Equal(1, harness.Engine.ExecuteCalls);
+        Assert.Equal("   ", harness.Engine.LastStatement);
     }
 
     /// <summary>
-    /// ⚠ THE EMPTY STRING IS NOT CAUGHT BY THE BLANK GUARD, and that separation is deliberate: it belongs
-    /// to the worker's own preserved arm, which answers the same code with NO diagnostic at all
-    /// [<c>:L45</c>]. Keeping the two distinguishable is what stops the boundary refusal from swallowing an
-    /// observable legacy difference.
+    /// ⚠ THE EMPTY STRING IS THE ONE CASE THE ORACLE ITSELF REFUSES, and the refusal is the WORKER'S own
+    /// preserved arm - the same code with NO diagnostic at all [<c>:L45</c>]. It is asserted beside the
+    /// blank rows above precisely because the two look alike and behave differently: empty is refused
+    /// because the legacy refuses it, whitespace is accepted because the legacy accepts it, and no
+    /// boundary test of this service's own invention stands between them.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -1098,8 +1114,8 @@ public sealed class CommandServiceTests
     }
 
     /// <summary>
-    /// A statement made only of a COMMENT is not blank and is not refused - the control that proves the
-    /// guard tests blankness rather than "looks like it does nothing".
+    /// A statement made only of a COMMENT is stored verbatim, which is the control for the whole group: a
+    /// statement that plainly does nothing is still not this service's business to judge.
     /// </summary>
     [Fact]
     public async Task SetSqlAcceptsAStatementThatIsOnlyAComment()

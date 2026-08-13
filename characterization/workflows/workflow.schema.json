@@ -74,8 +74,8 @@
         "properties": {
           "path": {
             "type": "string",
-            "pattern": "^(?!\\.{1,2}(?:/|$))[^/\\\\\\s]+(?:/(?!\\.{1,2}(?:/|$))[^/\\\\\\s]+)*$",
-            "description": "Repository-root-relative path to the fixture, forward slashes only - for example ws_objects/pfw.tests.pbl.src/dw_sqlite.srd. The pattern rejects an absolute path, a ./ prefix, any .. segment, backslashes and whitespace, so a citation resolves to exactly one file from the repository root on any platform and cannot be written to point outside the checkout."
+            "pattern": "^(?![.~])(?!\\.{1,2}(?:/|$))[^/\\\\:\\s]+(?:/(?!\\.{1,2}(?:/|$))[^/\\\\:\\s]+)*$",
+            "description": "Repository-root-relative path to the fixture, forward slashes only - for example ws_objects/pfw.tests.pbl.src/dw_sqlite.srd. THE PATTERN IS A CONTAINMENT CONTROL, NOT A TIDINESS RULE, AND IT REJECTS EVERY FORM THAT COULD NAME A FILE OUTSIDE THE CHECKOUT: a POSIX-absolute path, a UNC path, any leading dot including a ./ prefix, any .. segment anywhere, a backslash, whitespace, a leading ~ that a shell would expand to a home directory, and ANY COLON - which is what rules out the Windows drive-absolute and drive-relative forms C:/Windows/System32/..., c:..., and the NTFS alternate-data-stream syntax file.srd:stream. An earlier revision rejected the POSIX forms and accepted the drive-absolute one, which read as protection while providing none on the platform the oracle actually runs on. A colon has no legitimate use in any path in this repository, so the exclusion costs nothing; non-ASCII characters ARE legitimate and are accepted, because one cited specification is docs/PB\u591a\u7ebf\u7a0b\u7ed5\u5751\u63d0\u793a.md. THE CONSUMER STILL OWES TWO STEPS, BECAUSE A PATTERN CANNOT SEE THE FILESYSTEM: resolve this value against the repository root, CANONICALIZE the result - following symbolic links, since a link inside the checkout can point anywhere - and then VERIFY the canonical path is still beneath the canonical repository root, refusing it with a named error when it is not. Neither step is optional, and no consumer may substitute a string check on this value for them."
           },
           "role": {
             "type": "string",
@@ -571,7 +571,7 @@
       "enum": [
         "specified-not-executed"
       ],
-      "description": "The honest state of this workflow, and the only legal value is specified-not-executed. No workflow in this store has been run and no paired capture has been taken on either side: the legacy half needs a PowerBuilder toolchain that is not present, and Docker was not installed and no daemon was available in the environment this store was authored in, so the compose bring-up that the capture rule is expressed against could not have been exercised there in any case. Nothing in this schema may imply a verified run, which is why the enum has exactly one member rather than a passed value waiting to be selected. Widening it is a deliberate act: a further value is added only in the same reviewed change that lands the recordings justifying it."
+      "description": "The honest state of this workflow, and the only legal value is specified-not-executed. No workflow in this store has been run and no paired capture has been taken on either side: the legacy half needs a PowerBuilder toolchain that is not present, and although the compose bring-up the capture rule is expressed against has itself been exercised - orchestration/README.md section 10 is the single execution-status statement for this repository - a bring-up produces no recording, so neither half of any pair exists. Nothing in this schema may imply a verified run, which is why the enum has exactly one member rather than a passed value waiting to be selected. Widening it is a deliberate act: a further value is added only in the same reviewed change that lands the recordings justifying it."
     },
     "relatedWorkflows": {
       "type": "array",

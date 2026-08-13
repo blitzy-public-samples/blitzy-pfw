@@ -500,6 +500,557 @@ public sealed class UpdateRowValidatorTests
             Column("address", AddressColumn, new AnyValue { StringValue = new string('x', 300) }))));
     }
 
+    /// <summary>
+    /// 🔴 A BLOB IS NOT A SCALAR AND A <c>char</c> COLUMN REFUSES IT, which "any scalar" above did not.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE CHAR ARM USED TO ACCEPT EVERY ARM WITHOUT LOOKING, and a blob was the one that mattered. There
+    /// is NO legacy coercion from <c>blob</c> to <c>string</c> - PowerScript requires an explicit codec
+    /// call, which is a different operation with a different result - so accepting one here invents
+    /// behaviour the oracle does not have. What actually happened downstream was worse than an invention:
+    /// the bytes were bound to a character column verbatim, so a write-then-read answered a value the
+    /// caller never sent, with nothing in the response saying so.
+    /// </para>
+    /// <para>
+    /// BOTH CHAR COLUMNS ARE DRIVEN, because they are declared with different widths
+    /// [<c>dw_sqlite.srd:L9</c>, <c>:L11</c>] and the refusal must be about the TYPE rather than about
+    /// either width - the width is a preserved defect and is still not enforced, which the case above
+    /// pins.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ABlobIsRefusedByACharColumn()
+    {
+        foreach ((string name, long ordinal) in ((string, long)[])[("name", NameColumn), ("address", AddressColumn)])
+        {
+            UpdateRowValidationFailure failure = Assert.Single(Validate(Row(
+                1L,
+                Column(name, ordinal, new AnyValue
+                {
+                    BlobValue = Google.Protobuf.ByteString.CopyFrom(0x00, 0x01, 0xFF),
+                }))));
+
+            Assert.Equal(UpdateRowValidationKind.InvalidValue, failure.Kind);
+            Assert.Equal(RetCode.E_INVALID_DATA, failure.ReturnCode);
+            Assert.Equal(name, failure.ColumnName);
+        }
+
+        // AND A STRING IS STILL ACCEPTED BY THE SAME COLUMN, so the refusal is about the arm and not
+        // about the column.
+        Assert.Empty(Validate(Row(
+            1L,
+            Column("name", NameColumn, new AnyValue { StringValue = "Paul" }))));
+    }
+
+    /// <summary>
+    /// 🔴 A NON-FINITE <c>double</c> IS REFUSED BY EVERY NUMERIC COLUMN.
+    /// </summary>
+    /// <param name="value">The non-finite value.</param>
+    /// <remarks>
+    /// FITTING THE FAMILY USED TO BE THE WHOLE TEST, and these three fit it. <c>NaN</c>, <c>+∞</c> and
+    /// <c>-∞</c> are legal <c>double</c> values and no legal DataWindow numeric value: PowerBuilder has no
+    /// literal for any of them. The storage engine behind this contract records a non-finite REAL as
+    /// <c>NULL</c>, so accepting one turns a write into a null - or into a NOT NULL violation raised by the
+    /// driver and reported as a 502 naming a constraint - neither of which says what the caller actually
+    /// sent.
+    /// </remarks>
+    [Theory]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    [InlineData(double.NegativeInfinity)]
+    public void ANonFiniteDoubleIsRefusedByANumericColumn(double value)
+    {
+        foreach ((string name, long ordinal) in ((string, long)[])
+            [("id", IdColumn), ("age", AgeColumn), ("salary", SalaryColumn)])
+        {
+            UpdateRowValidationFailure failure = Assert.Single(Validate(Row(
+                1L,
+                Column(name, ordinal, new AnyValue { DoubleValue = value }))));
+
+            Assert.Equal(UpdateRowValidationKind.InvalidValue, failure.Kind);
+            Assert.Equal(RetCode.E_INVALID_DATA, failure.ReturnCode);
+        }
+
+        // THE NEGATIVE CONTROL FOR THE SAME COLUMNS: a finite double is accepted, including a fractional
+        // one, because `number` and `decimal(n)` are Dec() columns and hold fractions perfectly well.
+        Assert.Empty(Validate(Row(
+            1L,
+            Column("age", AgeColumn, new AnyValue { DoubleValue = 32.5d }),
+            Column("salary", SalaryColumn, new AnyValue { DoubleValue = -1250.75d }))));
+    }
+
+    /// <summary>
+    /// 🔴 A DECIMAL ARM WHOSE CANONICAL TEXT DOES NOT PARSE IS REFUSED HERE, not left to the codec.
+    /// </summary>
+    /// <param name="text">The decimal arm's text.</param>
+    /// <remarks>
+    /// <c>common.v1.DecimalValue</c> carries canonical TEXT rather than a numeric field, so an unparseable
+    /// one is possible on the wire. Refusing it here answers a PER-COLUMN fault; leaving it to the
+    /// receiving codec answers a generic invalid-payload code for the whole request, which tells a caller
+    /// nothing about which column to correct.
+    /// </remarks>
+    [Theory]
+    [InlineData("")]
+    [InlineData("not-a-number")]
+    [InlineData("1,250.75")]
+    [InlineData("12 34")]
+    public void AnUnparseableDecimalArmIsRefused(string text)
+    {
+        UpdateRowValidationFailure failure = Assert.Single(Validate(Row(
+            1L,
+            Column("salary", SalaryColumn, new AnyValue
+            {
+                DecimalValue = new DecimalValue { Value = text },
+            }))));
+
+        Assert.Equal(UpdateRowValidationKind.InvalidValue, failure.Kind);
+
+        // AND THE CANONICAL SPELLINGS ARE ACCEPTED, including a negative and an exponent, so the refusal
+        // is about parseability rather than about a narrow format.
+        Assert.Empty(Validate(Row(
+            1L,
+            Column("salary", SalaryColumn, new AnyValue { DecimalValue = new DecimalValue { Value = "-1250.75" } }),
+            Column("age", AgeColumn, new AnyValue { DecimalValue = new DecimalValue { Value = "3E2" } }))));
+    }
+
+    /// <summary>
+    /// 🔴 AN INTEGRAL COLUMN REFUSES A VALUE ITS OWN <c>Long()</c> COERCION WOULD SILENTLY TRUNCATE OR
+    /// WRAP, and the identical values are accepted by a <c>Dec()</c> column.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE SUBTYPE DECIDES, WHICH IS WHY THE FAMILY TEST WAS NOT ENOUGH.</b> The legacy dispatches
+    /// <c>long</c> and <c>ulong</c> columns to <c>Long()</c> [<c>se_cst_dw.sru:L236-L237</c>], and
+    /// <c>Long()</c> TRUNCATES rather than rounds - so admitting 3.7 stores 3, a value the caller did not
+    /// send, arrived at silently. A negative value for <c>ulong</c> is outside the type's domain outright,
+    /// and a <c>uint64</c> past <see cref="long.MaxValue"/> cannot be held by the signed carrier at all.
+    /// </para>
+    /// <para>
+    /// <b>THE HOST IS SYNTHETIC AND SAYS SO, BECAUSE THE ORACLE HAS NO SUCH COLUMN.</b> The one updatable
+    /// DataWindow in the estate declares <c>number</c> and <c>decimal(2)</c> and nothing integral
+    /// [<c>dw_sqlite.srd:L8-L13</c>], so these arms are unreachable through it - and adding an integral
+    /// column to the transcribed catalogue to reach them would misrepresent the oracle (C-C). A test-only
+    /// definition is the honest way in: the TYPE TOKENS are the oracle's own, read from
+    /// <c>NumberValidator.LongCoercionColumnTypePrefixes</c>, and only the definition carrying them is
+    /// this file's.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AnIntegralColumnRefusesAFractionalOrOutOfDomainValue()
+    {
+        FakeDataWindowHost host = new();
+        _ = host.AddColumn("signed", FakeColumnType.Long);
+        _ = host.AddColumn("unsigned", FakeColumnType.ULong);
+        _ = host.AddColumn("fractional", FakeColumnType.DecimalOf(2));
+
+        const long Signed = 1L;
+        const long Unsigned = 2L;
+        const long Fractional = 3L;
+
+        // A FRACTION INTO EITHER INTEGRAL COLUMN, spelled as a double and as a decimal, because the two
+        // arms reach the same rule by different routes.
+        foreach (AnyValue fraction in (AnyValue[])
+            [
+                new AnyValue { DoubleValue = 3.7d },
+                new AnyValue { DecimalValue = new DecimalValue { Value = "3.7" } },
+            ])
+        {
+            Assert.Equal(
+                UpdateRowValidationKind.InvalidValue,
+                Assert.Single(Validate(host, Row(1L, Column("signed", Signed, fraction)))).Kind);
+            Assert.Equal(
+                UpdateRowValidationKind.InvalidValue,
+                Assert.Single(Validate(host, Row(1L, Column("unsigned", Unsigned, fraction)))).Kind);
+
+            // 🔴 AND THE SAME VALUE IS FINE FOR A Dec() COLUMN, which is what makes this a subtype
+            // decision rather than a blanket refusal of fractions.
+            Assert.Empty(Validate(host, Row(1L, Column("fractional", Fractional, fraction))));
+        }
+
+        // A NEGATIVE FOR ulong, in all three spellings that can express one.
+        foreach (AnyValue negative in (AnyValue[])
+            [
+                new AnyValue { Int64Value = -1L },
+                new AnyValue { DoubleValue = -1d },
+                new AnyValue { DecimalValue = new DecimalValue { Value = "-1" } },
+            ])
+        {
+            Assert.Equal(
+                UpdateRowValidationKind.InvalidValue,
+                Assert.Single(Validate(host, Row(1L, Column("unsigned", Unsigned, negative)))).Kind);
+
+            // The SIGNED column holds it, so the refusal is the domain and not the sign.
+            Assert.Empty(Validate(host, Row(1L, Column("signed", Signed, negative))));
+        }
+
+        // A uint64 PAST long.MaxValue: refused by the signed column, held by the unsigned one.
+        AnyValue beyond = new() { Uint64Value = (ulong)long.MaxValue + 1UL };
+
+        Assert.Equal(
+            UpdateRowValidationKind.InvalidValue,
+            Assert.Single(Validate(host, Row(1L, Column("signed", Signed, beyond)))).Kind);
+        Assert.Empty(Validate(host, Row(1L, Column("unsigned", Unsigned, beyond))));
+
+        // A double magnitude past the signed domain is refused for the same reason.
+        Assert.Equal(
+            UpdateRowValidationKind.InvalidValue,
+            Assert.Single(Validate(host, Row(
+                1L,
+                Column("signed", Signed, new AnyValue { DoubleValue = 1e19d })))).Kind);
+
+        // AND WHOLE VALUES IN DOMAIN ARE ACCEPTED BY BOTH, so nothing above is a refusal of integers.
+        Assert.Empty(Validate(
+            host,
+            Row(
+                1L,
+                Column("signed", Signed, new AnyValue { Int64Value = long.MinValue }),
+                Column("unsigned", Unsigned, new AnyValue { Uint64Value = ulong.MaxValue }),
+                Column("signed", Signed, new AnyValue { DoubleValue = -4d }),
+                Column("unsigned", Unsigned, new AnyValue { DecimalValue = new DecimalValue { Value = "4.000" } }))));
+    }
+
+    /// <summary>
+    /// 🔴 EVERY PUBLISHED VALUE ARM HAS A STATED DECISION, so an arm added to the contract cannot be
+    /// admitted unvalidated by default.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE DEFAULT ARM USED TO ACCEPT, AND THAT IS THE FINDING RESTATED AS A RULE.</b> Accepting an
+    /// unrecognised arm reads as generous on a READ path; on a WRITE path it inverts into precisely the
+    /// defect this validator exists to prevent, because an arm the code cannot reason about is exactly an
+    /// arm it cannot say is representable - and the value would then be bound to a column of a type
+    /// nothing had checked it against.
+    /// </para>
+    /// <para>
+    /// <b>ASSERTED AS SET EQUALITY AGAINST THE GENERATED ONE-OF, WHICH IS WHAT MAKES IT A GUARD RATHER
+    /// THAN A SNAPSHOT.</b> Every value of <c>AnyValue.KindOneofCase</c> must appear in the table below, so
+    /// widening <c>common.v1.AnyValue</c> fails this case until an author states the new arm's decision
+    /// here - and the decision itself is asserted by running the validator, not merely recorded.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void EveryPublishedValueArmHasAStatedDecisionForANumericColumn()
+    {
+        // The decision for `age`, declared `number` [dw_sqlite.srd:L10] - a Dec() column, so it takes the
+        // four numeric arms and nothing else. `None` is the unset state and reads as "no value supplied",
+        // which is accepted for the same reason an explicit null is.
+        Dictionary<AnyValue.KindOneofCase, (AnyValue Value, bool Accepted)> decisions = new()
+        {
+            [AnyValue.KindOneofCase.None] = (new AnyValue(), true),
+            [AnyValue.KindOneofCase.IsNull] = (new AnyValue { IsNull = true }, true),
+            [AnyValue.KindOneofCase.Int64Value] = (new AnyValue { Int64Value = 30L }, true),
+            [AnyValue.KindOneofCase.Uint64Value] = (new AnyValue { Uint64Value = 30UL }, true),
+            [AnyValue.KindOneofCase.DoubleValue] = (new AnyValue { DoubleValue = 30d }, true),
+            [AnyValue.KindOneofCase.DecimalValue] =
+                (new AnyValue { DecimalValue = new DecimalValue { Value = "30" } }, true),
+            [AnyValue.KindOneofCase.StringValue] = (new AnyValue { StringValue = "30" }, true),
+            [AnyValue.KindOneofCase.BoolValue] = (new AnyValue { BoolValue = true }, false),
+            [AnyValue.KindOneofCase.BlobValue] =
+                (new AnyValue { BlobValue = Google.Protobuf.ByteString.CopyFrom(1, 2) }, false),
+            [AnyValue.KindOneofCase.DateValue] = (Date(1999, 5, 8), false),
+            [AnyValue.KindOneofCase.TimeValue] =
+                (new AnyValue { TimeValue = new TimeValue { Value = "12:00:00" } }, false),
+            [AnyValue.KindOneofCase.DatetimeValue] = (Midnight(1999, 5, 8), false),
+        };
+
+        // THE GUARD. A new arm on the published message lands here first.
+        Assert.Equal(
+            Enum.GetValues<AnyValue.KindOneofCase>().Order().ToArray(),
+            decisions.Keys.Order().ToArray());
+
+        foreach ((AnyValue.KindOneofCase arm, (AnyValue value, bool accepted)) in decisions)
+        {
+            // The arm the builder actually produced, so a table row cannot claim an arm it did not set.
+            Assert.Equal(arm, value.KindCase);
+
+            ImmutableArray<UpdateRowValidationFailure> failures =
+                Validate(Row(1L, Column("age", AgeColumn, value)));
+
+            if (accepted)
+            {
+                Assert.Empty(failures);
+
+                continue;
+            }
+
+            Assert.Equal(UpdateRowValidationKind.InvalidValue, Assert.Single(failures).Kind);
+        }
+    }
+
+    /// <summary>
+    /// The three type disagreements between the DataWindow and the DDL are PRESERVED, because this layer
+    /// validates against the definition and never against storage.
+    /// </summary>
+    /// <remarks>
+    /// <b>C-B AND AAP 0.6.4, PINNED AS ONE CASE SO THE INTENT IS LEGIBLE.</b> The definition declares
+    /// <c>address char(200)</c> over an <c>ADDRESS CHAR(50)</c> column, <c>salary decimal(2)</c> over a
+    /// <c>SALARY REAL</c>, and <c>birth date</c> over a <c>BIRTH TEXT</c>
+    /// [<c>dw_sqlite.srd:L11-L13</c> against <c>w_test_sqlite.srw:L463-L469</c>]. All three are defects the
+    /// migration reproduces rather than reconciles, so a value that fits the DECLARED type is accepted here
+    /// whatever storage would do with it - and a validator that consulted the DDL would pick a side and
+    /// change behaviour.
+    /// </remarks>
+    [Fact]
+    public void TheThreeDeclaredVersusStoredTypeMismatchesAreNotThisLayersRefusal()
+    {
+        Assert.Empty(Validate(Row(
+            1L,
+
+            // 200 declared characters into a 50-character column: accepted, width unenforced either way.
+            Column("address", AddressColumn, new AnyValue { StringValue = new string('x', 200) }),
+
+            // Two-place decimal into a REAL: accepted as the DECIMAL arm the definition declares.
+            Column("salary", SalaryColumn, new AnyValue { DecimalValue = new DecimalValue { Value = "20000.00" } }),
+
+            // A date into a TEXT column: accepted as the DATE arm the definition declares. The reverse -
+            // a datetime into the same column - is still refused, because that is a DEFINITION mismatch
+            // rather than a storage one.
+            Column("birth", BirthColumn, Date(1999, 5, 8)))));
+
+        Assert.Equal(
+            UpdateRowValidationKind.InvalidValue,
+            Assert.Single(Validate(Row(1L, Column("birth", BirthColumn, Midnight(1999, 5, 8))))).Kind);
+    }
+
+    // ==============================================================================================
+    //  2b. THE CONCURRENCY BASELINE - A COLUMN THAT STATES NO ORIGINAL
+    //  --------------------------------------------------------------------------------------------
+    //  `updatewhere=1` builds the generated statement's where clause from the ORIGINAL value of every
+    //  column the row carries [dw_sqlite.srd:L14, AAP 0.6.3.2], so a column with no stated original
+    //  leaves the receiving codec with no baseline. Substituting the caller's own current value - which
+    //  is what happened before this check existed - produces a predicate built from the values being
+    //  WRITTEN: an ordinary update compares a row against itself and can never detect a lost race, and
+    //  an update whose KEY changed addresses the row named by the NEW key. Both report success.
+    //
+    //  THE SCOPE IS THE PREDICATE AND NOT THE ROW SHAPE, which the cases below pin from both sides.
+    // ==============================================================================================
+
+    /// <summary>
+    /// 🔴 A MODIFIED ROW THAT STATES NO ORIGINAL FOR A COLUMN IS REFUSED, and the refusal says what to
+    /// send.
+    /// </summary>
+    [Fact]
+    public void AModifiedRowThatStatesNoOriginalForAColumnIsRefused()
+    {
+        ImmutableArray<UpdateRowValidationFailure> failures = Validate(Row(
+            1L,
+            ItemStatus.DataModified,
+            [
+                Column("age", AgeColumn, new AnyValue { DoubleValue = 33d }),
+                Column("name", NameColumn, new AnyValue { StringValue = "Paul" }),
+            ],
+            [Column("name", NameColumn, new AnyValue { StringValue = "Paul" })]));
+
+        UpdateRowValidationFailure failure = Assert.Single(failures);
+
+        Assert.Equal(UpdateRowValidationKind.MissingOriginalValue, failure.Kind);
+
+        // THE STRUCTURAL CODE, because the payload's SHAPE is wrong rather than its value: a caller must
+        // fix what it sends before its values mean anything.
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, failure.ReturnCode);
+
+        Assert.Equal("age", failure.ColumnName);
+        Assert.Equal(AgeColumn, failure.ColumnId);
+        Assert.Equal(DwBuffer.Primary, failure.Buffer);
+        Assert.Equal(1L, failure.Row);
+
+        // THE DECLARED TYPE IS REPORTED, unlike an unknown-column refusal - the column exists, so there is
+        // a real type to report and a caller can see which column it is being asked about.
+        Assert.Equal("number", failure.ColumnType);
+
+        Assert.Equal(UpdateRowValidator.MissingOriginalTitle, failure.Error.Title);
+        Assert.Equal(
+            [failure.ColumnName, AgeColumn.ToString(CultureInfo.InvariantCulture)],
+            failure.Error.FormatArguments);
+
+        // ⚠ THE WHOLE RENDERED SENTENCE, for the same reason the unknown-column case asserts it: the
+        // ported Sprintf numbers placeholders from ONE, so a zero-based template renders the ordinal where
+        // the name belongs and nothing where the ordinal does, and a containment assertion would pass.
+        Assert.Equal(
+            $"Column 'age' at ordinal {AgeColumn} carries no original value. This row generates a "
+            + "statement whose where clause is built from the ORIGINAL value of every column the row "
+            + "carries, so each one must appear in original_values - echo the value the retrieval answered "
+            + "for it. The requirement covers deleted rows and rows stamped DataModified; an inserted or "
+            + "unchanged row needs no baseline. Nothing was applied.",
+            failure.Error.Text);
+
+        // A DEFINED ERROR CLAIMS NO ORACLE - no translation table stands behind this sentence, so it
+        // reports itself untranslated and claims no category.
+        Assert.False(failure.Error.Localized);
+        Assert.Equal(0L, failure.Error.LocalizationCategory);
+
+        // AND THE COMPLETE PAYLOAD IS ACCEPTED, which is the control: the requirement is one field per
+        // column, and the retrieval the caller read the row from answered every one of them.
+        Assert.Empty(Validate(Row(
+            1L,
+            ItemStatus.DataModified,
+            [
+                Column("age", AgeColumn, new AnyValue { DoubleValue = 33d }),
+                Column("name", NameColumn, new AnyValue { StringValue = "Paul" }),
+            ],
+            [
+                Column("age", AgeColumn, new AnyValue { DoubleValue = 32d }),
+                Column("name", NameColumn, new AnyValue { StringValue = "Paul" }),
+            ])));
+    }
+
+    /// <summary>
+    /// A DELETED row is held to the same requirement, because a <c>DELETE</c> carries a where clause too.
+    /// </summary>
+    /// <param name="status">The row status the delete-buffer row carries.</param>
+    /// <remarks>
+    /// EVERY ROW OF THE <c>Delete!</c> BUFFER GENERATES A STATEMENT, whatever its status - membership in
+    /// that buffer IS the pending delete, and Persistence's delete walk is deliberately not filtered by
+    /// "modified" because an ordinary retrieved-then-deleted row sits there as <c>NotModified!</c>
+    /// [<c>Tasks/SqlUpdateCarrier.ApplyUpdate</c>, <c>ItemStatusMachine.IsDeleteCountable</c>]. So the
+    /// theory drives the statuses that would otherwise be exempt in a modifiable buffer.
+    /// </remarks>
+    [Theory]
+    [InlineData(ItemStatus.NotModified)]
+    [InlineData(ItemStatus.DataModified)]
+    [InlineData(ItemStatus.New)]
+    [InlineData(ItemStatus.NewModified)]
+    public void ADeletedRowIsHeldToTheSameBaselineRequirement(ItemStatus status)
+    {
+        UpdateRowValidationFailure failure = Assert.Single(Validate(Row(
+            1L,
+            status,
+            [Column("age", AgeColumn, new AnyValue { DoubleValue = 33d })],
+            originals: null,
+            DwBuffer.Delete)));
+
+        Assert.Equal(UpdateRowValidationKind.MissingOriginalValue, failure.Kind);
+        Assert.Equal(DwBuffer.Delete, failure.Buffer);
+
+        // WITH THE BASELINE STATED IT IS ACCEPTED, so the requirement is satisfiable in the delete buffer
+        // exactly as it is elsewhere.
+        Assert.Empty(Validate(Row(
+            1L,
+            status,
+            [Column("age", AgeColumn, new AnyValue { DoubleValue = 33d })],
+            [Column("age", AgeColumn, new AnyValue { DoubleValue = 33d })],
+            DwBuffer.Delete)));
+    }
+
+    /// <summary>
+    /// A row that generates no where clause is NOT asked for a baseline, in either of the two shapes.
+    /// </summary>
+    /// <param name="status">The row status.</param>
+    /// <param name="buffer">The modifiable buffer the row is sent in.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>THE OTHER HALF OF THE SCOPE, AND IT IS WHAT KEEPS THE CHECK FROM REFUSING CONFORMING
+    /// PAYLOADS.</b> A <c>New!</c>/<c>NewModified!</c> row generates an <c>INSERT</c>, which has no where
+    /// clause and no prior state to describe; a <c>NotModified!</c> row in a modifiable buffer generates no
+    /// statement at all [<c>Tasks/SqlUpdateCarrier.ApplyUpdate</c>, the closing comment of the row walk].
+    /// Asking either for an original would refuse payloads that are correct, which is a different defect
+    /// rather than a safer one.
+    /// </para>
+    /// <para>
+    /// BOTH MODIFIABLE BUFFERS ARE DRIVEN, because the update walk visits <c>Primary!</c> and
+    /// <c>Filter!</c> alike and a rule written against one buffer would silently exempt the other.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(ItemStatus.New, DwBuffer.Primary)]
+    [InlineData(ItemStatus.NewModified, DwBuffer.Primary)]
+    [InlineData(ItemStatus.NotModified, DwBuffer.Primary)]
+    [InlineData(ItemStatus.New, DwBuffer.Filter)]
+    [InlineData(ItemStatus.NewModified, DwBuffer.Filter)]
+    [InlineData(ItemStatus.NotModified, DwBuffer.Filter)]
+    public void ARowThatGeneratesNoWhereClauseIsNotAskedForABaseline(ItemStatus status, DwBuffer buffer)
+    {
+        Assert.Empty(Validate(Row(
+            1L,
+            status,
+            [
+                Column("age", AgeColumn, new AnyValue { DoubleValue = 33d }),
+                Column("name", NameColumn, new AnyValue { StringValue = "Paul" }),
+            ],
+            originals: null,
+            buffer)));
+
+        // AND ITS VALUES ARE STILL CHECKED, so the exemption is the baseline requirement alone.
+        Assert.Equal(
+            UpdateRowValidationKind.InvalidValue,
+            Assert.Single(Validate(Row(
+                1L,
+                status,
+                [Column("age", AgeColumn, new AnyValue { StringValue = "not-a-number" })],
+                originals: null,
+                buffer))).Kind);
+    }
+
+    /// <summary>
+    /// A modified column can fail BOTH questions, and both are reported.
+    /// </summary>
+    /// <remarks>
+    /// THE TWO FAULTS ARE INDEPENDENT AND A CALLER CORRECTING A PAYLOAD NEEDS BOTH. A column may be missing
+    /// its baseline AND carry a value its declared type cannot hold; reporting only the first would send
+    /// the caller back for a second round trip to discover the second. The ORDER is asserted too, because
+    /// it is the order the payload was walked in.
+    /// </remarks>
+    [Fact]
+    public void AColumnThatFailsBothQuestionsReportsBoth()
+    {
+        ImmutableArray<UpdateRowValidationFailure> failures = Validate(Row(
+            1L,
+            ItemStatus.DataModified,
+            [Column("age", AgeColumn, new AnyValue { StringValue = "not-a-number" })],
+            originals: null));
+
+        Assert.Equal(2, failures.Length);
+
+        Assert.Equal(UpdateRowValidationKind.MissingOriginalValue, failures[0].Kind);
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, failures[0].ReturnCode);
+
+        Assert.Equal(UpdateRowValidationKind.InvalidValue, failures[1].Kind);
+        Assert.Equal(RetCode.E_INVALID_DATA, failures[1].ReturnCode);
+
+        // AND AN UNRESOLVABLE COLUMN REPORTS ONLY THE ADDRESSING FAULT, because a column that does not
+        // exist has neither a baseline nor a type to judge a value against.
+        UpdateRowValidationFailure unresolvable = Assert.Single(Validate(Row(
+            1L,
+            ItemStatus.DataModified,
+            [Column("no_such_column", AgeColumn, new AnyValue { StringValue = "x" })],
+            originals: null)));
+
+        Assert.Equal(UpdateRowValidationKind.NoSuchColumn, unresolvable.Kind);
+    }
+
+    /// <summary>
+    /// An original that names a column the row does not carry does NOT satisfy the requirement for a
+    /// column it does.
+    /// </summary>
+    /// <remarks>
+    /// THE MATCH IS PER COLUMN AND BY ORDINAL, which is the only reading that makes the baseline usable:
+    /// the predicate reads the original of a SPECIFIC column, so an original for a different one is not a
+    /// baseline for this one. Counting originals instead - "as many as there are columns" - would accept a
+    /// payload that stated the same column twice, or six originals for the wrong six columns.
+    /// </remarks>
+    [Fact]
+    public void AnOriginalForADifferentColumnDoesNotSatisfyTheRequirement()
+    {
+        UpdateRowValidationFailure failure = Assert.Single(Validate(Row(
+            1L,
+            ItemStatus.DataModified,
+            [Column("age", AgeColumn, new AnyValue { DoubleValue = 33d })],
+            [Column("name", NameColumn, new AnyValue { StringValue = "Paul" })])));
+
+        Assert.Equal(UpdateRowValidationKind.MissingOriginalValue, failure.Kind);
+        Assert.Equal("age", failure.ColumnName);
+
+        // AND AN ORIGINAL IS MATCHED BY ORDINAL RATHER THAN BY NAME, because the receiving codec is
+        // positional [common.v1.ColumnValue.column_name] - a positional row carries no name at all, so a
+        // name-keyed match would refuse the legacy's own serialization shape.
+        Assert.Empty(Validate(Row(
+            1L,
+            ItemStatus.DataModified,
+            [Column("age", AgeColumn, new AnyValue { DoubleValue = 33d })],
+            [Column(string.Empty, AgeColumn, new AnyValue { DoubleValue = 32d })])));
+    }
+
     // ==============================================================================================
     //  3. WHAT THE VALIDATOR REPORTS ACROSS A WHOLE PAYLOAD
     // ==============================================================================================
@@ -655,6 +1206,21 @@ public sealed class UpdateRowValidatorTests
     private static ImmutableArray<UpdateRowValidationFailure> Validate(params DataWindowRow[] rows) =>
         new UpdateRowValidator(new I18n()).Validate(Host(), rows);
 
+    /// <summary>Validates rows against a SPECIFIC host, for the arms the evidenced fixture cannot reach.</summary>
+    /// <param name="host">The host to validate against.</param>
+    /// <param name="rows">The rows.</param>
+    /// <returns>The failures.</returns>
+    /// <remarks>
+    /// USED ONLY WHERE THE ORACLE HAS NO SUCH COLUMN. The one updatable DataWindow in the estate declares
+    /// no integral column at all [<c>dw_sqlite.srd:L8-L13</c>], so the <c>Long()</c> arms of the coercion
+    /// table are unreachable through it - and adding one to the transcribed catalogue to reach them would
+    /// misrepresent the oracle (C-C). Every other case in this file goes through <see cref="Host"/>.
+    /// </remarks>
+    private static ImmutableArray<UpdateRowValidationFailure> Validate(
+        DataWindowServiceHost host,
+        params DataWindowRow[] rows) =>
+        new UpdateRowValidator(new I18n()).Validate(host, rows);
+
     /// <summary>Builds a row.</summary>
     /// <param name="row">The one-based row ordinal.</param>
     /// <param name="columns">Its columns, in request order.</param>
@@ -663,6 +1229,33 @@ public sealed class UpdateRowValidatorTests
     {
         DataWindowRow built = new() { Buffer = DwBuffer.Primary, Row = row };
         built.Columns.AddRange(columns);
+
+        return built;
+    }
+
+    /// <summary>Builds a row that declares an item status and, optionally, its original values.</summary>
+    /// <param name="row">The one-based row ordinal.</param>
+    /// <param name="status">The row's item status, which decides whether a baseline is required of it.</param>
+    /// <param name="columns">Its current values, in request order.</param>
+    /// <param name="originals">Its original values, or <see langword="null"/> for none.</param>
+    /// <param name="buffer">The buffer it is sent in.</param>
+    /// <returns>The row.</returns>
+    /// <remarks>
+    /// SEPARATE FROM THE TWO OVERLOADS ABOVE RATHER THAN REPLACING THEM. Those leave the status at the
+    /// contract's own default - <c>ITEM_STATUS_NOT_MODIFIED</c> is field number zero - which is what the
+    /// value cases want: a row that generates no statement is exempt from the baseline requirement, so its
+    /// failures are about values alone and nothing else is in the way.
+    /// </remarks>
+    private static DataWindowRow Row(
+        long row,
+        ItemStatus status,
+        ColumnValue[] columns,
+        ColumnValue[]? originals = null,
+        DwBuffer buffer = DwBuffer.Primary)
+    {
+        DataWindowRow built = new() { Buffer = buffer, Row = row, ItemStatus = status };
+        built.Columns.AddRange(columns);
+        built.OriginalValues.AddRange(originals ?? []);
 
         return built;
     }

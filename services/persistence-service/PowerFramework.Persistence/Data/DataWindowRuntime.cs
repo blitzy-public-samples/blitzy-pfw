@@ -74,6 +74,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using PowerFramework.Contracts.Common.V1;
 using PowerFramework.Persistence.Buffers;
+using PowerFramework.Persistence.Errors;
 using PowerFramework.Persistence.Tasks;
 using PowerFramework.Persistence.Runtime;
 using PowerFramework.Persistence.Transactions;
@@ -1108,7 +1109,15 @@ namespace PowerFramework.Persistence.Data
                     DwBuffer.Primary,
                     0L);
 
-                _logger.LogError(failure, "A retrieval failed inside the storage engine.");
+                // Described rather than attached - see Errors/FaultRecord.cs. The comment above already
+                // keeps the statement out of the WIRE payload; attaching the exception here put it in the
+                // LOG instead, because every provider renders an attached exception's whole message chain
+                // and stack.
+                _logger.LogError(
+                    "A retrieval failed inside the storage engine. FaultTypes={FaultTypes} "
+                        + "RedactedMessage={RedactedMessage}",
+                    FaultRecord.Types(failure),
+                    FaultRecord.RedactedMessages(failure));
 
                 return DataWindowBufferStore.DataStoreFailure;
             }
@@ -1132,9 +1141,11 @@ namespace PowerFramework.Persistence.Data
                     0L);
 
                 _logger.LogError(
-                    failure,
                     "A retrieval was refused by the storage provider before reaching the engine, which is "
-                        + "the shape an unsupplied statement parameter takes.");
+                        + "the shape an unsupplied statement parameter takes. FaultTypes={FaultTypes} "
+                        + "RedactedMessage={RedactedMessage}",
+                    FaultRecord.Types(failure),
+                    FaultRecord.RedactedMessages(failure));
 
                 return DataWindowBufferStore.DataStoreFailure;
             }
@@ -1803,9 +1814,11 @@ namespace PowerFramework.Persistence.Data
             catch (SqliteException failure)
             {
                 _logger.LogError(
-                    failure,
                     "A grid DataWindow syntax could not be derived because the storage engine refused "
-                        + "to prepare the statement.");
+                        + "to prepare the statement. FaultTypes={FaultTypes} "
+                        + "RedactedMessage={RedactedMessage}",
+                    FaultRecord.Types(failure),
+                    FaultRecord.RedactedMessages(failure));
 
                 // Empty syntax paired with a non-empty diagnostic, which is how the outcome type spells
                 // "no syntax, and here is why" - the consumer tests the text rather than the emptiness.
@@ -1883,7 +1896,11 @@ namespace PowerFramework.Persistence.Data
             }
             catch (SqliteException failure)
             {
-                _logger.LogError(failure, "A page-counting query failed inside the storage engine.");
+                _logger.LogError(
+                    "A page-counting query failed inside the storage engine. FaultTypes={FaultTypes} "
+                        + "RedactedMessage={RedactedMessage}",
+                    FaultRecord.Types(failure),
+                    FaultRecord.RedactedMessages(failure));
 
                 return ValueTask.FromResult(new CountQueryOutcome(
                     DataWindowBufferStore.DataStoreFailure,

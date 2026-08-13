@@ -37,6 +37,7 @@
 
 using System.Net;
 using System.Net.Http.Headers;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -105,16 +106,15 @@ internal static class RosterFixture
 
         options.Audiences.Add(GrantedAudience);
 
-        SecurityClientOptions client = new()
+        // NO PERMISSION IS DECLARED ON THE ENTRY, because the type no longer carries one: the per-entry
+        // Audiences and Scopes lists it used to have were never consulted by any decision and are gone.
+        // GrantedAudience and GrantedScope survive as the values the MATRIX rows in the sibling
+        // authorization tests grant, which is the surface that decides.
+        options.Clients.Add(new SecurityClientOptions
         {
             Subject = Caller,
             SecretConfigurationKey = secretConfigurationKey,
-        };
-
-        client.Audiences.Add(GrantedAudience);
-        client.Scopes.Add(GrantedScope);
-
-        options.Clients.Add(client);
+        });
 
         return options;
     }
@@ -197,39 +197,54 @@ public sealed class IssuanceRosterValidationTests
         Assert.Contains("sole token issuer", failure, StringComparison.Ordinal);
     }
 
-    /// <summary>A grant naming an audience the deployment does not serve is refused.</summary>
+    /// <summary>
+    /// The credential directory declares an identity and a secret key name, and NOTHING that could be
+    /// read as a permission.
+    /// </summary>
     /// <remarks>
     /// <para>
-    /// THE MOST VALUABLE ROW IN THIS FILE. The issuer applies both gates and the deployment-wide one
-    /// first, so such a grant can never be exercised - it is unreachable configuration that reads in a
-    /// settings file as a granted permission. That is the failure mode a validator can catch and a test
-    /// of the happy path cannot: nothing breaks, the deployment simply does not do what its
-    /// configuration says.
+    /// 🔴 <b>THE MOST VALUABLE ROW IN THIS FILE, AND IT ASSERTS AN ABSENCE.</b> This type carried
+    /// <c>Audiences</c> and <c>Scopes</c> lists, documented as a per-caller gate applied after the
+    /// deployment-wide audience roster, validated against it, and frozen onto the resolved entry. No
+    /// decision anywhere read either of them: every issuance decision is taken against the matrix folded
+    /// from <c>Security:Callers</c> and <c>Security:CallerAuthorizations</c>. Two surfaces described one
+    /// caller's permissions, only one decided, and the shipped settings had already diverged - so an
+    /// operator reading this section would have concluded a caller could address an audience it would in
+    /// fact be refused for.
     /// </para>
     /// <para>
-    /// The message must name the deployment-wide key as well as the offending position, because the fix
-    /// is a choice between two places and an operator has to be told both.
+    /// <b>ASSERTED STRUCTURALLY RATHER THAN BY BEHAVIOUR, because the failure this guards against is a
+    /// re-addition.</b> A behavioural row cannot notice a member that decides nothing - that is precisely
+    /// what made the original defect invisible - so the guard reads the type's own members and requires
+    /// the exact pair that remains. A collection-typed member here would be a permission list by any
+    /// name, so any is refused whatever it is called.
+    /// </para>
+    /// <para>
+    /// <b>THE RULES THIS ROW REPLACES DID NOT DISAPPEAR; THEY LIVE WHERE THE PERMISSION LIVES.</b> An
+    /// unserved audience, an empty scope set, an unusable scope token and a duplicate pair are all
+    /// refused on the matrix, asserted by <c>CallerAuthorizationTests</c> -
+    /// <c>ARowNamingAnUnlistedAudienceIsRefused</c>, <c>ARowPermittingNoScopeIsRefused</c>,
+    /// <c>AnUnusableScopeIsRefused</c> and <c>ADuplicateCallerAndAudiencePairIsRefused</c>.
     /// </para>
     /// </remarks>
     [Fact]
-    public void AGrantNamingAnUnservedAudienceIsRefused()
+    public void TheCredentialDirectoryDeclaresNoPermission()
     {
-        SecurityOptions options = RosterFixture.Options();
+        string[] declared =
+        [
+            .. typeof(SecurityClientOptions)
+                .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                .Select(static property => property.Name)
+                .Order(StringComparer.Ordinal),
+        ];
 
-        options.Clients[0].Audiences.Add("an-audience-the-deployment-does-not-serve");
+        Assert.Equal([nameof(SecurityClientOptions.SecretConfigurationKey), nameof(SecurityClientOptions.Subject)], declared);
 
-        string failure = Assert.Single(
-            RosterFixture.Validate(options),
-            message => message.Contains(":Clients[0]:Audiences[1]'", StringComparison.Ordinal));
-
-        Assert.Contains(":Audiences'", failure, StringComparison.Ordinal);
-        Assert.Contains("never be exercised", failure, StringComparison.Ordinal);
-
-        // AND IT DOES NOT ECHO THE VALUE, which every message in this service is held to.
-        Assert.DoesNotContain(
-            "an-audience-the-deployment-does-not-serve",
-            failure,
-            StringComparison.Ordinal);
+        // AND NOTHING COLLECTION-SHAPED, under any name - a list here is a permission list whatever it is
+        // called, and a string is not one.
+        Assert.All(
+            typeof(SecurityClientOptions).GetProperties(BindingFlags.Public | BindingFlags.Instance),
+            property => Assert.Equal(typeof(string), property.PropertyType));
     }
 
     /// <summary>A duplicate subject is refused, because the roster is keyed by subject.</summary>
@@ -242,12 +257,7 @@ public sealed class IssuanceRosterValidationTests
     {
         SecurityOptions options = RosterFixture.Options();
 
-        SecurityClientOptions duplicate = new() { Subject = RosterFixture.Caller };
-
-        duplicate.Audiences.Add(RosterFixture.GrantedAudience);
-        duplicate.Scopes.Add(RosterFixture.GrantedScope);
-
-        options.Clients.Add(duplicate);
+        options.Clients.Add(new SecurityClientOptions { Subject = RosterFixture.Caller });
 
         string failure = Assert.Single(
             RosterFixture.Validate(options),
@@ -273,14 +283,6 @@ public sealed class IssuanceRosterValidationTests
     [InlineData("whitespace subject", ":Clients[0]:Subject'")]
     [InlineData("blank secret key name", ":Clients[0]:SecretConfigurationKey'")]
     [InlineData("unsafe secret key name", ":Clients[0]:SecretConfigurationKey'")]
-    [InlineData("no audiences", ":Clients[0]:Audiences'")]
-    [InlineData("blank audience", ":Clients[0]:Audiences[1]'")]
-    [InlineData("no scopes", ":Clients[0]:Scopes'")]
-    [InlineData("blank scope", ":Clients[0]:Scopes[1]'")]
-    [InlineData("spaced scope", ":Clients[0]:Scopes[1]'")]
-    [InlineData("quoted scope", ":Clients[0]:Scopes[1]'")]
-    [InlineData("over-long scope", ":Clients[0]:Scopes[1]'")]
-    [InlineData("duplicate scope", ":Clients[0]:Scopes[1]'")]
     public void EveryRosterShapeRuleIsEnforced(string fault, string expectedKeyFragment)
     {
         SecurityOptions options = RosterFixture.Options();
@@ -305,39 +307,11 @@ public sealed class IssuanceRosterValidationTests
                 client.SecretConfigurationKey = "TEST:ROSTER:SECRET";
                 break;
 
-            case "no audiences":
-                client.Audiences.Clear();
-                break;
-
-            case "blank audience":
-                client.Audiences.Add("   ");
-                break;
-
-            case "no scopes":
-                client.Scopes.Clear();
-                break;
-
-            case "blank scope":
-                client.Scopes.Add(string.Empty);
-                break;
-
-            case "spaced scope":
-                // The granted set travels as ONE space-delimited value, so this would become two.
-                client.Scopes.Add("two scopes");
-                break;
-
-            case "quoted scope":
-                // Outside the RFC 6749 section 3.3 scope-token charset.
-                client.Scopes.Add("a\"scope");
-                break;
-
-            case "over-long scope":
-                client.Scopes.Add(new string('s', SecurityOptionsValidator.MaximumScopeLength + 1));
-                break;
-
-            case "duplicate scope":
-                client.Scopes.Add(RosterFixture.GrantedScope);
-                break;
+            // THERE ARE NO PERMISSION ROWS HERE ANY MORE. The eight this theory used to carry - an empty
+            // audience set, a blank audience, an empty scope set, a blank, spaced, quoted, over-long or
+            // duplicated scope - were rules about `Security:Clients[n]:Audiences` and `:Scopes`, lists no
+            // decision ever read. The lists are gone and the rules moved with the permission they govern:
+            // CallerAuthorizationTests asserts every one of them on the matrix.
 
             default:
                 Assert.Fail($"The row '{fault}' names no fault this test knows how to apply.");
@@ -380,17 +354,32 @@ public sealed class IssuanceRosterValidationTests
         Assert.NotEmpty(shipped.Clients);
         Assert.Empty(RosterFixture.Validate(shipped));
 
-        // And every grant is reachable, which is the cross-check the validator exists for.
-        foreach (SecurityClientOptions client in shipped.Clients)
-        {
-            Assert.NotEmpty(client.Audiences);
-            Assert.NotEmpty(client.Scopes);
+        // EVERY ENTRY DECLARES A SUBJECT AND A SECRET KEY NAME AND NOTHING ELSE, which is the whole of
+        // what this section is now. There is no per-entry permission list to cross-check against the
+        // deployment-wide audience roster, because that cross-check was between two copies of one
+        // statement; the matrix carries the statement once and its own shipped rows are asserted by
+        // CallerAuthorizationTests.
+        Assert.All(shipped.Clients, client => Assert.False(string.IsNullOrWhiteSpace(client.Subject)));
 
-            foreach (string audience in client.Audiences)
-            {
-                Assert.Contains(audience, shipped.Audiences);
-            }
-        }
+        // AND EVERY SHIPPED CREDENTIAL IS GRANTED SOMETHING, so none of them is a credential that
+        // authenticates and is then refused every token. The host neither refuses nor reports this
+        // direction - the matrix is the sole authority and a credential it grants nothing is simply
+        // fail-closed - so the property is asserted here directly against the shipped rows, which is
+        // what keeps the shipped configuration free of a dead credential.
+        HashSet<string> grantedCallers = new(
+            shipped.CallerAuthorizations
+                .Where(static row => row is not null && !string.IsNullOrWhiteSpace(row.Caller))
+                .Select(static row => row.Caller.Trim()),
+            StringComparer.Ordinal);
+
+        Assert.All(
+            shipped.Clients,
+            client => Assert.Contains(client.Subject.Trim(), grantedCallers));
+
+        // AND EVERY SHIPPED GRANT IS REACHABLE BY SHARED SECRET - the direction the host REPORTS at
+        // startup, because a grant naming a caller with no credential entry is the supported
+        // certificate-only shape rather than drift. See IssuanceRosterAuthority.Describe.
+        Assert.Empty(IssuanceRosterAuthority.Describe(shipped));
     }
 }
 
@@ -400,7 +389,14 @@ public sealed class IssuanceRosterValidationTests
 /// </summary>
 public sealed class IssuanceClientRegistryTests
 {
-    /// <summary>A correct credential authenticates and yields the caller's own grants.</summary>
+    /// <summary>A correct credential authenticates and resolves to the caller's own identity.</summary>
+    /// <remarks>
+    /// AN IDENTITY, AND DELIBERATELY NOTHING MORE. The resolved entry used to carry frozen
+    /// <c>PermittedAudiences</c> and <c>PermittedScopes</c> sets that no decision read; authentication
+    /// answers who the caller is, and what that caller may obtain is the matrix's answer. So the
+    /// assertions here are the subject, the fact that a secret was resolved for it, and nothing that
+    /// would read as a permission.
+    /// </remarks>
     [Fact]
     public void ACorrectCredentialAuthenticates()
     {
@@ -412,9 +408,18 @@ public sealed class IssuanceClientRegistryTests
 
         Assert.NotNull(authenticated);
         Assert.Equal(RosterFixture.Caller, authenticated.Subject);
-        Assert.Contains(RosterFixture.GrantedAudience, authenticated.PermittedAudiences);
-        Assert.Contains(RosterFixture.GrantedScope, authenticated.PermittedScopes);
         Assert.True(authenticated.HasSecret);
+
+        // AND IT CARRIES NO PERMISSION, WHICH IS ASSERTED RATHER THAN ASSUMED. A resolved credential entry
+        // publishes a subject and whether it has a secret, and nothing else: the permission decision belongs
+        // to the grant matrix alone, and a second surface here is what previously let the roster advertise
+        // audiences the issuer refused.
+        Assert.Equal(
+            ["HasSecret", "Subject"],
+            typeof(RegisteredIssuanceClient)
+                .GetProperties()
+                .Select(static property => property.Name)
+                .Order(StringComparer.Ordinal));
     }
 
     /// <summary>
@@ -499,8 +504,23 @@ public sealed class IssuanceClientRegistryTests
                 options,
                 new KeyValuePair<string, string?>(RosterFixture.SecretKey, configured)));
 
-        Assert.Contains(":Clients[0]:SecretConfigurationKey'", failure.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain(RosterFixture.Secret, failure.Message, StringComparison.Ordinal);
+        // REDACTED BEFORE THE POSITIVE ASSERTION CAN RENDER IT. `Assert.Contains` renders its haystack, and
+        // the haystack is a fault message produced while a live per-process roster credential is in scope.
+        Assert.Contains(
+            ":Clients[0]:SecretConfigurationKey'",
+            SensitiveValueAssertions.Redact(failure.Message, RosterFixture.Secret),
+            StringComparison.Ordinal);
+
+        // AND THE MESSAGE NAMES THE POSITION, NEVER THE CREDENTIAL - asserted as a BOOLEAN over a fixed
+        // message rather than by handing the secret to `Assert.DoesNotContain`, which renders both its
+        // needle and its haystack. The failure case of this row is exactly the case where the secret IS in
+        // the message, so the obvious spelling would publish a usable credential into the test output and
+        // the CI log (CWE-532, constraint C-F). See SensitiveValueAssertions.cs.
+        Assert.False(
+            SensitiveValueAssertions.Carries(failure.Message, RosterFixture.Secret),
+            "The refusal message echoed the roster secret. A refusal may name the roster POSITION and the "
+                + "configuration key that carries the credential, and must never carry the credential "
+                + "itself. The message is deliberately not rendered here.");
     }
 
     /// <summary>A certificate-only entry needs no configured secret and constructs cleanly.</summary>
@@ -556,12 +576,7 @@ public sealed class IssuanceClientRegistryTests
     {
         SecurityOptions options = RosterFixture.Options();
 
-        SecurityClientOptions duplicate = new() { Subject = RosterFixture.Caller };
-
-        duplicate.Audiences.Add(RosterFixture.GrantedAudience);
-        duplicate.Scopes.Add(RosterFixture.GrantedScope);
-
-        options.Clients.Add(duplicate);
+        options.Clients.Add(new SecurityClientOptions { Subject = RosterFixture.Caller });
 
         InvalidOperationException failure = Assert.Throws<InvalidOperationException>(
             () => RosterFixture.Registry(options, RosterFixture.ConfiguredSecret));
@@ -1006,11 +1021,13 @@ public sealed class PerCallerAuthorizationTests
 
         RegisteredIssuanceClient registered = Resolve(factory, "powerframework-gateway");
 
+        string audience = GrantedAudienceFor(factory, registered.Subject);
+
         TokenIssuanceResult result = Issue(
             factory,
             registered.Subject,
-            registered.PermittedAudiences.First(),
-            [registered.PermittedScopes.First()]);
+            audience,
+            [GrantedScopeFor(factory, registered.Subject, audience)]);
 
         Assert.Equal(TokenIssuanceOutcome.Issued, result.Outcome);
         Assert.NotNull(result.Token);
@@ -1050,19 +1067,18 @@ public sealed class PerCallerAuthorizationTests
         SecurityOptions options = factory.ResolveSecurityOptions();
         RegisteredIssuanceClient registered = Resolve(factory, "powerframework-gateway");
 
-        // ANY served audience this caller is not granted. There is more than one - the caller is granted
-        // two of the four the deployment serves - so the row takes the first rather than asserting a
-        // count it has no reason to care about.
-        string servedButNotGranted =
-            options.Audiences.First(candidate => !registered.PermittedAudiences.Contains(candidate));
+        // ANY served audience the MATRIX does not grant this caller - read from the matrix because the
+        // matrix is the gate. The credential directory declares no permission to read instead.
+        string servedButNotGranted = UngrantedServedAudience(factory, registered.Subject);
+
+        string grantedScope = GrantedScopeFor(
+            factory,
+            registered.Subject,
+            GrantedAudienceFor(factory, registered.Subject));
 
         Assert.Equal(
             TokenIssuanceOutcome.CallerNotPermitted,
-            Issue(
-                factory,
-                registered.Subject,
-                servedButNotGranted,
-                [registered.PermittedScopes.First()]).Outcome);
+            Issue(factory, registered.Subject, servedButNotGranted, [grantedScope]).Outcome);
 
         const string notServedAtAll = "an-audience-no-deployment-here-serves";
 
@@ -1070,11 +1086,7 @@ public sealed class PerCallerAuthorizationTests
 
         Assert.Equal(
             TokenIssuanceOutcome.AudienceNotPermitted,
-            Issue(
-                factory,
-                registered.Subject,
-                notServedAtAll,
-                [registered.PermittedScopes.First()]).Outcome);
+            Issue(factory, registered.Subject, notServedAtAll, [grantedScope]).Outcome);
     }
 
     /// <summary>
@@ -1108,7 +1120,9 @@ public sealed class PerCallerAuthorizationTests
         string granted = GrantedScopeFor(factory, registered.Subject, GrantedAudienceFor(factory, registered.Subject));
         const string ungranted = "a.scope.no.roster.entry.grants";
 
-        Assert.DoesNotContain(ungranted, registered.PermittedScopes);
+        Assert.DoesNotContain(
+            ungranted,
+            MatrixRowsFor(factory, registered.Subject).SelectMany(static row => row.Scopes));
 
         string[] requested = position == "first" ? [ungranted, granted] : [granted, ungranted];
 
@@ -1341,18 +1355,22 @@ public sealed class ScopePolicyEnforcementTests
 
         const string caller = "powerframework-dataservices";
 
-        // A SCOPE THE ROSTER GRANTS THIS CALLER BUT THIS ROUTE DOES NOT REQUIRE, read from the roster
-        // rather than invented. An invented name would be refused by the ISSUER, and the row would then
-        // fail during its own setup rather than at the route it exists to test - proving the issuance
-        // gate a second time and the route policy not at all.
+        // A SCOPE THE MATRIX GRANTS THIS CALLER BUT THIS ROUTE DOES NOT REQUIRE, read from the matrix
+        // rather than invented. An invented name would be dropped by the ISSUER as ungranted, and the row
+        // would then fail during its own setup rather than at the route it exists to test - proving the
+        // issuance gate a second time and the route policy not at all. The credential directory is checked
+        // too, because a subject it does not name cannot authenticate at the issuance edge whatever the
+        // matrix grants it.
         Assert.True(
             factory.Services
                 .GetRequiredService<IssuanceClientRegistry>()
                 .TryResolveSubject(caller, out RegisteredIssuanceClient? registered),
             $"The booted host's issuance roster registers no subject '{caller}'.");
 
-        string grantedButUnrelated = registered.PermittedScopes.First(
-            scope => !string.Equals(scope, requiredScope, StringComparison.Ordinal));
+        string grantedButUnrelated = factory
+            .ResolveGrantedAudiences(caller)
+            .SelectMany(audience => factory.ResolveGrantedScopes(caller, audience))
+            .First(scope => !string.Equals(scope, requiredScope, StringComparison.Ordinal));
 
         using HttpClient narrow = factory.CreateAuthenticatedClient(
             caller,

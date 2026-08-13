@@ -22,18 +22,16 @@
 //  Every property name below equals its section or key name CHARACTER FOR CHARACTER, because a
 //  mismatch does not error and does not warn - it binds silently to the default.
 //
-//  THE HOST OWNS THE LISTENERS, AND THIS FILE DOES NOT RESTATE THEM
-//  TWO endpoints are declared in the standard `Kestrel` section of appsettings.json and bound by the
-//  ASP.NET Core host itself: `Rest` at `https://+:5101` with `Protocols: Http1`, carrying the readiness
-//  probe and the authentication proof, and `Grpc` at `https://+:5111` with `Protocols: Http2`, carrying
-//  the four published contracts C-05..C-08. Both terminate TLS. One protocol version per endpoint is a
-//  measured decision rather than a limitation - both being TLS, ALPN could negotiate `h2` and
-//  `http/1.1` on a single address - and the split is kept so a probe and a gRPC channel each address a
-//  listener that can only answer the thing it is for, and misaddressing either fails at once instead of
-//  at a later layer. Reading both from configuration already satisfies "never hardcode a port", so no
-//  port or protocol property appears here: two binders over one key is a silent-divergence risk, and a
-//  second port key would create the settings-versus-options mismatch this file exists to avoid. That is
-//  why the numbers 5101 and 5111 appear in this documentation and in no executable line of this file.
+//  THE HOST OWNS THE LISTENER, AND THIS FILE DOES NOT RESTATE IT
+//  ONE endpoint is declared in the standard `Kestrel` section of appsettings.json and bound by the
+//  ASP.NET Core host itself: `Rest` at `https://+:5101` with `Protocols: Http1AndHttp2`, carrying the
+//  readiness probe, the authentication proof AND the four published contracts C-05..C-08. It terminates
+//  TLS, which is what makes one address serve both versions: ALPN negotiates `h2` or `http/1.1` per
+//  connection, and 5101 is the port AAP 0.3.2.2 assigns this service. Reading it from configuration
+//  already satisfies "never hardcode a port", so no port or protocol property appears here: two binders
+//  over one key is a silent-divergence risk, and a second port key would create the
+//  settings-versus-options mismatch this file exists to avoid. That is why the number 5101 appears in
+//  this documentation and in no executable line of this file.
 //
 //  LEGACY SOURCES - READ AS SPECIFICATION, NEVER EDITED (constraint C-C)
 //  Every default below is the legacy value, and every one carries its ws_objects locator on the member
@@ -223,10 +221,10 @@ namespace PowerFramework.Persistence.Configuration;
 /// keeps its default forever.
 /// </para>
 /// <para>
-/// The listening endpoints are NOT here. Both are declared in the standard <c>Kestrel</c> section and
-/// bound by the host: <c>Rest https://+:5101</c> with <c>Http1</c> for the readiness probe and the
-/// authentication proof, and <c>Grpc https://+:5111</c> with <c>Http2</c> for the four published gRPC
-/// contracts. Restating a port here would put two binders over one key.
+/// The listening endpoint is NOT here. It is declared in the standard <c>Kestrel</c> section and bound
+/// by the host: <c>Rest https://+:5101</c> with <c>Http1AndHttp2</c>, carrying the readiness probe, the
+/// authentication proof and the four published gRPC contracts on the one port AAP 0.3.2.2 assigns.
+/// Restating a port here would put two binders over one key.
 /// </para>
 /// <para>
 /// Validation is <see cref="PersistenceOptionsValidator"/>, which is required rather than optional:
@@ -289,6 +287,19 @@ public sealed class PersistenceOptions
     /// property of the boundary rather than of any legacy behaviour (constraints C-A, C-B).
     /// </remarks>
     public HandleLifecycleOptions Handles { get; set; } = new();
+
+    /// <summary>
+    /// Whether this deployment applies the pending migrations at startup. Bound from the top-level
+    /// <c>Schema</c> section.
+    /// </summary>
+    /// <remarks>
+    /// SEPARATE FROM <see cref="Sqlite"/> ON PURPOSE, AND THE DISTINCTION IS NOT COSMETIC. The
+    /// <c>Sqlite</c> group is the EVIDENCED URI GRAMMAR and nothing else - its member set is pinned by a
+    /// test precisely so a runtime concern with no place in that grammar cannot be added to it. Schema
+    /// provisioning is a deployment decision about WHEN the schema is applied, not a part of the
+    /// connection URI, so it is its own section for the same reason <see cref="Handles"/> is.
+    /// </remarks>
+    public SchemaOptions Schema { get; set; } = new();
 
     /// <summary>
     /// The data-object definitions this service can resolve by name. Bound from the top-level
@@ -1601,6 +1612,79 @@ public sealed class HandleLifecycleOptions
 
 
 // --------------------------------------------------------------------------------------------------
+// GROUP 6 - SCHEMA PROVISIONING: ONE SWITCH, ADDITIVE ONLY, OFF BY DEFAULT
+// --------------------------------------------------------------------------------------------------
+
+/// <summary>
+/// Whether this deployment applies the pending migrations when the process starts. Bound from the
+/// top-level <c>Schema</c> section. One member, and nothing else.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHY THIS SECTION EXISTS - THE ONE-COMMAND BRING-UP WAS NOT ACHIEVABLE WITHOUT IT. This service
+/// deliberately creates no schema of its own, so on a FRESH <c>persistence-db</c> volume its readiness
+/// probe reports the <c>COMPANY</c> table absent for ever and the Compose health condition holds
+/// DataServices and Gateway back behind it. The documented bring-up is a single command
+/// (<c>docker compose --env-file .env up --build -d</c>, constraints C-J and C-L) and it could not reach
+/// a healthy stack: an operator had to run <c>dotnet ef database update</c> out of band from a checkout,
+/// with the SDK and the <c>dotnet-ef</c> tool installed, neither of which the runtime image carries.
+/// A switch here is what closes that gap without adding a fifth container, which C-D forbids.
+/// </para>
+/// <para>
+/// THE DEFAULT IS <see langword="false"/>, AND THAT IS THE LOAD-BEARING CHOICE RATHER THAN A TIMID ONE.
+/// Three things depend on it. A parity run must be able to rely on the volume being untouched between the
+/// legacy-side and target-side captures of one workflow identifier (AAP 0.6.7), so the schema step must be
+/// something a characterization operator switches ON deliberately and can leave off. Every existing
+/// deployment and every service-level test boots this same composition root, so an opt-out default is
+/// what keeps their behaviour identical to before this section existed. And a service that mutates its
+/// own storage on every restart, unasked, is exactly the surprise the fail-fast posture is meant to avoid.
+/// The orchestration manifest turns it ON explicitly, in one place, where an operator reading the
+/// bring-up can see it.
+/// </para>
+/// <para>
+/// WHAT THE SWITCH MAY AND MAY NOT DO. It selects <c>Database.Migrate</c> and NOTHING ELSE:
+/// no <c>EnsureCreated</c>, no <c>EnsureDeleted</c>, no <c>DROP</c>, no <c>DELETE</c>, no seed and no
+/// file removal, anywhere on the path it enables. Migrate is additive and idempotent - it applies the
+/// migrations the history table does not already record and does nothing at all when there are none - so
+/// turning it on cannot destroy or reseed a volume even mid-capture. <c>SchemaProvisioner</c> holds that
+/// path, and its own suite asserts the absence of every destructive construct by scanning its source.
+/// </para>
+/// <para>
+/// NO LEGACY ANALOGUE EXISTS FOR THIS MEMBER, and saying so is the honest position rather than an
+/// omission (constraints C-B, C-K). The legacy library has no schema step at all: the one DDL statement in
+/// the estate sits inside a test window's button handler
+/// [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469</c>], which is harness setup and not
+/// framework behaviour. So there is no oracle value to preserve here and no locator to cite for the
+/// default - the default is justified by the paragraph above instead.
+/// </para>
+/// </remarks>
+public sealed class SchemaOptions
+{
+    /// <summary>
+    /// Whether the pending migrations are applied at startup. Defaults to <see langword="false"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A PLAIN BOOLEAN, WITH BOTH VALUES LEGAL AND NEITHER VALIDATED. There is nothing for a rule to
+    /// assert: <see langword="false"/> is the shipped code default and <see langword="true"/> is what the
+    /// orchestration manifest sets, and a deployment is entitled to either. The validator therefore checks
+    /// this section for having been BOUND and applies no rule to the value, the same treatment
+    /// <see cref="TransactionPoolOptions"/> receives and for the same reason.
+    /// </para>
+    /// <para>
+    /// WHEN IT IS ON, FAILURE IS FATAL. An unapplicable migration means this service cannot serve a
+    /// retrieval or an update, so the process terminates with a named cause rather than starting and
+    /// answering every request with a storage error - the fail-fast posture the oracle's own
+    /// <c>HALT CLOSE</c> establishes [<c>ws_objects/pfw.pbl.src/pfw.sra:L143</c>]. WHEN IT IS OFF, nothing
+    /// happens at all: no connection is opened, no file is created and no log record beyond one
+    /// information line saying the step was skipped and naming the key that enables it.
+    /// </para>
+    /// </remarks>
+    public bool ApplyMigrationsOnStartup { get; set; }
+}
+
+
+// --------------------------------------------------------------------------------------------------
 // VALIDATION - WHERE THE FAIL-FAST POSTURE ACTUALLY LIVES
 // --------------------------------------------------------------------------------------------------
 
@@ -1741,6 +1825,15 @@ public sealed class PersistenceOptionsValidator : IValidateOptions<PersistenceOp
             AppendAnnotationFailures(options.Handles, path, failures);
             AppendHandleCeilingFailure(options.Handles, path, failures);
         }
+
+        // --- Schema: NO RULE, AND NONE MAY BE ADDED -------------------------------------------------
+        // One boolean, both values legal: false is the shipped code default and true is what the
+        // orchestration manifest sets so the documented single-command bring-up reaches a healthy stack.
+        // A rule here could only refuse one of the two positions a deployment is entitled to hold. The
+        // section is therefore checked for having been bound at all, exactly as TransactionPool is - and
+        // for the same reason: a null section would be a NullReferenceException on the provisioning path
+        // rather than a message naming a key.
+        _ = EnsureSectionBound(options.Schema, string.Concat(prefix, "Schema"), failures);
 
         // --- DataObjects: each entry complete, and no name declared twice -------------------------
         AppendDataObjectFailures(options.DataObjects, string.Concat(prefix, "DataObjects"), failures);

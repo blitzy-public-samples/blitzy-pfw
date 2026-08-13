@@ -1,10 +1,11 @@
 // ==================================================================================================
 //  EventChainDeadlockTests.cs - THE C-03 EVENT CHAIN ANSWERS ITS OWN QUESTIONS
 //  ------------------------------------------------------------------------------------------------
-//  ONE SUBJECT: that a semantic question the chain asks BACK over the `EventChain` stream can be
-//  answered on that same stream, and that an unanswered one ends the call instead of holding it for
-//  ever. Everything else about the chain - the 22 arms, the four alphabets, the ordering disciplines,
-//  the sequencer's accept rule - belongs to DataWindowServiceContractTests.cs and
+//  ONE SUBJECT: what the `EventChain` stream does with a question the chain asks BACK - that it can be
+//  answered on that same stream, that an unanswered one ends the call instead of holding it for ever,
+//  and that the notifications a client sends WHILE one is outstanding are bounded rather than retained
+//  without limit. Everything else about the chain - the 22 arms, the four alphabets, the ordering
+//  disciplines, the sequencer's accept rule - belongs to DataWindowServiceContractTests.cs and
 //  EventOrderingPatternTests.cs and is deliberately not re-asserted here.
 //
 //  WHY THE FILE EXISTS
@@ -314,6 +315,166 @@ public sealed class EventChainDeadlockTests
             StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A client that pipelines notifications instead of conversing is refused with
+    /// <c>ResourceExhausted</c> once the pending ceiling is reached, and the refusal arrives WHILE a
+    /// dispatch is blocked - which is only possible if the read loop was never stalled.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>WHAT THE HANDOVER LEFT OPEN.</b> Accepting a notification is constant-time work on the read
+    /// loop while the consumer may be blocked on one answer for as long as
+    /// <c>DataServices:EventChain:AnswerTimeout</c> permits - five minutes by default. The only thing
+    /// bounding the queue was therefore the synchronous discipline's promise that a client cannot
+    /// pipeline, and that promise is the CLIENT'S. An authenticated client that simply declined it grew
+    /// the queue with one protobuf message per write, unbounded (CWE-400).
+    /// </para>
+    /// <para>
+    /// THE FIXTURE MAKES THE FLOOD DETERMINISTIC RATHER THAN RACING THE CONSUMER. The first notification
+    /// is <c>ondoitemchange</c>, a question the chain asks BACK, and this client answers nothing - so the
+    /// consumer is provably still holding that dispatch when the rest arrive. No sleep, no retry loop and
+    /// no dependence on scheduling: the count can only be 1, then 2, then over.
+    /// </para>
+    /// <para>
+    /// AND THE REFUSAL ITSELF IS THE PROOF THE READ LOOP NEVER BLOCKED. Reaching the third message means
+    /// <c>MoveNext</c> was called three times while the consumer sat blocked on the first - which is
+    /// exactly the property a bounded CHANNEL would have destroyed, because a full channel stalls the
+    /// writer, and the writer here is the only thing that can deliver the answer the consumer is waiting
+    /// for. That is the original deadlock, and this row would time out rather than fail if a future
+    /// change reintroduced it.
+    /// </para>
+    /// <para>
+    /// NO RESULT IS WRITTEN, which is the substantive behavioural assertion: the refused notification was
+    /// never dispatched, so nothing was half-applied and no event the client believes ran actually did.
+    /// The alternative implementation - dropping the excess message and continuing - would have left the
+    /// chain's four cross-event fields describing an event that never happened
+    /// [<c>se_cst_dw.sru:L89-L96</c>].
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task APipelinedFloodIsRefusedOnTheCeilingWhileTheReadLoopStaysFree()
+    {
+        DataServicesOptions configured = new();
+
+        // THE SMALLEST LEGAL CEILING, stated rather than defaulted, so the row needs three messages
+        // instead of sixty-five and the arithmetic is readable. The shipped default is asserted
+        // separately in DataServicesOptionsTests.
+        configured.EventChain.MaxPendingNotifications = 2;
+
+        Harness harness = new(configured);
+
+        OpenValidationSessionResponse opened = await harness.Service
+            .OpenValidationSession(
+                new OpenValidationSessionRequest
+                {
+                    DatawindowHandle = DataWindowCatalogue.SqliteFixtureName,
+                },
+                harness.Context)
+            .WaitAsync(CallBudget, TestContext.Current.CancellationToken);
+
+        // Three notifications, sent back to back with no response read in between. The first occupies the
+        // consumer for the whole row; the second fills the ceiling; the third is the one refused.
+        FloodingStreams streams = new(
+            Notify(opened.SessionId, EventId.Ondoitemchange, 1L),
+            Notify(opened.SessionId, EventId.Ondwnsetfocus, 2L),
+            Notify(opened.SessionId, EventId.Ondwnsetfocus, 3L));
+
+        RpcException failure = await Assert.ThrowsAsync<RpcException>(
+            () => harness.Service
+                .EventChain(streams.Reader, streams.Writer, harness.Context)
+                .WaitAsync(CallBudget, TestContext.Current.CancellationToken));
+
+        // RESOURCE EXHAUSTED, not FailedPrecondition: the client's state is coherent and its next attempt
+        // succeeds unchanged if it converses, which is a quota's remedy rather than a precondition's.
+        Assert.Equal(StatusCode.ResourceExhausted, failure.StatusCode);
+
+        // The detail names the ceiling that was applied and the setting an operator would change, so the
+        // remedy is readable from the status alone.
+        Assert.Contains("MaxPendingNotifications", failure.Status.Detail, StringComparison.Ordinal);
+        Assert.Contains(
+            configured.EventChain.MaxPendingNotifications.ToString(CultureInfo.InvariantCulture),
+            failure.Status.Detail,
+            StringComparison.Ordinal);
+
+        // All three messages were read - the client was never blocked writing them, and neither was the
+        // server reading them.
+        Assert.Equal(3, streams.Reader.Delivered);
+
+        // NOTHING WAS DISPATCHED TO A RESULT. The one dispatch that started is still waiting on an answer
+        // that never came, and the two queued behind it were never reached.
+        Assert.DoesNotContain(
+            streams.Writer.Written,
+            written => written.PayloadCase == EventChainResponse.PayloadOneofCase.Result);
+    }
+
+    /// <summary>
+    /// A conforming conversation is unaffected by the ceiling even at its smallest legal value, because a
+    /// slot is released when its dispatch completes rather than accumulating for the life of the stream.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE OPPOSITE REGRESSION TO THE ROW ABOVE, AND THE ONE A CEILING INVITES. A ceiling counted
+    /// CUMULATIVELY rather than concurrently would pass the flood row and then refuse the third
+    /// notification of every long-lived conversation - a limit on how many events a chain may carry in
+    /// total, which is not a limit anything asked for. Two notifications over a ceiling of two would still
+    /// pass such a build; the THIRD is what distinguishes them, so this row sends three.
+    /// </para>
+    /// <para>
+    /// EVERY NOTIFICATION HERE IS A QUESTION, deliberately. A question is the case where the slot is held
+    /// longest - across a whole client round trip - so if the release is ever moved to the wrong place, it
+    /// is this shape that catches it rather than a raw event the chain answers itself in microseconds.
+    /// </para>
+    /// <para>
+    /// THE TOKENS ARE WHAT A CONFORMING CLIENT COMPUTES: one past the highest seen in either direction.
+    /// Each exchange consumes three ordinals - the question, the outcome report and the result write - so
+    /// the three notifications carry 1, 4 and 7. Stating the arithmetic here is cheaper than a reader
+    /// rediscovering it; the sequencer's own rule is asserted in EventOrderingPatternTests.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AConformingConversationIsNotRefusedAtTheSmallestLegalCeiling()
+    {
+        DataServicesOptions configured = new();
+        configured.EventChain.MaxPendingNotifications = 2;
+
+        Harness harness = new(configured);
+
+        OpenValidationSessionResponse opened = await harness.Service
+            .OpenValidationSession(
+                new OpenValidationSessionRequest
+                {
+                    DatawindowHandle = DataWindowCatalogue.SqliteFixtureName,
+                },
+                harness.Context)
+            .WaitAsync(CallBudget, TestContext.Current.CancellationToken);
+
+        AnsweringStreams streams = new(
+            opened.SessionId,
+            [
+                Notify(opened.SessionId, EventId.Ondoitemchange, 1L),
+                Notify(opened.SessionId, EventId.Ondoitemchange, 4L),
+                Notify(opened.SessionId, EventId.Ondoitemchange, 7L),
+            ]);
+
+        await harness.Service
+            .EventChain(streams.Reader, streams.Writer, harness.Context)
+            .WaitAsync(CallBudget, TestContext.Current.CancellationToken);
+
+        // Three questions and three results, alternating - so no notification was refused and none was
+        // dispatched out of turn.
+        Assert.Equal(6, streams.Writer.Written.Count);
+        Assert.Equal(3, streams.Reader.AnswersSent);
+
+        Assert.Collection(
+            streams.Writer.Written,
+            written => Assert.Equal(EventChainResponse.PayloadOneofCase.Invoke, written.PayloadCase),
+            written => Assert.Equal(EventChainResponse.PayloadOneofCase.Result, written.PayloadCase),
+            written => Assert.Equal(EventChainResponse.PayloadOneofCase.Invoke, written.PayloadCase),
+            written => Assert.Equal(EventChainResponse.PayloadOneofCase.Result, written.PayloadCase),
+            written => Assert.Equal(EventChainResponse.PayloadOneofCase.Invoke, written.PayloadCase),
+            written => Assert.Equal(EventChainResponse.PayloadOneofCase.Result, written.PayloadCase));
+    }
+
     /// <summary>Builds one notification message.</summary>
     /// <param name="sessionId">The session every message on the stream names.</param>
     /// <param name="eventId">Which event is notified.</param>
@@ -413,7 +574,11 @@ public sealed class EventChainDeadlockTests
         /// A CANCELLABLE token, because a production call context always carries one and a
         /// non-cancellable one hides the ASP.NET Core writer's refusal of the two-argument WriteAsync.
         /// </summary>
-        private CancellationTokenSource Lifetime { get; } = new();
+        /// <remarks>
+        /// EXPOSED SO ONE ROW CAN ACTUALLY CANCEL THE CALL. A client disconnect and an expired deadline
+        /// both reach a handler as this token firing, and there is no other way to reproduce either.
+        /// </remarks>
+        internal CancellationTokenSource Lifetime { get; } = new();
 
         internal ServerCallContext Context => _context ??= new C03CallContext(Lifetime.Token);
 
@@ -646,6 +811,70 @@ public sealed class EventChainDeadlockTests
             _sent = true;
 
             return Task.FromResult(true);
+        }
+    }
+
+    /// <summary>
+    /// A client that PIPELINES every notification it has without reading a single response, and then stays
+    /// connected and silent.
+    /// </summary>
+    /// <remarks>
+    /// THIS IS THE ABUSE, AND IT IS NOT AN EXOTIC ONE. It is what a client written against the wire
+    /// contract but not against the synchronous discipline does naturally: write everything, then read. It
+    /// stays open at the end rather than half-closing, because half-closing would end the read loop and
+    /// give a build with no ceiling a way to finish the call - which would make a broken build pass.
+    /// </remarks>
+    private sealed class FloodingStreams
+    {
+        internal FloodingStreams(params EventChainRequest[] notifications)
+        {
+            Writer = new SignallingWriter();
+            Reader = new FloodingReader(notifications);
+        }
+
+        internal SignallingWriter Writer { get; }
+
+        internal FloodingReader Reader { get; }
+    }
+
+    /// <summary>The client half of <see cref="FloodingStreams"/>.</summary>
+    private sealed class FloodingReader(EventChainRequest[] notifications)
+        : IAsyncStreamReader<EventChainRequest>
+    {
+        private readonly Queue<EventChainRequest> _pending = new(notifications);
+
+        private readonly TaskCompletionSource _never =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private EventChainRequest? _current;
+
+        public EventChainRequest Current => _current
+            ?? throw new InvalidOperationException("MoveNext has not produced a message.");
+
+        /// <summary>How many notifications the server actually took off this stream.</summary>
+        /// <remarks>
+        /// THE ASSERTION THAT THE READ LOOP WAS NEVER STALLED. A build whose queue blocked the writer would
+        /// leave this below the scripted count, because the loop would never come back for the next message.
+        /// </remarks>
+        internal int Delivered { get; private set; }
+
+        public async Task<bool> MoveNext(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (_pending.Count > 0)
+            {
+                _current = _pending.Dequeue();
+                Delivered++;
+
+                return true;
+            }
+
+            // Connected and silent, exactly as SilentReader is: the wait is released by the cancellation
+            // that the refused call's teardown raises, so it is ended rather than abandoned.
+            await _never.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+            return false;
         }
     }
 

@@ -4,7 +4,7 @@
 //  WHAT THIS FILE IS
 //  The REST projection of contract C-03 (dataservices.v1.DataWindowService) and contract C-04
 //  (dataservices.v1.ColumnExpressionService), declared on this service's REST listener - port 5102,
-//  inside the 5101-5105 band the environment fixes (constraint C-L). Thirty-nine operations under
+//  inside the 5101-5105 band the environment fixes (constraint C-L). Forty operations under
 //  /v1/datawindow/**, spelled exactly as shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml
 //  spells them, so that Gateway's documented /v1/datawindow/** ingress path and this projection
 //  correspond route for route.
@@ -36,9 +36,9 @@
 //  THE CENTRAL RESPONSIBILITY: ONE SHARED STATUS MAPPING, AND `Aborted` BECOMES `409`
 //  ------------------------------------------------------------------------------------------------
 //  The status translation is the substantive part of a projection, and it is implemented EXACTLY
-//  ONCE here - `ProjectStatus` plus `ProjectAsync` - and used by every one of the thirty-nine
+//  ONCE here - `ProjectStatus` plus `ProjectAsync` - and used by every one of the forty
 //  routes. There is no per-endpoint `try`/`catch (RpcException)` anywhere in this file. One mapper
-//  is both the correctness property (thirty-nine copies would drift) and the coverage property
+//  is both the correctness property (forty copies would drift) and the coverage property
 //  (constraint C-H measures a line gate per service, and one well-tested mapper is reachable from
 //  every route).
 //
@@ -90,7 +90,7 @@
 //  ------------------------------------------------------------------------------------------------
 //  WHAT IS DELIBERATELY NOT PROJECTED - THREE STREAMS, AND THE REASON IS STRUCTURAL
 //  ------------------------------------------------------------------------------------------------
-//  C-03 declares sixteen methods and C-04 twenty-six. Fifteen and twenty-four are projected. The
+//  C-03 declares sixteen methods and C-04 twenty-seven. Fifteen and twenty-five are projected. The
 //  three exclusions are all BIDIRECTIONAL, and they are named individually so the boundary is
 //  checkable rather than asserted:
 //
@@ -264,6 +264,7 @@ using Microsoft.AspNetCore.OpenApi;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.OpenApi;
 using PowerFramework.DataServices.Authorization;
+using PowerFramework.Shared.Diagnostics;
 using PowerFramework.Contracts.DataServices.V1;
 using PowerFramework.Shared.Kernel;
 
@@ -351,7 +352,7 @@ public static class RestProjectionEndpoints
     /// <summary>
     /// The nested prefix carrying C-04's operations, so that the contract's own
     /// <c>/v1/datawindow/expression/**</c> spelling is produced by composition rather than repeated
-    /// twenty-four times.
+    /// twenty-five times.
     /// </summary>
     private const string ExpressionGroupPrefix = "/expression";
 
@@ -549,9 +550,40 @@ public static class RestProjectionEndpoints
     /// <summary>Fallback prose for an access refusal reported in band.</summary>
     private const string InBandAccessDeniedDetail = "The operation refused this caller.";
 
+    /// <summary>Fallback prose for a payload the operation could not apply, reported in band.</summary>
+    /// <remarks>
+    /// 400 rather than 500: the request's own DATA is what was rejected, so the caller can correct it. The
+    /// contract's own diagnostic replaces this prose whenever it supplied one, which on the update path is
+    /// the legacy sentence itself.
+    /// </remarks>
+    private const string InBandInvalidDataDetail =
+        "The operation refused the data carried in the request. On the update path this is the buffered "
+        + "carrier failing validation before any statement is generated, so nothing was applied and "
+        + "re-sending the same payload will be refused again.";
+
+    /// <summary>Fallback prose for a DataWindow name that resolves to nothing, reported in band.</summary>
+    /// <remarks>
+    /// 400 AND NOT 404, for the reason recorded on the arm: the name is a member of the request BODY rather
+    /// than the request target, and the retrieval side answers the same mistake with the oracle's own
+    /// <c>E_INVALID_ARGUMENT</c>, which is already 400.
+    /// </remarks>
+    private const string InBandInvalidDataObjectDetail =
+        "The DataWindow named in the request resolves to nothing. The name travels in the request body, so "
+        + "this is a rejected argument rather than a missing resource.";
+
     /// <summary>Fallback prose for an unknown handle or missing object reported in band.</summary>
     private const string InBandNotFoundDetail =
         "The operation could not resolve the handle or object named in the request.";
+
+    /// <summary>Fallback prose for the oracle's unspecific failure reported in band.</summary>
+    /// <remarks>
+    /// 502 rather than 500, for the reason recorded on the arm: the DATA PATH behind this service reported
+    /// a failure and this projection did not fail. The distinction decides which service an operator
+    /// investigates, and it is the same distinction the ingress draws for the same code.
+    /// </remarks>
+    private const string InBandGenericFailureDetail =
+        "The operation reported the legacy unspecific failure. It completed normally and reported that it "
+        + "could not do what was asked; the originating return code is on the retCode member.";
 
     /// <summary>Fallback prose for a retryable conflict reported in band.</summary>
     /// <remarks>
@@ -694,9 +726,14 @@ public static class RestProjectionEndpoints
     // ----------------------------------------------------------------------------------------------
 
     /// <summary>The contract's shared success description for a projected operation.</summary>
+    /// <remarks>
+    /// It names the message rather than restating its members because the members are published, member
+    /// by member, by the schema of that name in the authored contract - see <see cref="ProtoPayload"/>.
+    /// </remarks>
     private const string ProjectedSuccessDescription =
         "The projected gRPC method returned OK. The body is the canonical protobuf JSON mapping of "
-        + "the message named in this operation's x-proto-response extension.";
+        + "the message named in this operation's x-proto-response extension, whose members the "
+        + "contract document publishes as a schema of the same name.";
 
     /// <summary>The contract's shared <c>400</c> description.</summary>
     private const string BadRequestDescription =
@@ -852,6 +889,13 @@ public static class RestProjectionEndpoints
     /// preserves the contract's absent-versus-empty distinctions - the produced-filter signal that
     /// mirrors the legacy <c>ref string</c> out-parameter among them.
     /// </para>
+    /// <para>
+    /// IT IS ALSO WHAT KEEPS <c>DataWindowRow.originalValues</c> PRESENT ON EVERY ROW. A repeated field
+    /// has no explicit presence, so an empty one is a default value: without this setting an
+    /// insert-shaped row - the one row that legitimately has no prior state - would serialize without
+    /// the member, and the member is REQUIRED. The schema's distinction is between an EMPTY array and an
+    /// ABSENT one, and only formatting defaults keeps that distinction expressible.
+    /// </para>
     /// </remarks>
     private static readonly JsonFormatter ResponseFormatter =
         new(JsonFormatter.Settings.Default.WithFormatDefaultValues(true));
@@ -907,7 +951,7 @@ public static class RestProjectionEndpoints
     // ==============================================================================================
 
     /// <summary>
-    /// Declares the thirty-nine <c>/v1/datawindow</c> operations on the supplied route builder.
+    /// Declares the forty <c>/v1/datawindow</c> operations on the supplied route builder.
     /// </summary>
     /// <param name="endpoints">The route builder the composition root is populating.</param>
     /// <returns>
@@ -930,7 +974,7 @@ public static class RestProjectionEndpoints
     /// <b>The return type is deliberately the route builder and not a route handler builder or a
     /// group.</b> Handing back either would let a caller append <c>AllowAnonymous</c>, which takes
     /// precedence over <c>RequireAuthorization</c> in endpoint metadata and would silently open
-    /// thirty-nine authenticated routes from a different file. Withholding it makes that impossible.
+    /// forty authenticated routes from a different file. Withholding it makes that impossible.
     /// </para>
     /// <para>
     /// Both groups are authorized by the parent group's single unconditional
@@ -1266,11 +1310,11 @@ public static class RestProjectionEndpoints
 
 
     // ==============================================================================================
-    //  C-04 - THE TWENTY-FOUR PROJECTED ColumnExpressionService OPERATIONS
+    //  C-04 - THE TWENTY-FIVE PROJECTED ColumnExpressionService OPERATIONS
     //
-    //  C-04 declares twenty-six methods. The two exclusions are `InvokeMethodChannel` and
+    //  C-04 declares twenty-seven methods. The two exclusions are `InvokeMethodChannel` and
     //  `TraceChannel`, both BIDIRECTIONAL and both INVERTED - the server asks and the client answers -
-    //  so neither has a request/response direction to project. Twenty-four are declared here.
+    //  so neither has a request/response direction to project. Twenty-five are declared here.
     //
     //  THE `$` VERSUS `$$` DISTINCTION IS THE REASON THIS SURFACE IS SO LARGE, and it does not
     //  survive naive serialization. Static expansion substitutes the variable's value AT THE MOMENT
@@ -1286,7 +1330,7 @@ public static class RestProjectionEndpoints
     // ==============================================================================================
 
     /// <summary>
-    /// Declares C-04's twenty-four projected operations: the session pair, the expression table, the
+    /// Declares C-04's twenty-five projected operations: the session pair, the expression table, the
     /// typed variable environment, the four calculation entry points, the two service switches and
     /// the two state reads, plus the projected event stream.
     /// </summary>
@@ -1321,24 +1365,6 @@ public static class RestProjectionEndpoints
             HttpMethods.Delete,
             static sessionId => new CloseExpressionSessionRequest { SessionId = sessionId },
             static (service, request, context) => service.CloseExpressionSession(request, context));
-
-        MapUnary<ColumnExpressionImplementation, LoadRowsRequest, LoadRowsResponse>(
-            group,
-            new("/rows/load", "loadExpressionRows", "LoadRows",
-                ContractSurface.ColumnExpression,
-                "Load rows into an expression session's DataWindow.",
-                "THE OPERATION THAT MAKES THE CALCULATION HALF OF THIS SERVICE REACHABLE. Every "
-                + "calculation evaluates against ROWS, and a session's DataWindow is created empty; the "
-                + "retrieve operation on the DataWindow service addresses a REGISTERED data-object name "
-                + "and refuses a session-scoped handle, so without this there was no published way to "
-                + "put a row into a session at all and only the binding half of the engine could be "
-                + "exercised. Rows are APPENDED to the Primary buffer in request order and the ordinals "
-                + "are assigned here - a caller's buffer and row are ignored, because honouring a "
-                + "supplied ordinal would let two calls disagree about which row is which. The response "
-                + "names the range it created. An inline row set rather than a retrieve into the "
-                + "session: Persistence is the only service that reaches storage, and a caller wanting "
-                + "stored rows retrieves them by name and hands the answer back here."),
-            static (service, request, context) => service.LoadRows(request, context));
 
         MapUnary<ColumnExpressionImplementation, AddExpressionRequest, AddExpressionResponse>(
             group,
@@ -1587,7 +1613,7 @@ public static class RestProjectionEndpoints
             group,
             new("/event-stream", "getExpressionEventStream", "EventStream",
                 ContractSurface.ColumnExpression,
-                "Read the engine's own event sequence as an ordered collection. Token required.",
+                "Poll the engine's own event sequence as an ordered collection. Token required.",
                 "A SERVER stream of the events the engine emits ON ITSELF - item-changed, "
                 + "do-item-changed with its from-input flag, and var-changed with its force-calculate "
                 + "flag. A server stream and not an inverted one: these are notifications the engine "
@@ -1595,13 +1621,25 @@ public static class RestProjectionEndpoints
                 + "inverted channels are not. EVERY RECORD CARRIES ITS SEQUENCING TOKEN AND ITS "
                 + "DECLARED ORDERING DISCIPLINE, AND SEQUENCE NUMBERS ARE FOR DETECTION ONLY - an "
                 + "out-of-order arrival is a hard error, never a reorder opportunity, so a consumer "
-                + "must not sort, buffer-and-reorder, de-duplicate or replay what it receives.",
+                + "must not sort, buffer-and-reorder, de-duplicate or replay what it receives. "
+                + "THIS OPERATION IS A BOUNDED POLL AND NOT THE SUBSCRIPTION'S WHOLE LIFETIME, WHICH "
+                + "IS THE ONE PLACE THIS PROJECTION DOES NOT MIRROR ITS gRPC TWIN. The gRPC stream ends "
+                + "only when the client goes away, and a request/response operation cannot wait for "
+                + "that, so the collection is bounded by this service's configured collection window "
+                + "(DataServices:RestProjection:StreamCollectionWindow, two seconds as shipped) and the "
+                + "response is the records that arrived within it. An empty collection therefore means "
+                + "'nothing was emitted during the window' and never 'the subscription ended'. A "
+                + "consumer that wants continuous delivery calls again - the sequencing token on the "
+                + "last record it received is how it detects a gap between polls - or uses the gRPC "
+                + "stream, which has no window because it needs none.",
                 SuccessDescription:
-                "The stream completed. The body is the ordered sequence of records the gRPC server "
-                + "stream would have delivered, each retaining its sequencing token and its declared "
-                + "ordering discipline."),
+                "The collection window closed. The body is the ordered sequence of records the gRPC "
+                + "server stream delivered within it, each retaining its sequencing token and its "
+                + "declared ordering discipline. An empty array is a complete, successful answer "
+                + "meaning no event was emitted during the window."),
             static (service, request, stream, context) =>
-                service.EventStream(request, stream, context));
+                service.EventStream(request, stream, context),
+            collectWithinWindow: true);
     }
 
 
@@ -1721,6 +1759,11 @@ public static class RestProjectionEndpoints
     /// <param name="group">The route group the operation is declared on.</param>
     /// <param name="operation">The operation's published metadata.</param>
     /// <param name="invoke">Invokes the projected method against a collecting stream writer.</param>
+    /// <param name="collectWithinWindow">
+    /// Whether this operation's upstream is a subscription that never completes on its own, so the
+    /// collection must be bounded by a finite window. Defaults to <see langword="false"/>, which is
+    /// correct for every stream that terminates itself.
+    /// </param>
     /// <remarks>
     /// <para>
     /// The response is the WHOLE sequence as an ordered collection, which is the shape the authored
@@ -1733,11 +1776,24 @@ public static class RestProjectionEndpoints
     /// TRUNCATED: a caller either receives every element the stream produced, in order, or receives a
     /// failure.
     /// </para>
+    /// <para>
+    /// 🔴 <b>"EVERY ELEMENT THE STREAM PRODUCED" NEEDS A DEFINITION FOR A STREAM THAT NEVER STOPS
+    /// PRODUCING, AND <paramref name="collectWithinWindow"/> IS IT.</b> One projected operation - the
+    /// expression event stream - is a SUBSCRIPTION whose upstream ends only when the client goes away, so
+    /// collecting it to completion meant a normal HTTP request received neither its events nor a success
+    /// status and held a request thread, a relay subscription and a connection until the caller gave up.
+    /// With the flag set, the collection is bounded by
+    /// <see cref="RestProjectionOptions.StreamCollectionWindow"/> and an expired window is a COMPLETE
+    /// ANSWER - the records available now, empty included - rather than a truncation or a fault. It is
+    /// opt-in per operation and not a property of streaming, because a retrieval ends with its
+    /// final-marked chunk and windowing one of those would truncate a legitimate result.
+    /// </para>
     /// </remarks>
     private static void MapServerStream<TService, TRequest, TResponse>(
         RouteGroupBuilder group,
         ProjectedOperation operation,
-        Func<TService, TRequest, IServerStreamWriter<TResponse>, ServerCallContext, Task> invoke)
+        Func<TService, TRequest, IServerStreamWriter<TResponse>, ServerCallContext, Task> invoke,
+        bool collectWithinWindow = false)
         where TService : class
         where TRequest : class, IMessage, new()
         where TResponse : class, IMessage, new()
@@ -1751,7 +1807,11 @@ public static class RestProjectionEndpoints
             streaming,
             async (service, context) =>
             {
-                string body = await ReadRequestBodyAsync(httpContext, context.CancellationToken)
+                // THE BODY IS READ ON THE REQUEST'S OWN TOKEN AND NOT ON THE CONTEXT'S, which matters only
+                // for a windowed operation and matters absolutely there: the window bounds the
+                // SUBSCRIPTION, so letting it also bound the upload would answer an empty collection to a
+                // slow client whose collection had not begun. The window is armed below, after binding.
+                string body = await ReadRequestBodyAsync(httpContext, httpContext.RequestAborted)
                     .ConfigureAwait(false);
 
                 if (!TryBindRequest(body, out TRequest? request, out StatusProjection rejection))
@@ -1759,16 +1819,31 @@ public static class RestProjectionEndpoints
                     return RejectRequest(httpContext, rejection);
                 }
 
-                CollectingStreamWriter<TResponse> collected = new(
-                    httpContext.RequestServices
-                        .GetRequiredService<IOptions<DataServicesOptions>>()
-                        .Value
-                        .RestProjection
-                        .MaxStreamedElements);
+                RestProjectionOptions projection = httpContext.RequestServices
+                    .GetRequiredService<IOptions<DataServicesOptions>>()
+                    .Value
+                    .RestProjection;
+
+                CollectingStreamWriter<TResponse> collected = new(projection.MaxStreamedElements);
+
+                if (collectWithinWindow)
+                {
+                    context.StartCollectionWindow(projection.StreamCollectionWindow);
+                }
 
                 try
                 {
                     await invoke(service, request, collected, context).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (context.WindowExpired)
+                {
+                    // AN EXPIRED WINDOW IS AN EMPTY-OR-PARTIAL COLLECTION, NEVER A FAULT, AND THIS ARM IS
+                    // WHY THAT DOES NOT DEPEND ON THE PROJECTED METHOD'S OWN MANNERS. EventStream ends its
+                    // read loop quietly on cancellation today, so this arm is not reached by it; a
+                    // server-streaming method that PROPAGATED the cancellation instead would otherwise
+                    // turn a completed poll into a 500, and the projection would be relying on an
+                    // implementation detail of the thing it projects. Everything written before expiry is
+                    // already in the collector, so the answer below is the records available now.
                 }
                 catch (StreamedResponseTooLargeException tooLarge)
                 {
@@ -1789,6 +1864,16 @@ public static class RestProjectionEndpoints
                                 + $"rather than truncated, because a truncated array cannot be told apart "
                                 + $"from a complete one."),
                             FromUpstream: true));
+                }
+
+                // A CALLER THAT WENT AWAY IS ANSWERED WITH NOTHING, matching the shared failure path's own
+                // posture. It is checked here rather than left to that path because a projected method may
+                // END QUIETLY on cancellation - EventStream does - so an aborted request would otherwise
+                // reach this point looking exactly like a completed collection and render a 200 body for a
+                // connection nobody is reading.
+                if (httpContext.RequestAborted.IsCancellationRequested)
+                {
+                    return Results.Empty;
                 }
 
                 return RenderSequence(collected.Written);
@@ -1928,8 +2013,8 @@ public static class RestProjectionEndpoints
     /// The walk starts at the conflict detail and follows message-typed fields transitively, so the
     /// whole published closure is covered - the detail, its rows, their column values and the value
     /// union with its nested types - without naming any of them here. Only schemas whose component name
-    /// matches a message in that closure are touched, so the problem shape and the delegated
-    /// placeholder are left exactly as the framework produced them.
+    /// matches a message in that closure are touched, so the problem shape and the summary envelope are
+    /// left exactly as the framework produced them.
     /// </para>
     /// </remarks>
     private static void PruneGeneratedMessageSchemas(OpenApiDocument? document)
@@ -2001,7 +2086,7 @@ public static class RestProjectionEndpoints
     /// <para>
     /// EVERY ROUTE IN THIS FILE PASSES THROUGH HERE, so the status translation exists exactly once.
     /// There is no per-endpoint <c>try</c>/<c>catch</c> anywhere in this file, which is both the
-    /// correctness property - thirty-nine copies would drift apart - and the coverage property, since
+    /// correctness property - forty copies would drift apart - and the coverage property, since
     /// one mapper is reachable from every route.
     /// </para>
     /// <para>
@@ -2023,13 +2108,18 @@ public static class RestProjectionEndpoints
     private static async Task<IResult> ProjectAsync<TService>(
         HttpContext httpContext,
         ProjectedOperation operation,
-        Func<TService, ServerCallContext, Task<IResult>> project,
+        Func<TService, ProjectionCallContext, Task<IResult>> project,
         Func<IServiceProvider, TService> resolve)
         where TService : class
     {
         TService service = resolve(httpContext.RequestServices);
 
-        ProjectionCallContext context = new(httpContext, operation.GrpcMethod);
+        // DISPOSED ON EVERY PATH OUT, because one operation arms a linked cancellation source on this
+        // context and a linked source holds a registration on the token it links to. The delegate is typed
+        // to the CONCRETE context rather than to ServerCallContext so that the one operation which arms a
+        // window can do so without a downcast; every other call site is unaffected, since the concrete
+        // type IS a ServerCallContext and the projected methods take that.
+        using ProjectionCallContext context = new(httpContext, operation.GrpcMethod);
 
         try
         {
@@ -2223,7 +2313,7 @@ public static class RestProjectionEndpoints
             failure.HttpStatus,
             httpContext.Request.Method,
             DescribeRoute(httpContext),
-            ResolveCorrelationId(httpContext));
+            LogSafeText.Render(ResolveCorrelationId(httpContext)));
 
         ProblemDetails problem = BuildProblem(httpContext, failure);
 
@@ -2433,8 +2523,10 @@ public static class RestProjectionEndpoints
     /// <para>
     /// Four statuses the published table does not name are mapped explicitly rather than left to the
     /// default arm, because C-03 and C-04 genuinely produce them:
-    /// <see cref="StatusCode.FailedPrecondition"/> for an unknown session, a handle bound to nothing or
-    /// an ordering violation under strict ordering; <see cref="StatusCode.OutOfRange"/> for an ordinal
+    /// <see cref="StatusCode.FailedPrecondition"/> for an unknown session, a transaction the upstream will
+    /// not accept or an ordering violation under strict ordering - but NOT for a handle naming nothing,
+    /// which is <see cref="StatusCode.NotFound"/> on every one of the estate's status maps and therefore
+    /// takes the published <c>404</c> row above; <see cref="StatusCode.OutOfRange"/> for an ordinal
     /// outside its range; <see cref="StatusCode.AlreadyExists"/>, which shares <c>409</c> and is
     /// EMPHATICALLY NOT a concurrency conflict, so it carries its own problem type and no
     /// <c>conflict</c> member; and <see cref="StatusCode.ResourceExhausted"/>.
@@ -2730,7 +2822,7 @@ public static class RestProjectionEndpoints
             projection.RetCode,
             httpContext.Request.Method,
             DescribeRoute(httpContext),
-            ResolveCorrelationId(httpContext));
+            LogSafeText.Render(ResolveCorrelationId(httpContext)));
 
         return TypedResults.Problem(BuildProblem(httpContext, projection));
     }
@@ -2808,7 +2900,7 @@ public static class RestProjectionEndpoints
             DescribeRoute(httpContext),
             failure.StatusCode.ToString(),
             failure.GetType().Name,
-            ResolveCorrelationId(httpContext));
+            LogSafeText.Render(ResolveCorrelationId(httpContext)));
     }
 
     /// <summary>
@@ -3013,7 +3105,7 @@ public static class RestProjectionEndpoints
     /// <param name="document">The document being built.</param>
     /// <remarks>
     /// Idempotent, so this composes with whatever document-wide security the host registers instead of
-    /// fighting it, and so thirty-nine operations describe ONE scheme rather than thirty-nine.
+    /// fighting it, and so forty operations describe ONE scheme rather than forty.
     /// </remarks>
     private static void EnsureBearerSecurityScheme(OpenApiDocument document)
     {
@@ -3069,14 +3161,25 @@ public static class RestProjectionEndpoints
     /// method exactly as a cancelled gRPC call would. There is no deadline, because HTTP carries no gRPC
     /// deadline header and inventing one would impose a limit no contract states.
     /// </para>
+    /// <para>
+    /// 🔴 <b>ONE OPERATION ARMS A FINITE COLLECTION WINDOW ON TOP OF THAT, AND IT IS THE ONE WHOSE
+    /// UPSTREAM NEVER ENDS.</b> See <see cref="StartCollectionWindow"/>: the expression event stream is a
+    /// subscription, so a projection of it that waited for the stream to complete waited forever. The
+    /// window is a token LINKED to the request's own rather than a timer around an await, which is what
+    /// makes expiry end the projected method - and release its subscription - instead of abandoning an
+    /// await while the method keeps running.
+    /// </para>
     /// </remarks>
-    private sealed class ProjectionCallContext : ServerCallContext
+    private sealed class ProjectionCallContext : ServerCallContext, IDisposable
     {
         /// <summary>The placeholder reported when the transport exposes no remote address.</summary>
         private const string UnknownPeer = "unknown";
 
         private readonly HttpContext _httpContext;
         private readonly string _method;
+
+        /// <summary>The armed collection window, or <see langword="null"/> when none was armed.</summary>
+        private CancellationTokenSource? _window;
 
         /// <summary>
         /// Initializes a context for one projected invocation.
@@ -3117,7 +3220,64 @@ public static class RestProjectionEndpoints
         protected override Metadata RequestHeadersCore { get; } = [];
 
         /// <inheritdoc/>
-        protected override CancellationToken CancellationTokenCore => _httpContext.RequestAborted;
+        /// <remarks>
+        /// THE WINDOW WHEN ONE IS ARMED, THE REQUEST'S OWN OTHERWISE - and the armed token is LINKED to
+        /// the request's, so a caller that goes away still cancels the projected method. The projected
+        /// method cannot tell the two apart and does not need to: ending the stream is the correct
+        /// response to either. <see cref="WindowExpired"/> is how the PROJECTION tells them apart, which
+        /// it must, because one answers the collected sequence and the other answers nothing at all.
+        /// </remarks>
+        protected override CancellationToken CancellationTokenCore =>
+            _window?.Token ?? _httpContext.RequestAborted;
+
+        /// <summary>
+        /// Whether the collection window - and not the caller's own abandonment - ended the invocation.
+        /// </summary>
+        /// <remarks>
+        /// <b>THE CALLER'S ABORT MUST NOT READ AS A COMPLETED COLLECTION, WHICH IS WHAT THE SECOND
+        /// CONDITION IS FOR.</b> The window is linked to the request, so a caller that hangs up cancels it
+        /// too - and treating that as a complete answer would render a 200 for a request nobody is waiting
+        /// for while hiding the abort from the shared failure path. Testing the request's own token second
+        /// is what keeps the two apart.
+        /// </remarks>
+        internal bool WindowExpired =>
+            _window is { IsCancellationRequested: true }
+            && !_httpContext.RequestAborted.IsCancellationRequested;
+
+        /// <summary>
+        /// Arms a finite collection window over the invocation this context serves.
+        /// </summary>
+        /// <param name="budget">How long the projection collects before answering with what it has.</param>
+        /// <remarks>
+        /// <para>
+        /// CALLED AFTER THE REQUEST BODY HAS BEEN READ AND BOUND, DELIBERATELY. The window bounds the
+        /// SUBSCRIPTION, not the request parse: arming it earlier would let a slow upload consume the
+        /// budget and answer an empty collection for a request that had not started collecting yet.
+        /// </para>
+        /// <para>
+        /// A LINKED SOURCE RATHER THAN A TIMEOUT AROUND THE AWAIT. The projected method observes
+        /// <see cref="ServerCallContext.CancellationToken"/>, so expiry ends its own read loop and
+        /// disposes its relay subscription; a timer around the await would leave the method running and
+        /// the subscription registered with nobody to consume it.
+        /// </para>
+        /// </remarks>
+        internal void StartCollectionWindow(TimeSpan budget)
+        {
+            _window = CancellationTokenSource.CreateLinkedTokenSource(_httpContext.RequestAborted);
+            _window.CancelAfter(budget);
+        }
+
+        /// <summary>Releases the collection window, if one was armed.</summary>
+        /// <remarks>
+        /// A LINKED SOURCE REGISTERS A CALLBACK ON THE TOKEN IT LINKS TO, so leaving it undisposed holds a
+        /// registration on the request's own token for the lifetime of that request. The projection
+        /// disposes this context on every path out, including the failure paths.
+        /// </remarks>
+        public void Dispose()
+        {
+            _window?.Dispose();
+            _window = null;
+        }
 
         /// <inheritdoc/>
         /// <remarks>
@@ -3504,6 +3664,28 @@ public static class RestProjectionEndpoints
         /// argument is <c>400</c> either way, and a busy resource is <c>429</c> either way.
         /// </para>
         /// <para>
+        /// 🔴 <b>AND IT MIRRORS THE INGRESS'S MAP FOR THE SAME REFUSAL, WHICH IS A PUBLISHED PROPERTY
+        /// RATHER THAN A COINCIDENCE.</b> The two surfaces are documented as equivalent, so the SAME
+        /// refusal must carry the SAME status whether a caller reached it through the gateway or reached
+        /// this projection directly. Six codes broke that: <c>E_INVALID_DATA</c> and
+        /// <c>E_INVALID_DATAOBJECT</c> were 400 there and 500 here; <c>E_NOT_EXISTS</c>,
+        /// <c>E_VAR_NOT_FOUND</c> and <c>E_MEMBER_NOT_FOUND</c> were 404 there and 500 here; and
+        /// <c>FAILED</c> - the oracle's own unspecific failure, which the projected methods really answer -
+        /// was 502 there and 500 here. Each is now an explicit arm, and each arm carries the reasoning that
+        /// chose its status rather than only the status. A table-driven test in this service's suite and its
+        /// twin in the gateway's pin the whole published mapping on both sides, deliberately duplicated
+        /// rather than hoisted into the contracts project, because no behaviour crosses a service boundary
+        /// in this system (constraint C-A) - the cross-reference between the two tests is what keeps them
+        /// in step.
+        /// </para>
+        /// <para>
+        /// THE PROSE IS NOT PART OF THAT EQUIVALENCE, AND IT SHOULD NOT BE. Each fallback sentence names
+        /// the surface a caller is talking to, so the gateway's says "upstream" where this one does not -
+        /// and either way the sentence is replaced by the contract's own diagnostic whenever one was
+        /// supplied, which is the case that matters for behaviour preservation (constraint C-B). The STATUS
+        /// is the contract; the sentence is the courtesy.
+        /// </para>
+        /// <para>
         /// THE DEFAULT IS <c>500</c> AND NOT <c>400</c>. An outcome this map does not recognise is a
         /// contract this projection has not been taught, which is a fault on this side of the boundary -
         /// blaming the caller for it would send a client into a retry-with-different-input loop that can
@@ -3514,8 +3696,18 @@ public static class RestProjectionEndpoints
         /// unchanged; the fixed prose below is used only when the contract left it empty, so nothing is
         /// paraphrased over the top of a real message (constraint C-B).
         /// </para>
+        /// <para>
+        /// 🔴 <b><see langword="internal"/> RATHER THAN <see langword="private"/> SO THE PUBLISHED MAPPING
+        /// IS PINNABLE AS A TABLE, AND THAT IS THE ONLY WAY THE EQUIVALENCE CLAIM CAN BE TESTED AT ALL.</b>
+        /// Reaching this map through a deployed host exercises only the handful of outcomes a real
+        /// operation can be provoked into answering - which is exactly how six codes came to diverge
+        /// between the two published surfaces unnoticed. Calling it directly makes every arm assertable,
+        /// including the arms no test can provoke, so the two services' tables can be compared row for row.
+        /// It is visible to this service's own test assembly alone, through the
+        /// <c>InternalsVisibleTo</c> item the project file already declares.
+        /// </para>
         /// </remarks>
-        private static StatusProjection Project(long retCode, string? errorText)
+        internal static StatusProjection Project(long retCode, string? errorText)
         {
             (int HttpStatus, string Detail) mapped = retCode switch
             {
@@ -3527,7 +3719,42 @@ public static class RestProjectionEndpoints
 
                 RetCode.E_ACCESS_DENIED => (StatusCodes.Status403Forbidden, InBandAccessDeniedDetail),
 
-                RetCode.E_INVALID_HANDLE or RetCode.E_OBJECT_NOT_FOUND =>
+                // ⚠ E_INVALID_DATA JOINS THE ARGUMENT-REJECTION ARM, and it belongs there rather than in
+                // the default. It is what the update path answers when the carrier it was handed cannot be
+                // applied [n_cst_thread_task_sqlupdate.sru, the legacy diagnostic 无效的更新数据!] - the
+                // caller's PAYLOAD is at fault, which is the definition of a 400. Falling to the default
+                // answered 500, telling a caller that this service had failed and inviting it to retry an
+                // identical request that can never succeed.
+                RetCode.E_INVALID_DATA =>
+                    (StatusCodes.Status400BadRequest, InBandInvalidDataDetail),
+
+                // ⚠ E_INVALID_DATAOBJECT JOINS THE ARGUMENT-REJECTION ARM, AND IT IS 400 RATHER THAN 404
+                // FOR A SPECIFIC REASON. It is answered when the DataWindow name a request carried
+                // resolves to nothing - and the RETRIEVAL side answers the SAME mistake with the oracle's
+                // own E_INVALID_ARGUMENT [n_cst_thread_task_sqlquery.sru:L554], which is already 400 here.
+                // One caller mistake must not produce two different statuses depending on which verb was
+                // used, so the update side is aligned to the retrieval side rather than to the handle
+                // family below. 404 was considered and rejected: the name is a member of the request BODY,
+                // not the request target, and 422 is closed to this surface by docs/CONTRACTS.md 12.1.
+                RetCode.E_INVALID_DATAOBJECT =>
+                    (StatusCodes.Status400BadRequest, InBandInvalidDataObjectDetail),
+
+                // ⚠ E_NOT_EXISTS JOINS THE NOT-FOUND FAMILY for the same reason its two siblings are
+                // already in it: the request named something that could not be found. A 500 here reported
+                // a fault where the honest answer is that the named thing is not there.
+                //
+                // ⚠ AND SO DO E_VAR_NOT_FOUND AND E_MEMBER_NOT_FOUND, which are the column-expression
+                // service's own not-found codes: E_VAR_NOT_FOUND is what it answers for a variable name no
+                // global-variable table carries [n_cst_dwsvc_columnexp.sru, the of_GetVar family] and
+                // E_MEMBER_NOT_FOUND for a member it cannot bind. Both are a caller naming something that
+                // is not there - the identical situation to the three codes above - yet both fell to the
+                // default and reported HTTP 500, which told the caller this service had failed and invited
+                // it to retry a request that can never succeed.
+                RetCode.E_INVALID_HANDLE
+                    or RetCode.E_OBJECT_NOT_FOUND
+                    or RetCode.E_NOT_EXISTS
+                    or RetCode.E_VAR_NOT_FOUND
+                    or RetCode.E_MEMBER_NOT_FOUND =>
                     (StatusCodes.Status404NotFound, InBandNotFoundDetail),
 
                 RetCode.E_RETRY => (StatusCodes.Status409Conflict, InBandRetryDetail),
@@ -3541,6 +3768,22 @@ public static class RestProjectionEndpoints
 
                 RetCode.E_DB_ERROR or RetCode.E_INVALID_TRANSACTION =>
                     (StatusCodes.Status502BadGateway, InBandDataPathDetail),
+
+                // ⚠ THE GENERIC LEGACY FAILURE IS A DATA-PATH FAILURE, NOT A PROJECTION ONE.
+                //
+                // FAILED = -1 [retcode.sru] is the oracle's unspecific failure and the projected methods
+                // really answer it - so it is a RECOGNISED outcome, and letting it fall to the default was
+                // the one arm where the default's own reasoning did not hold: the default is 500 because an
+                // UNRECOGNISED code is a contract this projection has not been taught, which is a fault on
+                // this side. A code this projection recognises, reported by an operation that completed
+                // normally, is the opposite situation. 502 is the status whose meaning is "the path behind
+                // me failed", and it is what the ingress answers for this same code - so answering 500 here
+                // was also the single largest divergence between the two published mappings.
+                //
+                // 422 WOULD HAVE BEEN THE INTUITIVE CHOICE AND IS FORBIDDEN. The status surface is closed
+                // to the set docs/CONTRACTS.md 12.1 sanctions plus 502 and 503, and the contracts suite
+                // asserts that 422 appears nowhere.
+                RetCode.FAILED => (StatusCodes.Status502BadGateway, InBandGenericFailureDetail),
 
                 _ => (StatusCodes.Status500InternalServerError, InBandUnclassifiedDetail),
             };
@@ -3563,27 +3806,44 @@ public static class RestProjectionEndpoints
 }
 
 /// <summary>
-/// The published placeholder for a body whose shape is defined by the protobuf message named in the
-/// enclosing operation's <c>x-proto-request</c> or <c>x-proto-response</c> extension, encoded in the
-/// canonical protobuf JSON mapping.
+/// The RUNTIME document's summary of a body whose authoritative, member-by-member schema is published
+/// by <c>OpenApi/gateway.v1.yaml</c> under the name the enclosing operation's <c>x-proto-request</c> or
+/// <c>x-proto-response</c> extension gives.
 /// </summary>
 /// <remarks>
 /// <para>
-/// A DELIBERATE DELEGATION, NOT AN UNSPECIFIED BODY. The messages live in
-/// <c>Proto/dataservices.v1.proto</c> and <c>Proto/common.v1.proto</c>, and they are the single
-/// authority for the shapes. Transcribing well over a hundred of them into this project would create a
-/// second source of truth with nothing keeping the two in step, and the first divergence would be
-/// silent. The <c>x-proto-*</c> extensions are the alternative, and they are CHECKABLE: each names a
-/// real generated type.
+/// <b>⚠ THIS TYPE IS A SUMMARY, AND THE PUBLISHED CONTRACT IS NOT.</b> The document served from
+/// <c>/openapi/v1.json</c> is a convenience mirror for whoever is holding this service; the CONTRACT a
+/// consumer is given is the authored <c>gateway.v1.yaml</c> in <c>PowerFramework.Contracts</c>, which
+/// publishes all 120 messages and 15 enums of the projected closure CONCRETELY - every member, its
+/// canonical JSON name, its canonical scalar encoding, <c>additionalProperties: false</c>, and a
+/// <c>required</c> list that states what the wire actually carries. The sibling test project compares
+/// every one of those schemas against its compiled descriptor on each build, so it cannot drift from
+/// the protocol definition.
 /// </para>
 /// <para>
-/// The extension-data member is what makes it an open object in the generated document, so a consumer
-/// validates against the generated message type rather than against this placeholder.
+/// <b>WHAT A CONSUMER MUST NOT INFER FROM THE OPEN SHAPE BELOW.</b> The extension-data member makes
+/// this an open object in the generated document, and that openness describes THIS DOCUMENT'S SILENCE
+/// about the members - never a permissiveness in the projection. <see cref="RestProjectionEndpoints"/>
+/// binds with <c>JsonParser.Default</c>, whose <c>IgnoreUnknownFields</c> is false: a member the target
+/// message does not declare is answered with <c>400</c>, not discarded. An earlier revision of the
+/// authored contract carried the same open shape and that WAS a defect, because a contract's audience
+/// has nothing else to read; it was replaced by the concrete tier. This summary remains because
+/// reproducing the generator here would put a third derivation of the same descriptors in a third
+/// place, and constraint C-A leaves no shared home for one - a service may not reach into another
+/// service's code, and <c>PowerFramework.Contracts</c> carries no behaviour.
+/// </para>
+/// <para>
+/// The <c>x-proto-*</c> extensions this projection attaches are the link between the two: each names
+/// the exact message, and the authored contract publishes a schema of that name.
 /// </para>
 /// </remarks>
 public sealed record ProtoPayload
 {
-    /// <summary>The members of the delegated message, whatever the named message declares.</summary>
+    /// <summary>
+    /// The members of the named message, whatever that message declares - carried as extension data so
+    /// the generated document describes an object without enumerating them.
+    /// </summary>
     [JsonExtensionData]
     public IDictionary<string, JsonElement>? Members { get; init; }
 }
@@ -3595,8 +3855,9 @@ public sealed record ProtoPayload
 /// <remarks>
 /// <para>
 /// THE ONE PAYLOAD IN THIS PROJECTION THAT IS NOT DELEGATED TO <see cref="ProtoPayload"/>, and the
-/// reason is behavioural rather than stylistic. Every other body can be delegated because a consumer
-/// only has to READ it; this one a consumer has to ACT on. On an <c>updatewhereclause</c> mismatch the
+/// reason is behavioural rather than stylistic. Every other body is summarised in the runtime document
+/// because a consumer only has to READ it and the authored contract publishes its members concretely;
+/// this one a consumer has to ACT on, so its shape is real even here. On an <c>updatewhereclause</c> mismatch the
 /// caller must decide between retrying and surfacing, and it can only construct a retry if it can see
 /// which column moved underneath it - so the conflict member is published as a real schema.
 /// </para>

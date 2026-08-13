@@ -4,7 +4,8 @@
 //  WHAT THIS FILE IS FOR, AND WHY IT IS SHAPED THE WAY IT IS.
 //
 //  CryptoEndpoints.cs projects seven cryptographic providers - 63 of the 65 declarations at
-//  ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L9-L73 - onto 17 REST operations, and it owns the
+//  ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L9-L73 - onto 17 POST operations, adds ONE AUTHORED
+//  operation that projects no legacy overload at all, and so publishes 18 in total. It owns the
 //  reference-resolution boundary that keeps raw key material off the wire. Two properties dominate
 //  everything else, so both are asserted structurally rather than by inspection:
 //
@@ -12,9 +13,18 @@
 //        record and proving that no member could carry a key, a passphrase or a certificate, and by
 //        proving the authoritative document marks every request schema closed to extra members.
 //
-//    (2) EVERY OPERATION REQUIRES A TOKEN. Asserted by driving all 17 routes through the REAL
-//        composition root without one and requiring 401 from each, as a data-driven row per route so
-//        that a route added later cannot escape the assertion by being forgotten.
+//    (2) EVERY OPERATION REQUIRES A TOKEN. Asserted by driving all 18 routes through the REAL
+//        composition root without one and requiring 401 from each - a data-driven row per route for
+//        the 17 POST projections, so that a route added later cannot escape the assertion by being
+//        forgotten, plus a row of its own for the authored DELETE, which is not POST-shaped and
+//        therefore cannot join that table.
+//
+//  TWO COUNTS THAT MUST NOT BE CONFLATED, AND ARE KEPT APART DELIBERATELY THROUGHOUT THIS FILE.
+//  SEVENTEEN is the number of PROJECTIONS - the POST operations the 63 legacy overloads land on.
+//  EIGHTEEN is the number of PUBLISHED OPERATIONS - those seventeen plus the authored
+//  `DELETE /v1/crypto/rsa/keys/{keyRef}`, which releases a retained key and covers no legacy overload
+//  because the legacy had no key store to release from. NINE operations resolve an inbound `keyRef`:
+//  eight carry it in the request body and the authored release carries it in the path.
 //
 //  THREE LEVELS OF TEST, EACH DOING WHAT ONLY IT CAN DO.
 //
@@ -227,26 +237,58 @@ internal static class ContractDocument
 }
 
 /// <summary>
-/// The 17 operations of contract C-02, as the authored document declares them.
+/// The 17 POST projections of contract C-02, as the authored document declares them.
 /// </summary>
 /// <param name="Path">The route path.</param>
 /// <param name="OperationId">The operation identifier.</param>
 /// <param name="DeclaresNotFound">
-/// Whether the operation declares 404, which only the operations resolving an inbound <c>keyRef</c> can
-/// answer. Key generation resolves none, so it declares none.
+/// Whether the operation declares 404, which only the operations resolving an inbound REFERENCE can
+/// answer: the eight that take a <c>keyRef</c> in the request body, plus <c>hashFile</c>, which resolves
+/// a <c>fileRef</c> against the same allow-listed store mechanism. Nine of the seventeen therefore
+/// declare it. Key generation resolves nothing, so it declares none.
 /// </param>
 /// <remarks>
+/// <para>
+/// THE EIGHTEENTH OPERATION IS NOT MODELLED BY THIS RECORD. Every row driven from this table asserts a
+/// POST-shaped operation; the authored <c>DELETE</c> release has its own rows, reached through
+/// <see cref="CryptoFixture.ReleasePath"/>. This record therefore describes seventeen operations while
+/// the contract publishes eighteen, and that gap is deliberate rather than an omission.
+/// </para>
+/// <para>
 /// THERE IS NO 403 FLAG, AND THERE USED TO BE. The forbidden status was once a per-operation property
-/// carried here, true for the eleven keyRef-taking operations and false for the seven that resolve
-/// nothing. It is now UNIVERSAL across the contract: the group requires the <c>security.crypto</c> scope,
-/// so every operation can answer 403 for a reason that has nothing to do with its own parameters, and the
-/// authored document and the group's own response declaration both say so. A flag whose every row read
-/// true would invite a reader to set one to false, so the rows assert it unconditionally instead.
+/// carried here, true for the eight operations of this table that resolve an inbound <c>keyRef</c> and
+/// false for the nine that resolve none. It is now UNIVERSAL across the contract: the group requires the
+/// <c>security.crypto</c> scope, so every operation can answer 403 for a reason that has nothing to do
+/// with its own parameters, and the authored document and the group's own response declaration both say
+/// so. A flag whose every row read true would invite a reader to set one to false, so the rows assert it
+/// unconditionally instead.
+/// </para>
 /// </remarks>
 internal sealed record CryptoOperation(
     string Path,
     string OperationId,
     bool DeclaresNotFound);
+
+/// <summary>
+/// One operation as the AUTHORED DOCUMENT declares it, read from the document rather than declared here.
+/// </summary>
+/// <param name="Path">The path key the document carries.</param>
+/// <param name="Verb">The HTTP method key, lower-cased as the document spells it.</param>
+/// <param name="RequestSchema">
+/// The component schema name the operation's request body references, or <see langword="null"/> when the
+/// operation declares no request body at all - which exactly one operation of this contract does.
+/// </param>
+/// <remarks>
+/// DELIBERATELY NOT <see cref="CryptoOperation"/>. That record is the SET THIS SUITE DRIVES ROWS FROM and
+/// is hand-declared so a missing route fails loudly; this one is the set the DOCUMENT declares, derived by
+/// scanning it. Keeping them separate is what lets one be compared against the other: a single shared
+/// declaration could not detect a disagreement between the two, which is the whole point of the
+/// inventory row that consumes this type.
+/// </remarks>
+internal sealed record DocumentedOperation(
+    string Path,
+    string Verb,
+    string? RequestSchema);
 
 /// <summary>
 /// Shared fixtures for the contract C-02 tests: the operation table, the provider graph, the
@@ -289,7 +331,10 @@ internal static class CryptoFixture
     /// <summary>A logger factory that records nothing, for the unit-level rows.</summary>
     internal static ILoggerFactory Loggers => NullLoggerFactory.Instance;
 
-    /// <summary>All 17 operations, in the order the document declares them.</summary>
+    /// <summary>
+    /// All 17 POST projections, in the order the document declares them. The authored release operation
+    /// is deliberately absent; see <see cref="ReleasePath"/>.
+    /// </summary>
     internal static IReadOnlyList<CryptoOperation> Operations { get; } =
     [
         new(Prefix + "/hash", "hash", DeclaresNotFound: false),
@@ -592,6 +637,68 @@ internal static class CryptoFixture
 
         return Assert.IsType<long>(value);
     }
+
+    /// <summary>
+    /// Creates a directory that belongs to ONE test execution and removes it unconditionally.
+    /// </summary>
+    /// <returns>The scope, whose <see cref="TemporaryDirectory.Path"/> is the created directory.</returns>
+    /// <remarks>
+    /// <para>
+    /// UNIQUE PER EXECUTION, NOT PER TEST NAME. Two rows in this file need a real file on disk, because
+    /// the file-shaped operations on this surface resolve an opaque reference to a configured PATH and
+    /// there is no way to prove a file was read without one. Both previously composed a FIXED name under
+    /// the system temporary directory, which made three failures possible that have nothing to do with
+    /// cryptography: residue from an earlier run that did not finish satisfied a "missing file" row, two
+    /// concurrent runs of this suite on one agent - a routine thing under a parallel batch - deleted each
+    /// other's directory mid-assertion, and a leftover directory silently changed what the next run
+    /// observed. A fresh identifier per execution removes all three by construction.
+    /// </para>
+    /// <para>
+    /// THE REMOVAL IS THE DISPOSAL, so it happens on the failure path too. That is the half a
+    /// <c>try</c>/<c>finally</c> also achieves and a bare pair of statements does not; expressing it as a
+    /// scope means a future row cannot acquire the directory and forget the teardown.
+    /// </para>
+    /// </remarks>
+    internal static TemporaryDirectory CreateTemporaryDirectory() => new();
+}
+
+/// <summary>
+/// A directory created for one test execution, removed when the scope ends.
+/// </summary>
+/// <remarks>
+/// The removal is deliberately NOT wrapped in a <c>catch</c>. A directory this scope created and owns
+/// exclusively should always be removable, and a failure to remove one is a real condition worth
+/// surfacing rather than a nuisance worth hiding - a suppressed teardown is indistinguishable from one
+/// that worked, which is exactly how residue accumulates unnoticed.
+/// </remarks>
+internal sealed class TemporaryDirectory : IDisposable
+{
+    /// <summary>Creates the directory under the system temporary directory.</summary>
+    internal TemporaryDirectory()
+    {
+        Path = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(),
+            "pfw-security-crypto-" + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture));
+
+        _ = Directory.CreateDirectory(Path);
+    }
+
+    /// <summary>The created directory's absolute path.</summary>
+    internal string Path { get; }
+
+    /// <summary>Composes a path inside this directory. The file itself is the caller's to write.</summary>
+    /// <param name="fileName">The leaf name.</param>
+    /// <returns>The absolute path.</returns>
+    internal string File(string fileName) => System.IO.Path.Combine(Path, fileName);
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        if (Directory.Exists(Path))
+        {
+            Directory.Delete(Path, recursive: true);
+        }
+    }
 }
 
 /// <summary>
@@ -627,17 +734,21 @@ public sealed class CryptoContractConformanceTests
     /// EVERY OPERATION DECLARES A 403, AND THAT IS NOW UNIVERSAL RATHER THAN PER-OPERATION. Each
     /// protected operation in this contract requires a named scope in addition to a valid token, and the
     /// scope a caller holds is decided per caller by this service's issuance roster - so a scope refusal
-    /// is reachable on all seventeen, including the ones that resolve no reference at all. An operation
+    /// is reachable on all eighteen published operations, including the ones that resolve no reference at
+    /// all and including the authored release. An operation
     /// declaring no 403 would be a document promising a status the service can produce and the contract
     /// does not admit.
     /// </para>
     /// <para>
-    /// THE ROW STILL DISTINGUISHES THE TWO REFUSALS, BY THE COMPONENT THE 403 RESOLVES TO rather than by
-    /// its presence - which is a STRONGER assertion than the one it replaces. An operation may declare
-    /// only one 403, so the keyed family points at the reference-refusal component (whose description
-    /// covers both conditions) while the unkeyed family points at the scope-refusal one. Asserting the
-    /// component is what keeps "this operation resolves a reference" a documented fact instead of an
-    /// inference from a status code that every operation now carries.
+    /// WHAT THE ROW DOES AND DOES NOT ASSERT ABOUT THE 403, STATED SO THE GAP IS NOT MISREAD AS COVERAGE.
+    /// It asserts that a 403 IS DECLARED, on every operation, unconditionally. It does NOT assert which
+    /// component the 403 resolves to, and the document's own split is the reason that would be a weaker
+    /// row than it sounds: sixteen of the seventeen POST operations point at the reference-refusal
+    /// component - whose description covers BOTH causes and is therefore correct even for an operation
+    /// resolving nothing - while key generation points at the scope-refusal component because scope is
+    /// its only cause. The component is consequently not a usable signal for "this operation resolves a
+    /// reference"; the 404 declaration is, and <paramref name="declaresNotFound"/> is the row that pins
+    /// it against the document.
     /// </para>
     /// <para>
     /// The absence of 501 is asserted on EVERY operation, not once globally. Constraint C-D reserves
@@ -828,6 +939,241 @@ public sealed class CryptoContractConformanceTests
     {
         Assert.Contains("bearerAuth", ContractDocument.Text, StringComparison.Ordinal);
         Assert.Contains("bearerFormat: JWT", ContractDocument.Text, StringComparison.Ordinal);
+    }
+
+    // ==============================================================================================
+    //  THE INVENTORY, DERIVED RATHER THAN RESTATED
+    // ==============================================================================================
+
+    /// <summary>The HTTP methods a path item may declare, lower-cased as the document spells them.</summary>
+    private static readonly string[] DocumentedVerbs =
+        ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
+
+    /// <summary>
+    /// The C-02 inventory, COUNTED FROM THE AUTHORED DOCUMENT: eighteen published operations, seventeen
+    /// of them POST projections and one authored DELETE, sixteen distinct request schemas, and nine
+    /// operations that resolve an inbound key reference.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY THIS ROW EXISTS, STATED AS THE DEFECT IT CLOSES. Four numbers describe this contract, three of
+    /// them are one apart, and until this row every one of them was prose that nothing checked. Successive
+    /// revisions of the document, of the endpoint file and of this suite variously claimed fifteen
+    /// operations, seventeen PUBLISHED operations, ten key-reference-taking operations and eleven of them.
+    /// A statement no assertion reads is a statement that drifts, so all four are now MEASURED - from the
+    /// document's own path and verb keys, and from resolving each POST operation's declared request schema
+    /// to the record that binds it. A nineteenth operation, a second authored one or a new keyed family
+    /// moves the numbers here rather than silently contradicting a sentence somewhere.
+    /// </para>
+    /// <para>
+    /// SEVENTEEN AND EIGHTEEN ANSWER DIFFERENT QUESTIONS AND NEITHER SUBSTITUTES FOR THE OTHER.
+    /// SEVENTEEN is how many operations the 63 legacy overloads project onto. EIGHTEEN is how many the
+    /// document publishes: those seventeen plus <c>DELETE /v1/crypto/rsa/keys/{keyRef}</c>, which is
+    /// AUTHORED and projects no overload at all, because the legacy handed the private half of a generated
+    /// pair straight back through a <c>ref</c> parameter and had no store to release from. Asserting both
+    /// in one place, against one source, is what keeps them apart.
+    /// </para>
+    /// <para>
+    /// SIXTEEN REQUEST SCHEMAS FOR SEVENTEEN POST OPERATIONS, AND THAT IS NOT AN ERROR EITHER:
+    /// <c>RsaCipherRequest</c> binds both RSA cipher directions, which differ in provider family and in
+    /// nothing a request carries. The row asserts the seventeen-to-sixteen collapse explicitly so that a
+    /// reader meeting either number elsewhere can tell which one is being counted.
+    /// </para>
+    /// <para>
+    /// NINE KEY REFERENCES: eight POST operations carry a <c>keyRef</c> in the request body - keyed digest
+    /// in both payload forms, both symmetric directions, and the four RSA operations that consume a key -
+    /// and the authored release carries one in its PATH. Key generation is the operation that RETURNS a
+    /// reference rather than resolving one, which is why it alone among the RSA operations declares no 404.
+    /// The count is derived from the request records themselves rather than from a list kept here, so a
+    /// family that acquired or lost a key would move it.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheDocumentedInventoryIsEighteenOperationsSeventeenProjectionsAndNineKeyReferences()
+    {
+        IReadOnlyList<DocumentedOperation> declared = DeclaredCryptoOperations();
+
+        // EIGHTEEN PUBLISHED, SEVENTEEN PROJECTING, ONE AUTHORED.
+        Assert.Equal(18, declared.Count);
+        Assert.Equal(17, declared.Count(operation => IsPost(operation)));
+
+        DocumentedOperation release = Assert.Single(declared, operation => !IsPost(operation));
+
+        Assert.Equal("delete", release.Verb);
+        Assert.Equal(CryptoFixture.ReleasePath, release.Path);
+        Assert.Contains("{keyRef}", release.Path, StringComparison.Ordinal);
+
+        // The authored operation is the ONE shape carrying no request body at all, which is why it cannot
+        // join the POST-shaped table and why that table describes seventeen of eighteen.
+        Assert.Null(release.RequestSchema);
+
+        Assert.Equal(17, CryptoFixture.Operations.Count);
+        Assert.DoesNotContain(
+            CryptoFixture.ReleasePath,
+            CryptoFixture.Operations.Select(operation => operation.Path),
+            StringComparer.Ordinal);
+
+        // The table is the document's POST set exactly - neither an invention nor an omission.
+        Assert.Equal(
+            declared.Where(IsPost).Select(operation => operation.Path).Order(StringComparer.Ordinal),
+            CryptoFixture.Operations.Select(operation => operation.Path).Order(StringComparer.Ordinal));
+
+        // SIXTEEN DISTINCT REQUEST SCHEMAS FOR SEVENTEEN OPERATIONS.
+        string[] requestSchemas =
+        [
+            .. declared
+                .Where(IsPost)
+                .Select(operation => operation.RequestSchema ?? string.Empty),
+        ];
+
+        Assert.DoesNotContain(string.Empty, requestSchemas, StringComparer.Ordinal);
+        Assert.Equal(16, requestSchemas.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(16, CryptoFixture.RequestTypes.Count);
+
+        // NINE KEY REFERENCES: eight in a request body, one in a path.
+        int bodyKeyReferencing = requestSchemas.Count(schema => ResolveRequestType(schema).KeyReferencing);
+
+        Assert.Equal(8, bodyKeyReferencing);
+        Assert.Equal(9, bodyKeyReferencing + 1);
+
+        // NINE OPERATIONS DECLARE 404, WHICH IS NOT THE SAME NINE. The eight keyed ones plus the unkeyed
+        // file digest, which resolves a fileRef through the same allow-listed mechanism. Each row's flag is
+        // tied to the document by OperationDeclaresExpectedStatusSet, so this count is document-backed too.
+        Assert.Equal(9, CryptoFixture.Operations.Count(operation => operation.DeclaresNotFound));
+    }
+
+    /// <summary>Whether an operation is one of the seventeen POST projections.</summary>
+    /// <param name="operation">The operation.</param>
+    /// <returns><see langword="true"/> when the document declares it under <c>post</c>.</returns>
+    private static bool IsPost(DocumentedOperation operation) =>
+        string.Equals(operation.Verb, "post", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Resolves a request schema name declared by the document to the record that binds it, and reports
+    /// whether that record carries a key reference.
+    /// </summary>
+    /// <param name="schemaName">The schema name, for example <c>HmacRequest</c>.</param>
+    /// <returns>The bound type and whether it declares a <c>KeyRef</c> member.</returns>
+    /// <remarks>
+    /// RESOLVING BY NAME IS ITSELF AN ASSERTION. The generated document names a schema after the type that
+    /// binds it, so a document declaring a schema no request record answers would fail here rather than in
+    /// a consumer's generated client.
+    /// </remarks>
+    private static (Type Type, bool KeyReferencing) ResolveRequestType(string schemaName)
+    {
+        Type? bound = CryptoFixture.RequestTypes.SingleOrDefault(
+            candidate => string.Equals(candidate.Name, schemaName, StringComparison.Ordinal));
+
+        Assert.True(
+            bound is not null,
+            $"The document declares request schema '{schemaName}', which no request record binds.");
+
+        return (bound, bound.GetProperty("KeyRef") is not null);
+    }
+
+    /// <summary>
+    /// Every operation the authored document declares under the cryptographic prefix, read from the
+    /// document's own path and verb keys.
+    /// </summary>
+    /// <returns>One entry per declared operation, in declaration order.</returns>
+    /// <remarks>
+    /// SCANNED RATHER THAN PARSED, ON THE SAME INDENTATION RULE <see cref="ContractDocument.PathBlock"/>
+    /// ALREADY RESTS ON: a path key sits at exactly two spaces, a verb key at exactly four, and a request
+    /// body's schema reference between the <c>requestBody</c> and <c>responses</c> keys at six. Every
+    /// description in this document is a block scalar indented deeper than either, so no prose line can
+    /// masquerade as a key.
+    /// </remarks>
+    private static IReadOnlyList<DocumentedOperation> DeclaredCryptoOperations()
+    {
+        List<DocumentedOperation> operations = [];
+
+        string path = string.Empty;
+        string verb = string.Empty;
+        string? requestSchema = null;
+        bool insideRequestBody = false;
+
+        void Close()
+        {
+            if (verb.Length > 0 && path.StartsWith(CryptoFixture.Prefix, StringComparison.Ordinal))
+            {
+                operations.Add(new DocumentedOperation(path, verb, requestSchema));
+            }
+
+            verb = string.Empty;
+            requestSchema = null;
+            insideRequestBody = false;
+        }
+
+        foreach (string raw in ContractDocument.Text.Split('\n'))
+        {
+            string line = raw.TrimEnd('\r');
+
+            if (IsKeyAtIndent(line, 2) && line.StartsWith("  /", StringComparison.Ordinal))
+            {
+                Close();
+                path = line.Trim().TrimEnd(':');
+                continue;
+            }
+
+            if (IsKeyAtIndent(line, 4) &&
+                Array.Exists(DocumentedVerbs, candidate =>
+                    string.Equals(candidate, line.Trim().TrimEnd(':'), StringComparison.Ordinal)))
+            {
+                Close();
+                verb = line.Trim().TrimEnd(':');
+                continue;
+            }
+
+            if (string.Equals(line, "      requestBody:", StringComparison.Ordinal))
+            {
+                insideRequestBody = true;
+                continue;
+            }
+
+            if (string.Equals(line, "      responses:", StringComparison.Ordinal))
+            {
+                insideRequestBody = false;
+                continue;
+            }
+
+            if (insideRequestBody && requestSchema is null)
+            {
+                const string marker = "$ref: '#/components/schemas/";
+
+                int at = line.IndexOf(marker, StringComparison.Ordinal);
+
+                if (at >= 0)
+                {
+                    requestSchema = line[(at + marker.Length)..].TrimEnd('\'');
+                }
+            }
+        }
+
+        Close();
+
+        return operations;
+    }
+
+    /// <summary>Whether a line is a mapping key at exactly the given indentation.</summary>
+    /// <param name="line">The line, with any carriage return already removed.</param>
+    /// <param name="indent">The exact number of leading spaces required.</param>
+    /// <returns><see langword="true"/> when the line is a key at that depth.</returns>
+    private static bool IsKeyAtIndent(string line, int indent)
+    {
+        if (!line.EndsWith(':') || line.Length <= indent)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < indent; index++)
+        {
+            if (line[index] != ' ')
+            {
+                return false;
+            }
+        }
+
+        return line[indent] != ' ';
     }
 
     /// <summary>The route path and identifier of every operation.</summary>
@@ -2043,50 +2389,43 @@ public sealed class CryptoReferenceResolutionTests
     [Fact]
     public async Task FileReferenceResolvesOnlyAnExistingPathAsync()
     {
-        string directory = Path.Combine(Path.GetTempPath(), "blitzy_adhoc_cryptoref");
-        Directory.CreateDirectory(directory);
+        using TemporaryDirectory scope = CryptoFixture.CreateTemporaryDirectory();
 
-        string present = Path.Combine(directory, "present.txt");
-        string missing = Path.Combine(directory, "missing.txt");
+        string directory = scope.Path;
+        string present = scope.File("present.txt");
+        string missing = scope.File("missing.txt");
 
         await File.WriteAllTextAsync(
             present,
             "file content",
             TestContext.Current.CancellationToken);
 
-        try
-        {
-            CryptoReferenceResolver store = CryptoFixture.Store(
-                new Dictionary<string, string>(StringComparer.Ordinal)
-                {
-                    ["present"] = present,
-                    ["missing"] = missing,
-                    ["not-a-path"] = "\0",
-                });
-
-            Assert.Null(store.TryResolveFile("present", CryptoFixture.Loggers, out string resolved));
-            Assert.Equal(present, resolved);
-
-            foreach (string reference in new[] { "missing", "not-a-path" })
+        CryptoReferenceResolver store = CryptoFixture.Store(
+            new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ProblemHttpResult? rejection = store.TryResolveFile(
-                    reference,
-                    CryptoFixture.Loggers,
-                    out string path);
+                ["present"] = present,
+                ["missing"] = missing,
+                ["not-a-path"] = "\0",
+            });
 
-                Assert.NotNull(rejection);
-                Assert.Equal(StatusCodes.Status404NotFound, rejection.StatusCode);
-                Assert.Equal(RetCode.E_OBJECT_NOT_FOUND, CryptoFixture.RetCodeOf(rejection));
-                Assert.Equal(string.Empty, path);
+        Assert.Null(store.TryResolveFile("present", CryptoFixture.Loggers, out string resolved));
+        Assert.Equal(present, resolved);
 
-                string rendered = JsonSerializer.Serialize(rejection.ProblemDetails);
-
-                Assert.DoesNotContain(directory, rendered, StringComparison.Ordinal);
-            }
-        }
-        finally
+        foreach (string reference in new[] { "missing", "not-a-path" })
         {
-            Directory.Delete(directory, recursive: true);
+            ProblemHttpResult? rejection = store.TryResolveFile(
+                reference,
+                CryptoFixture.Loggers,
+                out string path);
+
+            Assert.NotNull(rejection);
+            Assert.Equal(StatusCodes.Status404NotFound, rejection.StatusCode);
+            Assert.Equal(RetCode.E_OBJECT_NOT_FOUND, CryptoFixture.RetCodeOf(rejection));
+            Assert.Equal(string.Empty, path);
+
+            string rendered = JsonSerializer.Serialize(rejection.ProblemDetails);
+
+            Assert.DoesNotContain(directory, rendered, StringComparison.Ordinal);
         }
     }
 
@@ -3037,58 +3376,51 @@ public sealed class CryptoDigestMatrixTests
     [Fact]
     public async Task FileArmsHashAConfiguredFileAsync()
     {
-        string directory = Path.Combine(Path.GetTempPath(), "blitzy_adhoc_cryptofile");
-        Directory.CreateDirectory(directory);
+        using TemporaryDirectory scope = CryptoFixture.CreateTemporaryDirectory();
 
-        string file = Path.Combine(directory, "payload.bin");
+        string directory = scope.Path;
+        string file = scope.File("payload.bin");
         byte[] content = Encoding.UTF8.GetBytes("file bytes under digest");
 
         await File.WriteAllBytesAsync(file, content, TestContext.Current.CancellationToken);
 
-        try
-        {
-            CryptoReferenceResolver store = CryptoFixture.Store(
-                new Dictionary<string, string>(StringComparer.Ordinal)
-                {
-                    ["payload-file"] = file,
-                    ["file-key"] = CryptoFixture.KeyMaterial(32, 'f'),
-                });
+        CryptoReferenceResolver store = CryptoFixture.Store(
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["payload-file"] = file,
+                ["file-key"] = CryptoFixture.KeyMaterial(32, 'f'),
+            });
 
-            DigestResponse unkeyed = CryptoFixture.Success(CryptoEndpoints.HashFile(
-                new HashFileRequest { FileRef = "payload-file", HashType = Enums.CRYPTO_HASH_SHA256 },
-                CryptoFixture.Hashes,
-                store,
-                CryptoFixture.Loggers));
+        DigestResponse unkeyed = CryptoFixture.Success(CryptoEndpoints.HashFile(
+            new HashFileRequest { FileRef = "payload-file", HashType = Enums.CRYPTO_HASH_SHA256 },
+            CryptoFixture.Hashes,
+            store,
+            CryptoFixture.Loggers));
 
-            Assert.Equal(
-                CryptoFixture.Hashes.Hash(content, Enums.CRYPTO_HASH_SHA256),
-                unkeyed.Digest);
+        Assert.Equal(
+            CryptoFixture.Hashes.Hash(content, Enums.CRYPTO_HASH_SHA256),
+            unkeyed.Digest);
 
-            DigestResponse keyed = CryptoFixture.Success(CryptoEndpoints.HmacFile(
-                new HmacFileRequest
-                {
-                    FileRef = "payload-file",
-                    KeyRef = "file-key",
-                    HashType = Enums.CRYPTO_HASH_SHA256,
-                },
-                CryptoFixture.Authenticators,
-                store,
-                CryptoFixture.Loggers));
+        DigestResponse keyed = CryptoFixture.Success(CryptoEndpoints.HmacFile(
+            new HmacFileRequest
+            {
+                FileRef = "payload-file",
+                KeyRef = "file-key",
+                HashType = Enums.CRYPTO_HASH_SHA256,
+            },
+            CryptoFixture.Authenticators,
+            store,
+            CryptoFixture.Loggers));
 
-            Assert.False(string.IsNullOrEmpty(keyed.Digest));
-            Assert.NotEqual(unkeyed.Digest, keyed.Digest);
+        Assert.False(string.IsNullOrEmpty(keyed.Digest));
+        Assert.NotEqual(unkeyed.Digest, keyed.Digest);
 
-            string rendered = string.Concat(
-                JsonSerializer.Serialize(unkeyed),
-                JsonSerializer.Serialize(keyed));
+        string rendered = string.Concat(
+            JsonSerializer.Serialize(unkeyed),
+            JsonSerializer.Serialize(keyed));
 
-            Assert.DoesNotContain(directory, rendered, StringComparison.Ordinal);
-            Assert.DoesNotContain("payload.bin", rendered, StringComparison.Ordinal);
-        }
-        finally
-        {
-            Directory.Delete(directory, recursive: true);
-        }
+        Assert.DoesNotContain(directory, rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain("payload.bin", rendered, StringComparison.Ordinal);
     }
 
     /// <summary>The six published unkeyed selectors, in both payload forms.</summary>

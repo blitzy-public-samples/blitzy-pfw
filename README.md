@@ -95,10 +95,13 @@ native binaries shipped beside it.
 | `services/security-service` | `PowerFramework.Security` | **5104** | REST + `/.well-known/jwks.json` | The keyed cryptographic surface, and the **sole JWT issuer** for all four services |
 
 - **Port `5103` is deliberately reserved** and is allocated to nothing in this phase.
-- The two services that carry gRPC contracts bind a second, HTTP/2 listener for gRPC beside the HTTP/1.1
-  port in the table — `5111` for Persistence and `5112` for DataServices. The port in the table is the
-  documented readiness address in each case.
-- **Every listener terminates TLS.** No service exposes a plaintext port.
+- **Each service binds exactly one listener, on the port in the table.** The two services that carry gRPC
+  contracts declare `Protocols: Http1AndHttp2` on theirs, so TLS application-protocol negotiation gives a
+  readiness probe HTTP/1.1 and a gRPC channel HTTP/2 on that single port. The port in the table is
+  therefore both the documented readiness address and the gRPC call address.
+- **Every listener terminates TLS.** No service exposes a plaintext port — and here TLS is load-bearing
+  rather than only prudent: on cleartext, `Http1AndHttp2` silently degrades to HTTP/1.1 alone, which would
+  take every gRPC contract off the air while `/health` kept answering 200.
 - Security is the only service that mints a token. The other three hold verification material only and
   validate against the key set Security publishes.
 
@@ -108,10 +111,23 @@ Service topology, the reasoning behind each transport choice and the full port m
 
 ### Building
 
-**Per service.** This is the whole command, and it is sufficient on its own:
+**Per service.** This is the whole command, and it is sufficient on its own. It is fenced as `text` rather
+than `bash` because `<service-name>` is a placeholder, not shell syntax — a block that cannot be run
+verbatim must not claim it can:
+
+```text
+cd services/<service-name> && dotnet restore && dotnet build -c Release && dotnet test --collect:"XPlat Code Coverage"
+```
+
+Substituting a real directory name gives a block that **does** run verbatim:
 
 ```bash
-cd services/<service-name> && dotnet restore && dotnet build -c Release && dotnet test --collect:"XPlat Code Coverage"
+set -euo pipefail
+service=gateway-service   # or dataservices-service, persistence-service, security-service
+cd "services/$service"
+dotnet restore
+dotnet build -c Release
+dotnet test --collect:"XPlat Code Coverage"
 ```
 
 `<service-name>` is one of `gateway-service`, `dataservices-service`, `persistence-service` or
@@ -147,15 +163,51 @@ instructions are in [`docs/BUILD.md`](docs/BUILD.md).
 
 ### Running locally
 
-One manifest brings all four services up together. From the repository root:
+One manifest brings all four services up together. **The populated environment file is kept outside the
+working tree**, and that is a requirement rather than a preference: the root ignore rules exclude no `.env`
+path, so a populated file written into `orchestration/` is a tracked, stageable file holding an RSA private
+key and three caller secrets, one `git add -A` away from being committed. `--env-file` gives Compose the
+same file from anywhere on disk, so nothing is lost by keeping it out.
+
+From the repository root:
 
 ```bash
-cp orchestration/.env.example orchestration/.env
-# Then populate the roster that file documents. SECURITY_JWT_SIGNING_KEY is the one signing secret in the
-# system: it takes an RSA private key, and the commands that generate the local material are carried by
-# orchestration/README.md and docs/ARCHITECTURE.md. No value for it is committed anywhere in this tree.
-docker compose -f orchestration/docker-compose.yml up --build -d
+set -euo pipefail
+
+PFW_ENV="${XDG_CONFIG_HOME:-$HOME/.config}/powerframework/pfw.env"
+
+# 0700 on the directory is what actually protects the file; 0600 on the file is the second lock.
+install -d -m 700 "$(dirname "$PFW_ENV")"
+
+# NON-CLOBBERING, AND IT REPORTS WHICH BRANCH IT TOOK. Re-running this block after the file is populated
+# must not destroy the key and three secrets in it: a plain `cp` would, silently, and the loss is
+# unrecoverable because the signing key is stored nowhere else. The `if` also tells you whether your file
+# was preserved, which a bare non-clobbering copy does not.
+if [ -e "$PFW_ENV" ]; then
+  printf 'Keeping the existing environment file at %s\n' "$PFW_ENV"
+else
+  cp orchestration/.env.example "$PFW_ENV"
+  chmod 600 "$PFW_ENV"
+  printf 'Created %s from the template - populate it before continuing.\n' "$PFW_ENV"
+fi
+
+# Populate the roster that file documents. SIX values are required for the bring-up and the manifest
+# aborts BY NAME on any one of them: SECURITY_JWT_SIGNING_KEY (an RSA private key - `openssl rand`
+# produces material the host rejects), the two caller secrets SECURITY_CLIENT_SECRET_GATEWAY and
+# SECURITY_CLIENT_SECRET_DATASERVICES, and the three certificate PATHS. A seventh, SECURITY_CLIENT_SECRET,
+# is the operator and end-to-end identity and is optional - `tests/e2e` needs it, the stack does not.
+# docs/ARCHITECTURE.md section 9.3.1 generates the whole set in one block; orchestration/README.md carries
+# the bring-up order. No value for any of them is committed anywhere in this tree.
+
+docker compose -f orchestration/docker-compose.yml --env-file "$PFW_ENV" up --build -d
 ```
+
+The three certificate variables are **paths on your machine**, not paths inside a container: the manifest
+declares each as a Compose secret and projects it read-only under `/run/secrets/internal-tls/`, and each
+service is configured with that fixed projected path. One of them, the server private key, has to remain
+readable once projected — Compose ignores `mode:`, `uid:` and `gid:` outside Swarm, and the images run
+unprivileged — which is why §9.3.1 generates that one key `0644` inside the `0700` directory rather than
+`0600`.
 
 The readiness contract, which is also what the container probes and the compose dependencies enforce:
 
@@ -170,10 +222,19 @@ The readiness contract, which is also what the container probes and the compose 
   runs. That deviation from the environment's documented `http://` form is recorded in
   [`docs/BUILD.md`](docs/BUILD.md).
 
-**The bring-up above is the documented path, not a verified one.** No container was started while this
-section was written, so nothing here reports an exercised stack. What *was* exercised is the per-service
-restore, Release build and test-with-coverage path above. Bring-up, the ordered readiness gates and the
-one-off database provisioning step are in [`orchestration/README.md`](orchestration/README.md).
+**A fresh stack needs no provisioning step.** Persistence applies its own migrations inside its startup
+path — additively, idempotently, and before it can answer `/health` — so a brand-new `persistence-db`
+volume reaches ready on its own and the health-conditioned chain opens in the ordinary way. A
+characterization run that must not touch the schema between the two halves of a paired capture switches
+that off with one setting; [`orchestration/README.md`](orchestration/README.md) carries the bring-up
+order, the ordered readiness gates and that switch.
+
+**What has actually been exercised is recorded in exactly one place** —
+[`orchestration/README.md`](orchestration/README.md) §10 — and every other document in this repository,
+including this one, defers to it rather than restating it. That is deliberate: an execution claim restated
+in eight files is eight claims to keep true. The build, test and coverage figures behind it live in exactly
+one place too — [`docs/BUILD.md`](docs/BUILD.md) §1.3, the canonical machine-readable verification record —
+and are never restated here.
 
 Cross-service workflow verification lives in [`tests/e2e/`](tests/e2e) and needs a running stack; its own
 readme carries the install-and-run path. All key material reaches the services through configuration, so no

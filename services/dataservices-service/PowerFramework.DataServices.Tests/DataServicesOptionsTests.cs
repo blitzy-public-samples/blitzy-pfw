@@ -414,7 +414,7 @@ public sealed class DataServicesOptionsTests
     }
 
     [Fact]
-    public void TheEventChainGroupIsCheckedOnlyForHavingBeenBound()
+    public void TheEventChainStrictnessDialAcceptsItsWholeDomain()
     {
         DataServicesOptions options = ValidOptions();
 
@@ -432,6 +432,53 @@ public sealed class DataServicesOptionsTests
 
         options.EventChain.StrictOrdering = false;
         Assert.True(Succeeds(options));
+
+        // THE PENDING-NOTIFICATION CEILING DEFAULTS TO ITS PUBLISHED CONSTANT, not to a literal restated
+        // here. It is the server's own bound on the synchronous discipline: a conforming client holds
+        // exactly ONE notification queued-or-in-flight, because it must read a response to learn its next
+        // token, so the shipped value is headroom rather than a working limit. Asserting the constant means
+        // this row follows the value if it ever moves.
+        Assert.Equal(
+            EventChainOptions.DefaultMaxPendingNotifications,
+            options.EventChain.MaxPendingNotifications);
+    }
+
+    /// <summary>
+    /// The pending-notification ceiling is enforced, not merely annotated.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE ANNOTATION ALONE DOES NOTHING. A range attribute is only applied where the validator walks the
+    /// group, and this group was previously walked ONLY for its duration - so a zero would have bound
+    /// silently and then refused the FIRST notification of every event chain, which a caller reads as a
+    /// client fault while being a configuration mistake. A negative value is checked with it because that
+    /// is what an operator writes when they mean "no limit", and it is precisely the value that must not be
+    /// taken to mean that.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>AND 1 IS REFUSED WITH THEM, WHICH IS THE ROW WORTH HAVING.</b> A slot is released when the
+    /// dispatch holding it finishes - immediately AFTER its result has been written - so there is an
+    /// instant in which the client has already read the response and may legitimately send the next
+    /// notification while the previous slot is still counted. A ceiling of 1 would therefore refuse a
+    /// CONFORMING client intermittently, and an intermittent refusal is far worse than a value being too
+    /// small because it fails only under timing. Two is the least that can never do that.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(1)]
+    public void APendingNotificationCeilingBelowTwoIsRefused(int ceiling)
+    {
+        DataServicesOptions options = ValidOptions();
+        options.EventChain.MaxPendingNotifications = ceiling;
+
+        string failure = Assert.Single(Failures(options));
+
+        Assert.Contains(
+            "DataServices:EventChain:MaxPendingNotifications",
+            failure,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -598,6 +645,114 @@ public sealed class DataServicesOptionsTests
             Assert.Equal(TimeSpan.FromSeconds(900), client.StreamDeadline);
             Assert.True(client.StreamDeadline > client.RequestTimeout);
         }
+    }
+
+    /// <summary>
+    /// The retry count is accepted across its whole documented domain and refused outside it, on both
+    /// edges, with the offending path and the ceiling named.
+    /// </summary>
+    /// <param name="attempts">The configured count.</param>
+    /// <param name="accepted">Whether the validator must accept it.</param>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>BOTH ENDS OF THIS DOMAIN WERE DEFECTIVE, IN OPPOSITE DIRECTIONS.</b> Zero was documented as
+    /// disabling retrying and annotated as legal while both retry layers consumed it unconditionally, and
+    /// neither accepts it: the host FAILED TO START. The upper end was <see cref="int.MaxValue"/>, which
+    /// the gRPC layer increments into an attempt count - unchecked, so it wrapped to
+    /// <see cref="int.MinValue"/>, a negative count the channel and its retry policy both ACCEPTED,
+    /// leaving retry mis-configured on a service that started and reported itself healthy.
+    /// </para>
+    /// <para>
+    /// THE CEILING IS ASSERTED THROUGH ITS OWN CONSTANT RATHER THAN AS A LITERAL, so the annotation, the
+    /// documentation and this theory cannot drift apart: a later change to the bound moves all three rows
+    /// at once, and a change to the annotation alone fails here.
+    /// </para>
+    /// <para>
+    /// BOTH EDGES ARE EXERCISED PER ROW because the two groups are tuned independently and share a type -
+    /// a rule enforced on one path only would leave the other silently unbounded, which is the same
+    /// asymmetry the surrounding stream-deadline tests exist to refuse.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1, true)]
+    [InlineData(3, true)]
+    [InlineData(ClientResilienceOptions.MaxRetryAttemptsCeiling, true)]
+    [InlineData(ClientResilienceOptions.MaxRetryAttemptsCeiling + 1, false)]
+    [InlineData(-1, false)]
+    [InlineData(int.MaxValue, false)]
+    public void TheRetryCountIsAcceptedAcrossItsDocumentedDomainAndRefusedOutsideIt(
+        int attempts,
+        bool accepted)
+    {
+        foreach (string edge in (string[])["Persistence", "Security"])
+        {
+            DataServicesOptions options = ValidOptions();
+
+            ClientResilienceOptions client = string.Equals(edge, "Persistence", StringComparison.Ordinal)
+                ? options.Resilience.Persistence
+                : options.Resilience.Security;
+
+            client.MaxRetryAttempts = attempts;
+
+            string[] failures = Failures(options);
+
+            if (accepted)
+            {
+                Assert.Empty(failures);
+                continue;
+            }
+
+            string failure = Assert.Single(failures);
+
+            Assert.Contains(
+                $"DataServices:Resilience:{edge}:{nameof(ClientResilienceOptions.MaxRetryAttempts)}",
+                failure,
+                StringComparison.Ordinal);
+
+            // THE BOUND ITSELF IS IN THE MESSAGE, because a refusal that named only the key would tell an
+            // operator that the value is wrong and not what would be right.
+            Assert.Contains(
+                ClientResilienceOptions.MaxRetryAttemptsCeiling.ToString(CultureInfo.InvariantCulture),
+                failure,
+                StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The retry count answers whether retrying is enabled, and refuses to overflow into an attempt count.
+    /// </summary>
+    /// <remarks>
+    /// <b>THE GUARD BEHIND THE GUARD.</b> The range annotation makes <see cref="int.MaxValue"/>
+    /// unreachable through configuration, so this asserts what happens if it ever became reachable
+    /// again - the conversion THROWS rather than silently producing the negative attempt count that both
+    /// gRPC layers accepted. A validator can be edited; <c>checked</c> arithmetic cannot be edited by
+    /// accident.
+    /// </remarks>
+    [Fact]
+    public void TheRetryCountAnswersWhetherRetryingIsEnabledAndTheInclusiveAttemptCount()
+    {
+        ClientResilienceOptions client = new();
+
+        // The shipped default: three retries, four attempts.
+        Assert.True(client.RetriesEnabled);
+        Assert.Equal(4, client.ResolveGrpcAttemptCount());
+
+        client.MaxRetryAttempts = 0;
+        Assert.False(client.RetriesEnabled);
+
+        // One attempt, which is why the composition root installs NO configuration instead: the gRPC
+        // retry policy refuses an attempt count of one.
+        Assert.Equal(1, client.ResolveGrpcAttemptCount());
+
+        client.MaxRetryAttempts = ClientResilienceOptions.MaxRetryAttemptsCeiling;
+        Assert.True(client.RetriesEnabled);
+        Assert.Equal(
+            ClientResilienceOptions.MaxRetryAttemptsCeiling + 1,
+            client.ResolveGrpcAttemptCount());
+
+        client.MaxRetryAttempts = int.MaxValue;
+        _ = Assert.Throws<OverflowException>(() => client.ResolveGrpcAttemptCount());
     }
 
     [Theory]
@@ -1272,7 +1427,7 @@ public sealed class DataServicesOptionsTests
     //  bearer token. Contract C-01 therefore publishes TWO schemes for it and accepts either: an HTTP
     //  Basic credential naming a subject on Security's issuance roster, or a client certificate. This
     //  service must be able to present ONE of them; presenting neither means it obtains no credential, so
-    //  every one of the seventeen C-02 cryptographic calls and every call to the Persistence audience is
+    //  every one of the eighteen C-02 cryptographic calls and every call to the Persistence audience is
     //  unreachable - which is why that state is refused at startup rather than discovered on the first
     //  request.
     // ==============================================================================================
@@ -1746,6 +1901,137 @@ public sealed class DataServicesOptionsTests
             "DataServices:RestProjection:MaxStreamedElements",
             failure,
             StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The event chain's admission ceiling defaults to a value a conforming client cannot reach, and is
+    /// enforced rather than merely annotated.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE DEFAULT IS THE HALF THAT MATTERS. The chain's queue used to be UNBOUNDED with its write outcome
+    /// discarded, which handed whoever opened a stream an unbounded memory commitment: nine of the 22 events
+    /// are questions the dispatch BLOCKS on, so a client that keeps sending while one is outstanding grows
+    /// the queue for as long as it cares to and nothing in the process objects until it runs out of memory.
+    /// A ceiling only closes that if it ships switched on, so the default is a real number rather than a
+    /// sentinel meaning "no limit".
+    /// </para>
+    /// <para>
+    /// AND SIXTY-FOUR IS NOT A GUESS. Under the strictly synchronous discipline of AAP 0.6.1.4 a conforming
+    /// client must read a response to learn its next token, so its depth in flight is ONE; anything above
+    /// that is a client not following the discipline. The value is generous enough that a burst of
+    /// notifications a well-behaved client sends between two questions is still admitted, and small enough
+    /// that the commitment is a fixed, statable quantity per stream instead of an open one.
+    /// </para>
+    /// <para>
+    /// THE ANNOTATION ALONE WOULD DO NOTHING, exactly as for the streamed-element bound above: a range
+    /// attribute is applied only where the validator walks the group. Left unwalked, a zero would bind
+    /// silently and then refuse EVERY notification on EVERY stream - the whole event chain unusable, and
+    /// reported to each client as though it had misbehaved.
+    /// </para>
+    /// </remarks>
+    /// <param name="ceiling">The configured ceiling.</param>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void ANonPositiveEventChainAdmissionCeilingIsRefused(int ceiling)
+    {
+        Assert.Equal(64, new EventChainOptions().MaxPendingNotifications);
+
+        DataServicesOptions options = ValidOptions();
+        options.EventChain.MaxPendingNotifications = ceiling;
+
+        string failure = Assert.Single(Failures(options));
+
+        Assert.Contains(
+            "DataServices:EventChain:MaxPendingNotifications",
+            failure,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A collection window that collects nothing is refused.
+    /// </summary>
+    /// <param name="window">The window a deployment configured.</param>
+    /// <remarks>
+    /// 🔴 <b>ZERO ANSWERS EVERY POLL EMPTY, INCLUDING ONE WITH RECORDS ALREADY WAITING, AND THAT IS SILENT
+    /// DATA LOSS RATHER THAN A VISIBLE MISCONFIGURATION.</b> The projected event stream's empty collection
+    /// is a legitimate, successful answer meaning "nothing was emitted during the window" - so a window of
+    /// zero makes every poll answer 200 with an empty array forever, which no caller can distinguish from a
+    /// quiet subscription. Refusing at startup is the only place the mistake is visible.
+    /// </remarks>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void ANonPositiveStreamCollectionWindowIsRefused(int seconds)
+    {
+        DataServicesOptions options = ValidOptions();
+        options.RestProjection.StreamCollectionWindow = TimeSpan.FromSeconds(seconds);
+
+        string failure = Assert.Single(Failures(options));
+
+        Assert.Contains(
+            "DataServices:RestProjection:StreamCollectionWindow",
+            failure,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A collection window that cannot fire before its consumer gives up is refused.
+    /// </summary>
+    /// <param name="seconds">The window a deployment configured, in seconds.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>THE BOUND IS A RELATIONSHIP, WHICH IS WHY IT CANNOT BE AN ANNOTATION AND WHY IT IS ASSERTED
+    /// HERE.</b> A window at or beyond the per-attempt budget this projection's documented consumer applies
+    /// to it cannot fire first: the consumer abandons the attempt while this service is still collecting,
+    /// and the caller receives a transport failure instead of the empty collection the operation means -
+    /// which is the very defect the window exists to close, moved one hop out rather than fixed.
+    /// </para>
+    /// <para>
+    /// THE AT-THE-BOUND ROW IS THE ONE THAT MATTERS. An exclusive bound is the correct shape - a window
+    /// exactly equal to the consumer's budget is a race, and a race that resolves the wrong way produces
+    /// exactly the failure the window was added to prevent - so equality is refused as firmly as excess.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(10)]
+    [InlineData(11)]
+    [InlineData(600)]
+    public void AStreamCollectionWindowAtOrBeyondTheConsumerBudgetIsRefused(int seconds)
+    {
+        DataServicesOptions options = ValidOptions();
+        options.RestProjection.StreamCollectionWindow = TimeSpan.FromSeconds(seconds);
+
+        string failure = Assert.Single(Failures(options));
+
+        Assert.Contains(
+            "DataServices:RestProjection:StreamCollectionWindow",
+            failure,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A window inside the bound is accepted, including the shipped default and both extremes of the range.
+    /// </summary>
+    /// <param name="window">A legal window, as a TimeSpan literal.</param>
+    /// <remarks>
+    /// THE COMPLEMENT THAT KEEPS THE TWO REFUSAL ROWS FROM PASSING VACUOUSLY. A validator that refused every
+    /// window would satisfy both of them; this one proves the legal range is genuinely open, and it includes
+    /// the shipped default so the settings file cannot ship a value its own validator rejects.
+    /// </remarks>
+    [Theory]
+    [InlineData("00:00:00.001")]
+    [InlineData("00:00:02")]
+    [InlineData("00:00:09.999")]
+    public void AStreamCollectionWindowInsideTheBoundIsAccepted(string window)
+    {
+        DataServicesOptions options = ValidOptions();
+        options.RestProjection.StreamCollectionWindow = TimeSpan.Parse(
+            window,
+            CultureInfo.InvariantCulture);
+
+        Assert.Empty(Failures(options));
     }
 }
 
@@ -2320,9 +2606,19 @@ public sealed class DataServicesSettingsDocumentTests
         // defect.
         Assert.Equal(compiled.EventChain.StrictOrdering, declared.EventChain.StrictOrdering);
         Assert.Equal(compiled.EventChain.AnswerTimeout, declared.EventChain.AnswerTimeout);
+
+        Assert.Equal(
+            compiled.EventChain.MaxPendingNotifications,
+            declared.EventChain.MaxPendingNotifications);
+        Assert.Equal(
+            compiled.EventChain.MaxPendingNotifications,
+            declared.EventChain.MaxPendingNotifications);
         Assert.Equal(
             compiled.RestProjection.MaxStreamedElements,
             declared.RestProjection.MaxStreamedElements);
+        Assert.Equal(
+            compiled.RestProjection.StreamCollectionWindow,
+            declared.RestProjection.StreamCollectionWindow);
         Assert.Equal(compiled.PersistenceSession.Dbms, declared.PersistenceSession.Dbms, StringComparer.Ordinal);
         Assert.Equal(compiled.PersistenceSession.AutoCommit, declared.PersistenceSession.AutoCommit);
     }
@@ -2388,6 +2684,12 @@ public sealed class DataServicesSettingsDocumentTests
         Assert.Equal(
             ClientResilienceOptions.DefaultRequestTimeout,
             declared.Resilience.Security.RequestTimeout);
+
+        // The boundary-created COUNT that publishes its own default, for the same reason: the document
+        // must not carry a second copy of the number.
+        Assert.Equal(
+            EventChainOptions.DefaultMaxPendingNotifications,
+            declared.EventChain.MaxPendingNotifications);
     }
 
     /// <summary>
@@ -2713,14 +3015,16 @@ public sealed class DataServicesSettingsDocumentTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// ⚠ THE PERSISTENCE PORT IS 5111, NOT 5101, AND THE DIFFERENCE IS THE WHOLE POINT OF THE SPLIT.
-    /// This address builds a gRPC channel. Persistence serves gRPC on its own HTTP/2 endpoint 5111 while
-    /// its HTTP/1.1 <c>/health</c> and <c>/v1/ping</c> answer on 5101 - one endpoint per protocol
-    /// version, so a listener accepts only what it is for. Naming 5101 here fails every retrieval and
-    /// every update during transport negotiation, before the request arrives, with nothing on the far
-    /// side logging the cause. The 5101-5105 band of the attached environment is the band of the
-    /// HTTP/1.1 probe surfaces (constraint C-L); the gRPC halves sit above it and are not a deviation
-    /// from it.
+    /// ⚠ THE PERSISTENCE PORT IS 5101, WHICH IS THE PORT AAP 0.3.2.2 ASSIGNS IT, AND NAMING ANYTHING ELSE
+    /// IS THE DEFECT. This address builds a gRPC channel. Persistence binds ONE TLS endpoint,
+    /// <c>https://+:5101</c> with <c>Protocols: Http1AndHttp2</c>, so ALPN carries the C-05..C-08 gRPC
+    /// contracts and the HTTP/1.1 <c>/health</c> and <c>/v1/ping</c> surfaces on that single port. An
+    /// earlier revision named 5111 here, a second <c>Http2</c>-only endpoint placed above the documented
+    /// band; it was withdrawn because AAP 0.3.2.2 places C-05..C-08 on 5101, so a channel built on 5111
+    /// reached a port the map does not give those contracts. Naming 5111 now fails every retrieval and
+    /// every update at connect, before the request arrives, with nothing on the far side logging the
+    /// cause. The 5101-5105 band of the attached environment (constraint C-L) is therefore the whole of
+    /// the estate's addressing, with 5103 still unallocated (constraint C-D).
     /// </para>
     /// <para>
     /// The two addresses stay SEPARATE entries rather than one derived from the other: the Security base
@@ -2741,10 +3045,10 @@ public sealed class DataServicesSettingsDocumentTests
         DataServicesOptions development = DataServicesSettingsDocuments.BindService(
             DataServicesSettingsDocuments.WithDevelopmentOverlay());
 
-        Assert.Equal("https://persistence-service:5111", baseline.Persistence.Address, StringComparer.Ordinal);
+        Assert.Equal("https://persistence-service:5101", baseline.Persistence.Address, StringComparer.Ordinal);
         Assert.Equal("https://security-service:5104", baseline.Security.BaseAddress, StringComparer.Ordinal);
 
-        Assert.Equal("https://localhost:5111", development.Persistence.Address, StringComparer.Ordinal);
+        Assert.Equal("https://localhost:5101", development.Persistence.Address, StringComparer.Ordinal);
         Assert.Equal("https://localhost:5104", development.Security.BaseAddress, StringComparer.Ordinal);
 
         // ONLY THE HOST MOVES. Scheme, port and the absence of any credential component are invariant
@@ -2866,57 +3170,68 @@ public sealed class DataServicesSettingsDocumentTests
 
 
     /// <summary>
-    /// The listener declares one endpoint per protocol version: REST on 5102 and the gRPC contracts on
-    /// 5112.
+    /// The listener declares exactly one endpoint - <c>https://+:5102</c> with
+    /// <c>Protocols: Http1AndHttp2</c> - carrying the REST projection and the gRPC contracts together.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THE PORT MAP, AND ONE DEVIATION FROM ITS SHORTHAND THAT IS WORTH STATING PLAINLY. The plan's port
-    /// map gives DataServices 5102 and describes it as "gRPC primary plus a thin REST projection"
-    /// (AAP 0.3.2.2). The delivered listener splits those across TWO endpoints rather than negotiating
-    /// between them on one: <c>https://+:5102</c> restricted to HTTP/1.1 for the REST surface and
-    /// <c>https://+:5112</c> restricted to HTTP/2 prior knowledge for the gRPC contracts. The
-    /// documented port keeps its documented role - <c>/health</c> and <c>/v1/ping</c> answer on 5102, so
-    /// the readiness chain that gates Gateway is unaffected (constraint C-L) - and the split is what
-    /// makes each listener accept only what it is for, so a client that arrives with the wrong protocol
-    /// version fails cleanly at negotiation instead of being served a response it cannot parse.
+    /// THE PORT MAP, HONOURED WITHOUT A DEVIATION TO STATE. The plan's port map gives DataServices 5102
+    /// and describes it as "gRPC primary plus a thin REST projection" (AAP 0.3.2.2). The delivered
+    /// listener puts both on that one port: <c>https://+:5102</c> with <c>Protocols: Http1AndHttp2</c>, so
+    /// ALPN selects HTTP/1.1 for <c>/health</c>, <c>/v1/ping</c> and the REST projection and HTTP/2 for
+    /// contracts C-03 and C-04. A measured probe confirmed a single TLS endpoint of exactly this shape
+    /// answers an HTTP/1.1 <c>GET</c> with 200 and a gRPC unary call over HTTP/2.
+    /// </para>
+    /// <para>
+    /// AN EARLIER REVISION SPLIT THE TWO ACROSS SEPARATE ENDPOINTS, AND THAT WAS WITHDRAWN. It declared
+    /// <c>https://+:5102</c> restricted to <c>Http1</c> for REST and a second <c>https://+:5112</c>
+    /// restricted to <c>Http2</c> for gRPC, so that each listener accepted only what it was for. The cost
+    /// was that C-03 and C-04 answered on 5112, a port AAP 0.3.2.2 never names, while 5102 - the port it
+    /// assigns those contracts - carried only the probe. The assignment governs, so the split was
+    /// collapsed; 5103 is still unallocated (constraint C-D) because nothing moved into it, and the
+    /// readiness chain that gates Gateway still probes 5102 (constraint C-L).
     /// </para>
     /// <para>
     /// <c>+</c> binds EVERY interface, loopback included, which is why the Development overlay leaves
-    /// this section entirely alone: a loopback probe already works, and narrowing either address to
+    /// this section entirely alone: a loopback probe already works, and narrowing the address to
     /// <c>localhost</c> would break the containerised development run, where a container reached by
     /// service name cannot bind loopback only and the readiness probe would never satisfy.
     /// </para>
     /// <para>
-    /// BOTH ENDPOINTS TERMINATE TLS in every environment, so both schemes are asserted rather than only
-    /// the port numbers.
+    /// THE ENDPOINT TERMINATES TLS in every environment, and that is asserted rather than only the port
+    /// number - on cleartext, <c>Http1AndHttp2</c> silently means HTTP/1.1 alone, because Kestrel disables
+    /// HTTP/2 without TLS. The scheme is therefore what makes the single-port arrangement work at all.
     /// </para>
     /// </remarks>
     [Fact]
-    public void TheListenerDeclaresOneEndpointPerProtocolVersionOnTheDocumentedPorts()
+    public void TheListenerDeclaresOneEndpointCarryingBothProtocolVersionsOnTheDocumentedPort()
     {
         IConfigurationRoot document = DataServicesSettingsDocuments.Base();
 
         Assert.Equal("https://+:5102", document["Kestrel:Endpoints:Rest:Url"], StringComparer.Ordinal);
-        Assert.Equal("Http1", document["Kestrel:Endpoints:Rest:Protocols"], StringComparer.Ordinal);
-
-        Assert.Equal("https://+:5112", document["Kestrel:Endpoints:Grpc:Url"], StringComparer.Ordinal);
-        Assert.Equal("Http2", document["Kestrel:Endpoints:Grpc:Protocols"], StringComparer.Ordinal);
-
-        // EXACTLY TWO ENDPOINTS. A third would be an unaccounted listening socket on a service whose
-        // whole inbound surface is meant to be the two published contracts plus the probe pair.
         Assert.Equal(
-            ["Grpc", "Rest"],
+            "Http1AndHttp2",
+            document["Kestrel:Endpoints:Rest:Protocols"],
+            StringComparer.Ordinal);
+
+        // EXACTLY ONE ENDPOINT, AND THE WITHDRAWN SECOND ONE IS NAMED SO IT CANNOT RETURN QUIETLY. A
+        // second listener would put a published contract back on a port the map does not assign it, and
+        // any third would be an unaccounted listening socket on a service whose whole inbound surface is
+        // meant to be the two published contracts plus the probe pair.
+        Assert.Equal(
+            ["Rest"],
             document.GetSection("Kestrel:Endpoints")
                 .GetChildren()
                 .Select(static endpoint => endpoint.Key)
                 .OrderBy(static key => key, StringComparer.Ordinal));
 
+        Assert.Null(document["Kestrel:Endpoints:Grpc:Url"]);
+
         // THE RESERVED PHASE-TWO SLOT IS NOT TAKEN. 5103 is the port the attached environment had
         // assigned to a design service, and DesignSystem is precisely the deferred service this phase
         // must not implement even partially (constraint C-D). Leaving the port unallocated is what keeps
         // it available as the obvious Phase-2 slot.
-        foreach (string endpoint in (string[])["Rest", "Grpc"])
+        foreach (string endpoint in (string[])["Rest"])
         {
             Uri url = new(
                 document[$"Kestrel:Endpoints:{endpoint}:Url"]!.Replace(
@@ -2925,6 +3240,7 @@ public sealed class DataServicesSettingsDocumentTests
                     StringComparison.Ordinal));
 
             Assert.NotEqual(5103, url.Port);
+            Assert.Equal(5102, url.Port);
             Assert.Equal(Uri.UriSchemeHttps, url.Scheme, StringComparer.Ordinal);
         }
 
@@ -4207,7 +4523,7 @@ public sealed class DataServicesOptionsCompositionTests
             {
                 $"{service}:{nameof(DataServicesOptions.Persistence)}:"
                     + $"{nameof(PersistenceClientOptions.Address)}",
-                "persistence-service:5111",
+                "persistence-service:5101",
                 $"{service}:Persistence:Address"
             },
 
@@ -4658,9 +4974,23 @@ public sealed class DataServicesOptionsCompositionTests
         //     five duration members besides: "lifetime", "timeout" and "runtime" all contain it. A
         //     three-letter marker is simply too short to be a marker at all, so the capability is named in
         //     full instead.
+        //
+        //   * A bare "Window" is the third, and it collides with the CENTRAL IN-SCOPE NOUN OF THIS SERVICE.
+        //     What DesignSystem owns is the WIN32 WINDOW - positioning and geometry, reached through
+        //     ShowWindow, GetWindowRect, OffsetRect and SetWindowPos in the three presentational halves -
+        //     and "Window" names neither that nor only that. It matches `DataWindow`, which is the subject
+        //     of both projected contracts, so a legitimate member like a default DataWindow handle would
+        //     be forbidden; and it matched `StreamCollectionWindow`, a TIME interval bounding one REST
+        //     projection's collection, which names no user interface at all. The capability is therefore
+        //     named by its geometry spellings, which is STRICTER than the bare marker rather than looser:
+        //     five specific forms replace one that could not tell a screen from a stopwatch. `Win32`
+        //     remains in the list and is what catches the interop family wholesale - and the SIBLING guard
+        //     over settings KEYS in this same file has always relied on exactly that, listing `win32` and
+        //     no bare `window`.
         string[] deferredMarkers =
         [
-            "Dpi", "Scale", "Font", "Theme", "Colour", "Color", "Canvas", "Painter", "Window",
+            "Dpi", "Scale", "Font", "Theme", "Colour", "Color", "Canvas", "Painter",
+            "WindowPos", "WindowRect", "WindowGeometry", "WindowPlacement", "ShowWindow",
             "PopupMenu", "Tooltip", "TrayIcon", "Win32", "InputMethod",
             "Zip", "Barcode", "Xml", "Json", "FileScan", "Logger",
             "HttpClientObject", "OutboundHttp", "Ftp", "WebSocket", "Mqtt",
@@ -4732,7 +5062,7 @@ public sealed class DataServicesAddressShapeTests
     private static DataServicesOptions ValidOptions()
     {
         DataServicesOptions options = new();
-        options.Persistence.Address = "https://persistence-service:5111";
+        options.Persistence.Address = "https://persistence-service:5101";
         options.Security.BaseAddress = "https://security-service:5104";
         options.Security.ClientSecret = GeneratedIssuanceCredential;
         return options;
@@ -4787,8 +5117,8 @@ public sealed class DataServicesAddressShapeTests
     // BOTH VALUES ARE UNMISTAKEABLE PLACEHOLDERS, and that is deliberate rather than fussy: a
     // credential-SHAPED literal in a test file is a credential-shaped string in version control, and a
     // scanner cannot tell one from a real one. Neither token below can match any provider's key format.
-    [InlineData("https://not-a-real-account:not-a-real-value@persistence-service:5111")]
-    [InlineData("https://not-a-real-account@persistence-service:5111")]
+    [InlineData("https://not-a-real-account:not-a-real-value@persistence-service:5101")]
+    [InlineData("https://not-a-real-account@persistence-service:5101")]
     public void AnAddressThatEmbedsACredentialIsRefusedWithTheRemedyStated(string address)
     {
         DataServicesOptions options = ValidOptions();
@@ -5062,4 +5392,3 @@ public sealed class DataServicesAddressShapeTests
         Assert.Empty(ServiceFailures(fits));
     }
 }
-

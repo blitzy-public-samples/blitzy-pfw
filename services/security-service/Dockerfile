@@ -53,10 +53,12 @@
 #
 #  THE ONE WAY THIS IMAGE DIFFERS FROM ITS THREE SIBLINGS
 #  It is the only one that holds a signing input, so it is the one where every gram of added surface
-#  costs the most. It installs NO package: its listener is cleartext, like the other three, so the
-#  bash socket-redirection probe works here too and no probe binary has to be added. An earlier
-#  revision installed curl for a TLS listener that has since been withdrawn - see the endpoint note in
-#  stage 2 for the frozen-environment reason (constraint C-L).
+#  costs the most. It installs NO package even though its readiness probe has to complete a TLS
+#  handshake - the base image already ships /usr/bin/openssl, which is what makes that possible with no
+#  apt layer. Its listener is `https://+:5104`, exactly like the TLS listeners the other three bind, so
+#  a bash socket-redirection probe is NOT an option here and is not used: see the endpoint note in
+#  stage 2, which records the measurement behind that choice and why an earlier revision's `curl`
+#  install was removed rather than pinned.
 #
 #  WHAT IS DELIBERATELY ABSENT FROM THIS FILE
 #    * NO SECRET, IN ANY FORM. Not an ENV, not an ARG, not a default value, not a placeholder, and
@@ -98,15 +100,17 @@
 #      service names from the attached environment's five-directory roster is provisioned either.
 #    * No second port. Exactly one is exposed - no debug port, no diagnostics listener and no
 #      development-only surface. This service is REST-only, so the protocol-version split that forces
-#      Persistence and DataServices to bind a second cleartext endpoint does not arise here.
+#      Persistence and DataServices each to bind a SECOND TLS endpoint - one `Http1`, one `Http2`,
+#      because a single endpoint cannot carry both versions - does not arise here. Neither of their
+#      extra endpoints is cleartext; the split is about HTTP version, not about scheme.
 #    * No extra tooling AT ALL. Not one package is installed into either stage: no probe binary, no
 #      shell utility set, no debugging agent, no telemetry sidecar and no interactive tooling.
 #    * No performance, latency, throughput or availability claim. The repository publishes no such
 #      budget, so none is asserted here and none is used to justify a choice below.
 #
 #  WHAT WAS EXERCISED, AND WHAT IS NOT CLAIMED - stated plainly rather than implied
-#  Both base image tags below were inspected directly and report DOTNET_VERSION=10.0.10 and
-#  ASPNET_VERSION=10.0.10 with APP_UID=1654 backed by a real `app` account; the runtime image ships
+#  Both base image tags below were inspected directly and report DOTNET_VERSION=10.0.11 and
+#  ASPNET_VERSION=10.0.11 with APP_UID=1654 backed by a real `app` account; the runtime image ships
 #  bash and openssl but NOT curl and NOT wget.
 #
 #  This definition was then BUILT and RUN rather than only reviewed. From the repository root,
@@ -133,9 +137,12 @@
 #  cannot fail is not a probe: against a port with no listener it exits 1, and against /v1/ping - which
 #  answers 401 by design - it exits 1 rather than reading as healthy.
 #
-#  What is NOT claimed is a verified Compose bring-up of the whole stack: orchestration/
-#  docker-compose.yml does not exist yet, so the multi-service readiness chain this image is meant to
-#  participate in has not been exercised, and no such claim is made here.
+#  THE MULTI-SERVICE READINESS CHAIN HAS SINCE BEEN EXERCISED, and this paragraph used to say the
+#  opposite - that orchestration/docker-compose.yml did not exist. It does. A bring-up from it brought
+#  all four services to Docker health status `healthy` in the documented order, with this image first
+#  in that chain. What that run covered and what it did not is stated in ONE place rather than
+#  restated here: orchestration/README.md section 10 is this repository's only execution-status
+#  statement, and this file defers to it.
 #
 #  THE TRUST-ANCHOR MOUNT CONTRACT, STATED HERE BECAUSE THIS IMAGE DEPENDS ON IT AND CANNOT CARRY IT
 #    This service authenticates the callers of POST /v1/tokens by CLIENT certificate, and those
@@ -169,12 +176,21 @@
 # --------------------------------------------------------------------------------------------------
 # STAGE 1 - BUILD
 #
-# mcr.microsoft.com/dotnet/sdk:10.0 is matched to global.json, which pins SDK 10.0.302 with
-# rollForward confined to the latest feature band. The tag is the 10.0 FAMILY rather than a patch
-# revision, which is deliberate: the pin that has to hold is the one in global.json, and a family tag
-# lets a security-patched SDK be picked up on rebuild while still satisfying it.
+# THE BUILD IMAGE IS PINNED TO A PATCH REVISION, NOT TO THE 10.0 FAMILY TAG, AND THE DIFFERENCE IS A
+# SECURITY PROPERTY RATHER THAN A STYLE ONE. `mcr.microsoft.com/dotnet/sdk:10.0.400` is the SDK of the
+# 2026-08-11 security release of the 10.0 channel (runtime 10.0.11, ten CVEs fixed against 10.0.10).
+# An earlier revision used the family tag `sdk:10.0` on the reasoning that a rebuild would then pick a
+# security patch up by itself. IT DOES NOT: a family tag that is already present locally is reused as
+# it stands, so a builder holding a pre-patch `10.0` layer rebuilds on the vulnerable base and reports
+# success. A patch revision cannot go stale silently - advancing it is a diff a reviewer sees - and CI
+# additionally builds with `pull: true` so the reviewed digest is fetched rather than assumed
+# (CWE-1104).
+#
+# Measured on this tag: DOTNET_SDK_VERSION=10.0.400 and `dotnet --version` = 10.0.400. global.json
+# pins SDK 10.0.303 with rollForward: latestFeature, and 10.0.400 satisfies that pin by rolling
+# forward one feature band within 10.0 - both are the same 10.0.11 platform release.
 # --------------------------------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0.400 AS build
 
 WORKDIR /src
 
@@ -240,16 +256,19 @@ RUN dotnet publish services/security-service/PowerFramework.Security/PowerFramew
 # --------------------------------------------------------------------------------------------------
 # STAGE 2 - RUNTIME (the one and only final image)
 #
-# mcr.microsoft.com/dotnet/aspnet:10.0, matched to the Microsoft.AspNetCore.App runtime this refactor
-# builds against. Measured on this tag: ASPNET_VERSION=10.0.10 and DOTNET_VERSION=10.0.10, on Ubuntu
-# 24.04 LTS.
+# THE RUNTIME IMAGE IS PINNED TO A PATCH REVISION FOR THE SAME REASON THE BUILD IMAGE IS.
+# `mcr.microsoft.com/dotnet/aspnet:10.0.11` is the runtime of the 2026-08-11 security release, matched
+# to the Microsoft.AspNetCore.App version this refactor builds against and to the six platform package
+# pins in Directory.Packages.props. Measured on this tag: ASPNET_VERSION=10.0.11 and
+# DOTNET_VERSION=10.0.11 with APP_UID=1654 backed by a real `app` account, on Ubuntu 24.04 LTS, and it
+# ships NEITHER curl NOR wget.
 #
 # NOT the sdk image, which carries a compiler, a package cache and a build toolchain a running
 # service has no use for and which would be pure attack surface in the one image that holds the
 # signing key. NOT the non-ASP.NET `runtime` image either: this is an ASP.NET Core service and would
 # fail to start without the shared framework this image provides.
 # --------------------------------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
+FROM mcr.microsoft.com/dotnet/aspnet:10.0.11 AS final
 
 # --------------------------------------------------------------------------------------------------
 # NO PACKAGE IS INSTALLED INTO THIS IMAGE, AND THE READINESS PROBE STILL SPEAKS TLS
@@ -283,7 +302,7 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 # best removed rather than excused. It also cost an apt cache, a package list, a root-privileged layer
 # and a `hadolint ignore` directive.
 #
-# WHAT REPLACED IT WAS MEASURED, NOT ASSUMED. `mcr.microsoft.com/dotnet/aspnet:10.0` was inspected
+# WHAT REPLACED IT WAS MEASURED, NOT ASSUMED. `mcr.microsoft.com/dotnet/aspnet:10.0.11` was inspected
 # directly: it ships NO curl and NO wget, but it DOES ship /usr/bin/openssl (OpenSSL 3.0.13), because
 # the .NET runtime's own TLS stack depends on it. openssl s_client completes the handshake and the
 # shell composes the request and reads the status line, so the probe below adds NO package, NO layer
@@ -342,8 +361,8 @@ COPY --from=build /app/publish ./
 # place a deployment adds TLS settings. EXPOSE therefore DOCUMENTS the contract rather than
 # establishing it, and 5104 is this service's slot in the retained 5101-5105 band:
 #
-#     5101  Persistence     REST /health and /v1/ping;  5111 carries its gRPC contracts
-#     5102  DataServices    REST /health, /v1/ping and the REST projection;  5112 carries its gRPC
+#     5101  Persistence     REST /health and /v1/ping AND its gRPC contracts, on one endpoint
+#     5102  DataServices    REST /health, /v1/ping, the REST projection AND its gRPC contracts
 #     5103  RESERVED - deliberately unallocated so the obvious Phase 2 slot stays visible rather than
 #           being reassigned to one of the four services this phase builds. Nothing is provisioned for
 #           it here: no stage, no variable, no build input.
@@ -378,13 +397,16 @@ USER $APP_UID
 # /v1/ping is NEVER probed: it requires a bearer token and answers 401 without one BY DESIGN, so
 # pointing a probe at it would mark a perfectly healthy container unhealthy forever.
 #
-# BASH SOCKET REDIRECTION, WITH NOTHING INSTALLED. The listener is cleartext (see the endpoint note
-# above for the frozen-environment reason), so no handshake has to be negotiated and the shell can
-# write the request itself - measured in this base image: curl and wget are ABSENT, bash is present.
-# An earlier revision installed curl because the listener was TLS-terminated and socket redirection
-# cannot negotiate a handshake; that listener is withdrawn, so the tooling it required is too. This is
-# now the same probe shape the Gateway image uses, which is correct rather than a copy: both listeners
-# are cleartext.
+# OPENSSL PLUS THE SHELL, WITH NOTHING INSTALLED. The listener is TLS (`https://+:5104`, see the
+# endpoint note above), so a handshake HAS to be negotiated and bash socket redirection cannot do it -
+# `/dev/tcp` writes plaintext bytes into a TLS endpoint and never produces a status line. What makes a
+# probe possible with no apt layer is a measurement of this base image: curl and wget are ABSENT, but
+# bash AND /usr/bin/openssl are present, because the .NET runtime's own TLS stack depends on OpenSSL.
+# So `openssl s_client` completes the handshake and the shell composes the request and reads the status
+# line. An earlier revision installed curl for exactly this reason; it was removed because its apt
+# version could not be pinned against a family-tagged base (AAP 0.7.2 admits no floating version), not
+# because the listener stopped being TLS. This is the same probe shape all four images use, which is
+# correct rather than a copy: all eight listeners across the four services are `https`.
 #
 # NOT VERIFYING THE SERVER CERTIFICATE IS CORRECT HERE AND IS NOT A RELAXATION OF THIS SERVICE'S TLS
 # POSTURE. `openssl s_client` reports a verification failure and continues, which is the behaviour this

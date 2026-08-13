@@ -2820,12 +2820,31 @@ public enum PinyinClosedInput
 /// </summary>
 /// <remarks>
 /// <para>
-/// WHY A SKIPPED TEST RATHER THAN A COMMENT. A comment saying "characterize this later" is forgotten; a
-/// test that un-skips itself is not. The skip is CONDITIONAL on a legacy recording being present for the
-/// pinyin workflow, so the day someone lands one under
-/// <c>characterization/recordings/legacy/&lt;workflowId&gt;/</c> this matrix starts running and starts
-/// failing until the recorded data is wired into the matcher's configuration. Nobody has to remember it,
-/// and nobody can quietly ship a recording without wiring it in.
+/// WHY AN ALWAYS-ACTIVE TRACKING MATRIX RATHER THAN A SKIPPED ONE. This matrix used to be skipped until a
+/// legacy recording appeared, which meant that on the shipped state of this refactor - no recording - its
+/// four rows executed nothing at all and protected nothing at all. A skip that never fires is a test that
+/// does not exist. The rows now assert the EQUIVALENCE between two observable facts rather than one side of
+/// it: for each closed input, <b>the input is characterized exactly when a paired oracle recording exists
+/// for the workflow</b>. That single form is correct in both worlds and executable in both, and it is what
+/// makes each direction a real guard:
+/// </para>
+/// <para>
+/// * TODAY, with no recording, it asserts that the input is NOT characterized and that the shipped
+/// composition still hands the expression evaluator <c>PinyinFirstLetterMatcher.Blocked</c>. That is the
+/// ANTI-APPROXIMATION guard the parity mandate asks for: anyone who quietly supplies a table, a strategy, a
+/// flag default or a fuzzy closure from a third-party source or from a guess - rather than from the oracle -
+/// fails these rows immediately (AAP 0.6.5, risk R1).
+/// </para>
+/// <para>
+/// * THE DAY A RECORDING LANDS, the same rows demand that the recorded data actually reached the
+/// configuration, and FAIL until it has. Nobody has to remember it, and nobody can quietly ship a recording
+/// without wiring it in.
+/// </para>
+/// <para>
+/// * A HALF-CAPTURED PAIR FAILS RATHER THAN GOING UNNOTICED. Activation used to key on the legacy half
+/// alone, so a target-side recording with no legacy counterpart left the matrix asleep. The pair rule is
+/// asserted whenever EITHER half exists, which is the only reading of docs/PARITY.md 4.1 that catches the
+/// unpaired case.
 /// </para>
 /// <para>
 /// THE PAIRED-CAPTURE MODEL IT HOOKS INTO. docs/PARITY.md §4.1 keys recordings by workflow identifier -
@@ -2875,53 +2894,69 @@ public sealed class PinyinOracleCharacterizationHookTests
     /// ordinary file - which is what an actual capture produces.
     /// </para>
     /// <para>
-    /// Filesystem faults answer <see langword="false"/> rather than propagating, because a skip predicate
-    /// that throws would fail the run for an unrelated reason.
+    /// Filesystem faults answer <see langword="false"/> rather than propagating, because a predicate that
+    /// throws would fail the run for an unrelated reason.
     /// </para>
     /// </remarks>
     public static bool LegacyOracleRecordingIsPresent
     {
         get
         {
-            try
-            {
-                string? root = RepositoryRoot();
+            string? root = RepositoryRoot();
 
-                if (root is null)
-                {
-                    return false;
-                }
+            return root is not null && CarriesAnOrdinaryFile(Resolve(root, LegacyRecordingDirectory));
+        }
+    }
 
-                string legacy = Resolve(root, LegacyRecordingDirectory);
-
-                if (!Directory.Exists(legacy))
-                {
-                    return false;
-                }
-
-                foreach (string file in Directory.EnumerateFiles(legacy))
-                {
-                    string name = Path.GetFileName(file);
-
-                    bool placeholder = name.StartsWith('.')
-                        || string.Equals(name, "README.md", StringComparison.OrdinalIgnoreCase);
-
-                    if (!placeholder)
-                    {
-                        return true;
-                    }
-                }
-
-                return false;
-            }
-            catch (IOException)
+    /// <summary>
+    /// Whether <paramref name="directory"/> holds at least one file that an actual capture would have
+    /// written, as opposed to scaffolding.
+    /// </summary>
+    /// <param name="directory">The recording directory to inspect.</param>
+    /// <returns><see langword="true"/> when a real capture is present.</returns>
+    /// <remarks>
+    /// <para>
+    /// ONE SCAN, USED BY BOTH HALVES OF THE PAIR AND BY THE SELF-TEST. It was written out three times, once
+    /// per caller, which is exactly how the legacy half and the target half of a pair come to be judged by
+    /// subtly different rules. The rule itself is unchanged: an empty scaffold directory does not count and
+    /// neither does one holding only a readme or a dot-file.
+    /// </para>
+    /// <para>
+    /// Filesystem faults answer <see langword="false"/> rather than propagating, for the same reason the
+    /// predicate above does.
+    /// </para>
+    /// </remarks>
+    private static bool CarriesAnOrdinaryFile(string directory)
+    {
+        try
+        {
+            if (!Directory.Exists(directory))
             {
                 return false;
             }
-            catch (UnauthorizedAccessException)
+
+            foreach (string file in Directory.EnumerateFiles(directory))
             {
-                return false;
+                string name = Path.GetFileName(file);
+
+                bool placeholder = name.StartsWith('.')
+                    || string.Equals(name, "README.md", StringComparison.OrdinalIgnoreCase);
+
+                if (!placeholder)
+                {
+                    return true;
+                }
             }
+
+            return false;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
         }
     }
 
@@ -2993,8 +3028,9 @@ public sealed class PinyinOracleCharacterizationHookTests
     };
 
     /// <summary>
-    /// Once the oracle has been recorded, every closed input must be characterized from it and wired into
-    /// the shipped configuration.
+    /// Every closed input is characterized in the shipped configuration exactly when a paired oracle
+    /// recording exists for the workflow - so BLOCKED is asserted today and wiring is demanded the day a
+    /// recording lands.
     /// </summary>
     /// <param name="workflowId">The workflow identifier joining the two halves of the pair.</param>
     /// <param name="legacyRecordingDirectory">The legacy half's location, relative to the repository
@@ -3004,39 +3040,48 @@ public sealed class PinyinOracleCharacterizationHookTests
     /// <param name="closedInput">The closed input this row is responsible for.</param>
     /// <remarks>
     /// <para>
-    /// SKIPPED TODAY BECAUSE THE ORACLE HAS NOT BEEN EXERCISED, which docs/PARITY.md records as the reason
-    /// risk R1 is live. That is the honest state of this refactor and BLOCKED is its correct reportable
-    /// outcome - not an approximation, and not a silently missing test.
+    /// ACTIVE ON EVERY RUN, AND THAT IS THE CORRECTION. This matrix was <c>Skip</c>ped unless a legacy
+    /// recording was present, so on the shipped state of this refactor its four rows contributed no
+    /// executable protection whatsoever. It now asserts an EQUIVALENCE that is true in both worlds -
+    /// characterized if and only if recorded - which executes in both and guards in both directions.
     /// </para>
     /// <para>
-    /// WHAT IT ASSERTS WHEN IT ACTIVATES, in order. First the §4.1 pair rule, so a half-captured pair is
-    /// never mistaken for a comparison. Then that the shipped composition no longer hands the expression
-    /// evaluator the BLOCKED matcher - because a recording that nobody wired in unblocks nothing. Then,
-    /// per row, that the specific closed input this row names has actually been supplied.
+    /// TODAY THE ORACLE HAS NOT BEEN EXERCISED, which docs/PARITY.md records as the reason risk R1 is live,
+    /// so every row asserts the BLOCKED state: no table, no characterized relation, no characterized flag
+    /// default, no confirmed fuzzy closure, and a composition that still hands the expression evaluator
+    /// <c>PinyinFirstLetterMatcher.Blocked</c>. BLOCKED is the correct reportable outcome for this refactor -
+    /// not an approximation and not a silently missing test - and these rows are what stop an approximation
+    /// arriving unnoticed: no third-party pinyin table and no guessed flag set can be substituted without
+    /// failing here (AAP 0.6.5).
     /// </para>
     /// <para>
-    /// IT DELIBERATELY DOES NOT INVENT A RECORDING FORMAT. The capture schema is an oracle deliverable,
-    /// not something this suite may decide; what it can assert without inventing anything is that the pair
-    /// exists and that the data reached the configuration. Once the schema exists, per-case value
-    /// comparisons belong in this class beside this matrix.
+    /// THE DAY A RECORDING LANDS the same rows demand that the recorded data reached the configuration, and
+    /// fail until it has - because a recording nobody wired in unblocks nothing.
+    /// </para>
+    /// <para>
+    /// THE PAIR RULE IS ASSERTED WHENEVER EITHER HALF EXISTS. docs/PARITY.md 4.1 states that a recording
+    /// whose identifier does not exist on the other side "is not a comparison at all, and it must not be
+    /// reported as a pass", and 4.2 adds that both halves must be captured against the same
+    /// <c>persistence-db</c> volume state inside one working tree. Keying activation on the legacy half alone
+    /// would leave a target-only capture unexamined, so both halves are inspected by the same rule.
+    /// </para>
+    /// <para>
+    /// IT DELIBERATELY DOES NOT INVENT A RECORDING FORMAT. The capture schema is an oracle deliverable, not
+    /// something this suite may decide; what it can assert without inventing anything is that the pair exists
+    /// and that the data reached the configuration. Once the schema exists, per-case value comparisons belong
+    /// in this class beside this matrix.
     /// </para>
     /// <para>
     /// PAIRED WITH THE SIBLING ASSERTION OF TODAY'S STATE.
     /// <c>DataWindowExpressionEvaluatorTests.PinyinDispatchTests</c> asserts that the default evaluator
-    /// carries <c>PinyinFirstLetterMatcher.Blocked</c>. That case and this one describe opposite worlds and
-    /// MOVE TOGETHER: whoever lands a recording updates both, which is exactly the review moment this hook
-    /// exists to force.
+    /// carries <c>PinyinFirstLetterMatcher.Blocked</c>. That case and these rows now MOVE TOGETHER in one
+    /// direction rather than describing opposite worlds: whoever lands a recording updates both, which is
+    /// exactly the review moment this hook exists to force.
     /// </para>
     /// </remarks>
-    [Theory(
-        Skip = "Risk R1: the pinyin lookup table, matching relation, two-argument default flags and "
-            + "fuzzy-set closure live only inside the closed pfw.dll, and the behavioural oracle has not "
-            + "been exercised in this environment. BLOCKED is the correct reportable outcome; no "
-            + "approximation and no third-party pinyin table may be substituted. This matrix un-skips "
-            + "itself as soon as a legacy recording exists for the workflow.",
-        SkipUnless = nameof(LegacyOracleRecordingIsPresent))]
+    [Theory]
     [MemberData(nameof(OracleRecordingLocations))]
-    public void EveryClosedInputMustBeCharacterizedFromThePairedOracleRecording(
+    public void EveryClosedInputIsCharacterizedExactlyWhenThePairedOracleRecordingExists(
         string workflowId,
         string legacyRecordingDirectory,
         string dotnetRecordingDirectory,
@@ -3048,45 +3093,74 @@ public sealed class PinyinOracleCharacterizationHookTests
         string legacy = Resolve(root, legacyRecordingDirectory);
         string target = Resolve(root, dotnetRecordingDirectory);
 
-        // docs/PARITY.md 4.1 - the pair rule. A recording whose identifier does not exist on the other
-        // side is not a partial comparison, it is not a comparison at all.
-        Assert.True(
-            Directory.Exists(legacy),
-            "No legacy oracle recording for workflow " + workflowId + " at " + legacy);
-        Assert.True(
-            Directory.Exists(target),
-            "Workflow " + workflowId + " has a legacy recording but no target-side recording at "
-                + target + ". docs/PARITY.md 4.1: an unpaired recording must not be reported as a pass, "
-                + "and 4.2 requires both halves be captured against the same persistence-db volume "
-                + "state inside one working tree.");
-        Assert.NotEmpty(Directory.EnumerateFileSystemEntries(legacy));
-        Assert.NotEmpty(Directory.EnumerateFileSystemEntries(target));
+        bool legacyRecorded = CarriesAnOrdinaryFile(legacy);
+        bool targetRecorded = CarriesAnOrdinaryFile(target);
 
-        // The recording exists, so the shipped composition must no longer be BLOCKED.
+        // The legacy half is also reachable as a named predicate, and the two must agree: a divergence would
+        // mean the pair rule below and the predicate were judging the same directory differently.
+        Assert.Equal(legacyRecorded, LegacyOracleRecordingIsPresent);
+
+        // docs/PARITY.md 4.1 - THE PAIR RULE, checked from EITHER side. A recording whose identifier does
+        // not exist on the other side is not a partial comparison, it is not a comparison at all. Vacuous
+        // while nothing is recorded, which is today.
+        if (legacyRecorded || targetRecorded)
+        {
+            Assert.True(
+                legacyRecorded,
+                "Workflow " + workflowId + " has a target-side recording at " + target
+                    + " but no legacy oracle recording at " + legacy
+                    + ". docs/PARITY.md 4.1: an unpaired recording must not be reported as a pass.");
+            Assert.True(
+                targetRecorded,
+                "Workflow " + workflowId + " has a legacy recording but no target-side recording at "
+                    + target + ". docs/PARITY.md 4.1: an unpaired recording must not be reported as a pass, "
+                    + "and 4.2 requires both halves be captured against the same persistence-db volume "
+                    + "state inside one working tree.");
+        }
+
+        bool recorded = legacyRecorded && targetRecorded;
+
         DataWindowExpressionEvaluator evaluator = new(EvaluatorFixture.BuildSqliteFixture());
+        PinyinFirstLetterMatcher matcher = evaluator.PinyinMatcher;
 
-        Assert.NotSame(PinyinFirstLetterMatcher.Blocked, evaluator.PinyinMatcher);
+        // THE COMPOSITION TRACKS THE RECORDING. No pair means the shipped BLOCKED singleton is still what
+        // the evaluator dispatches to and the matcher still reports that it cannot match; a pair means it
+        // must be something else and must report that it can.
+        Assert.Equal(recorded, !ReferenceEquals(PinyinFirstLetterMatcher.Blocked, matcher));
+        Assert.Equal(recorded, matcher.CanMatch);
 
-        PinyinMatchConfiguration configuration = evaluator.PinyinMatcher.Configuration;
+        PinyinMatchConfiguration configuration = matcher.Configuration;
 
         switch (closedInput)
         {
             case PinyinClosedInput.LookupTable:
-                Assert.NotNull(configuration.Table);
-                Assert.NotEmpty(configuration.Table.SourceDescription);
+                // (a) Null is the BLOCKED state and is MEANINGFUL: an absent table and an empty one are
+                // different findings, so the assertion is on presence rather than on size - together with
+                // the provenance string a real capture has to carry.
+                Assert.Equal(recorded, configuration.Table is not null);
+                Assert.Equal(recorded, configuration.Table?.SourceDescription.Length > 0);
                 break;
 
             case PinyinClosedInput.MatchingRelation:
-                Assert.NotEqual(PinyinMatchStrategy.NotCharacterized, configuration.Strategy);
+                // (b) NotCharacterized is the BLOCKED value, and it is the only value that cannot reach a
+                // comparison at all.
+                Assert.Equal(recorded, configuration.Strategy != PinyinMatchStrategy.NotCharacterized);
                 break;
 
             case PinyinClosedInput.DefaultFlagSet:
-                Assert.True(evaluator.PinyinMatcher.IsDefaultFlagSetCharacterized);
-                Assert.NotNull(configuration.CharacterizedDefaultFlags);
+                // (c) The two-argument overload's flag set. Null is BLOCKED; the reported predicate and the
+                // underlying value must agree, since a divergence would let one of them lie.
+                Assert.Equal(recorded, matcher.IsDefaultFlagSetCharacterized);
+                Assert.Equal(recorded, configuration.CharacterizedDefaultFlags is not null);
                 break;
 
             case PinyinClosedInput.FuzzySoundSet:
-                Assert.True(configuration.FuzzySound.ExhaustivenessConfirmed);
+                // (d) THE DISCRIMINATING FACT IS EXHAUSTIVENESS, NOT PRESENCE. The documented pairs are
+                // always in force - PinyinFuzzySoundEquivalence defaults Pairs to DocumentedPairs - so a
+                // non-empty check would pass in the BLOCKED state too and would prove nothing. What the
+                // oracle has to settle is whether that documented relation CLOSES, which is exactly what
+                // ExhaustivenessConfirmed records.
+                Assert.Equal(recorded, configuration.FuzzySound.ExhaustivenessConfirmed);
                 Assert.NotEmpty(configuration.FuzzySound.Pairs);
                 break;
 
@@ -3094,29 +3168,28 @@ public sealed class PinyinOracleCharacterizationHookTests
                 Assert.Fail("Unhandled closed input " + closedInput + " for workflow " + workflowId);
                 break;
         }
-
-        Assert.True(evaluator.PinyinMatcher.CanMatch);
     }
 
     /// <summary>
-    /// The activation predicate itself is correct: today there is no recording, so the matrix above is
-    /// skipped.
+    /// The recording predicate agrees with the filesystem, and the repository-root locator it depends on
+    /// actually found the root.
     /// </summary>
     /// <remarks>
-    /// A SKIP THAT NEVER FIRES IS A TEST THAT DOES NOT EXIST, so the predicate is verified rather than
-    /// trusted. This case documents today's state as an assertion - and it is also the case that fails
-    /// first if the predicate is ever broken into always-false, which would silently disarm the hook.
+    /// THE PREDICATE IS VERIFIED RATHER THAN TRUSTED, because every row of the matrix above pivots on it: a
+    /// predicate broken into always-false would turn four two-directional guards into four assertions that
+    /// the shipped state is BLOCKED and would never demand wiring again. Written against the filesystem
+    /// directly rather than through the shared scan, so the two cannot be wrong in the same way, and phrased
+    /// as an equality so it stays correct after a recording lands rather than becoming the thing that has to
+    /// be remembered.
     /// </remarks>
     [Fact]
-    public void TodayThereIsNoOracleRecordingSoTheMatrixIsSkipped()
+    public void TheOracleRecordingPredicateAgreesWithTheFilesystem()
     {
         string? root = RepositoryRoot();
 
         Assert.NotNull(root);
         Assert.True(File.Exists(Path.Combine(root, RepositoryRootMarker)));
 
-        // The predicate must agree with the filesystem, whichever way round that is - so this case stays
-        // correct after a recording lands rather than becoming the thing that has to be remembered.
         string legacy = Resolve(root, LegacyRecordingDirectory);
         bool hasOrdinaryFile = false;
 

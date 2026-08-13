@@ -69,7 +69,7 @@ public sealed class ScopeAuthorizationTests
     /// A projected expression operation, under the same prefix and therefore the same scope.
     /// </summary>
     /// <remarks>
-    /// A <c>POST</c>, and not by preference. Of the twenty-four operations the contract publishes under
+    /// A <c>POST</c>, and not by preference. Of the twenty-five operations the contract publishes under
     /// <c>/v1/datawindow/expression/</c>, twenty-three are <c>POST</c> and one is a <c>DELETE</c>; there is
     /// no <c>GET</c> anywhere under the prefix. A probe that assumed the verb from the neighbouring
     /// DataWindow route would be answered <c>405 Method Not Allowed</c> - which is neither the refusal nor

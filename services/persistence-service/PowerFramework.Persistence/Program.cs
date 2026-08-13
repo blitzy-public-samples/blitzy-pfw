@@ -28,22 +28,23 @@
 //  result delivery of the legacy recordset. Protocol buffers over gRPC carry all four; JSON over
 //  REST carries none of them well.
 //
-//  TWO ENDPOINTS, ONE PROTOCOL VERSION EACH, AND THAT IS DELIBERATE (constraint C-K)
-//  appsettings.json declares TWO named Kestrel endpoints - `Rest https://+:5101` with `Http1` for the
-//  two REST routes, and `Grpc https://+:5111` with `Http2` for the four published gRPC contracts. Both
-//  are TLS, so ALPN could negotiate `h2` and `http/1.1` on ONE address and a single `Http1AndHttp2`
-//  endpoint would also work; the split is preferred because it keeps the readiness probe reachable over
-//  HTTP/1.1 without depending on ALPN behaviour in whatever proxy, sidecar or client fronts the address,
-//  and because it makes each port's protocol version a stated fact rather than a negotiated one.
+//  ONE ENDPOINT CARRYING BOTH PROTOCOL VERSIONS, ON THE ASSIGNED PORT (constraint C-K)
+//  appsettings.json declares ONE named Kestrel endpoint - `Rest https://+:5101` with `Http1AndHttp2` -
+//  and it carries the two REST routes AND the four published gRPC contracts. AAP 0.3.2.2 assigns this
+//  service 5101 as "gRPC, plus REST /health and /v1/ping", so one port is the topology the plan fixes;
+//  a second listener for the gRPC half published C-05..C-08 at an address the plan does not assign.
+//  Being TLS is what makes one address sufficient: ALPN negotiates `h2` or `http/1.1` per connection,
+//  measured on this toolchain rather than assumed - an HTTP/1.1 /health probe and a gRPC unary call both
+//  succeed against one such endpoint, with no "HTTP/2 is not enabled" warning.
 //
 //  ⚠ WHY THE SCHEME IS LOAD BEARING, VERIFIED BY RUNNING THE SERVICE RATHER THAN ASSUMED. Kestrel does
 //  NOT enable prior-knowledge HTTP/2 on a PLAINTEXT `Http1AndHttp2` endpoint: it emits "HTTP/2 is not
 //  enabled ... TLS is not enabled. HTTP/2 requires TLS application protocol negotiation. Connections to
 //  this endpoint will use HTTP/1.1" and serves HTTP/1.1 only, which would silently take all four gRPC
 //  contracts off the air while leaving the REST routes working - the worst possible failure shape,
-//  because the readiness probe would still answer 200. That is why BOTH endpoints declare `https`, and
-//  why anyone tempted to "simplify" either URL to `http` must declare that endpoint HTTP/2-only and
-//  accept losing HTTP/1.1 on it. The scheme is a deployment decision and it belongs to configuration;
+//  because the readiness probe would still answer 200. That is why the endpoint declares `https`, and
+//  why anyone tempted to "simplify" that URL to `http` must split the endpoint again and declare the
+//  gRPC half HTTP/2-only - which is exactly the topology divergence the single endpoint corrects. The scheme is a deployment decision and it belongs to configuration;
 //  the certificate arrives the same way, through the Kestrel certificate settings the orchestration
 //  layer supplies, which is why no certificate is named in this file.
 //
@@ -54,8 +55,8 @@
 //  DELIBERATELY RESERVED, COMMENTED placeholder for a deferred service and not a spare: binding it
 //  here would break the documented port map and violate constraint C-D in spirit.
 //
-//  NO HTTPS IS CONFIGURED IN CODE EITHER, WHICH IS NOT THE SAME AS NO HTTPS. Both configured endpoints
-//  declare `https`, and the certificate reaches Kestrel through the certificate settings the
+//  NO HTTPS IS CONFIGURED IN CODE EITHER, WHICH IS NOT THE SAME AS NO HTTPS. The configured endpoint
+//  declares `https`, and the certificate reaches Kestrel through the certificate settings the
 //  orchestration layer supplies - but there is no UseHttps call, no development certificate, no HSTS and
 //  no HTTPS redirection in this file. Mutual TLS remains a documented per-pair fallback that this
 //  service is not part of: it presents no client certificate, because it requests no token. The
@@ -88,11 +89,16 @@
 //      no UseOracle, no client package for either and no SQLCipher. The legacy's two enumerated
 //      database types survive as PURE STRING TRANSFORMS under Sql/Paging/ that need no instance of
 //      either engine (constraint C-E).
-//    * No destructive storage call. There is no EnsureDeleted, no EnsureCreated, no DROP and no
-//      migration application anywhere below, and the ONLY file this service ever deletes is the
-//      zero-byte writability probe the startup gate itself just created, by a generated name that
-//      cannot name a database. See the storage section for why that distinction is load bearing rather
-//      than merely tidy.
+//    * No destructive storage call. There is no EnsureDeleted, no EnsureCreated and no DROP anywhere
+//      below, and the ONLY file this service ever deletes is the zero-byte writability probe the startup
+//      gate itself just created, by a generated name that cannot name a database. Data/SchemaProvisioner
+//      DOES apply this build's PENDING migrations before the pipeline is built when
+//      Schema:ApplyMigrationsOnStartup is on - additive statements only, skipped entirely when the history
+//      table already records them - which is what makes the one-command bring-up converge on a fresh
+//      volume without ever mutating an existing one. The switch defaults to OFF so a characterization
+//      capture's untouched volume never depends on remembering to disable anything; the orchestration
+//      manifest opts in. See the storage section and SchemaProvisioner for why that distinction is load
+//      bearing rather than merely tidy.
 //    * No registration, route, client, options section or placeholder type for DesignSystem,
 //      Documents, Integration or ScriptBridge. The four reserved 501 routes belong to GATEWAY alone
 //      and this service declares none of them (constraint C-D).
@@ -119,6 +125,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.DataProtection.Repositories;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
@@ -179,6 +186,32 @@ WebApplication app = builder.Build();
 //  behavioural change dressed up as robustness.
 // --------------------------------------------------------------------------------------------------
 app.Services.ValidatePersistenceStructuralPreconditions();
+
+// --------------------------------------------------------------------------------------------------
+//  SCHEMA PROVISIONING - CONFIGURATION-GATED, ADDITIVE ONLY, AND OFF UNLESS A DEPLOYMENT ASKS
+//
+//  Immediately after the gate and strictly before the pipeline, which is the only position that makes
+//  the documented one-command bring-up work: the gate has already proven the data directory present
+//  and writable, and no request has been served yet, so a fresh `persistence-db` volume acquires its
+//  schema before the readiness probe is ever asked about it. `Schema:ApplyMigrationsOnStartup` defaults
+//  to FALSE, so this line is a single logged no-op for every deployment and every test that has not
+//  opted in; the orchestration manifest opts in explicitly. It calls `Database.Migrate` and nothing
+//  else - additive and idempotent, so it can neither destroy nor reseed the volume a paired
+//  characterization capture depends on - and it serializes concurrent replicas through an exclusive
+//  lock file on that same volume. A failure throws, which terminates the process with a non-zero exit
+//  code exactly as a gate failure does: a service whose schema could not be applied can serve nothing,
+//  and starting anyway would answer every retrieval and every update with a storage error.
+//
+//  Blocking here rather than deferring to a hosted service is the point of the position. A hosted
+//  service registered in user code starts AFTER the web host's own, so the listener would already be
+//  accepting requests while the schema was still being applied - which is a window in which the
+//  readiness gate can open onto a service that is not yet able to answer.
+// --------------------------------------------------------------------------------------------------
+app.Services
+    .GetRequiredService<SchemaProvisioner>()
+    .ProvisionAsync(app.Lifetime.ApplicationStopping)
+    .GetAwaiter()
+    .GetResult();
 
 // --------------------------------------------------------------------------------------------------
 //  THE PIPELINE. Authentication STRICTLY BEFORE authorization, and both STRICTLY BEFORE the endpoint
@@ -738,20 +771,31 @@ internal static class PersistenceServiceCollectionExtensions
     /// probe file, which it created a moment earlier under a generated name.
     /// </para>
     /// <para>
-    /// MIGRATIONS ARE NOT APPLIED AT STARTUP, AND THAT IS A DELIBERATE, DOCUMENTED CHOICE
-    /// (constraint C-K). Four reasons, each sufficient on its own. First, the paired-capture rule
-    /// above: an automatic schema mutation on every restart is exactly the between-captures volume
-    /// change the rule forbids, and a parity run must be able to rely on the volume being untouched.
-    /// Second, this service is required to be independently SCALABLE (constraint C-J), and concurrent
-    /// replicas racing to apply the same migration is a genuine hazard with no upside. Third, a
-    /// missing schema SHOULD be visible: the readiness probe reports storage reachability, so an
-    /// unmigrated database surfaces as unhealthy and gates the orchestration chain, which is
-    /// strictly better than being silently repaired by whichever replica started first. Fourth,
-    /// applying migrations is an operator action with a first-class tool - the design-time factory and
-    /// the migrations under <c>Data/Migrations/</c> exist precisely so <c>dotnet ef database
-    /// update</c> can do it out of band, additively, when someone has decided to. If a future phase
-    /// does want startup application, it must be ADDITIVE ONLY, never a drop-and-recreate, and gated
-    /// by configuration so a parity run can switch it off.
+    /// MIGRATIONS ARE APPLIED AT STARTUP ONLY WHEN A DEPLOYMENT ASKS FOR IT, AND THE SWITCH IS OFF BY
+    /// DEFAULT (constraint C-K). An earlier revision applied them never, on four stated reasons, and
+    /// three of the four still hold and are the reason the DEFAULT is off rather than on: the
+    /// paired-capture rule above means a parity run must be able to rely on the volume being untouched;
+    /// this service is required to be independently SCALABLE (constraint C-J), so replicas racing to
+    /// apply one migration is a real hazard; and a missing schema SHOULD be visible through the
+    /// readiness probe rather than silently repaired by whichever replica started first. What did not
+    /// survive is the fourth - that applying migrations is purely an operator action with a first-class
+    /// tool. It is, but the runtime image carries neither the SDK nor <c>dotnet-ef</c>, and the
+    /// documented bring-up is a SINGLE command (constraints C-J and C-L), so on a fresh volume that
+    /// command produced a stack in which three of four services never became healthy and nothing in the
+    /// manifest could fix it. An out-of-band step nobody following the documentation would know to run
+    /// is not a provisioning strategy.
+    /// </para>
+    /// <para>
+    /// SO THE SEAM THIS PARAGRAPH USED TO PRESCRIBE NOW EXISTS, ON EXACTLY THE TERMS IT PRESCRIBED:
+    /// ADDITIVE ONLY, never a drop-and-recreate, and gated by configuration so a parity run can switch
+    /// it off. <see cref="SchemaProvisioner"/> holds it, <c>Schema:ApplyMigrationsOnStartup</c> enables
+    /// it and defaults to <see langword="false"/>, and the orchestration manifest turns it on in one
+    /// visible place so the documented command reaches a healthy stack. It calls
+    /// <c>Database.Migrate</c> and nothing else, serializes replicas through an exclusive lock file on
+    /// the mounted volume, and terminates the process on failure rather than starting a service that
+    /// could answer nothing. The three sentences above this one still apply verbatim: no
+    /// <c>EnsureDeleted</c>, no <c>EnsureCreated</c> and no <c>DROP</c> anywhere in this service, and
+    /// the only deletion it performs at all remains the startup gate's own writability probe file.
     /// </para>
     /// <para>
     /// LIFETIME. The context is SCOPED, per the Entity Framework norm, and a gRPC call is itself a
@@ -771,6 +815,12 @@ internal static class PersistenceServiceCollectionExtensions
 
         services.AddDbContext<PowerFrameworkDbContext>(static (provider, options) =>
             options.UseSqlite(provider.GetRequiredService<SqliteConnectionFactory>().ConnectionString));
+
+        // THE PROVISIONER IS REGISTERED UNCONDITIONALLY AND DECIDES FOR ITSELF, which is deliberate: a
+        // registration conditional on configuration would make "the switch is off" and "the type was
+        // never registered" the same observable state, and only one of those is something an operator
+        // can act on. It reads the switch first and performs no file operation at all when it is off.
+        services.TryAddSingleton<SchemaProvisioner>();
 
         return services;
     }
@@ -1217,19 +1267,21 @@ internal static class PersistenceAuthorizationPolicies
     /// The policy - and the scope name - a caller must hold to reach the retrieval contract.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// THE POLICY NAME IS THE SCOPE NAME, DELIBERATELY. A separate policy identifier would be one more
     /// mapping to keep in step across two services: DataServices requests this exact string from Security
     /// [<c>services/dataservices-service/PowerFramework.DataServices/Clients/PersistenceClient.cs</c>],
     /// Security mints it into the token's space-delimited <c>scope</c> claim
     /// [<c>services/security-service/PowerFramework.Security/Tokens/TokenIssuer.cs</c>], and this file
     /// enforces it. One spelling, three places, no translation table.
-    /// </remarks>
-    /// <remarks>
+    /// </para>
+    /// <para>
     /// ALIASED TO <see cref="PersistenceScopes.Read"/> RATHER THAN RESTATED, so the literal exists once in
     /// this service. The registrar in <c>Authorization/ScopeAuthorization.cs</c> builds the policy under
     /// that name and every contract on this service names it through this constant; two independent
     /// spellings of the same value is how a route comes to name a policy nothing registered, which the
     /// framework answers as an unexplained internal error rather than as a refusal.
+    /// </para>
     /// </remarks>
     internal const string Read = PersistenceScopes.Read;
 
@@ -1476,6 +1528,20 @@ internal static class PersistenceStartupGate
     internal const string MetadataAddressKey = "MetadataAddress";
 
     /// <summary>
+    /// How many times schema provisioning is attempted before a locked database is treated as fatal.
+    /// </summary>
+    /// <remarks>
+    /// Bounded rather than open-ended, because an unbounded retry turns a genuinely stuck volume into a
+    /// container that never starts and never says why. Four attempts across the delay below cover the
+    /// only contention this service can create for itself - two instances starting against one volume at
+    /// once - and the migration itself is a handful of statements against an empty database.
+    /// </remarks>
+    private const int ProvisioningAttempts = 4;
+
+    /// <summary>How long to wait between provisioning attempts when another writer holds the database.</summary>
+    private static readonly TimeSpan ProvisioningRetryDelay = TimeSpan.FromMilliseconds(750);
+
+    /// <summary>
     /// Verifies every structural precondition, terminating the process when one fails.
     /// </summary>
     /// <param name="services">The composed container.</param>
@@ -1500,6 +1566,14 @@ internal static class PersistenceStartupGate
         ValidateDataDirectory(options, logger);
         ValidateRuntimeGraph(services, logger);
 
+        // THE SCHEMA IS PROVISIONED AFTER THIS GATE AND BEFORE THE PIPELINE, BY Data/SchemaProvisioner,
+        // WHICH IS THE ONLY POSITION THAT MAKES THE ONE-COMMAND BRING-UP CONVERGE. It has to run after
+        // ValidateDataDirectory, which creates and proves the directory, and after ValidateRuntimeGraph,
+        // which proves the connection seam constructible - and before the pipeline is built, because
+        // everything after that point can answer /health. It is a SEPARATE type rather than a step of this
+        // gate because the replica lock, the bounded wait and the additive-only property are each
+        // assertable there and none of them is a composition concern.
+
         // THE TRUST ANCHOR IS LOADED HERE SO A BAD ONE IS A REFUSAL TO START. A configured-but-unreadable
         // anchor means the bearer handler cannot fetch the key set it validates every inbound token
         // against, so this instance would start healthy and then refuse every authenticated call for a
@@ -1510,9 +1584,27 @@ internal static class PersistenceStartupGate
         logger.LogInformation(
             "Structural preconditions satisfied: the bound configuration validated, the storage "
             + "directory exists and is writable by this process, every runtime seam this service "
-            + "executes SQL through resolved, and internal TLS trust is {TrustPosture}.",
+            + "executes SQL through resolved, the schema is {SchemaPosture}, and internal TLS trust is "
+            + "{TrustPosture}.",
+            options.Schema.ApplyMigrationsOnStartup
+                ? "this build's to provision, because startup provisioning is switched on"
+                : "the operator's to provision, because startup provisioning is switched off",
             trust.IsPinned ? "pinned to the configured anchor" : "the platform default");
     }
+    /// <summary>
+    /// Reports whether a SQLite fault is write contention rather than a structural fault.
+    /// </summary>
+    /// <param name="error">The provider's exception.</param>
+    /// <returns><see langword="true"/> for a busy or locked database.</returns>
+    /// <remarks>
+    /// The two SQLite result codes that mean "another writer holds this database": 5 is
+    /// <c>SQLITE_BUSY</c> and 6 is <c>SQLITE_LOCKED</c>. Compared numerically rather than by message,
+    /// because a message is localised and is not a contract. Every other code is a structural fault and
+    /// is deliberately NOT retried - retrying a malformed schema or an unwritable file would only delay
+    /// the same failure while making it look intermittent.
+    /// </remarks>
+    private static bool IsContention(SqliteException error) =>
+        error.SqliteErrorCode is 5 or 6;
 
     /// <summary>
     /// Resolves every seam the SQL path executes through, so an incomplete graph terminates the process
@@ -1858,10 +1950,17 @@ internal sealed class PersistenceStatusInterceptor : Interceptor
     internal const string CancelledDetail = "The call was cancelled by its caller or its deadline.";
 
     /// <summary>The separator between links of a described fault chain, outermost towards innermost.</summary>
-    internal const string FaultChainSeparator = " <- ";
+    /// <remarks>
+    /// FORWARDED RATHER THAN DECLARED, so that this service and the shared primitive cannot disagree about
+    /// the shape of a record. The walk itself moved to
+    /// <see cref="PowerFramework.Shared.Diagnostics.ExceptionChain"/> when the same defect was found at
+    /// fifteen more sites in this service; the name is kept here because it is what the composition tests
+    /// assert against and because the interceptor is the record an operator reads first.
+    /// </remarks>
+    internal const string FaultChainSeparator = ExceptionChain.Separator;
 
     /// <summary>The marker appended when a fault chain is deeper than the bound below.</summary>
-    internal const string FaultChainTruncationMarker = "...";
+    internal const string FaultChainTruncationMarker = ExceptionChain.TruncationMarker;
 
     /// <summary>
     /// How many links of a fault chain are described before truncation.
@@ -1871,7 +1970,7 @@ internal sealed class PersistenceStatusInterceptor : Interceptor
     /// through aggregation, and an unbounded walk over one would build a string until the process ran out of
     /// memory - while handling a fault, which is the worst possible moment for a second one.
     /// </remarks>
-    internal const int MaximumDescribedFaultDepth = 8;
+    internal const int MaximumDescribedFaultDepth = ExceptionChain.MaximumDepth;
 
     /// <summary>
     /// The process exit code reported when a structural fault terminates this service.
@@ -2117,31 +2216,14 @@ internal sealed class PersistenceStatusInterceptor : Interceptor
     /// because a chain can be cyclic through aggregation, and a truncation marker is appended so a shortened
     /// chain is never mistaken for a complete one.
     /// </remarks>
-    private static string DescribeExceptionTypes(Exception error)
-    {
-        StringBuilder chain = new();
-        Exception? current = error;
-
-        for (int depth = 0; depth < MaximumDescribedFaultDepth && current is not null; depth++)
-        {
-            if (depth > 0)
-            {
-                _ = chain.Append(FaultChainSeparator);
-            }
-
-            Type type = current.GetType();
-
-            _ = chain.Append(type.FullName ?? type.Name);
-            current = current.InnerException;
-        }
-
-        if (current is not null)
-        {
-            _ = chain.Append(FaultChainSeparator).Append(FaultChainTruncationMarker);
-        }
-
-        return chain.ToString();
-    }
+    /// <remarks>
+    /// DELEGATED RATHER THAN IMPLEMENTED, and the delegation is the fix rather than tidying. This walk was
+    /// written twice - here and in DataServices - with the same three constants, while FIFTEEN other sites in
+    /// THIS service still attached the exception object itself and undid the redaction beside it. Three
+    /// independent copies of one security control drift; one primitive with one test suite does not.
+    /// </remarks>
+    private static string DescribeExceptionTypes(Exception error) =>
+        ExceptionChain.DescribeTypes(error);
 
     /// <summary>
     /// Redacts the message of every exception in a chain and joins them outermost first.
@@ -2154,29 +2236,14 @@ internal sealed class PersistenceStatusInterceptor : Interceptor
     /// interpolated statement sits at the bottom. Every message goes through the same redactor the wire path
     /// uses, so one rule governs both and a change to it cannot apply to one and not the other.
     /// </remarks>
-    private string DescribeRedactedMessages(Exception error)
-    {
-        StringBuilder messages = new();
-        Exception? current = error;
-
-        for (int depth = 0; depth < MaximumDescribedFaultDepth && current is not null; depth++)
-        {
-            if (depth > 0)
-            {
-                _ = messages.Append(FaultChainSeparator);
-            }
-
-            _ = messages.Append(_redactor.Redact(current.Message));
-            current = current.InnerException;
-        }
-
-        if (current is not null)
-        {
-            _ = messages.Append(FaultChainSeparator).Append(FaultChainTruncationMarker);
-        }
-
-        return messages.ToString();
-    }
+    /// <remarks>
+    /// THE INJECTED REDACTOR IS PASSED THROUGH, NOT THE STATIC ONE. The shared primitive refuses to read a
+    /// message without a policy, and the policy handed to it here is this interceptor's own injected
+    /// <c>ISqlRedactor</c> - so the wire path and the log path stay literally the same object and a change to
+    /// one cannot miss the other.
+    /// </remarks>
+    private string DescribeRedactedMessages(Exception error) =>
+        ExceptionChain.DescribeMessages(error, _redactor.Redact);
 
     /// <summary>
     /// The default termination effect: report the structural-fault exit code, then request shutdown.
@@ -2379,6 +2446,15 @@ internal sealed class PersistenceSqlTaskHost : ISqlTaskHost
         ParentTasking = parentTasking;
     }
 
+    /// <summary>The single worker task this host serves, or <see langword="null"/> before binding.</summary>
+    /// <remarks>
+    /// NOT A CONSTRUCTOR ARGUMENT, BECAUSE THE DEPENDENCY IS CIRCULAR. The worker takes the host as its
+    /// own constructor argument, so the cycle is closed by <see cref="BindTask"/> immediately after the
+    /// worker exists. Until then the field is null and every member that needs a worker says so rather
+    /// than inventing one.
+    /// </remarks>
+    private SqlTaskBase? _task;
+
     /// <summary>Binds the single worker task this host serves.</summary>
     /// <param name="task">The worker task composed against this host.</param>
     /// <remarks>
@@ -2396,15 +2472,6 @@ internal sealed class PersistenceSqlTaskHost : ISqlTaskHost
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="task"/> is <see langword="null"/>.</exception>
     /// <exception cref="InvalidOperationException">A task is already bound.</exception>
-    /// <summary>The single worker task this host serves, or <see langword="null"/> before binding.</summary>
-    /// <remarks>
-    /// NOT A CONSTRUCTOR ARGUMENT, BECAUSE THE DEPENDENCY IS CIRCULAR. The worker takes the host as its
-    /// own constructor argument, so the cycle is closed by <see cref="BindTask"/> immediately after the
-    /// worker exists. Until then the field is null and every member that needs a worker says so rather
-    /// than inventing one.
-    /// </remarks>
-    private SqlTaskBase? _task;
-
     internal void BindTask(SqlTaskBase task)
     {
         ArgumentNullException.ThrowIfNull(task);
@@ -3601,16 +3668,6 @@ internal sealed class UpdateTaskSurface : IUpdateTaskSurface
 }
 
 /// <summary>
-/// The reachable entry-point type for the in-process service tests.
-/// </summary>
-/// <remarks>
-/// LOAD BEARING, NOT CEREMONIAL. Top-level statements compile to an implicitly internal
-/// <c>Program</c> class, so without this declaration <c>WebApplicationFactory&lt;Program&gt;</c> in the
-/// sibling <c>PowerFramework.Persistence.Tests</c> project cannot name the entry point, the
-/// service-level tests cannot boot this host at all, and every line of wiring in this file becomes an
-/// uncovered island dragging the per-service coverage gate down with it (constraint C-H).
-/// </remarks>
-/// <summary>
 /// The data-protection key repository, held in this process's memory and never written to storage.
 /// </summary>
 /// <remarks>
@@ -3672,6 +3729,16 @@ internal sealed class InMemoryDataProtectionKeyRepository : IXmlRepository
     }
 }
 
+/// <summary>
+/// The reachable entry-point type for the in-process service tests.
+/// </summary>
+/// <remarks>
+/// LOAD BEARING, NOT CEREMONIAL. Top-level statements compile to an implicitly internal
+/// <c>Program</c> class, so without this declaration <c>WebApplicationFactory&lt;Program&gt;</c> in the
+/// sibling <c>PowerFramework.Persistence.Tests</c> project cannot name the entry point, the
+/// service-level tests cannot boot this host at all, and every line of wiring in this file becomes an
+/// uncovered island dragging the per-service coverage gate down with it (constraint C-H).
+/// </remarks>
 public partial class Program
 {
     /// <summary>

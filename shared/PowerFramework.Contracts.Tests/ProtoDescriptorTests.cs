@@ -457,25 +457,28 @@ public sealed class ProtoDescriptorTests
         // The overload families collapse into single RPCs carrying an explicit selector, because a
         // protobuf message with an optional field expresses "three arities" better than three methods.
         //
-        // THREE OF THE TWENTY-SEVEN ARE NOT OVERLOAD COLLAPSES AND ARE WORTH NAMING. `GetExpressionState`
+        // TWO OF THE TWENTY-SIX ARE NOT OVERLOAD COLLAPSES AND ARE WORTH NAMING. `GetExpressionState`
         // is the engine-state snapshot that makes the seven internal structures of
         // `n_cst_dwsvc_columnexp.sru:L22-L83` REACHABLE rather than merely declared - the expression
         // table, the reverse dependency index, the grammar sentinels and the three-part $ / $$
         // bindings. `EventStream` is the server stream of the three events the engine declares on
         // ITSELF [:L86-L88]: item-changed, do-item-changed with its `frominput` flag, and var-changed
-        // with its `forcecalc` flag. `LoadRows` is the third, and it corresponds to no legacy member at
-        // all: in-process the caller and the engine share one DataWindow, so there was nothing to
-        // publish. Across a boundary a session's DataWindow is created EMPTY and every calculation
-        // operation evaluates against rows, so without a way to put a row into one the whole calculation
-        // half of this service was unreachable. None of the three is in the nine methods the legacy
-        // documentation lists, which is precisely the point of asserting against the SOURCE.
-        Assert.Equal(27, service.Methods.Count);
+        // with its `forcecalc` flag. Neither is in the nine methods the legacy documentation lists, which
+        // is precisely the point of asserting against the SOURCE.
+        //
+        // THE COUNT WAS BRIEFLY 27, AND THE WITHDRAWN MEMBER IS NAMED SO IT IS NOT RE-ADDED. A `LoadRows`
+        // mutator was published here and has been removed: it corresponded to no legacy member, and it is
+        // absent from AAP 0.4.3's frozen C-04 inventory, so it widened a reviewed contract. The gap it was
+        // reaching for - no published operation populates the DataWindow a calculation evaluates over - is
+        // documented on `OpenExpressionSession` in the definition itself rather than closed by an
+        // unreviewed surface.
+        Assert.Equal(26, service.Methods.Count);
 
         string[] names = service.Methods.Select(static method => method.Name).ToArray();
 
         foreach (string required in (string[])
         [
-            "OpenExpressionSession", "CloseExpressionSession", "LoadRows",
+            "OpenExpressionSession", "CloseExpressionSession",
             "AddExpression", "SetExpression", "GetExpression", "RemoveExpression", "RemoveAllExpressions",
             "AddVariable", "SetVariable",
             "AddVariableExpression", "SetVariableExpression", "GetVariableExpression",

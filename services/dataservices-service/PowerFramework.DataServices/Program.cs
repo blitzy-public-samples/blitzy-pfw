@@ -680,7 +680,6 @@ internal static class DataServicesComposition
             + "ws_objects/pfw.pbl.src/pfw.sra:L95-L102 - en, chs or cht."),
     };
 
-
     /// <summary>
     /// Registers inbound token validation and the authorization policy that closes every route by
     /// default.
@@ -1157,8 +1156,23 @@ internal static class DataServicesComposition
         // code saying why. Clients/OutboundCallPolicy.cs classifies by operation and reads the
         // `grpc-status` a server-declared refusal arrives with - which an HTTP-level predicate cannot see
         // at all, because such a refusal arrives as HTTP 200 - so the four contracts here retry the
-        // classified reads and idempotent teardowns and nothing else, and the configured attempt count
-        // stays meaningful on the Security edge below. The rest of the pipeline - the total request
+        // classified reads and NOTHING else, and the configured attempt count stays meaningful on the
+        // Security edge below.
+        //
+        // 🔴 "AND IDEMPOTENT TEARDOWNS" USED TO BE PART OF THAT SENTENCE AND WAS WITHDRAWN. The three task
+        // releases were classified replay-safe on the reasoning that releasing an already-released handle
+        // is harmless. The reasoning is sound; the contract does not implement it. A release REMOVES the
+        // handle, so a replay answers E_INVALID_HANDLE - deliberately, so that two concurrent releases have
+        // exactly one winner - and a replay whose first attempt actually succeeded therefore reported a
+        // teardown failure for work that had completed. Making release idempotent would have made the
+        // classification true and would have been a CONTRACT change adopted to accommodate a retry policy,
+        // so the policy yielded instead.
+        //
+        // A CONFIGURED ZERO IS A SEPARATE MECHANISM FROM THIS ONE, and both are live. This predicate
+        // restricts by operation whatever the count; a zero count additionally installs no gRPC service
+        // configuration at all and puts every pipeline on the never-retry predicate.
+        //
+        // The rest of the pipeline - the total request
         // timeout and the circuit breaker - stays on all four, and that is the part the AAP added this
         // package for: an in-process call could not fail in transit and a network call can (AAP 0.5.3).
         // ==========================================================================================
@@ -1268,7 +1282,16 @@ internal static class DataServicesComposition
     /// policy takes a number of ATTEMPTS, so it is one greater. Getting that wrong would silently change
     /// how many calls a replay-safe read makes. The channel's own <c>MaxRetryAttempts</c> ceiling is set
     /// from the same number, because a channel whose ceiling is lower than the policy's count silently
-    /// clamps it and the configured number stops being the number performed.
+    /// clamps it and the configured number stops being the number performed. The increment is CHECKED -
+    /// see <see cref="ClientResilienceOptions.ResolveGrpcAttemptCount"/> for the negative count the
+    /// unchecked form used to produce and both the channel and its policy used to accept.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>A CONFIGURED ZERO INSTALLS NOTHING AT ALL, WHICH IS WHAT MAKES THE DISABLE REAL.</b> The
+    /// setting is documented as disabling retry, and this method consumed it unconditionally: zero
+    /// produced <c>MaxAttempts = 1</c>, which the gRPC retry policy rejects. Returning early leaves
+    /// <c>ServiceConfig</c> and the channel ceiling unset - the ABSENCE of a retry policy rather than one
+    /// configured to do nothing - and the HTTP layer is disabled by predicate in <c>ApplyResilience</c>.
     /// </para>
     /// </remarks>
     private static void ApplyGrpcRetry(
@@ -1278,7 +1301,12 @@ internal static class DataServicesComposition
         ArgumentNullException.ThrowIfNull(channelActions);
         ArgumentNullException.ThrowIfNull(configured);
 
-        int attempts = configured.MaxRetryAttempts + 1;
+        if (!configured.RetriesEnabled)
+        {
+            return;
+        }
+
+        int attempts = configured.ResolveGrpcAttemptCount();
         TimeSpan initialBackoff = configured.RetryBaseDelay;
 
         channelActions.Add(channelOptions =>
@@ -1406,8 +1434,40 @@ internal static class DataServicesComposition
     /// actionable: a named startup warning, and a named diagnostic from <see cref="SecurityClient"/> at
     /// the first token request instead of a request that could only ever be refused.
     /// </para>
+    /// <para>
+    /// HALF A PAIR SHOULD NOT REACH HERE, and the guard is written as a guard rather than as an
+    /// assumption. <see cref="MutualTlsClientOptions"/> validates the group as both-or-neither and the
+    /// options registration validates on start, so by the time this runs the pair is either wholly
+    /// present or wholly absent. The check defends against a future caller, not a reachable
+    /// configuration state.
+    /// </para>
+    /// <para>
+    /// The material is read as a PEM certificate plus a separate PEM key, which is the shape the
+    /// generation recipe in <c>docs/ARCHITECTURE.md</c> §9.3.1 produces and the shape the
+    /// <c>*_MTLS_CERT_PATH</c> / <c>*_MTLS_KEY_PATH</c> variables name. The resulting key is ephemeral,
+    /// which is directly usable for TLS client authentication on Linux - the target operating system for
+    /// every container in this refactor.
+    /// </para>
+    /// <para>
+    /// DELIBERATELY THE SAME SHAPE AS GATEWAY'S <c>LoadMutualTlsClientIdentity</c>, down to the caught
+    /// exception set and the posture of the refusal. Two services solving one problem two ways is how one
+    /// of them drifts, and a reader who has understood either has understood both. It is not SHARED code,
+    /// because AAP 0.4.3 permits exactly one cross-service coupling - the published contracts - and a
+    /// composition-root helper is not a contract.
+    /// </para>
+    /// <para>
+    /// THIS IS THE ONLY CLIENT-IDENTITY LOADER IN THIS SERVICE, AND IT USED NOT TO BE. A second,
+    /// byte-similar helper named <c>LoadMutualTlsClientIdentity</c> sat beside it with NO production call
+    /// site, while this one carried the registration at
+    /// <see cref="DataServicesComposition"/>'s singleton. The unit tests exercised the dead one, so they
+    /// reported on diagnostics no deployment could ever emit - the duplicate quoted the GROUP key and the
+    /// bare property names, where this one quotes both FULLY-QUALIFIED keys. Consolidating removes the
+    /// duplicate and points those tests here, which is why this member is <c>internal</c> rather than
+    /// <c>private</c>: the alternative was to keep a second implementation alive purely so a test had
+    /// something to call.
+    /// </para>
     /// </remarks>
-    private static X509Certificate2Collection LoadSecurityClientIdentity(
+    internal static X509Certificate2Collection LoadSecurityClientIdentity(
         MutualTlsClientOptions mutualTls)
     {
         ArgumentNullException.ThrowIfNull(mutualTls);
@@ -1503,8 +1563,13 @@ internal static class DataServicesComposition
         // circuit breaker with its own predicate, the per-attempt timeout and the total request timeout
         // all still apply, and the breaker still protects Persistence from a caller that keeps trying.
         //
-        // A PREDICATE, NOT A COUNT: the package's validator requires MaxRetryAttempts to be at least one,
-        // so "no retries" is not expressible as zero.
+        // A PREDICATE, NOT A COUNT: the package's validator requires ITS OWN strategy's MaxRetryAttempts to
+        // be at least one, so "no retries" is not expressible to that strategy as zero. That is a statement
+        // about the package and not about the operator-facing setting - DataServices:Resilience:*
+        // :MaxRetryAttempts DOES accept zero, and ApplyResilience branches on it, installing this same
+        // predicate together with ClientResilienceOptions.DisabledRetryPlaceholderAttempts as the smallest
+        // count the range permits. The assignment here is therefore unconditional for a different reason:
+        // on a gRPC channel the gRPC layer owns admission whatever the count.
         resilience.Retry.ShouldHandle = OutboundCallPolicy.NeverRetryAtTheHttpLayerAsync;
     }
 
@@ -1566,7 +1631,17 @@ internal static class DataServicesComposition
         HttpStandardResilienceOptions resilience,
         ClientResilienceOptions configured)
     {
-        resilience.Retry.MaxRetryAttempts = configured.MaxRetryAttempts;
+        // 🔴 A CONFIGURED ZERO IS EXPRESSED AS A PREDICATE, NOT AS A COUNT, and it has to be: the
+        // resilience package declares Retry.MaxRetryAttempts in the range 1..int.MaxValue, so assigning
+        // zero made the SERVICE FAIL TO START - "The field <client>-standard.Retry.MaxRetryAttempts must be
+        // between 1 and 2147483647", observed on the sibling Gateway edge whose wiring is identical - while
+        // the setting was documented as a disable. The strategy therefore names the smallest legal count
+        // and its ShouldHandle answers false for everything, so nothing is retried. See
+        // ClientResilienceOptions.DisabledRetryPlaceholderAttempts.
+        resilience.Retry.MaxRetryAttempts = configured.RetriesEnabled
+            ? configured.MaxRetryAttempts
+            : ClientResilienceOptions.DisabledRetryPlaceholderAttempts;
+
         resilience.Retry.Delay = configured.RetryBaseDelay;
 
         // THE SAFETY DECISION LIVES IN THE PREDICATE BELOW AND NOWHERE ELSE, WHICH IS A CORRECTION.
@@ -1615,10 +1690,12 @@ internal static class DataServicesComposition
         // circuit-breaker predicate additionally distinguishes an upstream that cannot serve from one
         // that is deliberately refusing, so a contested update or an exhausted quota cannot trip the
         // breaker and take the read path down with it.
-        resilience.Retry.ShouldHandle = OutboundCallPolicy.ShouldRetryAsync;
+        resilience.Retry.ShouldHandle = configured.RetriesEnabled
+            ? OutboundCallPolicy.ShouldRetryAsync
+            : OutboundCallPolicy.NeverRetryAtTheHttpLayerAsync;
+
         resilience.CircuitBreaker.ShouldHandle = OutboundCallPolicy.ShouldBreakAsync;
     }
-
 
     /// <summary>
     /// Registers the domain, expression and model collaborators the two published gRPC surfaces are
@@ -2092,101 +2169,91 @@ internal static class DataServicesComposition
 
         return app;
     }
-
-    /// <summary>
-    /// Reads the configured mutual-TLS client identity, or answers an empty collection when none is set.
-    /// </summary>
-    /// <param name="mutualTls">The bound pair of paths.</param>
-    /// <returns>
-    /// A collection holding the one certificate with its private key, or an EMPTY collection when this
-    /// deployment presents none. Empty rather than <see langword="null"/>, so the handler registration has one
-    /// shape to handle instead of two.
-    /// </returns>
-    /// <exception cref="ArgumentNullException"><paramref name="mutualTls"/> is <see langword="null"/>.</exception>
-    /// <exception cref="InvalidOperationException">
-    /// The pair is configured but the material cannot be read or does not parse. That is a structural fault and
-    /// it stops the host: a deployment that meant to authenticate to the issuer and cannot has already lost
-    /// every authenticated call it would make, so continuing would only defer the failure to first use. AAP
-    /// 0.1.4 requires the legacy's fail-fast posture survive as fail-fast rather than soften into
-    /// warning-and-continue.
-    /// </exception>
-    /// <remarks>
-    /// <para>
-    /// <b>NO PATH IS EVER ECHOED INTO A MESSAGE</b>, and the exceptions below name the two CONFIGURATION KEYS
-    /// instead. A path is not itself a credential, but it names the location of one, and a startup log is
-    /// exactly the wrong place to publish where a private key is mounted. The configuration key is sufficient
-    /// for an operator to find the setting, which is the rule <c>Configuration/DataServicesOptions.cs</c>
-    /// already applies to its own validation messages (constraint C-F).
-    /// </para>
-    /// <para>
-    /// HALF A PAIR SHOULD NOT REACH HERE. <see cref="MutualTlsClientOptions"/> validates the group as
-    /// both-or-neither and the options registration validates on start, so by the time this runs the pair is
-    /// either wholly present or wholly absent. The second check below is a guard against a future caller rather
-    /// than a reachable configuration state, and it is written as one rather than as an assumption.
-    /// </para>
-    /// <para>
-    /// The material is read from a PEM certificate and a separate PEM key, which is the shape the generation
-    /// recipe in <c>docs/ARCHITECTURE.md</c> produces and the shape the <c>*_MTLS_CERT_PATH</c> /
-    /// <c>*_MTLS_KEY_PATH</c> variables name. The resulting key is ephemeral, which is directly usable for TLS
-    /// client authentication on Linux - the target operating system for every container in this refactor.
-    /// </para>
-    /// <para>
-    /// DELIBERATELY THE SAME SHAPE AS GATEWAY'S LOADER, down to the caught exception set and the wording of the
-    /// refusal. Two services solving one problem two ways is how one of them drifts, and a reader who has
-    /// understood either has understood both. It is not SHARED code, because AAP 0.4.3 permits exactly one
-    /// cross-service coupling - the published contracts - and a composition-root helper is not a contract.
-    /// </para>
-    /// </remarks>
-    internal static X509Certificate2Collection LoadMutualTlsClientIdentity(
-        MutualTlsClientOptions mutualTls)
-    {
-        ArgumentNullException.ThrowIfNull(mutualTls);
-
-        if (!mutualTls.IsConfigured)
-        {
-            return [];
-        }
-
-        string certificatePath = mutualTls.CertificatePath.Trim();
-        string certificateKeyPath = mutualTls.CertificateKeyPath.Trim();
-
-        if (certificatePath.Length == 0 || certificateKeyPath.Length == 0)
-        {
-            throw new InvalidOperationException(
-                $"'{DataServicesOptions.SectionName}:Security:MutualTls' is half configured. A certificate "
-                    + "cannot complete a handshake without its key and a key has nothing to present without "
-                    + "its certificate, so set both "
-                    + $"'{nameof(MutualTlsClientOptions.CertificatePath)}' and "
-                    + $"'{nameof(MutualTlsClientOptions.CertificateKeyPath)}' or neither.");
-        }
-
-        try
-        {
-            // Constructed directly into the collection so the certificate has no owning local: its lifetime is
-            // the returned collection's, which the container holds as a singleton for the life of the process.
-            return new X509Certificate2Collection(
-                X509Certificate2.CreateFromPemFile(certificatePath, certificateKeyPath));
-        }
-        catch (Exception failure) when (failure
-            is CryptographicException
-            or IOException
-            or UnauthorizedAccessException
-            or ArgumentException)
-        {
-            throw new InvalidOperationException(
-                "The client certificate named by "
-                    + $"'{DataServicesOptions.SectionName}:Security:MutualTls' could not be loaded, so this "
-                    + "deployment cannot authenticate to the token-issuance edge and the host will not start. "
-                    + "Check that both files exist, that the process can read them, and that each is PEM "
-                    + $"encoded - the certificate in '{nameof(MutualTlsClientOptions.CertificatePath)}' and "
-                    + $"its private key in '{nameof(MutualTlsClientOptions.CertificateKeyPath)}'. Neither path "
-                    + "is reproduced here, because a startup log is the wrong place to publish where a private "
-                    + "key is mounted.",
-                failure);
-        }
-    }
 }
 
+/// <summary>
+/// The extension-member names the published problem body declares.
+/// </summary>
+/// <remarks>
+/// SPELLED ONCE HERE BECAUSE THE COMPOSITION ROOT AND THE PROJECTION FILE BOTH WRITE THEM, and the
+/// customization in the composition root exists precisely to fill the member the projection did not. Two
+/// independent spellings would let a rename go half-applied, at which point a body would carry both the old
+/// member and the new one and a consumer would read whichever it happened to look for.
+/// </remarks>
+internal static class ProblemContractMembers
+{
+    /// <summary>The legacy return code carried by every problem body.</summary>
+    internal const string RetCode = "retCode";
+}
+
+/// <summary>
+/// The names the two capability policies are registered and referenced under.
+/// </summary>
+/// <remarks>
+/// <para>
+/// ONE NAME PER CAPABILITY, AND IT IS THE PUBLISHED SCOPE NAME ITSELF. These aliases previously carried a
+/// second spelling of the same two decisions - <c>dataservices:datawindow</c> beside the published
+/// <c>dataservices.datawindow</c> - and each was registered separately, so the service ran with FOUR
+/// policies for TWO capabilities: the pair the endpoints named and a parallel pair nothing reached. Two
+/// spellings for one authorization decision is the shape in which a route ends up naming a policy that
+/// exists but enforces less than the one an author was editing, and the framework answers an unregistered
+/// name with an unexplained internal error rather than a refusal.
+/// </para>
+/// <para>
+/// THE SPELLING KEPT IS THE ONE THAT IS ALREADY ON THE WIRE. <c>DataServicesScopes</c> publishes these two
+/// values as the scopes Gateway requests and Security's grant matrix authorises, so the policy name, the
+/// scope claim and the issuance grant are one string in three files rather than a mapping that has to be
+/// maintained. These members remain as the names the endpoint files reference so the call sites read as
+/// authorization rather than as string literals.
+/// </para>
+/// <para>
+/// WHAT THE POLICIES THESE NAMES REFER TO ACTUALLY REQUIRE: who may call, and what they
+/// may do. The requirements themselves are built by the single registrar in
+/// <c>Authorization/ScopeAuthorization.cs</c>, reached through <c>AddScopeAuthorization()</c>;
+/// what follows is why they exist and why they take the shape they do.
+/// </para>
+/// <para>
+/// WHY THIS EXISTS. Both gRPC contracts and all thirty-nine projected REST routes used to be protected by
+/// "an authenticated user" and nothing more, so any holder of any token this issuer minted for this
+/// audience could call every operation on both - and a credential minted for a caller that has no business
+/// here at all could do the same (CWE-862, CWE-863). Both halves of the fix are here because either alone
+/// leaves a hole: scope without subject admits any caller the issuer serves as long as it holds the scope,
+/// and subject without scope lets the one permitted caller reach both contracts once it is in.
+/// </para>
+/// <para>
+/// THE SCOPE NAMES ARE NOT INVENTED HERE. Gateway requests exactly <c>dataservices.datawindow</c> and
+/// <c>dataservices.columnexpression</c> for this edge, and the split matches the contracts: C-03 is the
+/// DataWindow service and C-04 is the expression engine, kept separate precisely so the expansion engine
+/// can version independently (AAP 0.4.3). Stating them as constants keeps the receiver and the issuance
+/// roster spelling one thing.
+/// </para>
+/// <para>
+/// A SCOPE CLAIM IS SPACE-DELIMITED AND MUST BE SPLIT, WHICH IS WHY THIS IS AN ASSERTION AND NOT
+/// <c>RequireClaim</c>. RFC 6749 carries the granted set as ONE claim holding a space-delimited list, so
+/// <c>RequireClaim("scope", "dataservices.datawindow")</c> would demand a token whose ENTIRE scope claim is
+/// that one value - and would refuse the very credential Gateway obtains, which carries both scopes.
+/// </para>
+/// <para>
+/// THE SUBJECT IS READ FROM EITHER SPELLING. A bearer handler with inbound claim mapping on renames
+/// <c>sub</c> to the framework's name-identifier claim type, and with it off leaves <c>sub</c> alone; both
+/// are legitimate, and this service must not silently stop enforcing identity because of one. Whichever is
+/// present is compared ORDINALLY, matching how the issuer compares an identity everywhere else.
+/// </para>
+/// <para>
+/// A REFUSAL IS gRPC <c>PermissionDenied</c> RATHER THAN <c>Unauthenticated</c>, because the principal was
+/// established and found insufficient - and the REST projection in this service already publishes that as
+/// HTTP 403 against 401, "a valid-but-insufficient credential, distinct from none". Nothing about the wire
+/// contract changes; this is the code that makes the published 403 reachable.
+/// </para>
+/// </remarks>
+internal static class CallerAuthorization
+{
+    /// <summary>The policy name C-03 - the DataWindow service - and its projected routes are mapped under.</summary>
+    internal const string DataWindowPolicyName = DataServicesScopes.DataWindow;
+
+    /// <summary>The policy name C-04 - the column-expression engine - and its routes are mapped under.</summary>
+    internal const string ColumnExpressionPolicyName = DataServicesScopes.ColumnExpression;
+}
 
 /// <summary>
 /// The trust anchor every outbound internal channel verifies its peer against, loaded once from the
@@ -2224,103 +2291,6 @@ internal static class DataServicesComposition
 /// also what lets the eager resolve after <c>Build()</c> turn an unreadable anchor into a startup
 /// failure rather than a first-request one.
 /// </para>
-/// </remarks>
-/// <summary>
-/// The two authorization policies this service's contracts are served under: who may call, and what they
-/// may do.
-/// </summary>
-/// <remarks>
-/// <para>
-/// WHY THIS EXISTS. Both gRPC contracts and all thirty-nine projected REST routes used to be protected by
-/// "an authenticated user" and nothing more, so any holder of any token this issuer minted for this
-/// audience could call every operation on both - and a credential minted for a caller that has no business
-/// here at all could do the same (CWE-862, CWE-863). Both halves of the fix are here because either alone
-/// leaves a hole: scope without subject admits any caller the issuer serves as long as it holds the scope,
-/// and subject without scope lets the one permitted caller reach both contracts once it is in.
-/// </para>
-/// <para>
-/// THE SCOPE NAMES ARE NOT INVENTED HERE. Gateway requests exactly <c>dataservices.datawindow</c> and
-/// <c>dataservices.columnexpression</c> for this edge, and the split matches the contracts: C-03 is the
-/// DataWindow service and C-04 is the expression engine, kept separate precisely so the expansion engine
-/// can version independently (AAP 0.4.3). Stating them as constants keeps the receiver and the issuance
-/// roster spelling one thing.
-/// </para>
-/// <para>
-/// A SCOPE CLAIM IS SPACE-DELIMITED AND MUST BE SPLIT, WHICH IS WHY THIS IS AN ASSERTION AND NOT
-/// <c>RequireClaim</c>. RFC 6749 carries the granted set as ONE claim holding a space-delimited list, so
-/// <c>RequireClaim("scope", "dataservices.datawindow")</c> would demand a token whose ENTIRE scope claim is
-/// that one value - and would refuse the very credential Gateway obtains, which carries both scopes.
-/// </para>
-/// <para>
-/// THE SUBJECT IS READ FROM EITHER SPELLING. A bearer handler with inbound claim mapping on renames
-/// <c>sub</c> to the framework's name-identifier claim type, and with it off leaves <c>sub</c> alone; both
-/// are legitimate, and this service must not silently stop enforcing identity because of one. Whichever is
-/// present is compared ORDINALLY, matching how the issuer compares an identity everywhere else.
-/// </para>
-/// <para>
-/// A REFUSAL IS gRPC <c>PermissionDenied</c> RATHER THAN <c>Unauthenticated</c>, because the principal was
-/// established and found insufficient - and the REST projection in this service already publishes that as
-/// HTTP 403 against 401, "a valid-but-insufficient credential, distinct from none". Nothing about the wire
-/// contract changes; this is the code that makes the published 403 reachable.
-/// </para>
-/// </remarks>
-/// <summary>
-/// The extension-member names the published problem body declares.
-/// </summary>
-/// <remarks>
-/// SPELLED ONCE HERE BECAUSE THE COMPOSITION ROOT AND THE PROJECTION FILE BOTH WRITE THEM, and the
-/// customization in the composition root exists precisely to fill the member the projection did not. Two
-/// independent spellings would let a rename go half-applied, at which point a body would carry both the old
-/// member and the new one and a consumer would read whichever it happened to look for.
-/// </remarks>
-internal static class ProblemContractMembers
-{
-    /// <summary>The legacy return code carried by every problem body.</summary>
-    internal const string RetCode = "retCode";
-}
-
-/// <summary>
-/// The names the two capability policies are registered and referenced under.
-/// </summary>
-/// <remarks>
-/// <para>
-/// ONE NAME PER CAPABILITY, AND IT IS THE PUBLISHED SCOPE NAME ITSELF. These aliases previously carried a
-/// second spelling of the same two decisions - <c>dataservices:datawindow</c> beside the published
-/// <c>dataservices.datawindow</c> - and each was registered separately, so the service ran with FOUR
-/// policies for TWO capabilities: the pair the endpoints named and a parallel pair nothing reached. Two
-/// spellings for one authorization decision is the shape in which a route ends up naming a policy that
-/// exists but enforces less than the one an author was editing, and the framework answers an unregistered
-/// name with an unexplained internal error rather than a refusal.
-/// </para>
-/// <para>
-/// THE SPELLING KEPT IS THE ONE THAT IS ALREADY ON THE WIRE. <c>DataServicesScopes</c> publishes these two
-/// values as the scopes Gateway requests and Security's grant matrix authorises, so the policy name, the
-/// scope claim and the issuance grant are one string in three files rather than a mapping that has to be
-/// maintained. These members remain as the names the endpoint files reference so the call sites read as
-/// authorization rather than as string literals.
-/// </para>
-/// </remarks>
-internal static class CallerAuthorization
-{
-    /// <summary>The policy name C-03 - the DataWindow service - and its projected routes are mapped under.</summary>
-    internal const string DataWindowPolicyName = DataServicesScopes.DataWindow;
-
-    /// <summary>The policy name C-04 - the column-expression engine - and its routes are mapped under.</summary>
-    internal const string ColumnExpressionPolicyName = DataServicesScopes.ColumnExpression;
-}
-
-/// <summary>
-/// The reachable entry-point type for the in-process service tests.
-/// </summary>
-/// <remarks>
-/// LOAD BEARING, NOT CEREMONIAL. Top-level statements compile into an implicitly internal
-/// <c>Program</c> class, so without this declaration <c>WebApplicationFactory&lt;Program&gt;</c> in the
-/// sibling <c>PowerFramework.DataServices.Tests</c> project cannot name the entry point, the
-/// service-level tests cannot boot this host at all, and the per-service coverage gate (constraint
-/// C-H) becomes unreachable for every line in this file. The <c>InternalsVisibleTo</c> item in this
-/// project's <c>.csproj</c> covers the seven internal registration groups above; the entry point
-/// itself is made <c>public</c> because the factory's generic constraint resolves it by name from
-/// outside.
 /// </remarks>
 internal sealed class InternalTlsTrust
 {
@@ -2422,19 +2392,6 @@ internal sealed class InternalTlsTrust
 }
 
 /// <summary>
-/// The reachable entry-point type for the in-process service tests.
-/// </summary>
-/// <remarks>
-/// LOAD BEARING, NOT CEREMONIAL. Top-level statements compile into an implicitly internal
-/// <c>Program</c> class, so without this declaration <c>WebApplicationFactory&lt;Program&gt;</c> in the
-/// sibling <c>PowerFramework.DataServices.Tests</c> project cannot name the entry point, the
-/// service-level tests cannot boot this host at all, and the per-service coverage gate (constraint
-/// C-H) becomes unreachable for every line in this file. The <c>InternalsVisibleTo</c> item in this
-/// project's <c>.csproj</c> covers the seven internal registration groups above; the entry point
-/// itself is made <c>public</c> because the factory's generic constraint resolves it by name from
-/// outside.
-/// </remarks>
-/// <summary>
 /// The data-protection key repository, held in this process's memory and never written to storage.
 /// </summary>
 /// <remarks>
@@ -2496,6 +2453,19 @@ internal sealed class InMemoryDataProtectionKeyRepository : IXmlRepository
     }
 }
 
+/// <summary>
+/// The reachable entry-point type for the in-process service tests.
+/// </summary>
+/// <remarks>
+/// LOAD BEARING, NOT CEREMONIAL. Top-level statements compile into an implicitly internal
+/// <c>Program</c> class, so without this declaration <c>WebApplicationFactory&lt;Program&gt;</c> in the
+/// sibling <c>PowerFramework.DataServices.Tests</c> project cannot name the entry point, the
+/// service-level tests cannot boot this host at all, and the per-service coverage gate (constraint
+/// C-H) becomes unreachable for every line in this file. The <c>InternalsVisibleTo</c> item in this
+/// project's <c>.csproj</c> covers the seven internal registration groups above; the entry point
+/// itself is made <c>public</c> because the factory's generic constraint resolves it by name from
+/// outside.
+/// </remarks>
 public partial class Program
 {
     /// <summary>

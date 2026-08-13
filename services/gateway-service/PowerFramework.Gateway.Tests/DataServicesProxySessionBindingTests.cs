@@ -326,12 +326,35 @@ public sealed class DataServicesProxySessionBindingTests
     /// THE ASYMMETRY, ASSERTED RATHER THAN DESCRIBED IN A COMMENT. A retrieval terminates itself with a
     /// final-marked chunk, so a window that ended one early would produce a short array THAT CLOSES
     /// CLEANLY - indistinguishable from a complete result, which is the single failure mode F-15 exists to
-    /// prevent. Passing no window is what keeps that impossible, and this test fails if a future change
-    /// applies the subscription's window to data retrieval.
+    /// prevent. Passing no window is what keeps that impossible, and this test fails if anything other than
+    /// the producer ever ends a windowless retrieval.
     /// </para>
     /// <para>
-    /// Driven through the same prefetch with the window omitted, over a producer that would certainly have
-    /// been cut short had one applied: it stalls far longer than the subscription window before completing.
+    /// DRIVEN BY SIGNALS RATHER THAN BY A STALL OF SOME CHOSEN LENGTH. The producer stalls between its two
+    /// chunks - which is the position where a window would cut a retrieval to one element and close the
+    /// array cleanly - and it stalls until THIS TEST releases it, with no duration named anywhere. An
+    /// earlier form waited four hundred milliseconds on the reasoning that this was "far longer than the
+    /// subscription window", which was two guesses at once: that the agent would schedule the continuation
+    /// promptly, and that no future window would exceed it. Both are load-dependent, and neither is the
+    /// property under test.
+    /// </para>
+    /// <para>
+    /// OBSERVED FROM INSIDE THE FORWARDING LOOP, WHICH IS THE ONLY PLACE IT IS OBSERVABLE. The prefetch
+    /// pulls EXACTLY ONE element, so it completes on the first chunk and never reaches the stall at all -
+    /// the stall lives in the SECOND read, and only <c>ExecuteAsync</c> issues that. So the forwarding call
+    /// is started WITHOUT being awaited and is inspected while that read is outstanding: while the producer
+    /// is stalled the forwarding MUST still be pending, because the producer is the only thing entitled to
+    /// end it. That assertion fails if anything else does - an already-expired window closing the array
+    /// cleanly after one element, an element bound of one, or an eager close - which is precisely the
+    /// indistinguishable-short-array failure F-15 exists to prevent.
+    /// </para>
+    /// <para>
+    /// WHAT IT DOES NOT CLAIM, STATED PLAINLY. Because nothing here waits for a duration, it cannot detect
+    /// a window LONGER than the stall, and no signal-driven test can: detecting that would mean asserting
+    /// that some chosen wait outlasted some chosen window, which is the timing assumption this rework
+    /// removes and which AAP 0.8.5 forbids being dressed up as a budget. Whether retrieval opts into a
+    /// window at all is a route-level fact, asserted where the route is composed; what is pinned here is
+    /// that passing no window genuinely means no bound.
     /// </para>
     /// </remarks>
     [Fact]
@@ -342,14 +365,53 @@ public sealed class DataServicesProxySessionBindingTests
         using MemoryStream body = new();
         context.Response.Body = body;
 
+        // The producer announces that it has yielded its first chunk and is stalled; this test releases the
+        // stall. Continuations run asynchronously so completing either source cannot execute the other
+        // side's continuation inline on the completing thread.
+        TaskCompletionSource stalled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // COMPLETES ON THE FIRST CHUNK, by design: the prefetch pulls one element and hands the rest to the
+        // result. The stall is therefore still ahead of it and this await cannot hang on the signal.
         IResult result = await DataServicesProxyEndpoints.StreamedSequenceResult<RetrieveChunk>
             .PrefetchAsync(
-                StalledThenComplete(TestContext.Current.CancellationToken),
+                StalledThenComplete(stalled, release.Task, TestContext.Current.CancellationToken),
                 maximumElements: 64,
                 collectionWindow: null,
                 TestContext.Current.CancellationToken);
 
-        await result.ExecuteAsync(context);
+        // DELIBERATELY NOT AWAITED HERE. A truncation would happen INSIDE this call, at the second read, so
+        // the call has to be observable while that read is outstanding.
+        Task forwarding = result.ExecuteAsync(context);
+
+        // Token-driven and unbounded: the producer has been handed the continuation that sets this, so what
+        // is awaited is a signal already in flight rather than an event that may not occur. A stall that
+        // genuinely never begins is ended by the runner, which is the liveness bound that belongs outside
+        // the assertion (AAP 0.8.5).
+        await stalled.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+        try
+        {
+            // THE ASSERTION THE WINDOW ASYMMETRY RESTS ON. One chunk has been forwarded and the producer is
+            // stalled on the second read, which is exactly where a window would close the array cleanly
+            // after one element. With no window the producer is the only thing that can end this, so it
+            // must still be pending - and it cannot spuriously have completed, because the only other way
+            // out of the producer's wait is a cancellation this test never requests.
+            Assert.False(
+                forwarding.IsCompleted,
+                "The retrieval response completed while its producer was still stalled, which means "
+                    + "something other than the producer ended it - a window applied to data retrieval "
+                    + "would produce exactly this, and the cleanly closed one-element array it leaves is "
+                    + "indistinguishable from a complete result.");
+        }
+        finally
+        {
+            // Released on the failure path too, so a failed assertion cannot leave a producer stalled for
+            // the remainder of the run.
+            release.TrySetResult();
+        }
+
+        await forwarding;
 
         using JsonDocument document = JsonDocument.Parse(Encoding.UTF8.GetString(body.ToArray()));
 
@@ -574,21 +636,35 @@ public sealed class DataServicesProxySessionBindingTests
     }
 
     /// <summary>
-    /// A retrieval that stalls longer than the subscription window would allow and then completes.
+    /// A retrieval that stalls between its two chunks until the caller releases it.
     /// </summary>
-    /// <param name="cancellationToken">Observed on every read.</param>
+    /// <param name="stalled">Completed once the first chunk has been yielded and the stall has begun.</param>
+    /// <param name="release">Awaited to end the stall; the second chunk follows it.</param>
+    /// <param name="cancellationToken">Observed on every read and while stalled.</param>
     /// <returns>The sequence.</returns>
     /// <remarks>
+    /// <para>
     /// THE STALL IS BETWEEN THE FIRST AND SECOND CHUNK ON PURPOSE. That is exactly where a window would cut
     /// a retrieval to one element and close the array cleanly - the indistinguishable-short-array failure -
     /// so a stall placed anywhere else would not test the thing that matters.
+    /// </para>
+    /// <para>
+    /// SIGNALLED IN BOTH DIRECTIONS AND TIMED IN NEITHER. It announces the stall so the caller can assert
+    /// on the state rather than assume it has been reached, and it ends the stall on a signal rather than
+    /// after a duration, so nothing about the outcome depends on how quickly a continuation is scheduled.
+    /// The wait still observes the token, so a cancelled consumer ends the producer as before.
+    /// </para>
     /// </remarks>
     private static async IAsyncEnumerable<RetrieveChunk> StalledThenComplete(
+        TaskCompletionSource stalled,
+        Task release,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         yield return new RetrieveChunk { ChunkIndex = 1, Final = false };
 
-        await Task.Delay(TimeSpan.FromMilliseconds(400), cancellationToken).ConfigureAwait(false);
+        stalled.TrySetResult();
+
+        await release.WaitAsync(cancellationToken).ConfigureAwait(false);
 
         yield return new RetrieveChunk { ChunkIndex = 2, Final = true };
     }

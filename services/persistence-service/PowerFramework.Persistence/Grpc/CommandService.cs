@@ -152,6 +152,7 @@ using PowerFramework.Persistence.Runtime;
 using PowerFramework.Persistence.Tasks;
 using PowerFramework.Persistence.Tasks.TaskProxies;
 using PowerFramework.Persistence.Transactions;
+using PowerFramework.Shared.Diagnostics;
 
 // The generated C-07 service base, reached through an alias for two reasons. First, the mandated class
 // name below is the contract's own service name, so the bare name has to resolve to exactly one type
@@ -672,7 +673,7 @@ internal sealed class CommandTaskRegistry
             _logger?.LogWarning(
                 "Reclaimed an abandoned command task held by caller {Principal}. The handle value is "
                 + "deliberately not recorded.",
-                removed.Principal);
+                LogSafeText.Render(removed.Principal));
         }
 
         return reclaimed;
@@ -906,41 +907,6 @@ internal sealed class CommandService : GeneratedCommandServiceBase
         + "refused. Retry once it has completed.";
 
     /// <summary>
-    /// The diagnostic for a statement that is present but consists only of whitespace.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>THE WORKER'S GUARD IS AN EMPTINESS TEST AND STAYS ONE.</b> The oracle writes
-    /// <c>if sql = "" then return RetCode.E_INVALID_SQL</c> [<c>:L45</c>] and repeats it in the task body
-    /// [<c>:L65-L68</c>]; neither tests blankness, so neither refuses a run of spaces. Those two guards are
-    /// preserved verbatim (constraint C-B) and this refusal sits ABOVE them, at the published boundary.
-    /// </para>
-    /// <para>
-    /// <b>WHY THE BOUNDARY REFUSES WHAT THE WORKER TOLERATES.</b> A whitespace-only statement is not
-    /// tolerated-and-executed - it is accepted, submitted, and answered as a SUCCESS THAT DID NOTHING.
-    /// Measured against the shipped provider, a command whose text is only whitespace returns a row count
-    /// of <c>-1</c> without raising anything, so a caller received <c>0/Success</c> for a statement that
-    /// never ran. Refusing it here with the contract's own bad-statement code turns a silent no-op into an
-    /// actionable answer, and it narrows the boundary with a defined error rather than widening it with a
-    /// guess (AAP §0.1.5).
-    /// </para>
-    /// <para>
-    /// <b>ONLY PURE WHITESPACE.</b> A statement of comments - <c>"-- nothing"</c> - is not blank and is not
-    /// refused; it reaches the provider exactly as before.
-    /// </para>
-    /// <para>
-    /// The empty-statement arm deliberately keeps the oracle's message-free answer, so the two are
-    /// distinguishable: an empty statement answers <c>E_INVALID_SQL</c> with NO diagnostic because that is
-    /// what the legacy setter does, and a blank one answers the same code WITH this diagnostic because the
-    /// refusal is the boundary's own.
-    /// </para>
-    /// </remarks>
-    private const string BlankStatementDiagnostic =
-        "The statement consists only of whitespace. A blank statement submits nothing and would be "
-        + "reported as a success that changed no rows, so it is refused. Send the statement text, or omit "
-        + "the field to run the statement already installed on this task.";
-
-    /// <summary>
     /// The diagnostic for an autocommit value outside the three declared enumerators.
     /// </summary>
     /// <remarks>
@@ -1019,36 +985,6 @@ internal sealed class CommandService : GeneratedCommandServiceBase
     // ----------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Clears the caller-side driver-error sink, so that a payload read after the task body can only be
-    /// one this execution produced.
-    /// </summary>
-    /// <param name="proxy">The caller-side proxy whose sink is cleared.</param>
-    /// <remarks>
-    /// <para>
-    /// <b>THIS IS THE ORACLE'S OWN CLEARING WRITE, NOT AN INVENTED ONE.</b> The sink is a single field
-    /// on the caller-side object whose ONLY writer is the database-error event, whose entire body is the
-    /// bare assignment <c>_lastDBError = err</c> [<c>n_cst_threading_task_sqlbase.sru:L44</c>]; and the
-    /// oracle clears it by writing an empty structure into that same field -
-    /// <c>_lastDBError = emptyData</c> [<c>:L65</c>], where <c>emptyData</c> is an uninitialized local
-    /// [<c>:L55</c>]. Writing <see cref="DbErrorData.Empty"/> through the event entry point is
-    /// therefore the same write the oracle's reset performs, reached the only way the field can be
-    /// reached from outside the object.
-    /// </para>
-    /// <para>
-    /// <b>Why the caller-side reset is NOT used for this.</b> <c>of_reset</c> would clear the sink, but
-    /// it also delegates to the worker's reset, which restores autocommit to <c>AC_OFF</c> and clears
-    /// the statement [<c>:L34-L35</c>], and it resets the parameter collection and the commit signal
-    /// [<c>n_cst_thread_task_sqlbase.sru:L242-L246</c>]. Calling it inside an execution would therefore
-    /// discard the very configuration the caller had just installed through <c>SetSql</c> and
-    /// <c>SetAutoCommit</c>. The narrow write is the only one that clears the sink and nothing else.
-    /// </para>
-    /// <para>
-    /// The cast is required because the entry point is implemented EXPLICITLY on the caller-side base
-    /// so that the overridable hook stays <see langword="protected"/>. No override exists on the
-    /// command proxy, so the effect here is exactly the bare field assignment.
-    /// </para>
-    /// </remarks>
-    /// <summary>
     /// Takes a task's operation lease, or produces the refusal to report.
     /// </summary>
     /// <param name="task">The resolved task.</param>
@@ -1094,12 +1030,69 @@ internal sealed class CommandService : GeneratedCommandServiceBase
         }
     }
 
+    /// <summary>
+    /// Clears the caller-side driver-error sink, so that a payload read after the task body can only be
+    /// one this execution produced.
+    /// </summary>
+    /// <param name="proxy">The caller-side proxy whose sink is cleared.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS IS THE ORACLE'S OWN CLEARING WRITE, NOT AN INVENTED ONE.</b> The sink is a single field
+    /// on the caller-side object whose ONLY writer is the database-error event, whose entire body is the
+    /// bare assignment <c>_lastDBError = err</c> [<c>n_cst_threading_task_sqlbase.sru:L44</c>]; and the
+    /// oracle clears it by writing an empty structure into that same field -
+    /// <c>_lastDBError = emptyData</c> [<c>:L65</c>], where <c>emptyData</c> is an uninitialized local
+    /// [<c>:L55</c>]. Writing <see cref="DbErrorData.Empty"/> through the event entry point is
+    /// therefore the same write the oracle's reset performs, reached the only way the field can be
+    /// reached from outside the object.
+    /// </para>
+    /// <para>
+    /// <b>Why the caller-side reset is NOT used for this.</b> <c>of_reset</c> would clear the sink, but
+    /// it also delegates to the worker's reset, which restores autocommit to <c>AC_OFF</c> and clears
+    /// the statement [<c>:L34-L35</c>], and it resets the parameter collection and the commit signal
+    /// [<c>n_cst_thread_task_sqlbase.sru:L242-L246</c>]. Calling it inside an execution would therefore
+    /// discard the very configuration the caller had just installed through <c>SetSql</c> and
+    /// <c>SetAutoCommit</c>. The narrow write is the only one that clears the sink and nothing else.
+    /// </para>
+    /// <para>
+    /// The cast is required because the entry point is implemented EXPLICITLY on the caller-side base
+    /// so that the overridable hook stays <see langword="protected"/>. No override exists on the
+    /// command proxy, so the effect here is exactly the bare field assignment.
+    /// </para>
+    /// </remarks>
     private static void ClearCapturedDbError(SqlCommandTaskProxy proxy)
     {
         DbErrorData empty = DbErrorData.Empty;
 
         ((ISqlTaskProxy)proxy).OnDbError(in empty);
     }
+
+    /// <summary>
+    /// Whether a statement is present but blank - see <see cref="BlankStatementDiagnostic"/>.
+    /// </summary>
+    /// <param name="sql">The statement as sent.</param>
+    /// <returns>
+    /// <see langword="true"/> only for a non-empty run of whitespace. The EMPTY string answers
+    /// <see langword="false"/>, so it still reaches the worker's own oracle-faithful guard and still
+    /// carries that guard's message-free answer.
+    /// </returns>
+    private static bool IsBlankStatement(string sql) =>
+        sql.Length > 0 && string.IsNullOrWhiteSpace(sql);
+
+    /// <summary>
+    /// Whether an autocommit value is one of the three the contract declares - see
+    /// <see cref="AutoCommitOutOfDomainDiagnostic"/>.
+    /// </summary>
+    /// <param name="mode">The value as sent.</param>
+    /// <returns><see langword="true"/> for AC_OFF, AC_ON or AC_NATIVE and nothing else.</returns>
+    /// <remarks>
+    /// Written as an explicit pattern over all three enumerators rather than as a reflective
+    /// <c>Enum.IsDefined</c> test, for two reasons: the pattern is checked by the compiler when a fourth
+    /// mode is ever added to the contract, and it states the domain in the same terms the diagnostic and
+    /// the protocol definition state it in.
+    /// </remarks>
+    private static bool IsDeclaredAutoCommitMode(AutoCommitMode mode) =>
+        mode is AutoCommitMode.AcOff or AutoCommitMode.AcOn or AutoCommitMode.AcNative;
 
     /// <summary>
     /// Installs the request's parameter list on the task, replacing whatever was there.
@@ -1159,33 +1152,6 @@ internal sealed class CommandService : GeneratedCommandServiceBase
     /// list the caller sent.
     /// </para>
     /// </remarks>
-    /// <summary>
-    /// Whether a statement is present but blank - see <see cref="BlankStatementDiagnostic"/>.
-    /// </summary>
-    /// <param name="sql">The statement as sent.</param>
-    /// <returns>
-    /// <see langword="true"/> only for a non-empty run of whitespace. The EMPTY string answers
-    /// <see langword="false"/>, so it still reaches the worker's own oracle-faithful guard and still
-    /// carries that guard's message-free answer.
-    /// </returns>
-    private static bool IsBlankStatement(string sql) =>
-        sql.Length > 0 && string.IsNullOrWhiteSpace(sql);
-
-    /// <summary>
-    /// Whether an autocommit value is one of the three the contract declares - see
-    /// <see cref="AutoCommitOutOfDomainDiagnostic"/>.
-    /// </summary>
-    /// <param name="mode">The value as sent.</param>
-    /// <returns><see langword="true"/> for AC_OFF, AC_ON or AC_NATIVE and nothing else.</returns>
-    /// <remarks>
-    /// Written as an explicit pattern over all three enumerators rather than as a reflective
-    /// <c>Enum.IsDefined</c> test, for two reasons: the pattern is checked by the compiler when a fourth
-    /// mode is ever added to the contract, and it states the domain in the same terms the diagnostic and
-    /// the protocol definition state it in.
-    /// </remarks>
-    private static bool IsDeclaredAutoCommitMode(AutoCommitMode mode) =>
-        mode is AutoCommitMode.AcOff or AutoCommitMode.AcOn or AutoCommitMode.AcNative;
-
     private static long ApplyParameters(
         SqlCommandTaskProxy proxy,
         IReadOnlyList<PositionalParameter> parameters)
@@ -1435,7 +1401,7 @@ internal sealed class CommandService : GeneratedCommandServiceBase
                     _logger?.LogWarning(
                         "CreateCommandTask did not publish a task on session {SessionId} because the "
                         + "session began retiring first.",
-                        session.SessionId);
+                        LogSafeText.Render(session.SessionId));
 
                     return new CreateCommandTaskResponse
                     {
@@ -1453,7 +1419,7 @@ internal sealed class CommandService : GeneratedCommandServiceBase
                 _logger?.LogWarning(
                     "CreateCommandTask refused a task on session {SessionId} because a handle ceiling was "
                     + "reached: {Diagnostic}",
-                    session.SessionId,
+                    LogSafeText.Render(session.SessionId),
                     quotaDiagnostic);
 
                 return new CreateCommandTaskResponse
@@ -1467,8 +1433,8 @@ internal sealed class CommandService : GeneratedCommandServiceBase
 
             _logger?.LogDebug(
                 "Command task {TaskId} created against session {SessionId}.",
-                task.TaskId,
-                session.SessionId);
+                LogSafeText.Render(task.TaskId),
+                LogSafeText.Render(session.SessionId));
 
             return new CreateCommandTaskResponse
             {
@@ -1771,19 +1737,14 @@ internal sealed class CommandService : GeneratedCommandServiceBase
             });
         }
 
-        // THE BLANK-STATEMENT REFUSAL, AHEAD OF THE LEASE for the same reason the autocommit domain test
-        // is: a blank statement is blank whether or not the task is busy. See BlankStatementDiagnostic for
-        // why the boundary refuses what the worker's emptiness guard tolerates, and note that an EMPTY
-        // statement is deliberately NOT caught here - it belongs to the worker's guard and to that guard's
-        // message-free answer.
-        if (IsBlankStatement(request.Sql))
-        {
-            return Task.FromResult(new SetCommandSqlResponse
-            {
-                Status = TransactionWireCodes.Status(RetCode.E_INVALID_SQL, BlankStatementDiagnostic),
-            });
-        }
-
+        // ⚠ NO BLANKNESS TEST SITS HERE, AND ITS ABSENCE IS THE PRESERVED BEHAVIOUR RATHER THAN AN
+        // OVERSIGHT (constraint C-B, AAP G2). The oracle's guard is an EMPTINESS test - `if sql = "" then
+        // return RetCode.E_INVALID_SQL` [n_cst_threading_task_sqlbase.sru:L45], repeated in the task body
+        // [n_cst_thread_task_sqlbase.sru:L65-L68] - so a run of spaces is ACCEPTED, stored and submitted,
+        // and whatever the provider answers for it is the answer. A boundary test for blankness was added
+        // here and has been withdrawn: it refused a statement the legacy accepts, which makes this port
+        // STRICTER than its oracle, and being stricter is a behaviour change in exactly the same way being
+        // laxer would be. A caller that submits whitespace still gets what the legacy gave it.
         if (!TryLease(task, out OperationStatus refusal))
         {
             return Task.FromResult(new SetCommandSqlResponse { Status = refusal });
@@ -1966,19 +1927,10 @@ internal sealed class CommandService : GeneratedCommandServiceBase
             // [n_cst_threading_task_sqlbase.sru:L57, :L73, :L95, :L110, :L124, :L144, :L162, :L179, :L188].
             if (request.HasSql)
             {
-                // A PRESENT-BUT-BLANK statement is refused here on the same terms the setter RPC refuses
-                // it, so the two entry points cannot disagree about one statement. Set-but-EMPTY still
-                // falls through to the setter's own guard below, message-free, exactly as before.
-                if (IsBlankStatement(request.Sql))
-                {
-                    return Task.FromResult(new ExecResponse
-                    {
-                        Status = TransactionWireCodes.Status(
-                            RetCode.E_INVALID_SQL,
-                            BlankStatementDiagnostic),
-                    });
-                }
-
+                // ⚠ AND NO BLANKNESS TEST HERE EITHER, for the reason recorded on the setter RPC: the
+                // oracle's guard is an emptiness test, so whitespace is stored and submitted and the
+                // provider's answer for it is the answer. The two entry points agree because NEITHER adds
+                // a test the legacy does not have.
                 long statementCode = task.Proxy.SetSql(request.Sql);
                 if (Predicates.IsFailed(statementCode))
                 {
@@ -2129,7 +2081,7 @@ internal sealed class CommandService : GeneratedCommandServiceBase
                     "Command task {TaskId} executed with {ResultCode}: sql_code {SqlCode}, "
                     + "sql_db_code {SqlDbCode}, rows {SqlNRows}, committed {Committed}, "
                     + "parameters {ParameterCount}.",
-                    task.TaskId,
+                    LogSafeText.Render(task.TaskId),
                     rtCode,
                     sqlCode,
                     sqlDbCode,

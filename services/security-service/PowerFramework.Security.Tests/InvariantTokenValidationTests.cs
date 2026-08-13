@@ -1,5 +1,5 @@
 // ==================================================================================================
-//  InvariantTokenValidationTests - THE FOUR SWITCHES THAT ARE NOT DEPLOYMENT CHOICES
+//  InvariantTokenValidationTests - THE FIVE SETTINGS THAT ARE NOT DEPLOYMENT CHOICES
 //  ------------------------------------------------------------------------------------------------
 //  WHAT THIS FILE GUARDS, AND WHY THIS SERVICE HAS THE MOST TO LOSE
 //
@@ -16,6 +16,15 @@
 //    * without lifetime validation the short lifetimes this service itself mints bound nothing;
 //    * without signature validation the signature is not checked at all and any well-formed token is
 //      accepted.
+//
+//  AND A FIFTH SETTING WHOSE POLARITY IS THE OPPOSITE ONE. MapInboundClaims is likewise assigned
+//  literally - to FALSE - and on this service it is load bearing rather than tidy: the legacy handler
+//  rewrites `scope` and `sub` into WS-Federation URIs, so with mapping ON the scope policy would look for
+//  claims that are no longer there and every scope check would silently pass nothing. So the required
+//  value is false and a configured TRUE is what must be refused. It was READ from configuration in
+//  section 5 and then overwritten by the literal, which is the same read-then-ignore shape the four
+//  switches used to have: the read decided nothing while appearing to. The read is gone and this file's
+//  last three rows are what replaces it.
 //
 //  THE REFUSAL IS A STARTUP GATE HERE, NOT AN OPTIONS RULE, AND THAT SHAPES EVERY ROW BELOW. The two
 //  sibling services model these switches on their own typed options and refuse a disabled one through
@@ -52,6 +61,9 @@ public sealed class InvariantTokenValidationTests
 {
     /// <summary>The configuration section the four switches are read from.</summary>
     private const string InboundAuthenticationSection = "Authentication:Jwt";
+
+    /// <summary>The key whose required value is FALSE rather than true.</summary>
+    private const string MapInboundClaimsKey = "MapInboundClaims";
 
     /// <summary>The four keys, in the order the gate reports them.</summary>
     /// <remarks>
@@ -174,6 +186,79 @@ public sealed class InvariantTokenValidationTests
         {
             factory.Settings[$"{InboundAuthenticationSection}:{switchKey}"] = null;
         }
+
+        Assert.NotNull(factory.ResolveSecurityOptions());
+    }
+
+    /// <summary>
+    /// A deployment that turns inbound claim mapping ON does not start, and the fault names the key and
+    /// the consequence.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE FIFTH SETTING, AND THE ONLY ONE WHOSE FAULT IS A CONFIGURED <c>true</c>.</b> It cannot
+    /// join the theory above for exactly that reason: the four switches are refused when false, and this
+    /// one when true, so a single loop would have to carry the polarity as data and would then be asserting
+    /// the loop rather than the rule.
+    /// </para>
+    /// <para>
+    /// <b>WHAT IT PROTECTS, stated because "claim mapping" sounds cosmetic and is not.</b> The legacy
+    /// handler rewrites the standard <c>scope</c> and <c>sub</c> claim names into WS-Federation URIs. The
+    /// scope policy looks for <c>scope</c>; with mapping on it would find nothing, and a policy that finds
+    /// no scopes admits no scope - so every authenticated request would meet a 403 and the authorization
+    /// surface would be uniformly broken rather than visibly misconfigured.
+    /// </para>
+    /// <para>
+    /// <b>AND IT REPLACES A DEAD READ.</b> Section 5 of the composition root used to assign this from
+    /// configuration and then overwrite it with the literal a few lines later, so a configured value took
+    /// no effect while an operator reading the settings file would believe it had. The read is gone; the
+    /// refusal is what tells a deployment that the value is neither honoured nor honourable.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ADeploymentEnablingInboundClaimMappingDoesNotStart()
+    {
+        using SecurityAppFactory factory = new();
+
+        factory.Settings[$"{InboundAuthenticationSection}:{MapInboundClaimsKey}"] = "true";
+
+        InvalidOperationException refused = Assert.Throws<InvalidOperationException>(
+            () => factory.ResolveSecurityOptions());
+
+        Assert.Contains(MapInboundClaimsKey, refused.Message, StringComparison.Ordinal);
+        Assert.Contains("set to true", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("would not take effect", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("set it to false", refused.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A deployment stating claim mapping explicitly false starts, because it agrees with the literal.
+    /// </summary>
+    /// <remarks>
+    /// THE SHIPPED SETTINGS FILE STATES IT, so this is not a hypothetical shape. A value that agrees with
+    /// the literal changes nothing and is accepted for the same reason the four switches accept an explicit
+    /// <c>true</c>: the point of the gate is to refuse a setting that would be IGNORED, not to refuse the
+    /// key's existence.
+    /// </remarks>
+    [Fact]
+    public void ADeploymentStatingClaimMappingExplicitlyFalseStarts()
+    {
+        using SecurityAppFactory factory = new();
+
+        factory.Settings[$"{InboundAuthenticationSection}:{MapInboundClaimsKey}"] = "false";
+
+        Assert.NotNull(factory.ResolveSecurityOptions());
+    }
+
+    /// <summary>
+    /// A deployment stating claim mapping not at all starts, because the absent value is the safe one.
+    /// </summary>
+    [Fact]
+    public void ADeploymentStatingNoClaimMappingValueStarts()
+    {
+        using SecurityAppFactory factory = new();
+
+        factory.Settings[$"{InboundAuthenticationSection}:{MapInboundClaimsKey}"] = null;
 
         Assert.NotNull(factory.ResolveSecurityOptions());
     }

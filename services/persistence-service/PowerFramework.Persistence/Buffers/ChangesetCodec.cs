@@ -824,6 +824,88 @@ internal interface IChangesetTransferSink
 #region The opaque payload format - GetChanges and SetChanges
 
 /// <summary>
+/// How much a payload's ORIGINAL values may be trusted, which is a property of the CALLER rather than of
+/// the payload and therefore has to be stated at every apply.
+/// </summary>
+/// <remarks>
+/// <para>
+/// 🔴 <b>THE CONCURRENCY BASELINE IS THE ONE THING A CHANGESET CANNOT BE ALLOWED TO GUESS.</b> An
+/// <c>updatewhere=1</c> predicate carries the key column plus the ORIGINAL value of every marked column
+/// (AAP 0.6.3.2), so the originals in a payload are not decoration - they ARE the optimistic-concurrency
+/// check. This codec used to substitute the caller's CURRENT value wherever an original was missing,
+/// which produced a predicate built from the values the caller was writing: an ordinary update then
+/// compared a row against itself and could not detect a lost race, and a caller that changed a KEY
+/// without stating its old value had its statement aimed at the row named by the NEW key - a write to a
+/// different row than the one it read, reported as success. Neither is a hypothetical; both follow
+/// mechanically from a fabricated baseline.
+/// </para>
+/// <para>
+/// <b>WHY THIS IS A MODE AND NOT ONE RULE FOR EVERYONE.</b> Two callers apply changesets and they are
+/// not equally trustworthy, so one rule would have to be wrong for one of them:
+/// </para>
+/// <list type="bullet">
+///   <item>
+///     <description>
+///     The RETRIEVE path - <c>Tasks/TaskProxies/SqlQueryTaskProxy</c> moving chunks between carriers -
+///     applies a payload THIS SERVICE PRODUCED, whose encoding is defined by
+///     <see cref="ChangesetPayloadCodec.TryEncode"/>: an original is emitted only where it DIFFERS from
+///     the current value, because the carrier answers the current value when no original was captured.
+///     Absence there is a positive statement of equality, so requiring one would refuse this service's
+///     own conforming output - and it would break the one shape that MUST survive the wire, a column
+///     stamped <c>DataModified!</c> whose value did not move, which is how the legacy's self-assignment
+///     workaround at <c>n_cst_thread_task_sqlupdate.sru:L155-L167</c> crosses the boundary at all.
+///     </description>
+///   </item>
+///   <item>
+///     <description>
+///     The UPDATE path - <c>Tasks/SqlUpdateCarrier.SetChanges</c> - applies a payload composed by an
+///     untrusted CALLER, and every statement generated from it carries a predicate read out of these
+///     originals. There the contract's own requirement applies in full: a changed row states both halves
+///     of every column it carries, or it is refused.
+///     </description>
+///   </item>
+/// </list>
+/// <para>
+/// <b>AND THE STRICT MODE IS SCOPED TO THE ROWS WHOSE BASELINE IS ACTUALLY READ, which is narrower than
+/// "every row" and deliberately so.</b> Requiring a baseline from a row no statement is generated for
+/// would refuse conforming payloads while preventing nothing. The two arms that read originals are every
+/// <c>Delete!</c> buffer row - membership in that buffer IS the pending delete, so a <c>DELETE ... WHERE</c>
+/// is generated whatever its status - and every <see cref="ItemStatus.DataModified"/> row in a modifiable
+/// buffer, which becomes an <c>UPDATE</c> or, when the key moved under <c>updatekeyinplace=no</c>, a
+/// <c>DELETE</c> plus an <c>INSERT</c> [<c>Tasks/SqlUpdateCarrier.ApplyUpdate</c>]. A row whose status is
+/// <see cref="ItemStatus.New"/> or <see cref="ItemStatus.NewModified"/> in a modifiable buffer generates an
+/// <c>INSERT</c>, which has no where clause and no prior state to describe; a
+/// <see cref="ItemStatus.NotModified"/> row there generates nothing at all.
+/// </para>
+/// </remarks>
+internal enum CarrierBaselineTrust
+{
+    /// <summary>
+    /// The producer's own encoding is honoured: a column with no stated original is UNCHANGED, so its
+    /// baseline is its current value because the two are the same value.
+    /// </summary>
+    /// <remarks>
+    /// For payloads this service produced. It is the transfer-path reading and it is exact rather than
+    /// lenient - see the type-level remarks.
+    /// </remarks>
+    AsStated = 0,
+
+    /// <summary>
+    /// Every column of every row whose baseline becomes a where clause - a <c>Delete!</c> buffer row, or a
+    /// <see cref="ItemStatus.DataModified"/> row in a modifiable buffer - must state its original
+    /// explicitly, and a payload that omits one is refused rather than read against a fabricated baseline.
+    /// </summary>
+    /// <remarks>
+    /// For the update path, where the originals become an optimistic-concurrency predicate. This is
+    /// literally what AAP 0.6.3.2 requires a payload to transmit, so the requirement narrows nothing a
+    /// conforming caller was permitted to omit. Rows that generate an <c>INSERT</c> or no statement at all
+    /// are outside it - see the type-level remarks for why the scope is the predicate rather than the row
+    /// shape.
+    /// </remarks>
+    RequiredOnChangedRows = 1,
+}
+
+/// <summary>
 /// Encodes a carrier's changed rows into an opaque binary payload and applies such a payload back
 /// onto a carrier: the managed stand-in for PowerBuilder's <c>GetChanges</c> and <c>SetChanges</c>.
 /// </summary>
@@ -876,17 +958,34 @@ internal interface IChangesetPayloadCodec
     /// </summary>
     /// <param name="target">The carrier to write.</param>
     /// <param name="state">The carrier state to apply. <see langword="null"/> is malformed input.</param>
+    /// <param name="baselineTrust">
+    /// How much the payload's ORIGINAL values may be trusted, which depends on who composed the payload.
+    /// See <see cref="CarrierBaselineTrust"/>: the transfer path passes
+    /// <see cref="CarrierBaselineTrust.AsStated"/> and the update path passes
+    /// <see cref="CarrierBaselineTrust.RequiredOnChangedRows"/>.
+    /// </param>
     /// <returns>
     /// <see cref="DataWindowBufferStore.DataStoreSuccess"/> on a clean apply,
     /// <see cref="DataWindowBufferStore.DataStoreFailure"/> on a malformed payload, or a value greater
     /// than one for a partial apply.
     /// </returns>
     /// <remarks>
+    /// <para>
     /// Reproduces <c>SetChanges(blbData)</c>. A MALFORMED PAYLOAD MUST ANSWER A CODE AND MUST NOT
     /// THROW: the legacy reacts to a code, and an exception escaping here would be a failure mode the
     /// oracle does not have (C-B).
+    /// </para>
+    /// <para>
+    /// THE TRUST MODE IS A REQUIRED ARGUMENT RATHER THAN A DEFAULT, deliberately. A default would let a
+    /// future caller inherit the lenient reading silently, and the one caller that must not is the one
+    /// whose payload becomes an optimistic-concurrency predicate. Stating it at the call site is what
+    /// makes the choice reviewable.
+    /// </para>
     /// </remarks>
-    long TryApply(DataWindowBufferStore target, CarrierState? state);
+    long TryApply(
+        DataWindowBufferStore target,
+        CarrierState? state,
+        CarrierBaselineTrust baselineTrust);
 }
 
 /// <summary>
@@ -913,7 +1012,10 @@ internal interface IChangesetPayloadCodec
 /// COLUMN. A payload that carried only current values could not express optimistic concurrency at all,
 /// and the row loss would be invisible until a conflict silently failed to be detected. That is why
 /// <see cref="DataWindowRow.OriginalValues"/> is populated here and not treated as a retrieve-path
-/// nicety.
+/// nicety - <b>for every column projected, including the ones whose original still equals their
+/// current value.</b> Skipping the agreeing ones is an inference this codec's receive half can make and
+/// a consumer of the CONTRACT cannot be required to: it would leave a freshly retrieved row carrying no
+/// baseline at all, and AAP 0.6.3.2 states the obligation with no exemption.
 /// </para>
 /// <para>
 /// NO JSON AND NO XML (C-D), AND NO HAND-ROLLED BINARY EITHER. Document serialization would reach into
@@ -1015,7 +1117,10 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
     }
 
     /// <inheritdoc/>
-    public long TryApply(DataWindowBufferStore target, CarrierState? state)
+    public long TryApply(
+        DataWindowBufferStore target,
+        CarrierState? state,
+        CarrierBaselineTrust baselineTrust)
     {
         ArgumentNullException.ThrowIfNull(target);
 
@@ -1064,7 +1169,8 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
 
             foreach (DataWindowRow row in segment.Rows)
             {
-                if (!TryReadRow(row, out List<AdmittedColumn>? columns) || columns is null)
+                if (!TryReadRow(row, baselineTrust, out List<AdmittedColumn>? columns)
+                    || columns is null)
                 {
                     return DataWindowBufferStore.DataStoreFailure;
                 }
@@ -1094,8 +1200,11 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
     /// <param name="Status">That column's own item status.</param>
     /// <param name="Current">The current value.</param>
     /// <param name="Original">
-    /// The value at the last baseline. Equal to <paramref name="Current"/> when the payload omitted an
-    /// original, which the contract defines as "unchanged since the baseline".
+    /// The value at the last baseline. Equal to <paramref name="Current"/> where the payload omitted an
+    /// original, which the contract defines as "unchanged since the baseline" - and which is why such a
+    /// column also reads <see cref="ItemStatus.NotModified"/> unless its row is insert-shaped. On the
+    /// update path an omitted original is refused before it reaches here
+    /// [<see cref="CarrierBaselineTrust.RequiredOnChangedRows"/>].
     /// </param>
     private readonly record struct AdmittedColumn(
         int ColumnNumber,
@@ -1159,11 +1268,13 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
     /// <param name="row">The projection, or <see langword="null"/> when a value is unrepresentable.</param>
     /// <returns><see langword="false"/> when a value is outside the published value domain.</returns>
     /// <remarks>
-    /// AN ORIGINAL IS EMITTED ONLY WHEN IT DIFFERS FROM THE CURRENT VALUE, which the contract defines as
-    /// the encoding of "unchanged since the last baseline": the carrier answers the current value when no
-    /// original was captured, so the two statements are the same one. Blob comparison is by VALUE here -
-    /// the carrier hands out defensive copies, so reference equality would emit an original for every
-    /// blob column whether or not it changed.
+    /// AN ORIGINAL IS EMITTED FOR EVERY COLUMN THE ROW CARRIES, agreeing with the current value or not.
+    /// An earlier form emitted one only where it DIFFERED, which the contract then defined as the encoding
+    /// of "unchanged since the last baseline"; AAP 0.6.3.2 leaves no room for that reading, because on a
+    /// freshly retrieved row every column agrees and the row would carry no baseline at all. The value
+    /// emitted is the one the carrier CAPTURED at its last baseline, which for a <c>blob</c> is a content
+    /// snapshot rather than an alias - the carrier hands out defensive copies, so the emitted original must
+    /// be read from the baseline store and never from the live array.
     /// </remarks>
     private static bool TryProjectRow(
         DataWindowBufferStore source,
@@ -1210,11 +1321,21 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
 
             object? original = carrierRow.GetOriginalValue(columnNumber);
 
-            if (ValuesMatch(current, original))
-            {
-                continue;
-            }
-
+            // 🔴 ONE ORIGINAL FOR EVERY COLUMN PROJECTED, INCLUDING THE ONES THAT DID NOT MOVE. An earlier
+            // form skipped a column whose original equalled its current value, on the reasoning that a
+            // consumer could infer the omitted baseline from the current value - which is true of THIS
+            // codec's own receive half and false of the contract. AAP 0.6.3.2 states the obligation without
+            // an exemption: the payload must transmit, per row, BOTH the current and the original value of
+            // EVERY MARKED COLUMN, because `updatewhere=1` over six columns each marked
+            // `updatewhereclause=yes` [ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14] builds a WHERE
+            // clause from all six originals. Omitting the agreeing ones made a FRESHLY RETRIEVED row carry
+            // no baseline at all, so a consumer holding only the payload had to RECONSTRUCT the concurrency
+            // predicate from an absence - and a consumer that read the absence as "no baseline exists"
+            // rather than as "equal to current" would either fabricate one or drop the predicate, which is
+            // the silent overwrite AAP 0.6.3.8 forbids outright.
+            //
+            // AN EMPTY LIST NOW MEANS EXACTLY ONE THING - the row has NO PRIOR STATE, which is an
+            // insert-shaped row - instead of meaning that plus "every column happens to agree".
             if (!CarrierValue.TryToWire(original, out AnyValue? originalValue))
             {
                 return false;
@@ -1231,22 +1352,6 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
         row = projected;
 
         return true;
-    }
-
-    /// <summary>
-    /// Whether two carrier values are the same value, comparing a <c>blob</c> by content.
-    /// </summary>
-    /// <param name="left">One value.</param>
-    /// <param name="right">The other.</param>
-    /// <returns><see langword="true"/> when they are equal.</returns>
-    private static bool ValuesMatch(object? left, object? right)
-    {
-        if (left is byte[] leftBlob && right is byte[] rightBlob)
-        {
-            return leftBlob.AsSpan().SequenceEqual(rightBlob);
-        }
-
-        return Equals(left, right);
     }
 
     /// <summary>
@@ -1367,12 +1472,31 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
     /// which is also how the storage engine compares them. See that method for the full reasoning.
     /// </para>
     /// <para>
-    /// AND IT APPLIES ONLY WHERE AN ORIGINAL WAS ACTUALLY STATED. A column the payload supplied no
-    /// original for has no baseline to be measured against, so the row's own statement stands for it -
-    /// which is exactly an INSERT-shaped row, where <c>NewModified!</c> is the row's status and there are
-    /// no originals at all because the row has no prior state. Reading an unstated original as "equal to
-    /// the current value" instead would make every column of an insert resolve <c>NotModified!</c>,
-    /// which is not the state the runtime holds for a new row.
+    /// 🔴 <b>AND WHERE NO ORIGINAL WAS STATED THE COLUMN READS UNCHANGED, UNLESS THE ROW IS
+    /// INSERT-SHAPED.</b> The row's statement used to stand for such a column on the reasoning that a
+    /// column with no baseline cannot be measured against one. The premise is true and the conclusion was
+    /// backwards for an update: the column was stamped modified, so it entered the generated SET list,
+    /// while the predicate beside it compared that column against the value being written - so a caller
+    /// that changed a value and omitted its original wrote to whichever row held the NEW value, and a
+    /// caller that changed a KEY that way bypassed the <c>updatekeyinplace=no</c> DELETE-plus-INSERT path
+    /// entirely. Absence of an original is the contract's own encoding of "unchanged since the baseline",
+    /// and that is now what it reads as.
+    /// </para>
+    /// <para>
+    /// THE INSERT-SHAPED ARM KEEPS THE ONE CASE WHERE ADOPTING IS RIGHT. A row whose own status is
+    /// <c>New!</c> or <c>NewModified!</c> carries no originals at all because it has no prior state, and
+    /// resolving its columns to <c>NotModified!</c> would not be the state the in-process runtime holds
+    /// for a new row. No predicate is generated for an insert, so nothing here can be aimed at the wrong
+    /// row.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>AND ON THE UPDATE PATH AN UNSTATED BASELINE IS REFUSED OUTRIGHT RATHER THAN INFERRED.</b>
+    /// <see cref="CarrierBaselineTrust.RequiredOnChangedRows"/> requires every column of every row that
+    /// is not insert-shaped to state its original, because those originals become the
+    /// optimistic-concurrency predicate and a caller is not a trustworthy source of a value it is
+    /// simultaneously overwriting. The transfer path passes
+    /// <see cref="CarrierBaselineTrust.AsStated"/> instead, under which absence IS a statement of
+    /// equality - see <see cref="CarrierBaselineTrust"/> for why the two callers cannot share one rule.
     /// </para>
     /// <para>
     /// A ROW WHOSE EVERY SUPPLIED COLUMN THEREFORE READS <c>NotModified!</c> - a row stamped modified in
@@ -1400,9 +1524,36 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
     /// caller-composed payload, which is the update path.
     /// </para>
     /// </remarks>
-    private static bool TryReadRow(DataWindowRow row, out List<AdmittedColumn>? columns)
+    private static bool TryReadRow(
+        DataWindowRow row,
+        CarrierBaselineTrust baselineTrust,
+        out List<AdmittedColumn>? columns)
     {
         columns = null;
+
+        // AN INSERT-SHAPED ROW HAS NO PRIOR STATE, so it states no originals at all. The row-status
+        // inference below may therefore adopt a modified status for a column with no baseline ONLY here -
+        // resolving a new row's columns to NotModified! would not be the state the in-process runtime
+        // holds for one, and would leave its INSERT with nothing marked.
+        bool insertShaped = row.ItemStatus is ItemStatus.New or ItemStatus.NewModified;
+
+        // 🔴 THE ROWS WHOSE BASELINE ACTUALLY BECOMES A PREDICATE, which is what the update path's
+        // requirement is scoped to. Requiring a baseline from any row that merely is not insert-shaped
+        // would be strictly broader than the hazard and would refuse conforming payloads: a NotModified!
+        // row in a modifiable buffer generates NO STATEMENT AT ALL, so nothing ever reads its originals
+        // [Tasks/SqlUpdateCarrier.ApplyUpdate, the final comment of the row walk]. The two arms that DO
+        // read them are:
+        //
+        //   * EVERY Delete! buffer row, whatever its status - membership in that buffer IS the pending
+        //     delete, so the walk generates a DELETE for each one and builds its where clause from the
+        //     originals [ApplyUpdate, the delete walk; ItemStatusMachine.IsDeleteCountable];
+        //   * every DataModified! row in a modifiable buffer, which becomes either an UPDATE or, when the
+        //     key moved under updatekeyinplace=no, a DELETE plus an INSERT - and both statements of that
+        //     pair are aimed by the originals.
+        //
+        // New!/NewModified! in a modifiable buffer generate an INSERT, which has no where clause at all.
+        bool baselineBecomesAPredicate =
+            row.Buffer == DwBuffer.Delete || row.ItemStatus == ItemStatus.DataModified;
 
         // THE ROW'S OWN STATUS GOVERNS ONLY WHEN THE PAYLOAD SAID NOTHING PER COLUMN - see the remarks.
         // Computed before the walk because it is a property of the WHOLE row: one explicitly stamped
@@ -1450,12 +1601,33 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
 
             int columnNumber = (int)column.ColumnId;
 
-            // THE ORIGINAL THE PAYLOAD SUPPLIED, OR THE CURRENT VALUE WHEN IT SUPPLIED NONE. The carrier
-            // needs a baseline for every column it holds, and an unsupplied original is carried as the
-            // current value so the concurrency predicate compares a value the caller actually sent
-            // rather than a fabricated null. WHETHER one was supplied is kept separately, because the
-            // inference below distinguishes "stated, and equal" from "never stated".
+            // WHETHER AN ORIGINAL WAS STATED IS KEPT SEPARATELY FROM ITS VALUE, because both rules below
+            // turn on presence rather than on the value: the update path REQUIRES presence, and the
+            // row-status inference distinguishes "stated, and equal" from "never stated".
             bool originalWasSupplied = originals.TryGetValue(columnNumber, out object? supplied);
+
+            // 🔴 THE UPDATE PATH REFUSES A CHANGED ROW THAT LEFT A BASELINE UNSTATED, rather than reading
+            // the caller's own current value as the baseline. Everything the generated statement's WHERE
+            // clause compares comes out of these originals, so a fabricated one is a predicate aimed at
+            // the values being written: it matches the row itself and cannot detect a lost race, and for
+            // a changed KEY it addresses the row named by the NEW key. Refusing is the fail-closed
+            // answer AAP 0.1.5 requires - narrow with a defined error, never widen with a guess - and it
+            // asks a caller for nothing the contract did not already require it to send (AAP 0.6.3.2).
+            // Scoped to the rows whose baseline is actually read - see the note above this walk - so a
+            // row that generates no statement, or one that generates only an INSERT, is not asked for a
+            // baseline it has no use for.
+            if (baselineTrust == CarrierBaselineTrust.RequiredOnChangedRows
+                && baselineBecomesAPredicate
+                && !originalWasSupplied)
+            {
+                return false;
+            }
+
+            // THE STATED ORIGINAL, OR THE CURRENT VALUE WHERE NONE WAS STATED - which is EXACT rather
+            // than a substitution, because in every case that reaches this line the two are the same
+            // value. Under AsStated the producer omits an original precisely when it equals the current
+            // value; under RequiredOnChangedRows the only rows that reach here with an unstated original
+            // are insert-shaped, for which no baseline exists and none is ever read.
             object? originalValue = originalWasSupplied ? supplied : currentValue;
 
             // An omitted per-column status is the contract's "no status was supplied". When the row
@@ -1464,14 +1636,23 @@ internal sealed class ChangesetPayloadCodec : IChangesetPayloadCodec
             // statement governs every column it supplied EXCEPT the ones whose stated original proves
             // the value did not move - the legacy row-status convention, see the remarks on this method
             // for why, for why the value test is part of it, and for why the retrieve path cannot reach
-            // it. A column with NO stated original has no baseline to be measured against, so the row's
-            // statement stands for it: that is the whole of an insert-shaped row, which carries no
-            // originals at all because it has no prior state.
+            // it.
+            //
+            // 🔴 AND A COLUMN WITH NO STATED ORIGINAL READS UNCHANGED UNLESS THE ROW IS INSERT-SHAPED.
+            // It used to adopt the row's modified status on the reasoning that a column with no baseline
+            // cannot be measured - true, but the conclusion was backwards for an UPDATE: the column was
+            // then written into the SET list while the predicate compared it against the value being
+            // written, so a caller that changed a value and omitted its original had its statement aimed
+            // at the wrong row. Absence of an original means UNCHANGED, which is the contract's own
+            // encoding of it. The insert-shaped arm keeps the one case where adopting is right: a new
+            // row's columns carry no originals because there is no prior state, and reading them as
+            // NotModified! would not be the state the in-process runtime holds for a new row.
             ItemStatus columnStatus = column.HasItemStatus
                 ? column.ItemStatus
                 : adoptRowStatus
-                    && !(originalWasSupplied
-                        && CarrierValue.AreEquivalent(currentValue, originalValue))
+                    && (insertShaped
+                        || (originalWasSupplied
+                            && !CarrierValue.AreEquivalent(currentValue, originalValue)))
                     ? row.ItemStatus
                     : ItemStatus.NotModified;
 
@@ -3238,7 +3419,9 @@ internal sealed class ChangesetCodec
 
             // `rtCode = dw.SetChanges(blbData)` [:L197, :L221, :L238]. Chunks after the first ACCUMULATE
             // onto the target, which is why the reset above is gated on the first chunk alone.
-            result = _payloadCodec.TryApply(target, chunk.State);
+            // THE TRANSFER READING: this payload was produced by TryEncode on the sending side, whose
+            // encoding omits an original exactly where it equals the current value.
+            result = _payloadCodec.TryApply(target, chunk.State, CarrierBaselineTrust.AsStated);
 
             // `if count = current then dw.ResetUpdate()` [:L198-L199, :L222-L223, :L239-L240]. Run
             // UNCONDITIONALLY on the last chunk, without consulting the apply result - the legacy does
@@ -3360,7 +3543,7 @@ internal sealed class ChangesetCodec
         // [:L104-L108, :L117-L121, :L129-L133].
         long result = payload.IsEmptyPayload
             ? DataWindowBufferStore.DataStoreSuccess
-            : _payloadCodec.TryApply(childTarget, payload.State);
+            : _payloadCodec.TryApply(childTarget, payload.State, CarrierBaselineTrust.AsStated);
 
         // `blbData = Blob("")` [:L139] - the payload belongs to the caller and is not retained.
 

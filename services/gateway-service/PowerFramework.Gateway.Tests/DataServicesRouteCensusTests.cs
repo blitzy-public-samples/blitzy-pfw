@@ -5,17 +5,17 @@
 //
 //  Gateway individually wires THIRTY-NINE routes onto the two DataServices contracts - fifteen for C-03's
 //  DataWindowService and twenty-four for C-04's ColumnExpressionService - and its typed client exposes
-//  forty-three public operations over the same two generated stubs. Every one of those wirings is a
+//  forty-two public operations over the same two generated stubs. Every one of those wirings is a
 //  four-part assertion made in source and nowhere verified: a path, an HTTP method, a request/response
 //  message pair, and the ONE typed-client member the route delegates to.
 //
-//  The sibling suites exercise three of the forty, and they were chosen for good reasons - the
+//  The sibling suites exercise three of the thirty-nine, and they were chosen for good reasons - the
 //  update carries the 409, the retrieval carries the stream, the event-gate read carries the session
 //  identifier. What they cannot see is a route wired to the WRONG NEIGHBOUR. Every projection has the same
 //  shape, so `/calc-all` delegating to `Calc`, `/expressions/set` delegating to `AddExpression`, or
 //  `/variable-expressions/get` bound to `SetVariableExpression` all compile, all answer 200, all render a
 //  well-formed body of the right family, and all pass every test in this folder. The mis-wiring is
-//  invisible precisely because the surface is uniform and hand-written forty times.
+//  invisible precisely because the surface is uniform and hand-written thirty-nine times.
 //
 //  So this file asserts the census rather than the sample, in four independent directions:
 //
@@ -26,7 +26,7 @@
 //    2. AGAINST THE PUBLISHED DOCUMENT. Every route the production host declares under /v1/datawindow must
 //       appear in the table with the same method, path and operation id, and vice versa. Read from the
 //       host's own OpenAPI document, so it is the DEPLOYED registration being measured.
-//    3. AGAINST THE RUNNING HOST, ROUTE BY ROUTE. All forty are driven through the real composition
+//    3. AGAINST THE RUNNING HOST, ROUTE BY ROUTE. All thirty-nine are driven through the real composition
 //       root against a recording transport, and each must reach EXACTLY ONE upstream RPC and it must be
 //       the expected one, by fully-qualified gRPC method name.
 //    4. AGAINST THE TYPED CLIENT DIRECTLY, for the members no route projects: the session scope, the two
@@ -35,7 +35,7 @@
 //
 //  HOW THE UPSTREAM IS SUBSTITUTED, AND WHY IT IS DONE AT THE CALL INVOKER.
 //  The sibling suites derive from the generated stub and override the operations they need. That does not
-//  scale to a census: it would mean forty overrides written by hand, each of which could itself be wired
+//  scale to a census: it would mean thirty-nine overrides written by hand, each of which could itself be wired
 //  to the wrong method - a double that repeats the very mistake it is meant to catch. Instead the
 //  GENERATED stubs are constructed over a recording CallInvoker, which is the seam gRPC itself provides:
 //  the stub's own generated code decides which Method<,> descriptor each member passes, so the recording
@@ -129,7 +129,7 @@ public enum ContractService
 /// It answers with an EMPTY response of the right type rather than a scripted payload. That is deliberate
 /// and it is the whole scope of this file: the subject is which RPC a route reaches, and a payload
 /// assertion here would duplicate the sibling suites' work while making a route census depend on
-/// forty message shapes. An empty message is still a well-formed one, so the projection renders it and the
+/// thirty-nine message shapes. An empty message is still a well-formed one, so the projection renders it and the
 /// route answers 200.
 /// </para>
 /// <para>
@@ -281,7 +281,7 @@ internal sealed class RecordingCallInvoker : CallInvoker
 }
 
 /// <summary>
-/// The census: all forty projected routes and the typed-client members no route can reach.
+/// The census: all thirty-nine projected routes and the typed-client members no route can reach.
 /// </summary>
 /// <remarks>
 /// Each test owns its host, because each substitutes the DataServices client and the shared class fixture
@@ -293,7 +293,7 @@ public sealed class DataServicesRouteCensusTests
     /// <summary>The group prefix every projected route sits under.</summary>
     private const string DataWindowPrefix = "/v1/datawindow";
 
-    /// <summary>The sub-group prefix the twenty-four C-04 projections sit under.</summary>
+    /// <summary>The sub-group prefix the twenty-five C-04 projections sit under.</summary>
     private const string ExpressionPrefix = DataWindowPrefix + "/expression";
 
     /// <summary>The published contract document, which is anonymous.</summary>
@@ -325,7 +325,7 @@ public sealed class DataServicesRouteCensusTests
     /// implement the macro switch and to consume the expression trace. An inverted stream has no
     /// request/response direction to project onto a REST route, so their absence is a contract property
     /// rather than an omission - and it is asserted by name here so that projecting one later fails loudly
-    /// instead of quietly adding a forty-first route.
+    /// instead of quietly adding a fortieth route.
     /// </remarks>
     private static readonly ImmutableArray<string> InvertedChannels =
         ["InvokeMethodChannel", "TraceChannel"];
@@ -376,14 +376,6 @@ public sealed class DataServicesRouteCensusTests
             ExpressionPrefix + "/sessions", "openExpressionSession"),
         new("CloseExpressionSession", ContractService.ColumnExpression, "DELETE",
             ExpressionPrefix + "/sessions/{sessionId}", "closeExpressionSession"),
-
-        // LoadRows is the one row here that answers to no legacy member. In-process the caller and the
-        // engine SHARE one DataWindow, so filling it was never an operation; across a boundary a session's
-        // DataWindow is created empty and private, and without this route every calculation operation on
-        // C-04 evaluates over zero rows. Session-scoped handle only, and it APPENDS - so the client member
-        // it drives is documented as not replay-safe.
-        new("LoadRows", ContractService.ColumnExpression, "POST",
-            ExpressionPrefix + "/rows/load", "loadExpressionRows"),
         new("AddExpression", ContractService.ColumnExpression, "POST",
             ExpressionPrefix + "/expressions/add", "addExpression"),
         new("SetExpression", ContractService.ColumnExpression, "POST",
@@ -451,25 +443,25 @@ public sealed class DataServicesRouteCensusTests
     /// omit an RPC entirely, and an omitted RPC is the one failure a per-route test can never detect.
     /// </para>
     /// <para>
-    /// The exclusions are asserted BY NAME. A test that merely counted "forty of forty-three" would
+    /// The exclusions are asserted BY NAME. A test that merely counted "thirty-nine of forty-two" would
     /// pass if the wrong three were missing.
     /// </para>
     /// </remarks>
     [Fact]
     public void TheCensusIsExactlyTheProjectableSurfaceOfBothContracts()
     {
-        Assert.Equal(40, Census.Length);
+        Assert.Equal(39, Census.Length);
 
         // No duplicate anywhere: not a path, not an operation id, not an RPC.
-        Assert.Equal(40, Census.Select(route => route.Path + route.HttpMethod).Distinct(StringComparer.Ordinal).Count());
-        Assert.Equal(40, Census.Select(route => route.OperationId).Distinct(StringComparer.Ordinal).Count());
-        Assert.Equal(40, Census.Select(route => route.GrpcMethodName).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(39, Census.Select(route => route.Path + route.HttpMethod).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(39, Census.Select(route => route.OperationId).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(39, Census.Select(route => route.GrpcMethodName).Distinct(StringComparer.Ordinal).Count());
 
         AssertSurfaceCovered(ContractService.DataWindow, DataWindowService.Descriptor, expectedProjected: 15);
         AssertSurfaceCovered(
             ContractService.ColumnExpression,
             ColumnExpressionService.Descriptor,
-            expectedProjected: 25);
+            expectedProjected: 24);
 
         // The inverted pair belongs to C-04 and is projected by nothing.
         foreach (string inverted in InvertedChannels)
@@ -908,7 +900,7 @@ public sealed class DataServicesRouteCensusTests
     /// could use without any route at all.
     /// </para>
     /// <para>
-    /// Driven by reflection over the census rather than by forty hand-written calls, because a hand-written
+    /// Driven by reflection over the census rather than by thirty-nine hand-written calls, because a hand-written
     /// call list is a second place for the same mistake to be made. The member name is derived from the RPC
     /// name by the one convention the client follows without exception - <c>&lt;Rpc&gt;Async</c> - with the
     /// single documented departure noted below.
@@ -983,7 +975,7 @@ public sealed class DataServicesRouteCensusTests
     /// <remarks>
     /// <para>
     /// THE ONE ASSERTION THAT KEEPS THIS FILE HONEST AS THE CLIENT GROWS. Every other test here measures the
-    /// operations it already knows about, so every one of them would still pass if a forty-fourth operation
+    /// operations it already knows about, so every one of them would still pass if a forty-third operation
     /// were added and never touched. This test is an equality between the client's whole asynchronous public
     /// surface and the union of the census and the four documented non-projected operations, so a new
     /// operation fails it until it is either projected as a route or named as a deliberate exception.

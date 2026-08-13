@@ -67,10 +67,11 @@
 //  saying so, and nothing is invented, inferred or back-filled in their place. The binding set is the
 //  enterprise-standard baseline plus the named non-rule constraints, and the ruling FOR THIS FILE is:
 //    C-A/C-I  Only SqlTaskProxyBase, Tasks/SqlQueryTask.cs, the sibling folders of this project and
-//             the four project edges the .csproj already declares are referenced. Nothing here
-//             reaches a peer service, PowerFramework.Shared.Eventful or
-//             PowerFramework.Shared.Localization, and NO PackageReference is added. The file builds
-//             warning-clean under TreatWarningsAsErrors with nullable enabled.
+//             the five project edges the .csproj declares are referenced. Nothing here reaches a peer
+//             service or PowerFramework.Shared.Localization, and NO PackageReference is added. This
+//             file itself touches PowerFramework.Shared.Eventful only through the notification surface
+//             it inherits from the base; the base's own header records why that edge exists. The file
+//             builds warning-clean under TreatWarningsAsErrors with nullable enabled.
 //    C-B      Ten legacy behaviours that read as defects are reproduced AND ANNOTATED AT THE POINT OF
 //             REPRODUCTION, never corrected: the full-state-versus-changeset `>1` normalisation in
 //             OPPOSITE directions [:L247-L251] plus the child handler's failure-only form [:L141];
@@ -2202,7 +2203,10 @@ internal sealed class SqlQueryTaskProxy : SqlTaskProxyBase, IQueryResultSink
                         }
 
                         // `rtCode = dw.SetChanges(blbData)` [:L197].
-                        rtCode = _payloadCodec.TryApply(target.Carrier, payload);
+                        rtCode = _payloadCodec.TryApply(
+                            target.Carrier,
+                            payload,
+                            CarrierBaselineTrust.AsStated);
 
                         // `if count = current then` [:L198] - the LAST chunk.
                         if (count == current)
@@ -2257,7 +2261,10 @@ internal sealed class SqlQueryTaskProxy : SqlTaskProxyBase, IQueryResultSink
                         }
 
                         // `rtCode = ds.SetChanges(blbData)` [:L221].
-                        rtCode = _payloadCodec.TryApply(target.Carrier, payload);
+                        rtCode = _payloadCodec.TryApply(
+                            target.Carrier,
+                            payload,
+                            CarrierBaselineTrust.AsStated);
 
                         // `if count = current then ds.ResetUpdate()` [:L222-L224] - and NOTHING ELSE.
                         // No GroupCalc, no redraw restore.
@@ -2297,7 +2304,7 @@ internal sealed class SqlQueryTaskProxy : SqlTaskProxyBase, IQueryResultSink
                 }
 
                 // `rtCode = Data.SetChanges(blbData)` [:L238].
-                rtCode = _payloadCodec.TryApply(Data.Carrier, payload);
+                rtCode = _payloadCodec.TryApply(Data.Carrier, payload, CarrierBaselineTrust.AsStated);
 
                 // `if count = current then Data.ResetUpdate()` [:L239-L240].
                 if (count == current)
@@ -2859,7 +2866,7 @@ internal sealed class SqlQueryTaskProxy : SqlTaskProxyBase, IQueryResultSink
         // [:L104-L108, :L117-L121, :L129-L133]. An absent state IS the zero-length blob.
         return payload is null
             ? DataWindowBufferStore.DataStoreSuccess
-            : _payloadCodec.TryApply(resolved.Store, payload);
+            : _payloadCodec.TryApply(resolved.Store, payload, CarrierBaselineTrust.AsStated);
     }
 
     /// <summary>

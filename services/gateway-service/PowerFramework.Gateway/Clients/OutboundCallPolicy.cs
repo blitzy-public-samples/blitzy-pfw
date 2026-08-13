@@ -277,15 +277,22 @@ internal static class OutboundCallPolicy
         (int)global::Grpc.Core.StatusCode.Unavailable,
     ]);
 
-    /// <summary>
-    /// Absolute request paths whose attempts may be replayed at the transport level.
-    /// </summary>
     /// <summary>The replay-safe methods of C-03, by name on its descriptor.</summary>
     /// <remarks>
+    /// <para>
     /// HOISTED SO ONE DEFINITION FEEDS BOTH RETRY LAYERS. The HTTP-level policy classifies by request
     /// path and the gRPC-level policy classifies by method name; if each kept its own list they would
     /// drift, and the drift would show up as an operation being retried at one layer and not the other -
     /// which for a non-idempotent method is a double-apply. See <see cref="BuildRetryServiceConfig"/>.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>THE ADMISSION TEST IS THAT A REPLAY GIVES THE CALLER THE SAME ANSWER, NOT MERELY THAT IT
+    /// LEAVES THE SERVER IN THE SAME STATE.</b> Every method named here is a pure read: it takes nothing
+    /// away, so a second attempt after a lost response answers exactly what the first would have. That is
+    /// the whole of the rule, and it is what excluded <c>CloseValidationSession</c> - see
+    /// <see cref="BuildReplaySafePaths"/> for the two closes and why an idempotent END STATE is not
+    /// sufficient.
+    /// </para>
     /// </remarks>
     private static readonly string[] ReplaySafeDataWindowMethods =
     [
@@ -294,19 +301,24 @@ internal static class OutboundCallPolicy
         "GetColumnSortState",
         "GetContextMenuModel",
         "GetRowSelectState",
-        "CloseValidationSession",
     ];
 
     /// <summary>The replay-safe methods of C-04, by name on its descriptor.</summary>
+    /// <remarks>
+    /// Four pure reads. <c>CloseExpressionSession</c> is excluded for the same reason its C-03 sibling is
+    /// - see <see cref="BuildReplaySafePaths"/>.
+    /// </remarks>
     private static readonly string[] ReplaySafeColumnExpressionMethods =
     [
         "GetExpression",
         "GetVariableExpression",
         "GetServiceState",
         "GetExpressionState",
-        "CloseExpressionSession",
     ];
 
+    /// <summary>
+    /// Absolute request paths whose attempts may be replayed at the transport level.
+    /// </summary>
     private static readonly FrozenSet<string> ReplaySafePaths = BuildReplaySafePaths();
 
     /// <summary>
@@ -348,17 +360,6 @@ internal static class OutboundCallPolicy
     }
 
     /// <summary>
-    /// Decides whether an outcome counts against the circuit breaker.
-    /// </summary>
-    /// <param name="arguments">The outcome and its resilience context.</param>
-    /// <returns><see langword="true"/> when the outcome is evidence the upstream is unhealthy.</returns>
-    /// <remarks>
-    /// UNLIKE RETRY, THIS IS NOT GATED ON THE OPERATION. Whether the upstream is healthy is a property
-    /// of the upstream, not of the call that discovered it, so a server-declared Unavailable on an
-    /// update is exactly as much evidence as one on a read. What IS filtered is the meaning of the
-    /// answer: a status the server chose deliberately and correctly is not a failure of the server.
-    /// </remarks>
-    /// <summary>
     /// The retry predicate installed on a gRPC channel's HTTP pipeline: it never retries.
     /// </summary>
     /// <param name="arguments">The attempt's outcome. Not read.</param>
@@ -374,14 +375,34 @@ internal static class OutboundCallPolicy
     /// </para>
     /// <para>
     /// EXPRESSED AS A PREDICATE RATHER THAN AS ZERO ATTEMPTS because the resilience package's own
-    /// validator requires <c>MaxRetryAttempts</c> to be at least one, so "no retries" is not expressible
-    /// as a count. A named method rather than an inline lambda so a test can assert the identity of what
-    /// is installed instead of inferring it from behaviour.
+    /// validator requires its strategy's <c>MaxRetryAttempts</c> to be at least one, so "no retries" is
+    /// not expressible to THAT strategy as a count. A named method rather than an inline lambda so a test
+    /// can assert the identity of what is installed instead of inferring it from behaviour.
+    /// </para>
+    /// <para>
+    /// THAT IS A STATEMENT ABOUT THE PACKAGE AND NOT ABOUT THE OPERATOR-FACING SETTING, which is a
+    /// distinction worth keeping: <c>Gateway:Outbound:MaxRetryAttempts</c> DOES accept zero, and the
+    /// composition root branches on it - installing no gRPC service configuration at all and pairing this
+    /// predicate with <see cref="GatewayOptions.OutboundCallOptions.DisabledRetryPlaceholderAttempts"/>,
+    /// the smallest count the package's range permits. So this method serves two callers: the gRPC
+    /// channels always, because retry there belongs to the gRPC layer, and every pipeline when retrying is
+    /// configured off.
     /// </para>
     /// </remarks>
     internal static ValueTask<bool> NeverRetryAtTheHttpLayerAsync(
         RetryPredicateArguments<HttpResponseMessage> arguments) => ValueTask.FromResult(false);
 
+    /// <summary>
+    /// Decides whether an outcome counts against the circuit breaker.
+    /// </summary>
+    /// <param name="arguments">The outcome and its resilience context.</param>
+    /// <returns><see langword="true"/> when the outcome is evidence the upstream is unhealthy.</returns>
+    /// <remarks>
+    /// UNLIKE RETRY, THIS IS NOT GATED ON THE OPERATION. Whether the upstream is healthy is a property
+    /// of the upstream, not of the call that discovered it, so a server-declared Unavailable on an
+    /// update is exactly as much evidence as one on a read. What IS filtered is the meaning of the
+    /// answer: a status the server chose deliberately and correctly is not a failure of the server.
+    /// </remarks>
     internal static ValueTask<bool> ShouldBreakAsync(
         CircuitBreakerPredicateArguments<HttpResponseMessage> arguments)
     {
@@ -615,15 +636,27 @@ internal static class OutboundCallPolicy
     /// </exception>
     /// <remarks>
     /// <para>
-    /// THE C-03 ENTRIES. Five pure reads - the event gate and the four presentational model reads,
-    /// each of which derives a model from state it does not change - plus the validation-session
-    /// close, which <c>DataServicesClient.CloseValidationSessionAsync</c> documents as idempotent by
-    /// contract precisely so that a caller which cannot safely repeat a close does not leak a session
-    /// on a transport hiccup.
+    /// THE C-03 ENTRIES. Five pure reads - the event gate and the four presentational model reads, each
+    /// of which derives a model from state it does not change.
     /// </para>
     /// <para>
-    /// THE C-04 ENTRIES. Four pure reads plus the expression-session close, which reports a session
-    /// that had already gone without that being an error.
+    /// THE C-04 ENTRIES. Four pure reads.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>THE TWO SESSION CLOSES WERE HERE AND ARE NOT ANY MORE, AND THE REASON IS THAT AN IDEMPOTENT
+    /// END STATE IS NOT REPLAY SAFETY.</b> They were admitted on the reading that closing twice leaves the
+    /// server in the same place, which is true and is beside the point: a close is DESTRUCTIVE OF THE
+    /// INFORMATION ITS OWN RESPONSE CARRIES. <c>CloseValidationSession</c> answers <c>was_open</c> plus the
+    /// session's <c>final_state</c>, captured from the session immediately before it is removed
+    /// [<c>Domain/ValidationSession</c> - the registry's close], so a first attempt that SUCCEEDED and
+    /// whose response was lost in transit is followed by a replay that finds nothing, answers
+    /// <c>OK / was_open = false</c> with an EMPTY final state, and hands the caller a response
+    /// indistinguishable from "there was never such a session". The outstanding continuation or set
+    /// re-entrancy guard that the real answer reported - the whole reason the response carries a final
+    /// state - is gone, silently. <c>CloseExpressionSession</c> has the same shape on <c>was_open</c>.
+    /// Neither is retried now, so a lost close response surfaces as the transport fault it is and the
+    /// caller decides; the idle sweeper is what stops an unclosed session outliving its client, which is
+    /// what the retry was informally standing in for.
     /// </para>
     /// <para>
     /// WHAT IS ABSENT AND WHY, because the absences carry more of the policy than the entries do.
@@ -721,7 +754,7 @@ internal static class OutboundCallPolicy
     /// </para>
     /// <para>
     /// ONLY REPLAY-SAFE METHODS ARE NAMED, and a method absent from a service config's method list is
-    /// simply not retried. So <c>Retrieve</c>, <c>Update</c>, <c>LoadRows</c> and every other
+    /// simply not retried. So <c>Retrieve</c>, <c>Update</c>, <c>AddExpression</c> and every other
     /// state-advancing method remain single-attempt exactly as before: replaying one would leak a task,
     /// append a clause twice, or apply an update twice.
     /// </para>

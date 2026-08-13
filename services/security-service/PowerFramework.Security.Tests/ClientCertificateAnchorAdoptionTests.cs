@@ -255,12 +255,17 @@ public sealed class ClientCertificateAnchorAdoptionTests
     private sealed class AnchorHost : WebApplicationFactory<Program>
     {
         /// <summary>The configuration overrides this host is built with.</summary>
-        private readonly Dictionary<string, string?> _settings = new(StringComparer.Ordinal)
-        {
-            [SecurityOptions.SigningKeyEnvironmentVariableName] =
-                SecurityAppFactory.CreateSigningKeyMaterial(
-                    SecurityAppFactory.DefaultSigningKeySizeInBits),
-        };
+        /// <remarks>
+        /// THE ROSTER SECRETS ARE PART OF THE MINIMUM A HOST NEEDS IN ORDER TO START, not an extra. The
+        /// issuance registry resolves every secret the shipped roster names EAGERLY and refuses to
+        /// construct when one resolves to nothing, so a host that omitted them would fail during startup
+        /// rather than on the trust-anchor property these rows exist to assert. They are merged from
+        /// <see cref="SecurityAppFactory.RosterSecretOverrides"/> so this host and the four others in the
+        /// assembly cannot drift, and they are supplied HERE - in this host's own in-memory configuration -
+        /// rather than in the process environment, so nothing this host configures is observable by another
+        /// test class.
+        /// </remarks>
+        private readonly Dictionary<string, string?> _settings = BuildBaseSettings();
 
         /// <summary>Records one configuration override, for the collection initializer.</summary>
         /// <param name="key">The configuration key.</param>
@@ -269,6 +274,24 @@ public sealed class ClientCertificateAnchorAdoptionTests
         {
             get => _settings.TryGetValue(key, out string? value) ? value : null;
             set => _settings[key] = value;
+        }
+
+        /// <summary>
+        /// The signing material and roster secrets without which this service's composition root refuses
+        /// to start.
+        /// </summary>
+        /// <returns>The minimum startable configuration, as a mutable collection a row can add to.</returns>
+        private static Dictionary<string, string?> BuildBaseSettings()
+        {
+            Dictionary<string, string?> settings =
+                new(SecurityAppFactory.RosterSecretOverrides(), StringComparer.Ordinal)
+                {
+                    [SecurityOptions.SigningKeyEnvironmentVariableName] =
+                        SecurityAppFactory.CreateSigningKeyMaterial(
+                            SecurityAppFactory.DefaultSigningKeySizeInBits),
+                };
+
+            return settings;
         }
 
         /// <inheritdoc />

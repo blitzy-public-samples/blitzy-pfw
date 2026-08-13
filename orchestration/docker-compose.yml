@@ -9,8 +9,8 @@
 #
 #  THE FOUR SERVICES, AND ONLY THESE FOUR:
 #    security-service      5104   REST + OpenAPI            the system's SOLE token issuer
-#    persistence-service   5101   REST  /  5111 gRPC        the only service that executes SQL
-#    dataservices-service  5102   REST  /  5112 gRPC        the DataWindow service layer
+#    persistence-service   5101   REST + gRPC              the only service that executes SQL
+#    dataservices-service  5102   REST + gRPC              the DataWindow service layer
 #    gateway-service       5105   REST + OpenAPI            the sole ingress and composition root
 #
 #  THE FOUR DEFERRED SERVICES APPEAR NOWHERE IN THIS FILE (C-D). DesignSystem, Documents,
@@ -30,6 +30,14 @@
 #  three inside vendored binaries; that register carries locators and severities and reproduces no
 #  value, and nothing from it is referenced or reproduced here. Authoring this file required reading
 #  no secret value, and it contains none.
+#
+#  THE `secrets:` SECTION AT THE FOOT OF THIS FILE IS NOT AN EXCEPTION TO THAT, and it is worth saying
+#  so where a reader meets the claim. It declares three FILE REFERENCES - the server certificate, its
+#  private key and the internal CA - each naming a path on the operator's own machine and projecting it
+#  read-only into the containers under `/run/secrets/internal-tls/`. No material crosses this file, and
+#  the projection exists because every listener here terminates TLS and every image probe verifies the
+#  certificate it is presented: without it, all four containers crash-loop on a certificate they cannot
+#  resolve, which is exactly what an earlier revision of this manifest did.
 #
 #  THE LEGACY TREE IS NOT REACHED BY ANYTHING HERE (C-C). No mount, bind, volume or build input names
 #  `ws_objects/`, `pack/`, `oldversion/`, `res/`, `samples/`, `sciter_control/`, `tests/blink/`,
@@ -127,7 +135,8 @@ services:
       context: ..
       dockerfile: services/security-service/Dockerfile
 
-    # PUBLISHED 1:1, AND QUOTED SO YAML CANNOT READ IT AS A SEXAGESIMAL NUMBER.
+    # PUBLISHED WITH AN OVERRIDABLE HOST PORT, AND QUOTED SO YAML CANNOT READ IT AS A SEXAGESIMAL
+    # NUMBER.
     #
     # Gateway on 5105 is the only intended ingress. The other three ports are published purely so the
     # per-service `/health` readiness probes the attached environment documents can be exercised FROM
@@ -138,13 +147,74 @@ services:
     # the three `ports:` blocks and keeps `expose`-free in-network access, which changes nothing about
     # how the services talk to each other.
     #
+    # THE HOST HALF IS A VARIABLE AND THE CONTAINER HALF IS NOT, and the asymmetry is the whole point.
+    # The container port is what the service BINDS - it is fixed by `Kestrel:Endpoints` in that
+    # service's own settings file and a variable here could only ever disagree with it. The host port
+    # is what the operator's machine offers, and that is genuinely the operator's to choose: without
+    # this, a SECOND stack on one host (`docker compose -p pfw-2 …`) fails on a port collision, which
+    # `orchestration/README.md` used to claim worked. The default is the documented value, so an
+    # operator who sets nothing gets exactly the attached environment's map.
+    #
     # The 5101-5105 band and Gateway's 5105 are preserved exactly as the attached environment fixes
     # them (C-L), because 5105 is the documented composition-root access URL.
     ports:
-      - "5104:5104"
+      - "${SECURITY_HOST_PORT:-5104}:5104"
 
     # NO `expose:` KEY. It would be redundant beside `ports:` and beside the `EXPOSE` each Dockerfile
     # already declares, and a third statement of the same fact is a third thing to keep in agreement.
+
+    # ============================================================================================
+    #  THE TLS MATERIAL - PROJECTED READ-ONLY INTO ALL FOUR SERVICES, AND THE THING THAT MAKES EVERY
+    #  CERTIFICATE PATH IN THIS FILE NAME A FILE THAT ACTUALLY EXISTS.
+    #
+    #  ⚠ THIS CLOSES A DEFECT THAT MADE THE DOCUMENTED BRING-UP IMPOSSIBLE, and the defect is worth
+    #  stating so nobody removes the projection as redundant. An earlier revision passed three
+    #  CONTAINER paths to every service - the Kestrel certificate pair and the trust anchor - and
+    #  supplied nothing at any of them. All four Dockerfiles' HEALTHCHECKs read the anchor path too. So
+    #  an operator following the documented bring-up got four containers in which
+    #  /run/secrets/internal-tls/ was an EMPTY, NON-EXISTENT directory: Kestrel cannot resolve a
+    #  certificate and REFUSES TO START an https endpoint rather than downgrading, so every service
+    #  crash-looped, no `/health` ever answered, and the `depends_on: service_healthy` chain could
+    #  never open. The paths were correct; there was simply nothing behind them.
+    #
+    #  THE MECHANISM IS THE `secrets:` GRANT BELOW, NOT A BIND MOUNT, AND THAT IS A REASONED CHOICE
+    #  (C-K). A grant's `target:` is stated relative to `/run/secrets`, so `internal-tls/server.crt`
+    #  lands at `/run/secrets/internal-tls/server.crt` - the literal path the `environment:` block
+    #  above names. Three properties follow that a bind mount would not give for free:
+    #    * IT IS READ-ONLY BY CONSTRUCTION. A private key a container can rewrite is a private key a
+    #      compromised container can replace, and nothing in this stack ever writes here - the only
+    #      writable path any service needs is Persistence's data volume. A bind is read-write unless
+    #      told otherwise, so the property would depend on remembering `read_only: true` on four
+    #      mounts; here it cannot be forgotten.
+    #    * A MISSING SOURCE ABORTS BRING-UP BY NAME. Each secret's `file:` carries the `:?` form, so an
+    #      unset variable stops Compose with a message naming the variable, and a path that is set but
+    #      names nothing stops Docker with a message naming the path. Neither can degrade into four
+    #      containers with an empty directory - which is exactly what `${DIR}:/run/secrets/...:ro`
+    #      short-syntax would do, because it silently CREATES an empty host directory when the source
+    #      is absent. This is the fail-fast posture the rest of this file keeps
+    #      [ws_objects/pfw.pbl.src/pfw.sra:L143].
+    #    * IT IS THE SHAPE A PRODUCTION PROJECTION ALREADY HAS. A Kubernetes secret volume and a Docker
+    #      secret both land as files under a directory, which is what the Dockerfiles describe when
+    #      they say the anchor "is MOUNTED READ-ONLY at run time from the orchestration secret layer".
+    #
+    #  THE THREE FILES, AND THE VARIABLE EACH IS NAMED TO THE APPLICATION BY:
+    #      server.crt   the PEM certificate chain   Kestrel__Certificates__Default__Path
+    #      server.key   its PEM private key         Kestrel__Certificates__Default__KeyPath
+    #      ca.crt       the issuing authority       INTERNAL_TLS_TRUSTED_CA_PATH (+ the HEALTHCHECKs)
+    #  Generate all three with `docs/ARCHITECTURE.md` section 9.3.1. NOTHING IS COMMITTED: this file
+    #  names three host paths the operator supplies and no material of any kind (C-F).
+    #
+    #  ⚠ OWNERSHIP MATTERS AND IS THE ONE THING THE PROJECTION WILL NOT FIX FOR YOU. The projection
+    #  preserves the HOST file's ownership and mode, and every runtime stage drops to the unprivileged
+    #  `app` account the base image publishes as UID 1654. A key mode 0600 owned by the host's root is
+    #  therefore UNREADABLE inside the container and Kestrel fails exactly as if it were absent.
+    #  `orchestration/README.md` and `orchestration/.env.example` carry the `chown 1654` step, and
+    #  section 9.3.1 generates the key 0644 inside a 0700 directory for the same reason.
+    #
+    #  A DEPLOYMENT ADOPTING THE MUTUAL-TLS FALLBACK adds its client material as three further secrets
+    #  and points the optional `*_MTLS_*` variables at their projected paths; those four variables are
+    #  empty by default and nothing here is required to change for the fallback to be reachable.
+    # ============================================================================================
 
     environment:
 
@@ -173,8 +243,16 @@ services:
       # loopback IPs. Current TLS stacks ignore the common name and read `subjectAltName` only, so a
       # single-CN certificate matches nothing at all. `docs/ARCHITECTURE.md` 9.3.1 carries the
       # generation recipe and the verification step; per-service certificates are equally correct.
-      Kestrel__Certificates__Default__Path: '${TLS_CERTIFICATE_PATH:?TLS_CERTIFICATE_PATH must be set in orchestration/.env - every listener in this stack is https and Kestrel refuses to start without a certificate. Generate one with docs/ARCHITECTURE.md section 9.3.1 and point this at the PEM chain.}'
-      Kestrel__Certificates__Default__KeyPath: '${TLS_CERTIFICATE_KEY_PATH:?TLS_CERTIFICATE_KEY_PATH must be set in orchestration/.env - the PEM private key matching TLS_CERTIFICATE_PATH. See docs/ARCHITECTURE.md section 9.3.1.}'
+      #
+      # 🔴 THE VALUES ARE THE PROJECTED CONTAINER PATHS, NOT THE OPERATOR'S HOST PATHS, AND AN EARLIER
+      # REVISION OF THIS FILE GOT THAT EXACTLY BACKWARDS. It interpolated `${TLS_CERTIFICATE_PATH}`
+      # straight into this key - a path on the OPERATOR'S MACHINE, handed to a process inside a
+      # container that mounted nothing. Every listener in the stack then failed to resolve its
+      # certificate and every container crash-looped, while the manifest read as fully configured. The
+      # host paths now feed the `secrets:` sources at the foot of this file; what a service is told is
+      # where Compose PUTS the file, which is decided here and is therefore a literal.
+      Kestrel__Certificates__Default__Path: /run/secrets/internal-tls/server.crt
+      Kestrel__Certificates__Default__KeyPath: /run/secrets/internal-tls/server.key
 
       # THE ONLY SIGNING SECRET IN THE ENTIRE SYSTEM (C-G), AND THE ONE VARIABLE THAT CARRIES
       # MATERIAL RATHER THAN A PATH.
@@ -241,25 +319,36 @@ services:
       # accepts EITHER a shared secret or a client certificate, and the documented bring-up supplies
       # the secrets above. A deployment that supplies the secrets and leaves the certificate paths
       # empty is fully supported and every service reports ready under it. Mutual TLS is the
-      # documented per-pair FALLBACK, so it is left configurable and is not scaffolded here: this
-      # file mounts no certificate, no key and no TLS volume anywhere.
+      # documented per-pair FALLBACK, so it is left configurable and no value is scaffolded for it.
+      #
+      # ADOPTING IT NEEDS ONE FURTHER SECRET AND THIS ONE VARIABLE. Declare the client authority beside
+      # the three listener secrets at the foot of this file, grant it a target under `internal-tls/` -
+      # for example `internal-tls/client-ca.crt` - and point this variable at the projected path
+      # `/run/secrets/internal-tls/client-ca.crt`. The same shape applies to the four `*_MTLS_*` client
+      # pairs on Gateway and DataServices. Nothing here changes for a deployment that does not adopt
+      # the fallback, which is why the variable is empty rather than absent.
       Security__MutualTls__ClientCaPath: ${SECURITY_MTLS_CLIENT_CA_PATH:-}
       Security__ClientCertificateRevocationMode: ${SECURITY_MTLS_CLIENT_REVOCATION_MODE:-NoCheck}
 
-      # THE END-TO-END SUITE'S ISSUANCE GRANT, PASSED THROUGH VERBATIM.
+      # THE END-TO-END SUITE'S ISSUANCE GRANT IS NOT STATED HERE, AND ITS REMOVAL IS THE FIX RATHER
+      # THAN AN OMISSION.
       #
-      # These five are already ASP.NET Core configuration keys rather than external names, so they are
-      # forwarded unchanged - which is why they alone among the entries in this file carry no
-      # translation. INDEX 3 IS LOAD-BEARING: Security's `appsettings.json` states the permission
-      # matrix in the flat `CallerAuthorizations` shape and occupies indices 0, 1 and 2, and the
-      # configuration provider merges an array BY INDEX rather than by appending. A fourth row added
-      # to that settings file would be wholly shadowed by this block, silently; if a row is
-      # legitimately added there, this index moves with it.
-      Security__CallerAuthorizations__3__Caller: ${Security__CallerAuthorizations__3__Caller:-pfw-e2e-suite}
-      Security__CallerAuthorizations__3__Audience: ${Security__CallerAuthorizations__3__Audience:-powerframework-gateway}
-      Security__CallerAuthorizations__3__Scopes__0: ${Security__CallerAuthorizations__3__Scopes__0:-ping}
-      Security__CallerAuthorizations__3__Scopes__1: ${Security__CallerAuthorizations__3__Scopes__1:-capabilities}
-      Security__CallerAuthorizations__3__Scopes__2: ${Security__CallerAuthorizations__3__Scopes__2:-datawindow}
+      # This block used to inject `Security__CallerAuthorizations__3__{Caller,Audience,Scopes__0..2}`
+      # UNCONDITIONALLY, granting `pfw-e2e-suite` the Gateway audience in every environment. It was
+      # wrong in both:
+      #
+      #   * In `Development` it was REDUNDANT - `appsettings.Development.json` already states that
+      #     exact grant at that exact index, alongside the `Security:Clients` credential entry the
+      #     caller needs in order to authenticate for it. Two statements of one grant, merged by
+      #     index, is a standing invitation to drift.
+      #   * In `Production` it was WRONG - the base settings file has no credential entry for that
+      #     caller, so the row granted a permission nothing could authenticate to exercise, and
+      #     Security now reports exactly that at startup.
+      #
+      # It also made the literal index 3 load-bearing across two files: a fourth row legitimately
+      # added to the settings file would have been silently merged INTO this one rather than appended,
+      # because the environment provider merges an array by index. The grant belongs where the caller
+      # that uses it is registered, which is the Development overlay, and it is stated there only.
 
       # THE TRUST ANCHOR, FOR THIS SERVICE'S OWN READINESS PROBE RATHER THAN FOR ITS CONFIGURATION.
       #
@@ -269,7 +358,23 @@ services:
       # probe that skipped verification would report a Security instance healthy while presenting
       # material every consumer in the system is about to reject. The value is a PATH to a public
       # certificate; the anchor itself is not secret and is not committed.
-      INTERNAL_TLS_TRUSTED_CA_PATH: ${INTERNAL_TLS_TRUSTED_CA_PATH:-/run/secrets/internal-tls/ca.crt}
+      #
+      # LITERAL FOR THE SAME REASON AS THE CERTIFICATE PAIR ABOVE: it is where the `secrets:` grant
+      # below projects the anchor, which this file decides. It was previously an overridable variable
+      # defaulting to this same path - an override that disagreed with the projection could only ever
+      # break the probe, so the choice is not one worth offering.
+      INTERNAL_TLS_TRUSTED_CA_PATH: /run/secrets/internal-tls/ca.crt
+
+    # THE TLS MATERIAL, PROJECTED READ-ONLY. See the `secrets:` section at the foot of this file for
+    # the full contract; every service takes the same three, because every one both PRESENTS the
+    # server certificate on its own listener and VERIFIES a peer's against the same anchor.
+    secrets:
+      - source: tls-server-certificate
+        target: internal-tls/server.crt
+      - source: tls-server-private-key
+        target: internal-tls/server.key
+      - source: internal-tls-ca-certificate
+        target: internal-tls/ca.crt
 
     networks:
       - powerframework
@@ -295,7 +400,7 @@ services:
     #   1. THE IMAGE PROBES SPEAK TLS, AND A NAIVE ONE CANNOT. Every listener in this stack
     #      terminates TLS, so the two obvious manifest-side probes both fail PERMANENTLY rather than
     #      intermittently: `curl --fail` is not available at all - the .NET runtime images ship
-    #      NEITHER curl NOR wget, measured on `aspnet:10.0`, which carries `openssl`, `bash`,
+    #      NEITHER curl NOR wget, measured on `aspnet:10.0.11`, which carries `openssl`, `bash`,
     #      `timeout` and `head` instead - and a bash `/dev/tcp` redirection writes plaintext bytes
     #      into a TLS endpoint, so it never produces a status line. A probe that can only ever fail
     #      keeps a `service_healthy` gate shut for ever, which from the outside is indistinguishable
@@ -313,21 +418,24 @@ services:
     #      inherit its declaration rather than write one of its own.
     #
     # SO THE READINESS CONTRACT IS STILL LEGIBLE FROM THIS FILE - it is stated here and cited to the
-    # line rather than duplicated. Each image probes its own ANONYMOUS `GET /health` over TLS on its
-    # HTTP/1.1 port, verifies the presented certificate against the trust anchor above, and matches
+    # line rather than duplicated. Each image probes its own ANONYMOUS `GET /health` over TLS, using
+    # HTTP/1.1 against the one port its service binds, verifies the presented certificate against the
+    # trust anchor above, and matches
     # `' 200 '` in the status line, so a 503 from a Degraded or Unhealthy report fails the probe
     # exactly as a refused connection does. `/v1/ping` is NEVER probed by any of them: it requires a
     # bearer token and answers 401 by design, so pointing a probe at it would mark every healthy
     # container unhealthy for ever.
     #
     #   security-service      services/security-service/Dockerfile:L439-L440       probes 127.0.0.1:5104
-    #   persistence-service   services/persistence-service/Dockerfile:L354-L355    probes 127.0.0.1:5101
-    #   dataservices-service  services/dataservices-service/Dockerfile:L448-L449   probes 127.0.0.1:5102
+    #   persistence-service   services/persistence-service/Dockerfile:L351-L352    probes 127.0.0.1:5101
+    #   dataservices-service  services/dataservices-service/Dockerfile:L446-L447   probes 127.0.0.1:5102
     #   gateway-service       services/gateway-service/Dockerfile:L259-L260        probes 127.0.0.1:5105
     #
-    # The gRPC ports 5111 and 5112 are deliberately unprobed: each is configured HTTP/2-only and
-    # would answer an HTTP/1.1 request with 400, and a host binds all its endpoints or refuses to
-    # start, so the REST port answering already proves the process is serving.
+    # THERE IS NO SEPARATE gRPC PORT TO PROBE. Persistence and DataServices each bind ONE TLS endpoint
+    # with Protocols Http1AndHttp2 on the port AAP 0.3.2.2 assigns them, so the address that answers
+    # this HTTP/1.1 probe is the same address their gRPC contracts arrive on and ALPN chooses between
+    # the versions per connection. A host binds all its endpoints or refuses to start, so the probe
+    # answering proves the whole listener is serving.
     #
     # THE HEALTH GATE HAS TWO HALVES AND BOTH ARE REQUIRED. This file supplies the first - the
     # `depends_on` conditions below, which control START ORDERING. The second is Gateway's own
@@ -337,8 +445,8 @@ services:
     # something this file can or should implement. Compose alone would only order the starts.
 
   # ================================================================================================
-  # PERSISTENCE - port 5101 REST, 5111 gRPC. THE ONLY SERVICE THAT EXECUTES SQL, AND THE ONLY ONE
-  # WITH A STORAGE PROVIDER.
+  # PERSISTENCE - port 5101, REST AND gRPC ON ONE ENDPOINT. THE ONLY SERVICE THAT EXECUTES SQL, AND
+  # THE ONLY ONE WITH A STORAGE PROVIDER.
   # ================================================================================================
   #
   # It waits for Security because its bearer handler fetches Security's published key set to verify
@@ -351,23 +459,40 @@ services:
       context: ..
       dockerfile: services/persistence-service/Dockerfile
 
-    # TWO PORTS, ONE PER PROTOCOL VERSION, AND THEY ARE NOT INTERCHANGEABLE. 5101 carries the
-    # anonymous `/health` and the authenticated `/v1/ping` over HTTP/1.1; 5111 carries the four
-    # published gRPC contracts C-05..C-08 over HTTP/2, whose only caller is DataServices inside this
-    # network. Each endpoint pins ONE protocol version, so a gRPC channel aimed at 5101 fails with
-    # HTTP_1_1_REQUIRED before the request arrives and an HTTP/1.1 probe aimed at 5111 gets a 400 -
-    # both mistakes fail loudly instead of at some later, less attributable point. 5111 sits OUTSIDE
-    # the documented 5101-5105 band on purpose, so it cannot collide with it and cannot encroach on
-    # 5103, which stays the reserved Phase-2 slot (C-D).
+    # ONE LISTENER, CARRYING BOTH PROTOCOL VERSIONS, AND IT IS PUBLISHED TO THE HOST.
+    #
+    # 5101 carries everything this service serves: the anonymous `/health` and the authenticated
+    # `/v1/ping` over HTTP/1.1, and the four published gRPC contracts C-05..C-08 over HTTP/2, whose only
+    # caller is DataServices inside this network. This is the port AAP 0.3.2.2 assigns Persistence for
+    # exactly this traffic - "gRPC, plus REST /health and /v1/ping", one port carrying both kinds - so
+    # the endpoint is declared `Http1AndHttp2` in this service's own `appsettings.json` and ALPN
+    # negotiates the version per connection. 5103 is untouched either way and stays the reserved
+    # Phase-2 slot (C-D).
+    #
+    # AN EARLIER REVISION SPLIT THIS IN TWO, 5101 for HTTP/1.1 and 5111 for HTTP/2, each endpoint
+    # pinning one version so a misaddressed caller failed at negotiation rather than at the routing
+    # layer. That motive was real but it put C-05..C-08 at an address the plan does not assign, and the
+    # plan's port map is what every caller, probe, manifest and fixture addresses; a diagnostic
+    # convenience does not outweigh the assignment. The split is withdrawn, and with it a second
+    # EXPOSE, a second probe target and a second port in every document.
+    #
+    # PUBLISHING 5101 DOES NOT PUBLISH AN UNAUTHENTICATED SURFACE, which is what makes the collapse
+    # safe rather than merely tidier. The attached environment's readiness gate requires `/health` to
+    # be curl-able from the host (C-L), and that endpoint is anonymous by design. Everything else on
+    # the port - `/v1/ping` and all four gRPC contracts - requires a bearer token issued by Security
+    # and answers 401 without one, so the boundary decomposition created is authenticated from the
+    # outset rather than merely unadvertised (C-G).
+    #
+    # The host half is a variable for the reason given on Security's block above.
     ports:
-      - "5101:5101"
-      - "5111:5111"
+      - "${PERSISTENCE_HOST_PORT:-5101}:5101"
 
-    # THE ONLY VOLUME MOUNT IN THIS MANIFEST, ON THE ONLY SERVICE THAT HOLDS STORAGE.
+    # THE ONLY WRITABLE MOUNT IN THIS MANIFEST, ON THE ONLY SERVICE THAT HOLDS STORAGE.
     #
     # Persistence is the sole service that generates or executes SQL and the sole holder of a storage
-    # provider, so it is the only one that touches storage here. Gateway, DataServices and Security
-    # mount nothing at all - not a volume, not a bind, not a tmpfs.
+    # provider, so it is the only one that touches STORAGE here. Gateway, DataServices and Security
+    # mount no volume, no bind and no tmpfs of their own - the three read-only TLS secrets projected
+    # below reach all four identically and carry no state.
     #
     # `/var/lib/powerframework` is not a guess: it is the `Sqlite:DataDirectory` value in this
     # service's own `appsettings.json`, and its Dockerfile creates that directory, chowns it to the
@@ -377,33 +502,56 @@ services:
     # merely on the file is required. Mounting the named volume at exactly that path is what makes
     # the database survive container recreation.
     #
-    # ⚠ ONE OPERATOR STEP IS REQUIRED ON A FRESH VOLUME, AND IT IS NOT SOMETHING THIS FILE CAN DO.
+    # 🔴 A FRESH VOLUME PROVISIONS ITSELF, AND THAT IS WHAT MAKES THE ONE DOCUMENTED COMMAND SUFFICIENT.
     #
-    # THIS SERVICE DOES NOT CREATE ITS OWN SCHEMA, deliberately - there is no EnsureCreated and no
-    # Migrate anywhere in it, and its own source says so in as many words. Its `/health` therefore
-    # reports NOT READY until the `COMPANY` table exists. VERIFIED BY BRINGING THIS STACK UP: against
-    # a brand-new `persistence-db` volume the container starts, binds both listeners and answers, but
-    # its storage check reports Unhealthy with "the database file may not exist yet", so the
-    # `depends_on` conditions below correctly hold DataServices and Gateway back. That is the
-    # readiness gate doing precisely its job rather than a fault in it - but an operator who does not
-    # know about this step reads it as a broken stack, which is why it is recorded here, at the point
-    # where the volume is mounted, and not only in a document.
+    # `Schema__ApplyMigrationsOnStartup` is set to true in this service's environment below, so on a
+    # brand-new `persistence-db` volume the container applies the pending migrations - between its
+    # startup gate and its request pipeline, before the readiness probe is ever asked - and then answers
+    # `/health` 200, which opens the `depends_on` conditions for DataServices and Gateway. Nothing else
+    # is required of an operator: `docker compose --env-file .env up --build -d` reaches a healthy stack
+    # from an empty volume.
     #
-    # Apply the migration once per volume, as `docs/BUILD.md` section 5.6 prescribes. It is idempotent
-    # and non-destructive, so it is safe to re-run and safe BETWEEN the two halves of a paired
-    # characterization capture:
+    # WHAT THIS REPLACED, RECORDED BECAUSE THE OLD BEHAVIOUR LOOKED LIKE A BROKEN STACK. This service
+    # applied no migration at all, so a fresh volume had no `COMPANY` table and its storage check
+    # reported Unhealthy for ever - VERIFIED BY BRINGING THIS STACK UP, with the body naming the
+    # unprovisioned database and the health conditions correctly holding two services back. The gate was
+    # doing its job; the stack was still unusable, and the remedy was `dotnet ef database update` run out
+    # of band from a checkout with the SDK and the `dotnet-ef` tool installed, neither of which the
+    # runtime image carries. An operator following the documented bring-up had no reason to know.
+    #
+    # THE STEP IS ADDITIVE AND IDEMPOTENT, WHICH IS WHY IT IS SAFE TO HAVE ON BY DEFAULT HERE. It calls
+    # `Database.Migrate` and nothing else: it creates what the migration history table does not already
+    # record and it drops, deletes and reseeds NOTHING. There is no EnsureCreated, no EnsureDeleted and
+    # no DROP anywhere in this service. So it is safe to re-run, safe on every restart, and safe BETWEEN
+    # the two halves of a paired characterization capture - the volume is never recreated or reseeded.
+    # Concurrent replicas are serialized by an exclusive lock file on this same volume, and a failure
+    # TERMINATES the container rather than starting a service that could answer nothing.
+    #
+    # A PARITY OPERATOR CAN STILL TURN IT OFF, in one place and without editing this file: set
+    # PERSISTENCE_APPLY_MIGRATIONS_ON_STARTUP=false in `orchestration/.env`. The service's own
+    # `appsettings.json` defaults it to false, so the opted-out behaviour is the code default and this
+    # manifest is the only thing that opts in. With it off, the schema is applied out of band exactly as
+    # before, as `docs/BUILD.md` section 5.6 prescribes:
     #
     #     cd services/persistence-service/PowerFramework.Persistence
     #     dotnet build -c Release
     #     dotnet ef database update --no-build --configuration Release \
     #       -c PowerFrameworkDbContext --connection "Data Source=<data-directory>/test.db"
     #
-    # NO INIT CONTAINER DOES THIS, AND THAT IS DELIBERATE RATHER THAN AN OMISSION. The runtime image
-    # carries neither the SDK nor the `dotnet-ef` tool, so a migration container would be a FIFTH
-    # service built from a different base image - and this manifest is exactly four services by
-    # requirement. Provisioning is a deployment step; `orchestration/README.md` carries it in the
-    # bring-up order alongside the readiness gates.
+    # AND TURNING IT OFF IS A PRECAUTION RATHER THAN A REQUIREMENT, WHICH IS WORTH BEING PRECISE ABOUT.
+    # Applying a migration never touches a row, so leaving the switch on does not by itself put a paired
+    # capture at risk; the destructive operation the paired-capture rule actually guards against is
+    # recreating the VOLUME - `docker compose down -v` - and the note at the foot of this file covers it.
+    # What the switch buys a capture operator is the stronger statement: that nothing but the workflow
+    # under characterization opened the database at all.
+    #
+    # NO INIT CONTAINER DOES THIS, AND THAT IS STILL DELIBERATE. A migration container would be a FIFTH
+    # service built from a different base image, and this manifest is exactly four services by
+    # requirement - which is precisely why the step lives inside the service that owns the storage.
 
+    # THE ONLY `volumes:` KEY IN THIS MANIFEST, AND THE ONLY WRITABLE PATH IN THE STACK. The TLS
+    # material every service reads arrives by the `secrets:` grant instead - see `security-service`
+    # above for why - so this key is storage and nothing else.
     volumes:
       - persistence-db:/var/lib/powerframework
 
@@ -411,8 +559,9 @@ services:
 
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
 
-      Kestrel__Certificates__Default__Path: '${TLS_CERTIFICATE_PATH:?TLS_CERTIFICATE_PATH must be set in orchestration/.env - see docs/ARCHITECTURE.md section 9.3.1.}'
-      Kestrel__Certificates__Default__KeyPath: '${TLS_CERTIFICATE_KEY_PATH:?TLS_CERTIFICATE_KEY_PATH must be set in orchestration/.env - see docs/ARCHITECTURE.md section 9.3.1.}'
+      # The projected container paths, not host paths - see Security's block for the full reasoning.
+      Kestrel__Certificates__Default__Path: /run/secrets/internal-tls/server.crt
+      Kestrel__Certificates__Default__KeyPath: /run/secrets/internal-tls/server.key
 
       # VERIFICATION MATERIAL ONLY - NO SIGNING AUTHORITY OF ANY KIND (C-G).
       #
@@ -431,8 +580,12 @@ services:
       # Security's key set anonymously, because verification material is public by design. That is
       # why the three issuance secrets appear on Security, Gateway and DataServices and not here.
       Jwt__Authority: ${SECURITY_BASE_URL:-https://security-service:5104}
-      InternalTls__TrustedCaPath: ${INTERNAL_TLS_TRUSTED_CA_PATH:-/run/secrets/internal-tls/ca.crt}
-      INTERNAL_TLS_TRUSTED_CA_PATH: ${INTERNAL_TLS_TRUSTED_CA_PATH:-/run/secrets/internal-tls/ca.crt}
+
+      # Twice, deliberately, and both literal: the first is the APPLICATION's anchor for the outbound
+      # channel it opens to Security, the second is the one the image's own HEALTHCHECK reads. Same
+      # file, two consumers, and the projected path below is where the `secrets:` grant puts it.
+      InternalTls__TrustedCaPath: /run/secrets/internal-tls/ca.crt
+      INTERNAL_TLS_TRUSTED_CA_PATH: /run/secrets/internal-tls/ca.crt
 
       # SQLITE IS THE ONLY DATABASE PROVISIONED, AND THAT IS A DISCOVERY OUTCOME (C-E).
       #
@@ -467,6 +620,13 @@ services:
       # and a database in the container's writable layer would make that impossible to honour.
       Sqlite__DataDirectory: ${PERSISTENCE_SQLITE_DATA_DIRECTORY:-/var/lib/powerframework}
 
+      # THE SCHEMA STEP, TURNED ON HERE AND NOWHERE ELSE. The service's own `appsettings.json` defaults
+      # this to FALSE, so the opted-out behaviour is the code default and this line is the single place
+      # the stack opts in - which is what makes the one documented bring-up command sufficient on a fresh
+      # volume. See the block above the volume mount for what it does, why it is safe to leave on, and
+      # how a parity operator turns it off without editing this file.
+      Schema__ApplyMigrationsOnStartup: ${PERSISTENCE_APPLY_MIGRATIONS_ON_STARTUP:-true}
+
       # THE TRANSACTION-POOL KEEP-ALIVE SETTINGS, WITH THE LEGACY UNITS AND THE LEGACY FALLBACK.
       #
       # The legacy pool declares `KEEPALIVE_EXPIRE = 30000 //ms`
@@ -491,6 +651,17 @@ services:
       TransactionPool__KeepAlive: ${PERSISTENCE_TRANSPOOL_KEEPALIVE:-false}
       TransactionPool__KeepAliveExpireSeconds: ${PERSISTENCE_TRANSPOOL_KEEPALIVE_EXPIRE_SECONDS:-30}
 
+    # The same three projections as every other service, for the same two reasons: this service
+    # PRESENTS the server certificate on both of its listeners, and VERIFIES Security's against the
+    # anchor when its bearer handler fetches the published key set.
+    secrets:
+      - source: tls-server-certificate
+        target: internal-tls/server.crt
+      - source: tls-server-private-key
+        target: internal-tls/server.key
+      - source: internal-tls-ca-certificate
+        target: internal-tls/ca.crt
+
     networks:
       - powerframework
 
@@ -504,7 +675,7 @@ services:
         condition: service_healthy
 
   # ================================================================================================
-  # DATASERVICES - port 5102 REST, 5112 gRPC. THE DATAWINDOW SERVICE LAYER.
+  # DATASERVICES - port 5102, REST AND gRPC ON ONE ENDPOINT. THE DATAWINDOW SERVICE LAYER.
   # ================================================================================================
   #
   # It waits for BOTH of its downstreams. Persistence, because every retrieval, validation and update
@@ -518,20 +689,35 @@ services:
       context: ..
       dockerfile: services/dataservices-service/Dockerfile
 
-    # 5102 REST over HTTP/1.1 - the anonymous `/health`, the authenticated `/v1/ping`, and the thin
-    # REST projection consumed only by Gateway. 5112 gRPC over HTTP/2 - contracts C-03 and C-04,
-    # whose only caller is Gateway. Split for the same misaddressing reason as Persistence, and 5112
-    # likewise sits outside the documented band.
+    # ONE LISTENER, CARRYING BOTH PROTOCOL VERSIONS, AND IT IS PUBLISHED TO THE HOST.
+    #
+    # 5102 carries everything this service serves: the anonymous `/health`, the authenticated
+    # `/v1/ping`, the thin REST projection consumed only by Gateway, and contracts C-03 and C-04 as
+    # gRPC over HTTP/2, whose only caller is Gateway. It is the port AAP 0.3.2.2 assigns DataServices
+    # for exactly that mixture - "gRPC primary + thin REST projection for Gateway" - so the endpoint is
+    # declared `Http1AndHttp2` and ALPN negotiates the version per connection.
+    #
+    # AN EARLIER REVISION SPLIT THIS IN TWO, 5102 for HTTP/1.1 and 5112 for HTTP/2. It is withdrawn for
+    # the reason set out on Persistence's block above, and 5102 remains published for the same two:
+    # the environment's `/health` readiness gate is exercised from the host, and every other route on
+    # the port requires a bearer token and answers 401 without one.
     ports:
-      - "5102:5102"
-      - "5112:5112"
+      - "${DATASERVICES_HOST_PORT:-5102}:5102"
+
+
+    # THE TLS MATERIAL, PROJECTED IDENTICALLY ON ALL FOUR SERVICES. The three grants are at the foot
+    # of this service block and the sources are at the foot of this file; the full rationale is on
+    # `security-service` above - a Compose secret rather than a bind so the material is read-only by
+    # construction, `${VAR:?}` sources so a missing path aborts bring-up by name, and the UID 1654
+    # readability step. Stated once so there is one place to change it.
 
     environment:
 
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
 
-      Kestrel__Certificates__Default__Path: '${TLS_CERTIFICATE_PATH:?TLS_CERTIFICATE_PATH must be set in orchestration/.env - see docs/ARCHITECTURE.md section 9.3.1.}'
-      Kestrel__Certificates__Default__KeyPath: '${TLS_CERTIFICATE_KEY_PATH:?TLS_CERTIFICATE_KEY_PATH must be set in orchestration/.env - see docs/ARCHITECTURE.md section 9.3.1.}'
+      # The projected container paths, not host paths - see Security's block for the full reasoning.
+      Kestrel__Certificates__Default__Path: /run/secrets/internal-tls/server.crt
+      Kestrel__Certificates__Default__KeyPath: /run/secrets/internal-tls/server.key
 
       # VERIFICATION MATERIAL ONLY, PLUS ITS OWN CALLER CREDENTIAL (C-G). No signing authority.
       #
@@ -552,24 +738,25 @@ services:
 
       # THE PERSISTENCE gRPC ADDRESS - THE ONE EDGE ONLY THIS SERVICE MAY USE.
       #
-      # It names Persistence's HTTP/2 endpoint on 5111 and NOT its REST port, because a gRPC channel
-      # pointed at the HTTP/1.1 endpoint fails every call with HTTP_1_1_REQUIRED before the request
-      # arrives. `persistence-service` is this manifest's own service name, resolved by Compose's
+      # It names Persistence on 5101 - the port AAP 0.3.2.2 assigns it - where one TLS endpoint with
+      # Protocols Http1AndHttp2 carries the gRPC contracts and the REST routes together, ALPN choosing
+      # per connection. `persistence-service` is this manifest's own service name, resolved by Compose's
       # in-network DNS.
       #
       # THE TRANSPORT IS TLS-TERMINATED HTTP/2 RATHER THAN PLAINTEXT h2c. Kestrel protocol and TLS
       # selection belongs to each service's own configuration and `Program.cs`, not to this file -
-      # this line supplies only the address. NO TLS MATERIAL IS PROVISIONED HERE beyond the path pair
-      # above: the mutual-TLS keys below are the documented per-pair fallback and are left empty, and
-      # this file mounts no certificate, no key and no TLS volume.
+      # this line supplies only the address. The server material this channel VERIFIES against arrives
+      # by the `secrets:` projection below; the CLIENT-side mutual-TLS keys further down are the
+      # documented per-pair fallback and are left empty.
       #
       # The layering rule is what makes this the only place this address appears: nothing but
       # DataServices calls Persistence, so Gateway is given no Persistence client, channel or stub -
       # only an anonymous health-probe address, which is a different option group on purpose.
-      DataServices__Persistence__Address: ${PERSISTENCE_GRPC_URL:-https://persistence-service:5111}
+      DataServices__Persistence__Address: ${PERSISTENCE_GRPC_URL:-https://persistence-service:5101}
 
-      DataServices__InternalTls__TrustedCaPath: ${INTERNAL_TLS_TRUSTED_CA_PATH:-/run/secrets/internal-tls/ca.crt}
-      INTERNAL_TLS_TRUSTED_CA_PATH: ${INTERNAL_TLS_TRUSTED_CA_PATH:-/run/secrets/internal-tls/ca.crt}
+      # The application's anchor and the image probe's anchor: one projected file, two consumers.
+      DataServices__InternalTls__TrustedCaPath: /run/secrets/internal-tls/ca.crt
+      INTERNAL_TLS_TRUSTED_CA_PATH: /run/secrets/internal-tls/ca.crt
 
       # THE CLIENT HALF OF THE ISSUANCE HANDSHAKE - PATHS, OPTIONAL, AND BOTH-OR-NEITHER.
       # Half-configured is a refusal to start with a names-only message; entirely unset is a
@@ -577,6 +764,16 @@ services:
       # secret instead. Left empty by default because the documented bring-up uses the secret.
       DataServices__Security__MutualTls__CertificatePath: ${DATASERVICES_MTLS_CERT_PATH:-}
       DataServices__Security__MutualTls__CertificateKeyPath: ${DATASERVICES_MTLS_KEY_PATH:-}
+
+    # Presents the server certificate on both its listeners; verifies Persistence's and Security's
+    # against the anchor.
+    secrets:
+      - source: tls-server-certificate
+        target: internal-tls/server.crt
+      - source: tls-server-private-key
+        target: internal-tls/server.key
+      - source: internal-tls-ca-certificate
+        target: internal-tls/ca.crt
 
     networks:
       - powerframework
@@ -630,15 +827,35 @@ services:
       context: ..
       dockerfile: services/gateway-service/Dockerfile
 
+    # THE ONE PUBLICATION THAT IS NOT MERELY DIAGNOSTIC. This is the documented composition-root access
+    # URL, so the container half stays 5105 and the host half is overridable for a second stack.
     ports:
-      - "5105:5105"
+      - "${GATEWAY_HOST_PORT:-5105}:5105"
+
+
+    # THE TLS MATERIAL, PROJECTED IDENTICALLY ON ALL FOUR SERVICES. The three grants are at the foot
+    # of this service block and the sources are at the foot of this file; the full rationale is on
+    # `security-service` above - a Compose secret rather than a bind so the material is read-only by
+    # construction, `${VAR:?}` sources so a missing path aborts bring-up by name, and the UID 1654
+    # readability step. Stated once so there is one place to change it.
 
     environment:
 
+      # THE LISTENER IS NOT RESTATED HERE, AND THAT IS DELIBERATE - IT IS OWNED BY THIS SERVICE'S OWN
+      # SETTINGS FILES, WHICH NOW AGREE. `appsettings.Development.json` used to bind
+      # `https://localhost:5105` where the base file binds `https://+:5105`, so selecting
+      # `Development` - which `.env.example` does - left Gateway serving its own container's loopback
+      # interface and nothing else: the publication above forwarded to an address that refused the
+      # connection, while the image HEALTHCHECK connecting to 127.0.0.1 still reported healthy and
+      # opened the readiness chain. The overlay is fixed at source rather than papered over with an
+      # override here, because an override would only protect THIS deployment path, and
+      # `ServiceConfigurationCoherenceTests` now refuses any listener in any settings file whose host
+      # is not the wildcard.
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
 
-      Kestrel__Certificates__Default__Path: '${TLS_CERTIFICATE_PATH:?TLS_CERTIFICATE_PATH must be set in orchestration/.env - see docs/ARCHITECTURE.md section 9.3.1.}'
-      Kestrel__Certificates__Default__KeyPath: '${TLS_CERTIFICATE_KEY_PATH:?TLS_CERTIFICATE_KEY_PATH must be set in orchestration/.env - see docs/ARCHITECTURE.md section 9.3.1.}'
+      # The projected container paths, not host paths - see Security's block for the full reasoning.
+      Kestrel__Certificates__Default__Path: /run/secrets/internal-tls/server.crt
+      Kestrel__Certificates__Default__KeyPath: /run/secrets/internal-tls/server.key
 
       # VERIFICATION MATERIAL ONLY (C-G), AND ALL THREE OF THESE KEYS ARE LOAD-BEARING.
       #
@@ -665,12 +882,14 @@ services:
       # itself, so an un-overridden Gateway would dial ITSELF for DataServices and for Security and
       # every call would fail. The compose service names below are resolved by in-network DNS.
       #
-      # DataServices is addressed on its HTTP/2 port because Gateway reaches it over gRPC (C-03 and
-      # C-04); Security is addressed on its single REST port. GATEWAY HOLDS NO PERSISTENCE CLIENT,
+      # DataServices is addressed on 5102, the port AAP 0.3.2.2 assigns it, where one TLS endpoint
+      # carries both protocol versions - Gateway reaches it over gRPC (C-03 and C-04) at the same address
+      # its readiness probe reads. Security is addressed on its single REST port. GATEWAY HOLDS NO
+      # PERSISTENCE CLIENT,
       # CHANNEL OR STUB, and there is deliberately no Persistence address in this group - only
       # DataServices calls Persistence, and that layering rule is enforced by there being nothing here
       # to call it with.
-      Gateway__Upstreams__DataServices: ${DATASERVICES_GRPC_URL:-https://dataservices-service:5112}
+      Gateway__Upstreams__DataServices: ${DATASERVICES_GRPC_URL:-https://dataservices-service:5102}
       Gateway__Upstreams__Security: ${SECURITY_BASE_URL:-https://security-service:5104}
 
       # THE THREE READINESS PROBES GATEWAY READS - A DIFFERENT LIST FROM THE TWO IT CALLS.
@@ -687,9 +906,11 @@ services:
       # address arrive in Gateway's configuration looking like a probe, which is the one topology
       # breach the separation exists to prevent.
       #
-      # EACH READS THE HTTP/1.1 PORT AND NEVER THE gRPC ONE - 5101, 5102 and 5104. A probe speaks
-      # HTTP/1.1, and an HTTP/1.1 `GET /health` against an HTTP/2-only endpoint answers 400, so
-      # pointing one of these at 5111 or 5112 would keep the readiness gate shut for ever.
+      # EACH READS THE PORT AAP 0.3.2.2 ASSIGNS - 5101, 5102 and 5104 - which is the same port that
+      # service's gRPC contracts arrive on, since each binds ONE endpoint carrying both versions. A probe
+      # speaks HTTP/1.1, and an HTTP/1.1 `GET /health` against an HTTP/2-ONLY endpoint answers 400, so a
+      # deployment that splits a listener again must keep these pointed at the version-negotiating half
+      # or the readiness gate never opens.
       #
       # Each falls back to that service's documented base address, which is exactly the relationship
       # `.env.example` describes: the probe variable defaults to the same listener the base-URL
@@ -754,8 +975,9 @@ services:
       # as data rather than refused, both of which are preserved behaviours.
       Gateway__CapabilityFlags: ${GATEWAY_CAPABILITY_FLAGS:-3847}
 
-      Gateway__InternalTls__TrustedCaPath: ${INTERNAL_TLS_TRUSTED_CA_PATH:-/run/secrets/internal-tls/ca.crt}
-      INTERNAL_TLS_TRUSTED_CA_PATH: ${INTERNAL_TLS_TRUSTED_CA_PATH:-/run/secrets/internal-tls/ca.crt}
+      # The application's anchor and the image probe's anchor: one projected file, two consumers.
+      Gateway__InternalTls__TrustedCaPath: /run/secrets/internal-tls/ca.crt
+      INTERNAL_TLS_TRUSTED_CA_PATH: /run/secrets/internal-tls/ca.crt
 
       # Gateway's own issuance credential, and its optional client-certificate pair. Same shape and
       # same reasoning as DataServices': a caller credential rather than a signing key, required for
@@ -763,6 +985,16 @@ services:
       SECURITY_CLIENT_SECRET_GATEWAY: '${SECURITY_CLIENT_SECRET_GATEWAY:?SECURITY_CLIENT_SECRET_GATEWAY must be set in orchestration/.env - generate one with: openssl rand -base64 32}'
       Gateway__MutualTls__CertificatePath: ${GATEWAY_MTLS_CERT_PATH:-}
       Gateway__MutualTls__CertificateKeyPath: ${GATEWAY_MTLS_KEY_PATH:-}
+
+    # Presents the server certificate on the one surface an external client addresses; verifies
+    # DataServices' and Security's against the anchor, and probes all three upstreams over it.
+    secrets:
+      - source: tls-server-certificate
+        target: internal-tls/server.crt
+      - source: tls-server-private-key
+        target: internal-tls/server.key
+      - source: internal-tls-ca-certificate
+        target: internal-tls/ca.crt
 
     networks:
       - powerframework
@@ -826,7 +1058,7 @@ networks:
 # five-directory placeholder roster. That roster is superseded - its own STEP 0 labels the five
 # directories placeholders lifted verbatim from a "not prescriptive" example grouping - and the
 # service that actually owns storage in this phase is `persistence-service`. So the volume is renamed
-# to match its owner, because a volume named after a service that does not exist is a standing
+# to match its owner, because a volume named after a service this phase never builds is a standing
 # invitation to mount it on the wrong thing.
 #
 # THE ENVIRONMENT'S PAIRED-CAPTURE PERSISTENCE RULE SURVIVES THE RENAME INTACT, and is restated
@@ -844,24 +1076,174 @@ networks:
 #
 # NO OTHER VOLUME, AND NO BIND MOUNT ANYWHERE IN THIS FILE. Nothing mounts the repository, and in
 # particular nothing mounts any part of the read-only legacy tree (C-C). The only other material any
-# container needs is the TLS and certificate set, which arrives BY PATH through the variables above
-# and is projected by the deployment's own secret layer - the canonical default being
-# `/run/secrets/internal-tls/ca.crt`, which is where a Docker or Kubernetes secret lands. This file
-# therefore declares the path contract and never the material, which is what keeps C-F structural
-# rather than a matter of review.
+# container needs is the TLS set, and that arrives through the `secrets:` section below rather than
+# through a mount: three files, read-only, projected under `/run/secrets/internal-tls/`. This file
+# names the operator's host paths and the projection targets and never the material itself, which is
+# what keeps C-F structural rather than a matter of review.
 volumes:
   persistence-db:
+
+####################################################################################################
+# SECRETS - THE TLS SET, PROJECTED READ-ONLY, AND THE ONE THING THIS MANIFEST USED TO BE MISSING
+####################################################################################################
+#
+# 🔴 WHAT WAS WRONG BEFORE, STATED PLAINLY BECAUSE IT MADE THE WHOLE STACK UNDEPLOYABLE. Every listener
+# in this stack is declared `https` and every image HEALTHCHECK completes a TLS handshake and verifies
+# the presented certificate against a trust anchor - so each container needs THREE files: the server
+# certificate, its private key, and the CA that signed it. This manifest declared no projection of any
+# kind. It interpolated the OPERATOR'S HOST PATHS straight into each service's Kestrel keys, handing a
+# process inside a container a path that exists only outside it. Kestrel does not degrade to plaintext
+# when it cannot resolve a certificate - it refuses to start - so every one of the four containers
+# built, started and crash-looped, while the manifest read as fully configured to anyone auditing it.
+#
+# THE FIX IS A PROJECTION, NOT A MOUNT, and the distinction is the security posture. A bind mount
+# would expose a host DIRECTORY read-write by default and hand the container whatever else lives in
+# it; a secret projects exactly one named file, read-only, and nothing else. The three sources below
+# are host paths the operator supplies; the targets are fixed by this file, which is why every
+# consuming key above is a literal rather than a variable - the projection target and the configured
+# path are one fact, and two statements of one fact drift.
+#
+# ⚠ HOST FILE PERMISSIONS ARE THE ONLY LEVER HERE, AND THIS WAS MEASURED RATHER THAN ASSUMED. Compose
+# accepts `mode:`, `uid:` and `gid:` on a secret and IGNORES ALL THREE outside Swarm: a host file at
+# `0600` projects into the container as `-rw------- root root`, and all four images run as the
+# unprivileged `app` account (uid 1654), so the server KEY becomes unreadable and Kestrel refuses to
+# start - the same outcome as before, for a different reason. `docs/ARCHITECTURE.md` 9.3.1 therefore
+# generates the projected key `0644` inside a `0700` directory: the directory is the real host control,
+# and the key never leaves the operator's machine. The CA private key, the caller keys and the JWT
+# signing key are NOT projected by this manifest and stay `0600`.
+#
+# ONE PAIR SERVES ALL FOUR SERVICES, so the certificate must carry subject alternative names for every
+# origin it is presented under - the four compose service names plus `localhost`, `127.0.0.1` and
+# `::1`. Per-service pairs are equally correct and need one source and one target per service.
+#
+# THE `:?` FORM IS THE COMPOSE-LEVEL FAIL-FAST, exactly as it is on the signing key: bring-up ABORTS
+# by name if a path is unset, rather than starting four containers that cannot bind a listener. A
+# secret whose `file:` names a path that does not EXIST also aborts bring-up, which is the second half
+# of the same guarantee.
+secrets:
+
+  tls-server-certificate:
+    file: ${TLS_CERTIFICATE_PATH:?TLS_CERTIFICATE_PATH must be set in orchestration/.env to a path ON THIS HOST holding the PEM server certificate chain. Every listener in this stack is https and Kestrel refuses to start without one. Generate the set with docs/ARCHITECTURE.md section 9.3.1.}
+
+  tls-server-private-key:
+    file: ${TLS_CERTIFICATE_KEY_PATH:?TLS_CERTIFICATE_KEY_PATH must be set in orchestration/.env to a path ON THIS HOST holding the PEM private key matching TLS_CERTIFICATE_PATH. It must be readable by uid 1654 once projected - see docs/ARCHITECTURE.md section 9.3.1, which generates it 0644 inside a 0700 directory.}
+
+  internal-tls-ca-certificate:
+    file: ${INTERNAL_TLS_CA_PATH:?INTERNAL_TLS_CA_PATH must be set in orchestration/.env to a path ON THIS HOST holding the PEM certificate of the authority that signed TLS_CERTIFICATE_PATH. Every internal channel and every image HEALTHCHECK verifies against it, and no container OS trust store carries a locally generated authority. See docs/ARCHITECTURE.md section 9.3.1.}
 
 ####################################################################################################
 # TWO OMISSIONS THAT ARE DELIBERATE, RECORDED SO THEY ARE NOT "FIXED"
 ####################################################################################################
 #
-# NO `container_name:` ON ANY SERVICE. A fixed container name makes `docker compose up --scale
-# <service>=N` impossible, and independent scalability per service is a requirement (C-J) rather than
-# a nicety - it is half of what "independently deployable and independently scalable" means. Compose's
-# generated names (`<project>-<service>-<n>`) are what make more than one replica expressible, and
-# they also keep two projects on one host from colliding. The omission is deliberate; please do not
-# helpfully add them.
+# NO `container_name:` ON ANY SERVICE, AND THE REASON IS NARROWER THAN AN EARLIER REVISION CLAIMED.
+# A fixed container name is a hard blocker on `docker compose up --scale <service>=N`, and Compose's
+# generated names (`<project>-<service>-<n>`) also keep two projects on one host from colliding. So
+# the omission stands and please do not helpfully add them.
+#
+# WHAT THAT OMISSION DOES *NOT* BUY, STATED PLAINLY BECAUSE THIS FILE PREVIOUSLY CLAIMED IT DID.
+# `--scale <service>=N` for N>1 does NOT work against this file as written, for any of the four
+# services, and removing the container names did not make it work. Every service publishes a FIXED
+# host port, and a host port can be bound once: the second replica is created and then fails at start
+# with `Bind for 0.0.0.0:<port> failed: port is already allocated`, straight from the daemon. That was
+# measured on this manifest, not inferred. It is also the worse of the two failure shapes, because it
+# arrives AFTER the image build and after the other services have re-satisfied their health gates, so
+# an operator is left with a partially mutated stack and an error that names a port rather than the
+# claim that misled them.
+#
+# The fixed publishes are not a mistake to remove, either. The 5101-5105 band and the per-service
+# `/health` probe addresses are the attached environment's own readiness gates (C-L), and they are what
+# the port map, the end-to-end fixture and the documentation all agree on. So THIS FILE describes a
+# ONE-CONTAINER-PER-SERVICE topology, and that is the property to rely on when reading it.
+#
+# HOW TO RUN MORE THAN ONE REPLICA OF A SERVICE, WHICH IS A REAL CAPABILITY AND NEEDS NO NEW MACHINERY.
+# Independent scalability (C-J) is a property of the ARCHITECTURE - four images, no in-process
+# dependency between them, so instance counts can differ per service - and it is not a property this
+# manifest exercises. To exercise it, remove the `ports:` block from the service being replicated and
+# scale it:
+#
+#     # in an override file, so this manifest keeps its documented publishes intact
+#     services:
+#       dataservices-service:
+#         ports: !reset []
+#
+#     docker compose -f docker-compose.yml -f scale.override.yml up -d --scale dataservices-service=3
+#
+# Nothing else is required and nothing else may be added: the compose network already carries an
+# embedded DNS server, so `dataservices-service` resolves to every healthy replica's address, and both
+# replicas start, pass their own probes and are reachable by that name. NO reverse proxy, NO service mesh
+# and NO sidecar appears here or is needed for this (C-B) - a replicated service simply stops being
+# reachable from the HOST, which is exactly what its `ports:` block was for, so do not scale the service
+# you are probing from the host at the same time. That much was measured on this manifest: two
+# `dataservices-service` replicas, both healthy, neither publishing a port, with Gateway still reporting
+# `Healthy` over the replicated upstream.
+#
+# WHAT REPLICATION DOES AND DOES NOT GIVE YOU HERE, BECAUSE THE MEASUREMENT CONTRADICTED THE OBVIOUS
+# ASSUMPTION. Every gRPC client in this system is configured with a plain `https://<service-name>:<port>`
+# address and a retry service config - and NO load-balancing policy. A channel built that way resolves the
+# name and opens ONE connection, then multiplexes every call over it, so ONE replica receives all of that
+# caller's traffic for the life of the connection. That was observed directly: of two healthy replicas,
+# one served 24 logged calls and the other served none. So replicas here buy AVAILABILITY - a healthy
+# instance to reconnect to across a restart or a failure - and NOT request spreading. Spreading would
+# require the client to opt in, with gRPC's `dns:///` resolver and a `round_robin` policy; this refactor
+# configures neither, and the block below is why that is not a simple win.
+#
+# THE ONE THING A SECOND REPLICA REQUIRES OF THE CALLER: STICKY ROUTING ON THE HANDLE, AND THE
+# CONTRACT ALREADY NAMES THE KEY.
+#
+# Four of this stack's operations hand back an OPAQUE HANDLE and expect it on every subsequent call,
+# and the state behind that handle lives in the process that issued it. Two replicas do not share it -
+# deliberately, because sharing it would mean a distributed session store this refactor has no evidence
+# for and no requirement to build. So a follow-up call carrying a handle MUST reach the replica that
+# issued it, and the affinity key is a named field rather than something to be inferred:
+#
+#   Persistence  transaction session   `persistence.v1.SessionHandle.session_id`   (TransactionService.BeginSession)
+#   Persistence  query task            `persistence.v1.TaskHandle.task_id`         (QueryService)
+#   Persistence  update task           `persistence.v1.TaskHandle.task_id`         (UpdateService)
+#   Persistence  command task          `persistence.v1.TaskHandle.task_id`         (CommandService)
+#   DataServices validation session    `dataservices.v1` `session_id`              (OpenValidationSession)
+#   DataServices expression session    `dataservices.v1` `datawindow_handle`       (the expression surface)
+#
+# A MIS-ROUTED HANDLE IS ALREADY REFUSED RATHER THAN SILENTLY WRONG, WHICH IS WHY THIS IS AN
+# OPERATIONAL CONTRACT AND NOT A CORRECTNESS RISK. A replica that never issued a handle does not
+# recognise it: Persistence answers `RetCode.E_INVALID_HANDLE` (-11), which its status mapping
+# projects as gRPC `FailedPrecondition`, and DataServices answers the same way for a session or
+# DataWindow handle it does not hold. Gateway surfaces that as an HTTP 400 naming the upstream. So the
+# worst outcome of scaling without affinity is a refusal an operator can read, never a partial write
+# or a silently different result set.
+#
+# CONNECTION PINNING IS WHY THIS USUALLY WORKS AND WHY IT IS STILL NOT SAFE TO ASSUME. Because a channel
+# pins to one replica for the life of its connection (above), a caller's handles stay valid for as long as
+# that connection lives - which is most of the time and is exactly what makes the hazard easy to miss. The
+# handle becomes unrecognised at a RECONNECT, which happens on a replica restart, a rolling update, an
+# idle-connection close or a network blip, and immediately for every caller if a `round_robin` policy is
+# ever switched on. That is the scenario the affinity table above exists for.
+#
+# WHAT IS DELIBERATELY *NOT* DONE ABOUT IT: no instance discriminator is embedded in a handle value.
+# Handles are unguessable by construction - 32 hexadecimal characters from a cryptographic source,
+# derived from no caller-supplied data - and encoding the serving instance into one would weaken that
+# property and disclose internal topology to every caller (CWE-200). Stickiness in a real load balancer
+# is keyed on a header or a consistent hash OVER the handle value; it never requires parsing it.
+#
+# ⚠ WHAT THAT OMISSION DOES AND DOES NOT BUY, STATED EXACTLY, BECAUSE AN EARLIER REVISION OVERSTATED
+# IT. Absent container names are NECESSARY for `--scale` and are not SUFFICIENT: a service with a fixed
+# host port cannot exceed one replica whatever it is named, because the second replica would have to bind
+# a host port the first already holds and the daemon refuses it with `port is already allocated`. That is
+# a property of publishing rather than of naming, so the two must not be conflated - as written, this
+# manifest is one container per service.
+#
+#   * SCALING A SERVICE BEYOND ONE REPLICA therefore means not publishing it. The three diagnostic
+#     publications (5101, 5102, 5104) can be deleted with no effect on how the services talk to each
+#     other - in-network DNS resolves the service name and Compose load-balances across its replicas -
+#     and Gateway, the one publication that is genuinely load bearing, is scaled behind a proxy rather
+#     than by publishing a port range. Nothing in this phase requires more than one replica of
+#     anything; what C-J requires is that instance counts be able to VARY PER SERVICE, which they can,
+#     because no service holds an in-process dependency on any other.
+#   * A SECOND FULL STACK ON ONE HOST is the case the host-port variables above exist for, and it does
+#     work: `GATEWAY_HOST_PORT=6105 SECURITY_HOST_PORT=6104 PERSISTENCE_HOST_PORT=6101
+#     DATASERVICES_HOST_PORT=6102 docker compose -p pfw-2 --env-file … up -d`. The project name
+#     separates the networks, the volumes and the container names; the four variables separate the host
+#     ports. Before those variables existed the documented `-p pfw-2` recipe collided on all four
+#     published ports and could not start.
 #
 # NO `env_file:` POINTING AT `.env`, AND THE DISTINCTION MATTERS. Compose already auto-loads
 # `orchestration/.env` for `${...}` INTERPOLATION - that is how every reference above resolves. An

@@ -29,6 +29,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using Grpc.Core;
+using Grpc.Net.Client.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Http;
@@ -41,6 +42,11 @@ using PowerFramework.Contracts.Persistence.V1;
 using PowerFramework.DataServices.Clients;
 using PowerFramework.DataServices.Configuration;
 using Xunit;
+
+// THE PROTOBUF SERVICE DESCRIPTOR, ALIASED FOR THE SAME REASON THE POLICY ALIASES IT:
+// Microsoft.Extensions.DependencyInjection declares a ServiceDescriptor too, and both
+// namespaces are in scope here [Clients/OutboundCallPolicy uses the identical alias].
+using ContractDescriptor = Google.Protobuf.Reflection.ServiceDescriptor;
 
 using PersistenceQueryClient =
     PowerFramework.Contracts.Persistence.V1.QueryService.QueryServiceClient;
@@ -135,12 +141,29 @@ public sealed class OutboundCallPolicyTests
     /// omitted a method could not tell a deliberate exclusion from a forgotten one.
     /// </para>
     /// <para>
-    /// The three rows worth reading twice: <c>ReleaseQueryTask</c> is admitted while
-    /// <c>CreateQueryTask</c> is not, because a replayed release releases nothing twice while a
-    /// replayed create leaves a second server-held task nobody holds a handle to. <c>EndSession</c> is
-    /// excluded even though it looks like a teardown, because the legacy pool is REFERENCE COUNTED and
-    /// a repeated end decrements twice. And the clause setters are excluded because they carry a
-    /// modification style, so the append form applied twice appends twice.
+    /// 🔴 THE FOUR ROWS THAT CHANGED, AND WHY THEY WERE WRONG. All three task releases and
+    /// <c>AutoCommit</c> were admitted and are not any more.
+    /// </para>
+    /// <para>
+    /// A RELEASE CONSUMES ITS OWN REGISTRATION. It was admitted on the reading that "a replayed release
+    /// releases nothing twice", which is true of the state and false of the answer: the server removes the
+    /// registration and then answers <c>E_INVALID_HANDLE</c> when there is nothing to remove, and the
+    /// caller-side cleanup path reads any non-OK answer as evidence of a leak - it records that the server
+    /// may still be holding the task. So a replay after a SUCCESSFUL first attempt whose response was lost
+    /// manufactures an operator warning asserting the opposite of the truth.
+    /// </para>
+    /// <para>
+    /// AND <c>AutoCommit</c> IS NOT A SETTINGS READ. Its name suggests one and its behaviour is the ported
+    /// <c>of_autocommit</c> checkpoint: it ROLLS BACK on a non-zero statement status and otherwise COMMITS,
+    /// over shared work. It sat beside <c>Commit</c> and <c>Rollback</c> in the excluded list while doing
+    /// the same thing they do.
+    /// </para>
+    /// <para>
+    /// UNCHANGED AND STILL WORTH READING TWICE: <c>CreateQueryTask</c> is excluded because a replayed
+    /// create leaves a second server-held task nobody holds a handle to; <c>EndSession</c> is excluded even
+    /// though it looks like a teardown, because the legacy pool is REFERENCE COUNTED and a repeated end
+    /// decrements twice; and the clause setters are excluded because they carry a modification style, so
+    /// the append form applied twice appends twice.
     /// </para>
     /// </remarks>
     public static TheoryData<string, bool> OperationAdmission
@@ -149,8 +172,36 @@ public sealed class OutboundCallPolicyTests
         {
             TheoryData<string, bool> data = [];
 
+            foreach ((string path, bool replaySafe) in AdmittedOperations)
+            {
+                data.Add(path, replaySafe);
+            }
+
+            return data;
+        }
+    }
+
+    /// <summary>
+    /// Every classified operation as a plain list, so the theory above and the exhaustiveness guard below
+    /// read the SAME declaration.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 IT IS A LIST RATHER THAN THE THEORY DATA ITSELF BECAUSE THE TABLE'S CLAIM NEEDED ENFORCING. The
+    /// theory documents itself as covering "the whole surface, not the interesting parts", and nothing
+    /// checked that: a method added to a contract was neither classified by the policy nor asserted here, so
+    /// it inherited "attempted exactly once" silently - which is the safe default but leaves a deliberate
+    /// exclusion indistinguishable from a forgotten one, the exact confusion this table exists to remove.
+    /// <c>TheAdmissionTableCoversEveryMethodOfEveryContractItClassifies</c> reads this list and compares it
+    /// to the descriptors.
+    /// </remarks>
+    private static IReadOnlyList<(string Path, bool ReplaySafe)> AdmittedOperations
+    {
+        get
+        {
+            List<(string Path, bool ReplaySafe)> data = [];
+
             Add(QueryService.Descriptor.FullName, "CreateQueryTask", replaySafe: false);
-            Add(QueryService.Descriptor.FullName, "ReleaseQueryTask", replaySafe: true);
+            Add(QueryService.Descriptor.FullName, "ReleaseQueryTask", replaySafe: false);
             Add(QueryService.Descriptor.FullName, "Reset", replaySafe: false);
             Add(QueryService.Descriptor.FullName, "SetChunkSize", replaySafe: false);
             Add(QueryService.Descriptor.FullName, "SetMaxRows", replaySafe: false);
@@ -162,13 +213,13 @@ public sealed class OutboundCallPolicyTests
             Add(QueryService.Descriptor.FullName, "Count", replaySafe: true);
 
             Add(UpdateService.Descriptor.FullName, "CreateUpdateTask", replaySafe: false);
-            Add(UpdateService.Descriptor.FullName, "ReleaseUpdateTask", replaySafe: true);
+            Add(UpdateService.Descriptor.FullName, "ReleaseUpdateTask", replaySafe: false);
             Add(UpdateService.Descriptor.FullName, "Reset", replaySafe: false);
             Add(UpdateService.Descriptor.FullName, "PrepareUpdate", replaySafe: false);
             Add(UpdateService.Descriptor.FullName, "Update", replaySafe: false);
 
             Add(CommandService.Descriptor.FullName, "CreateCommandTask", replaySafe: false);
-            Add(CommandService.Descriptor.FullName, "ReleaseCommandTask", replaySafe: true);
+            Add(CommandService.Descriptor.FullName, "ReleaseCommandTask", replaySafe: false);
             Add(CommandService.Descriptor.FullName, "Reset", replaySafe: false);
             Add(CommandService.Descriptor.FullName, "SetAutoCommit", replaySafe: false);
             Add(CommandService.Descriptor.FullName, "SetSql", replaySafe: false);
@@ -178,7 +229,7 @@ public sealed class OutboundCallPolicyTests
             Add(TransactionService.Descriptor.FullName, "EndSession", replaySafe: false);
             Add(TransactionService.Descriptor.FullName, "GetTransactionData", replaySafe: true);
             Add(TransactionService.Descriptor.FullName, "SetAutoCommit", replaySafe: false);
-            Add(TransactionService.Descriptor.FullName, "AutoCommit", replaySafe: true);
+            Add(TransactionService.Descriptor.FullName, "AutoCommit", replaySafe: false);
             Add(TransactionService.Descriptor.FullName, "Commit", replaySafe: false);
             Add(TransactionService.Descriptor.FullName, "Rollback", replaySafe: false);
             Add(TransactionService.Descriptor.FullName, "IsConnected", replaySafe: true);
@@ -191,7 +242,7 @@ public sealed class OutboundCallPolicyTests
             return data;
 
             void Add(string contract, string method, bool replaySafe) =>
-                data.Add(string.Concat("/", contract, "/", method), replaySafe);
+                data.Add((string.Concat("/", contract, "/", method), replaySafe));
         }
     }
 
@@ -318,6 +369,87 @@ public sealed class OutboundCallPolicyTests
     }
 
     /// <summary>
+    /// The three task releases are refused at BOTH retry layers, because the upstream answers a replayed
+    /// release with <c>E_INVALID_HANDLE</c> rather than repeating the success.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE WITHDRAWN "IDEMPOTENT TEARDOWN" FAMILY.</b> All three were classified replay-safe on the
+    /// reasoning that releasing an already-released handle is harmless. The reasoning is sound and the
+    /// classification was still wrong, because the contract does not implement it: a release REMOVES the
+    /// handle from the registry, so a second one finds nothing and answers <c>E_INVALID_HANDLE</c>. That is
+    /// deliberate and is asserted upstream - Persistence's own
+    /// <c>UpdateServiceTests.ReleaseUpdateTaskIsSingleUseAndDisposesExactlyOnce</c>,
+    /// <c>CommandServiceTests.AHandleIsSingleUseOnceReleased</c> and
+    /// <c>QueryServiceLeaseTests.AReleaseArrivingDuringARetrievalDefersTheTeardownToTheRetrievalsExit</c>
+    /// each pin the first release as success and the second as invalid-handle.
+    /// </para>
+    /// <para>
+    /// WHAT THE MISCLASSIFICATION COST IS A FABRICATED FAILURE, WHICH IS WORSE THAN A LOST RETRY. A replay
+    /// whose first attempt actually succeeded returns an error for work that completed, so a caller sees a
+    /// teardown fault where there was none - and, having been told the handle is invalid, cannot tell that
+    /// apart from a handle it never held.
+    /// </para>
+    /// <para>
+    /// THE ALTERNATIVE WAS AVAILABLE AND WAS NOT TAKEN. Making release idempotent would have made the
+    /// classification true, but it is a CONTRACT change adopted to accommodate a retry policy, and it would
+    /// cost the answer that lets two concurrent releases be resolved - exactly one wins. The policy yields
+    /// to the contract instead.
+    /// </para>
+    /// <para>
+    /// BOTH LAYERS ARE ASSERTED because either alone would leave the replay reachable: the HTTP predicate
+    /// governs the Security REST edge's shape of decision, and the gRPC service configuration is the layer
+    /// that actually sees a connect failure on these channels.
+    /// </para>
+    /// </remarks>
+    /// <returns>A task representing the assertions.</returns>
+    [Fact]
+    public async Task A_replayed_task_release_is_refused_because_the_upstream_answers_invalid_handle()
+    {
+        // NAMED THROUGH THE DESCRIPTORS RATHER THAN AS LITERALS, so a renamed or removed release makes this
+        // fail to compile instead of passing against a path nothing serves.
+        (Google.Protobuf.Reflection.ServiceDescriptor Contract, string Method)[] releases =
+        [
+            (QueryService.Descriptor, "ReleaseQueryTask"),
+            (UpdateService.Descriptor, "ReleaseUpdateTask"),
+            (CommandService.Descriptor, "ReleaseCommandTask"),
+        ];
+
+        ServiceConfig config = OutboundCallPolicy.BuildRetryServiceConfig(
+            maxAttempts: 4,
+            initialBackoff: TimeSpan.FromMilliseconds(10));
+
+        HashSet<string> named = new(StringComparer.Ordinal);
+
+        foreach (MethodConfig methodConfig in config.MethodConfigs)
+        {
+            foreach (MethodName method in methodConfig.Names)
+            {
+                _ = named.Add($"{method.Service}/{method.Method}");
+            }
+        }
+
+        // The configuration is non-empty, so "absent" below is a decision rather than a vacuous truth.
+        Assert.NotEmpty(named);
+
+        foreach ((Google.Protobuf.Reflection.ServiceDescriptor contract, string method) in releases)
+        {
+            // The method exists on the contract as shipped: a stale name would make every assertion below
+            // pass for the wrong reason.
+            Assert.Contains(method, contract.Methods.Select(static candidate => candidate.Name));
+
+            // LAYER ONE - the HTTP predicate refuses the replay, on the one status it would otherwise
+            // admit.
+            Assert.False(
+                await ShouldRetryAsync($"/{contract.FullName}/{method}", StatusCode.Unavailable));
+
+            // LAYER TWO - the gRPC service configuration does not name it, so there is no policy to
+            // replay it even where a connect failure is visible.
+            Assert.DoesNotContain($"{contract.FullName}/{method}", named);
+        }
+    }
+
+    /// <summary>
     /// Every Security REST path this service reaches is classified exactly as the policy states.
     /// </summary>
     /// <remarks>
@@ -339,6 +471,58 @@ public sealed class OutboundCallPolicyTests
                 0));
 
         Assert.Equal(replaySafe, retried);
+    }
+
+    /// <summary>
+    /// The one Security operation published under a method other than <c>POST</c> - the RSA key release -
+    /// is not replayed, whatever the fault.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A RELEASE MUST NOT BE REPLAYED, ON EXACTLY THE TERMS THAT KEEP THE PERSISTENCE TASK RELEASES OFF
+    /// THE REPLAY-SAFE TABLE.</b> A transport failure does not tell a caller whether the server processed
+    /// the request. A replayed release whose first attempt actually succeeded is answered <c>404</c>, which
+    /// the client reports as "no key was held for this caller" - a true statement about the store and a
+    /// misleading one about this call, since the caller cannot tell its own earlier attempt apart from a
+    /// reference that never existed. The contract makes those two deliberately indistinguishable, so
+    /// retrying manufactures an ambiguity the caller has no way to resolve.
+    /// </para>
+    /// <para>
+    /// <b>NOTHING WAS ADDED TO THE POLICY FOR THIS OPERATION, AND THIS ROW IS WHY THAT IS SAFE.</b> The
+    /// exclusion holds twice over already: the safe-method admission is exactly GET, HEAD, OPTIONS and
+    /// TRACE - and its own remarks record that "PUT and DELETE are idempotent but not safe" - while the
+    /// replay-safe path table is built solely from the four Persistence gRPC rosters and therefore carries
+    /// no Security path at all. Both arms are exercised here, the response arm and the transport-fault arm,
+    /// because a method admission that held for one and not the other would be a gap.
+    /// </para>
+    /// <para>
+    /// The <c>POST</c> comparison in the same rows is what makes the assertion about the METHOD rather than
+    /// about the path: the collection path is classified false for its own reason - generation is not
+    /// replayable - so a member path that answered false only because its prefix did would prove nothing.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task The_rsa_key_release_is_never_replayed()
+    {
+        const string releasePath = "/v1/crypto/rsa/keys/any-reference";
+
+        ResilienceContext refused = ResilienceContextPool.Shared.Get(TestContext.Current.CancellationToken);
+        refused.SetRequestMessage(new HttpRequestMessage(HttpMethod.Delete, Absolute(releasePath)));
+
+        Assert.False(await OutboundCallPolicy.ShouldRetryAsync(
+            new RetryPredicateArguments<HttpResponseMessage>(
+                refused,
+                Outcome.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)),
+                0)));
+
+        ResilienceContext faulted = ResilienceContextPool.Shared.Get(TestContext.Current.CancellationToken);
+        faulted.SetRequestMessage(new HttpRequestMessage(HttpMethod.Delete, Absolute(releasePath)));
+
+        Assert.False(await OutboundCallPolicy.ShouldRetryAsync(
+            new RetryPredicateArguments<HttpResponseMessage>(
+                faulted,
+                Outcome.FromException<HttpResponseMessage>(new HttpRequestException("reset")),
+                0)));
     }
 
     /// <summary>
@@ -491,8 +675,60 @@ public sealed class OutboundCallPolicyTests
     [Fact]
     public void The_classification_table_resolves_against_the_shipped_contracts()
     {
-        // 10 gRPC operations across the four contracts plus 13 Security crypto paths.
-        Assert.Equal(23, OutboundCallPolicy.Verify());
+        // 6 gRPC operations across the four contracts - the C-05 count and the five C-08 reads - plus 13
+        // Security crypto paths. It was 10 while the three task releases and AutoCommit were admitted, and
+        // C-06 and C-07 now contribute none at all, which is a classification rather than a gap.
+        Assert.Equal(19, OutboundCallPolicy.Verify());
+    }
+
+    /// <summary>
+    /// 🔴 The admission table covers EVERY method of every contract it classifies - no method is
+    /// unclassified and none is classified twice.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE TABLE CLAIMED THE WHOLE SURFACE AND NOTHING CHECKED THE CLAIM.</b> An operation nobody
+    /// classifies inherits "attempted exactly once", which is the safe default and a silent one: a method
+    /// added to the C-05 through C-08 contract set was neither admitted by the policy nor refused by it on the
+    /// record, so a deliberate exclusion and a forgotten one looked identical. That is precisely the
+    /// distinction the table was written to make, so the claim is now enforced against the descriptors.
+    /// </para>
+    /// <para>
+    /// STREAMING METHODS ARE INCLUDED IN THE COMPARISON. They can never be replay-safe - the policy's own
+    /// builder refuses to classify one - but they must still APPEAR here as excluded, because a reader
+    /// checking whether an operation is retried should find every operation.
+    /// </para>
+    /// <para>
+    /// SET EQUALITY IN BOTH DIRECTIONS, so a table row naming a method the contract no longer declares fails
+    /// as loudly as a method the table forgot. The duplicate check is separate because set equality would
+    /// hide a path listed twice with two different verdicts.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheAdmissionTableCoversEveryMethodOfEveryContractItClassifies()
+    {
+        ContractDescriptor[] contracts =
+            [
+                QueryService.Descriptor,
+                UpdateService.Descriptor,
+                CommandService.Descriptor,
+                TransactionService.Descriptor,
+            ];
+
+        string[] declared =
+        [
+            .. contracts
+                .SelectMany(contract => contract.Methods.Select(
+                    method => string.Concat("/", contract.FullName, "/", method.Name)))
+                .Order(StringComparer.Ordinal),
+        ];
+
+        string[] classified = [.. AdmittedOperations.Select(row => row.Path).Order(StringComparer.Ordinal)];
+
+        Assert.Equal(declared, classified);
+
+        // NO PATH TWICE, which set equality above would not catch.
+        Assert.Equal(classified.Length, classified.Distinct(StringComparer.Ordinal).Count());
     }
 
     /// <summary>

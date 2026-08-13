@@ -1939,14 +1939,18 @@ message SetCommandSqlRequest {
   // several times stays in the same mode on every execution; the mode is derived from the stored text at
   // execution rather than latched at installation, which is what stops the two disagreeing.
   //
-  // ============ A PRESENT-BUT-BLANK STATEMENT IS REFUSED AT THIS BOUNDARY =========================
-  // A statement consisting only of whitespace answers common.v1.RetCode.Value.E_INVALID_SQL with a
-  // diagnostic naming the reason, and nothing is installed - so the refusal is atomic and the task still
-  // holds whatever it held. The EMPTY string is deliberately NOT caught here: it belongs to the worker's
-  // own preserved arm, which answers the same code with NO diagnostic [:L45], and keeping the two
-  // distinguishable is what stops this refusal swallowing an observable legacy difference.
+  // ============ A PRESENT-BUT-BLANK STATEMENT IS ACCEPTED, AND ONLY THE EMPTY ONE IS REFUSED =======
+  // The guard is an EMPTINESS test and only an emptiness test, in both of its preserved copies
+  // [:L45, :L65-L68]: a statement consisting only of whitespace is stored VERBATIM and answers
+  // common.v1.RetCode.Value.OK, while the EMPTY string answers E_INVALID_SQL with NO diagnostic, which is
+  // the legacy setter's own message-free arm.
   //
-  // See ExecRequest.sql for the full reasoning and the measured provider behaviour that motivates it.
+  // A BOUNDARY BLANKNESS REFUSAL WAS PUBLISHED HERE AND HAS BEEN WITHDRAWN (C-B). It answered
+  // E_INVALID_SQL with a diagnostic of its own on the reasoning that a whitespace-only statement submits
+  // nothing and would be reported as a success that changed no rows. That reasoning is a judgement about
+  // the legacy's design rather than a statement about its behaviour, and acting on it made this boundary
+  // STRICTER than the oracle it preserves - which is a behaviour change in exactly the way being laxer
+  // would be. See ExecRequest.sql for the same note on the other entry point.
   // ==========================================================================================
   string sql = 2;
 }
@@ -1998,27 +2002,22 @@ message ExecRequest {
   // as a single command and rolls it back as a unit on failure, which is what makes the autocommit
   // mode above meaningful on a batch rather than only on a single statement.
   //
-  // ============ A PRESENT-BUT-BLANK STATEMENT IS REFUSED. AN ABSENT ONE IS NOT. ==================
-  // A statement consisting only of whitespace answers
-  // common.v1.RetCode.Value.E_INVALID_SQL with a diagnostic naming the reason, and nothing is executed.
+  // ============ ONLY THE EMPTY STATEMENT IS REFUSED. BLANK AND ABSENT ARE NOT. ====================
+  // Both preserved guards test EMPTINESS rather than blankness [:L45, :L65-L68], so a run of spaces is
+  // installed, submitted, and answered with whatever the storage engine answers - measured against the
+  // shipped provider that is a row count of -1 with nothing raised, i.e. a SUCCESS THAT DID NOTHING.
   //
-  // WHY, GIVEN THE LEGACY ACCEPTS IT. Both preserved guards test EMPTINESS rather than blankness
-  // [:L45, :L65-L68], so a run of spaces passed both, reached the storage engine and was answered as a
-  // SUCCESS THAT DID NOTHING - measured against the shipped provider, a whitespace-only command reports
-  // a row count of -1 and raises nothing at all. That is not a legacy behaviour worth preserving on a
-  // published boundary: it is a caller being told their statement succeeded when it never ran. The
-  // refusal narrows the boundary with a defined error rather than widening it with a guess (AAP 0.1.5),
-  // and both worker guards are untouched underneath it.
-  //
-  // THE THREE CASES STAY DISTINGUISHABLE, WHICH IS THE POINT:
+  // THAT OUTCOME IS PRESERVED RATHER THAN CORRECTED (C-B), AND A REFUSAL THAT CORRECTED IT HAS BEEN
+  // WITHDRAWN. This boundary published a blankness refusal - E_INVALID_SQL with its own diagnostic,
+  // nothing executed - on the reasoning that telling a caller their statement succeeded when it never ran
+  // is not worth preserving. However reasonable, that is a judgement about the legacy's DESIGN, while what
+  // this contract owes its callers is the legacy's BEHAVIOUR: a port that refuses input its oracle accepts
+  // has diverged just as far as one that accepts input its oracle refuses. The three cases are therefore:
   //   * FIELD ABSENT       - the task's own statement stands, and the worker's second guard applies to
   //                          whatever it holds. This is how a caller who never called SetCommandSql
   //                          reaches that guard.
   //   * FIELD SET TO ""    - E_INVALID_SQL with NO diagnostic, which is the legacy setter's own arm.
-  //   * FIELD SET TO "   " - E_INVALID_SQL WITH a diagnostic, because the refusal is the boundary's own.
-  //
-  // ONLY PURE WHITESPACE. A statement of comments - "-- nothing" - is not blank, is not refused, and
-  // reaches the provider exactly as before.
+  //   * FIELD SET TO "   " - accepted, stored verbatim and submitted, exactly as the legacy submits it.
   // ==========================================================================================
   optional string sql = 2;
 

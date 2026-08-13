@@ -68,6 +68,7 @@ using PowerFramework.Contracts.Persistence.V1;
 using PowerFramework.Persistence.Buffers;
 using PowerFramework.Persistence.Concurrency;
 using PowerFramework.Persistence.Data;
+using PowerFramework.Persistence.Errors;
 using PowerFramework.Persistence.Transactions;
 
 using Predicates = PowerFramework.Shared.Kernel.Predicates;
@@ -351,11 +352,33 @@ namespace PowerFramework.Persistence.Tasks
 
         /// <inheritdoc/>
         /// <remarks>
+        /// <para>
         /// Delegated to the sibling payload codec rather than decoded here, because the codec already
         /// owns the two documented changeset defects and a second decoder would be a second place for
         /// them to be got wrong. A <see langword="null"/> payload is the oracle's zero-length
         /// <c>Blob("")</c> and answers the failure value, which the caller tells apart from a rejected
         /// payload by the update-row count.
+        /// </para>
+        /// <para>
+        /// 🔴 <b>AND IT IS THE ONE APPLY IN THE SERVICE THAT DEMANDS AN EXPLICIT BASELINE.</b> This
+        /// payload was composed by a CALLER and every statement generated from it carries a predicate
+        /// read out of its ORIGINAL values, so <see cref="CarrierBaselineTrust.RequiredOnChangedRows"/>
+        /// is passed: a row that is not insert-shaped must state the original of every column it carries,
+        /// or the payload is refused here rather than applied against a baseline inferred from the values
+        /// being written. The retrieve path passes <see cref="CarrierBaselineTrust.AsStated"/> instead,
+        /// because there the producer is this service. See <see cref="CarrierBaselineTrust"/> for the
+        /// full reasoning, and note that this asks a caller for nothing the update contract did not
+        /// already require it to send (AAP 0.6.3.2).
+        /// </para>
+        /// <para>
+        /// A REFUSAL IS THE ORACLE'S OWN INVALID-UPDATE-DATA OUTCOME rather than a new failure mode: the
+        /// failure value travels back through <c>of_setupdatedata</c> exactly as a malformed changeset
+        /// already did, and the update task answers <c>E_INVALID_DATA</c> with the legacy diagnostic
+        /// [<c>n_cst_thread_task_sqlupdate.sru</c>, 无效的更新数据!]. DataServices additionally refuses
+        /// the same shape at the ingress with a legible per-column error
+        /// [<c>Validators/UpdateRowValidator</c>], so a caller normally learns which column it left
+        /// unstated before this line is ever reached.
+        /// </para>
         /// </remarks>
         public long SetChanges(CarrierState? changes)
         {
@@ -364,7 +387,10 @@ namespace PowerFramework.Persistence.Tasks
                 return DataWindowBufferStore.DataStoreFailure;
             }
 
-            return _payloads.TryApply(_store.Carrier, changes);
+            return _payloads.TryApply(
+                _store.Carrier,
+                changes,
+                CarrierBaselineTrust.RequiredOnChangedRows);
         }
 
         /// <inheritdoc/>
@@ -733,7 +759,15 @@ namespace PowerFramework.Persistence.Tasks
                     failingBuffer,
                     failingRow);
 
-                _logger.LogError(failure, "An update failed inside the storage engine.");
+                // Described rather than attached - see Errors/FaultRecord.cs. This is the update path, so
+                // the provider's message carries the generated statement with the row's literal VALUES
+                // interpolated; the wire payload relays it to the caller, who is entitled to it, and the
+                // record does not.
+                _logger.LogError(
+                    "An update failed inside the storage engine. FaultTypes={FaultTypes} "
+                        + "RedactedMessage={RedactedMessage}",
+                    FaultRecord.Types(failure),
+                    FaultRecord.RedactedMessages(failure));
 
                 return DataWindowBufferStore.DataStoreFailure;
             }
@@ -1119,12 +1153,6 @@ namespace PowerFramework.Persistence.Tasks
         };
 
         /// <summary>
-        /// Removes a property suffix, answering the column name in front of it.
-        /// </summary>
-        /// <param name="property">The property name.</param>
-        /// <param name="suffix">The suffix to remove.</param>
-        /// <returns>The column name, or the empty string when the suffix was absent.</returns>
-        /// <summary>
         /// Decides whether a modification-script property names an object this carrier holds.
         /// </summary>
         /// <param name="property">The property name, already trimmed.</param>
@@ -1229,6 +1257,12 @@ namespace PowerFramework.Persistence.Tasks
             return false;
         }
 
+        /// <summary>
+        /// Removes a property suffix, answering the column name in front of it.
+        /// </summary>
+        /// <param name="property">The property name.</param>
+        /// <param name="suffix">The suffix to remove.</param>
+        /// <returns>The column name, or the empty string when the suffix was absent.</returns>
         private static string TrimSuffix(string property, string suffix) =>
             property.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
                 ? property[..^suffix.Length].Trim()
@@ -1379,17 +1413,6 @@ namespace PowerFramework.Persistence.Tasks
             }
         }
 
-        /// <summary>
-        /// Reads the installed flags back into the column plan the generator emits from.
-        /// </summary>
-        /// <returns>The plan.</returns>
-        /// <remarks>
-        /// THE FLAGS ARE THE PREPARE STEP'S, READ BACK RATHER THAN RE-DERIVED. `_of_updateprepare` resets
-        /// update, key and identity to off on every column and then selectively re-enables from the table
-        /// descriptor array [<c>n_cst_thread_task_sqlupdate.sru:L104-L129</c>], which is precisely what
-        /// arrives here through <see cref="Modify"/>. Re-deriving them from the definition would discard
-        /// the caller's descriptor and generate a statement for columns it never asked to update.
-        /// </remarks>
         /// <summary>
         /// Projects the current state of every row whose predicate matched nothing.
         /// </summary>
@@ -1676,6 +1699,17 @@ namespace PowerFramework.Persistence.Tasks
             return [];
         }
 
+        /// <summary>
+        /// Reads the installed flags back into the column plan the generator emits from.
+        /// </summary>
+        /// <returns>The plan.</returns>
+        /// <remarks>
+        /// THE FLAGS ARE THE PREPARE STEP'S, READ BACK RATHER THAN RE-DERIVED. `_of_updateprepare` resets
+        /// update, key and identity to off on every column and then selectively re-enables from the table
+        /// descriptor array [<c>n_cst_thread_task_sqlupdate.sru:L104-L129</c>], which is precisely what
+        /// arrives here through <see cref="Modify"/>. Re-deriving them from the definition would discard
+        /// the caller's descriptor and generate a statement for columns it never asked to update.
+        /// </remarks>
         private UpdateColumnPlan BuildPlan()
         {
             string[] columns = ColumnModel();

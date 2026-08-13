@@ -117,11 +117,12 @@
 -->
 <Solution>
   <!--
-    The DataServices application. Binds TWO TLS endpoints, one protocol version each: gRPC on port
-    5112 with Http2 for contracts C-03 (DataWindowService) and C-04 (ColumnExpressionService), and
-    REST on port 5102 with Http1 for the thin projection consumed only by Gateway, the anonymous
-    /health endpoint and the JWT protected /v1/ping endpoint. Its six shared
-    ProjectReference entries pull the remainder of the build closure in behind it.
+    The DataServices application. Binds ONE TLS endpoint carrying both protocol versions: port 5102
+    with Http1AndHttp2, serving contracts C-03 (DataWindowService) and C-04 (ColumnExpressionService)
+    over gRPC alongside the thin REST projection consumed only by Gateway, the anonymous /health
+    endpoint and the JWT protected /v1/ping endpoint. 5102 is the port AAP 0.3.2.2 assigns, and ALPN
+    negotiates the version per connection. Its six shared ProjectReference entries pull the remainder
+    of the build closure in behind it.
   -->
   <Project Path="PowerFramework.DataServices/PowerFramework.DataServices.csproj" />
 

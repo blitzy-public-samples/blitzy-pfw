@@ -225,6 +225,7 @@ using System.Text.Json.Serialization;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using PowerFramework.Persistence.Data;
+using PowerFramework.Persistence.Errors;
 using PowerFramework.Persistence.Grpc;
 using PowerFramework.Persistence.Runtime;
 using PowerFramework.Persistence.Tasks;
@@ -1221,6 +1222,7 @@ internal sealed class SqliteReachabilityHealthCheck : IHealthCheck
 
     /// <summary>Fixed prose for an engine that answered negatively.</summary>
     /// <remarks>
+    /// <para>
     /// IT NAMES THE SAME REMEDY AS THE SCHEMA-INCOMPLETE ARM, because the commonest way to reach this one
     /// is a database file that does not exist yet: the readiness probe opens READ-ONLY by design, so it
     /// cannot create the file the way an ordinary connection would, and an unprovisioned deployment
@@ -1228,6 +1230,17 @@ internal sealed class SqliteReachabilityHealthCheck : IHealthCheck
     /// file AND the schema, so it is the operator's next step in either case. Naming it costs nothing and
     /// its absence was the whole of the operability gap: an operator reading only "did not answer" has no
     /// way to tell a missing file from a broken engine, and the first is by far the likelier.
+    /// </para>
+    /// <para>
+    /// THIS ARM IS REACHED ON THE SHIPPED DEFAULTS AND NOT ON THE ORCHESTRATED BRING-UP, and the remedy it
+    /// names is the right one either way. <c>Schema:ApplyMigrationsOnStartup</c> defaults to OFF, so a
+    /// deployment that boots this composition root unamended does no schema work and a fresh volume reaches
+    /// this probe exactly as described above - which is the documented posture for a characterization
+    /// capture run, where the volume must be provably untouched between the two halves of a pair. The
+    /// orchestration manifest switches the key ON, and there <c>SchemaProvisioner</c> applies the pending
+    /// migrations before this host serves anything, so an unprovisionable database refuses the process
+    /// rather than reaching this probe at all; what still reaches it there is a volume replaced under an
+    /// already-running container. In every one of those cases applying the migrations is what is required.
     /// </remarks>
     private const string StorageUnreachableDescription =
         "The storage engine did not answer a read-only reachability probe. The database file may not exist "
@@ -1769,16 +1782,21 @@ internal sealed class RuntimeSeamHealthCheck : IHealthCheck
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            // The exception object goes to the operator channel ONLY. Its message can name a type, an
-            // assembly or a configuration key, none of which belongs on an anonymous response.
+            // 🔴 "THE OPERATOR CHANNEL ONLY" WAS THE RIGHT HALF OF THE ANSWER. Keeping this detail off the
+            // anonymous response was correct; putting the exception OBJECT on the log was not. A seam this
+            // service cannot construct is usually the storage seam, so the inner fault is a provider
+            // exception whose message quotes the composed connection string - the database path and, when
+            // configured, the password. The fault is described instead, and the redactor is what reads any
+            // message at all. See Errors/FaultRecord.cs.
             _logger.LogError(
-                exception,
                 "The {Seam} runtime seam that contract {Contract} depends on is registered but could not "
                     + "be constructed, so every call on that contract would fail. Reporting the {Check} "
-                    + "readiness check not ready.",
+                    + "readiness check not ready. FaultTypes={FaultTypes} RedactedMessage={RedactedMessage}",
                 seam.Name,
                 contract,
-                HealthEndpoints.RuntimeCheckName);
+                HealthEndpoints.RuntimeCheckName,
+                FaultRecord.Types(exception),
+                FaultRecord.RedactedMessages(exception));
 
             instance = null;
             unbound = new HealthCheckResult(failureStatus, RuntimeUnboundDescription);

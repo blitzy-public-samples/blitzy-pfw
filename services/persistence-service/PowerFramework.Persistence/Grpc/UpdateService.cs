@@ -134,6 +134,7 @@ using PowerFramework.Persistence.Configuration;
 using PowerFramework.Persistence.Data;
 using PowerFramework.Persistence.Errors;
 using PowerFramework.Persistence.Runtime;
+using PowerFramework.Shared.Diagnostics;
 
 // The generated C-06 service base, reached through an alias for two reasons. First, the mandated class
 // name below is the contract's own service name, so within this file the bare name `UpdateService`
@@ -1202,8 +1203,8 @@ internal sealed class UpdateTaskRegistry
             _logger?.LogWarning(
                 "Reclaimed an abandoned update task held by caller {Principal} against session "
                 + "{SessionId}. The handle value is deliberately not recorded.",
-                removed.Principal,
-                removed.SessionId);
+                LogSafeText.Render(removed.Principal),
+                LogSafeText.Render(removed.SessionId));
         }
 
         return reclaimed;
@@ -1641,7 +1642,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
                     + "from the one that definition declares. No table name, column name or value is "
                     + "recorded.",
                     request.Tables.Count,
-                    entry.TaskId);
+                    LogSafeText.Render(entry.TaskId));
 
                 refusal = UpdateWireCodes.Status(
                     RetCode.E_INVALID_ARGUMENT,
@@ -1661,7 +1662,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
                 "PrepareUpdate refused an update-table descriptor on task {TaskId}: it names a column the "
                 + "governing data object's definition does not declare. No table name, column name or "
                 + "value is recorded.",
-                entry.TaskId);
+                LogSafeText.Render(entry.TaskId));
 
             refusal = UpdateWireCodes.Status(
                 RetCode.E_INTERNAL_ERROR,
@@ -1948,7 +1949,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             // descriptor, connection string or credential is reachable from this method at all.
             _logger?.LogWarning(
                 "CreateUpdateTask refused a request for session {SessionId} with code {ReturnCode}.",
-                sessionId,
+                LogSafeText.Render(sessionId),
                 created);
 
             return new CreateUpdateTaskResponse
@@ -1985,7 +1986,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
                     _logger?.LogWarning(
                         "CreateUpdateTask did not publish a task on session {SessionId} because the session "
                         + "began retiring first.",
-                        sessionId);
+                        LogSafeText.Render(sessionId));
 
                     return new CreateUpdateTaskResponse
                     {
@@ -2003,7 +2004,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
                 _logger?.LogWarning(
                     "CreateUpdateTask refused a task on session {SessionId} because a handle ceiling was "
                     + "reached: {Diagnostic}",
-                    sessionId,
+                    LogSafeText.Render(sessionId),
                     quotaDiagnostic);
 
                 return new CreateUpdateTaskResponse
@@ -2017,8 +2018,8 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
 
             _logger?.LogDebug(
                 "CreateUpdateTask issued update task {TaskId} on session {SessionId}.",
-                entry.TaskId,
-                entry.SessionId);
+                LogSafeText.Render(entry.TaskId),
+                LogSafeText.Render(entry.SessionId));
 
             return new CreateUpdateTaskResponse
             {
@@ -2089,8 +2090,8 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
 
         _logger?.LogDebug(
             "ReleaseUpdateTask retired update task {TaskId} on session {SessionId}.",
-            removed.TaskId,
-            removed.SessionId);
+            LogSafeText.Render(removed.TaskId),
+            LogSafeText.Render(removed.SessionId));
 
         return Task.FromResult(new ReleaseUpdateTaskResponse
         {
@@ -2389,7 +2390,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
                     "PrepareUpdate refused on task {TaskId}: the request names neither a data object nor a "
                     + "SQL syntax and the task holds neither, so no update could ever run against it. "
                     + "Nothing was cleared and no descriptor was recorded.",
-                    entry.TaskId);
+                    LogSafeText.Render(entry.TaskId));
 
                 return Task.FromResult(new PrepareUpdateResponse
                 {
@@ -2465,7 +2466,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
                         + "code {ReturnCode}.",
                         ordinal,
                         request.Tables.Count,
-                        entry.TaskId,
+                        LogSafeText.Render(entry.TaskId),
                         added);
 
                     return Task.FromResult(new PrepareUpdateResponse
@@ -2517,7 +2518,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
                 "PrepareUpdate recorded {TableCount} descriptor(s) on task {TaskId}; multi-table update is "
                 + "{MultiTableUpdate}.",
                 request.Tables.Count,
-                entry.TaskId,
+                LogSafeText.Render(entry.TaskId),
                 request.MultiTableUpdate);
 
             return Task.FromResult(new PrepareUpdateResponse
@@ -2750,7 +2751,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
                     + "table {UpdateTable}; {RowsExpected} row(s) expected, {RowsMatched} matched. Reported as "
                     + "Aborted with its detail so the caller can re-read and rebase or surface it; it is "
                     + "neither retried nor overwritten.",
-                    entry.TaskId,
+                    LogSafeText.Render(entry.TaskId),
                     conflict.Conflict?.Rows.Count ?? 0,
                     conflict.Conflict?.UpdateTable ?? string.Empty,
                     conflict.Conflict?.RowsExpected ?? 0L,
@@ -2791,7 +2792,7 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             _logger?.LogDebug(
                 "Update on task {TaskId} answered {ReturnCode}; {IdentityBlockCount} identity block(s), "
                 + "{Inserted} inserted, {Updated} updated, {Deleted} deleted.",
-                entry.TaskId,
+                LogSafeText.Render(entry.TaskId),
                 result.Code,
                 response.Identity.Count,
                 response.Counts?.Inserted ?? 0L,

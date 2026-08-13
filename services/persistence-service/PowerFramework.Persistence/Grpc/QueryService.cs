@@ -161,6 +161,7 @@ using PowerFramework.Persistence.Sql;
 using PowerFramework.Persistence.Sql.Paging;
 using PowerFramework.Persistence.Tasks;
 using PowerFramework.Persistence.Transactions;
+using PowerFramework.Shared.Diagnostics;
 
 // The generated C-05 service base, reached through an alias for two reasons. First, the mandated class
 // name below is the contract's own service name, so the bare name has to resolve to exactly one type
@@ -1190,8 +1191,8 @@ internal sealed class QueryTaskRegistry
             _logger?.LogWarning(
                 "Reclaimed an abandoned query task held by caller {Principal} against session "
                 + "{SessionId}. The handle value is deliberately not recorded.",
-                removed.Principal,
-                removed.SessionId);
+                LogSafeText.Render(removed.Principal),
+                LogSafeText.Render(removed.SessionId));
         }
 
         return reclaimed;
@@ -2333,7 +2334,7 @@ internal sealed class QueryService : GeneratedQueryServiceBase
 
             _logger?.LogDebug(
                 "Created a query task against session {SessionId}.",
-                entry.SessionId);
+                LogSafeText.Render(entry.SessionId));
 
             return new CreateQueryTaskResponse
             {

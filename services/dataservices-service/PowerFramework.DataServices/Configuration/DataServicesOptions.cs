@@ -1203,14 +1203,70 @@ public sealed class ResilienceOptions
 public sealed class ClientResilienceOptions
 {
     /// <summary>
-    /// How many times a failed attempt is retried. Zero disables retrying.
+    /// How many times a failed attempt is retried. Zero disables retrying; the ceiling is
+    /// <see cref="MaxRetryAttemptsCeiling"/>.
     /// </summary>
     /// <remarks>
-    /// Zero is a legal value and is validated as such: a deployment that wants a single attempt and
-    /// an immediate surfaced failure is expressing a policy, not a misconfiguration.
+    /// <para>
+    /// Zero is a legal value: a deployment that wants a single attempt and an immediate surfaced failure
+    /// is expressing a policy, not a misconfiguration.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>AND IT NOW BEHAVES AS ONE, WHICH IT DID NOT BEFORE.</b> Both retry layers consumed the
+    /// value unconditionally and NEITHER accepts zero. The resilience package declares its retry
+    /// strategy's <c>MaxRetryAttempts</c> in the range one to <see cref="int.MaxValue"/>, so a configured
+    /// zero made the SERVICE FAIL TO START - "The field &lt;client&gt;-standard.Retry.MaxRetryAttempts
+    /// must be between 1 and 2147483647", observed on the sibling Gateway edge, whose wiring is identical
+    /// - and the gRPC layer's <c>MaxAttempts = retries + 1</c> became one, which its own retry policy
+    /// rejects. The composition root now BRANCHES on zero: no gRPC service configuration and no channel
+    /// ceiling at all, and the HTTP-layer strategy takes the never-retry predicate with
+    /// <see cref="DisabledRetryPlaceholderAttempts"/> as the count the package's range requires.
+    /// </para>
+    /// <para>
+    /// <b>THE CEILING REPLACES <see cref="int.MaxValue"/> BECAUSE THE UNBOUNDED FORM SILENTLY BROKE
+    /// RETRY.</b> The gRPC layer increments the value to an attempt count, and unchecked
+    /// <c>int.MaxValue + 1</c> wraps to <see cref="int.MinValue"/> - a negative count that the channel and
+    /// its retry policy both ACCEPTED, leaving retry mis-configured on a service that started and reported
+    /// itself healthy (observed). Ten is production-safe rather than arbitrary: the total request budget
+    /// bounds how many attempts can occur at all, since the shipped two-second base delay growing
+    /// exponentially means a fourth retry already cannot fit a thirty-second budget - so a larger value
+    /// expresses a mistake, not a policy. NO PERFORMANCE CLAIM IS MADE OR IMPLIED (AAP 0.8.5).
+    /// </para>
     /// </remarks>
-    [Range(0, int.MaxValue)]
+    [Range(0, MaxRetryAttemptsCeiling)]
     public int MaxRetryAttempts { get; set; } = 3;
+
+    /// <summary>The largest accepted value of <see cref="MaxRetryAttempts"/>.</summary>
+    /// <remarks>
+    /// A NAMED CONSTANT BECAUSE THREE PLACES MUST AGREE ON IT: the range annotation that refuses a larger
+    /// value, the documentation an operator reads, and the boundary tests.
+    /// </remarks>
+    public const int MaxRetryAttemptsCeiling = 10;
+
+    /// <summary>
+    /// The retry count assigned to the HTTP-layer strategy when retrying is DISABLED.
+    /// </summary>
+    /// <remarks>
+    /// A PLACEHOLDER, AND THE PREDICATE IS WHAT ACTUALLY DISABLES. The resilience package's range forbids
+    /// zero, so a disabled pipeline still has to name a legal count; it names the smallest one, and its
+    /// <c>ShouldHandle</c> answers false for everything, so no attempt is ever repeated. Naming the
+    /// constant is what stops a reader from concluding that one retry survives the disable.
+    /// </remarks>
+    public const int DisabledRetryPlaceholderAttempts = 1;
+
+    /// <summary>Whether the configuration asks for any retrying at all.</summary>
+    public bool RetriesEnabled => MaxRetryAttempts > 0;
+
+    /// <summary>
+    /// The inclusive ATTEMPT count the gRPC retry policy takes, which is one more than the retry count.
+    /// </summary>
+    /// <returns>The attempt count.</returns>
+    /// <exception cref="OverflowException">
+    /// The retry count is <see cref="int.MaxValue"/>. Unreachable through validated configuration - the
+    /// range annotation refuses it long before - and CHECKED anyway, because the unchecked form's failure
+    /// mode was a silently negative attempt count that every layer accepted.
+    /// </exception>
+    public int ResolveGrpcAttemptCount() => checked(MaxRetryAttempts + 1);
 
     /// <summary>
     /// The base delay from which the backoff between retry attempts is derived. Must be positive.
@@ -1552,6 +1608,76 @@ public sealed class EventChainOptions
     /// </para>
     /// </remarks>
     public TimeSpan AnswerTimeout { get; set; } = SessionLifetimeOptions.DefaultIdleTimeout;
+
+    /// <summary>
+    /// How many notifications one event-chain stream may hold queued-or-in-flight at once before a
+    /// further one is refused. Must be at least 2. Defaults to
+    /// <see cref="DefaultMaxPendingNotifications"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>CREATED BY THE DECOMPOSITION, AND IT IS THE SERVER-SIDE ENFORCEMENT OF A DISCIPLINE THAT
+    /// WAS PREVIOUSLY ONLY ASSUMED.</b> A notification is handed to a single ordered consumer rather
+    /// than dispatched on the read loop, because nine of the 22 events are questions the chain asks
+    /// BACK and blocks on, and only the read loop can deliver the answer
+    /// [<c>se_cst_dw.sru:L11-L14</c>, <c>:L24-L26</c>, <c>:L28</c>, <c>:L32</c>]. That handover is
+    /// correct and stays. What it left open is that the read loop accepts a notification in O(1) while
+    /// the consumer may be blocked on one answer for as long as <see cref="AnswerTimeout"/> allows, so
+    /// a client that pipelines instead of conversing could enqueue without limit. The synchronous
+    /// discipline says it will not; this setting is what makes the server INDEPENDENT of that promise.
+    /// </para>
+    /// <para>
+    /// WHAT "PENDING" COUNTS, PRECISELY: every notification accepted and not yet dispatched to
+    /// completion - the queued ones AND the one currently in flight. A conforming client under the
+    /// synchronous discipline holds exactly ONE, because it must read a response to learn its next
+    /// token, so the shipped default is roughly two orders of magnitude of headroom above what the
+    /// protocol itself requires. It is a backstop against a client that ignores the discipline, not a
+    /// working limit any conversation approaches.
+    /// </para>
+    /// <para>
+    /// EXCEEDING IT ENDS THE CALL WITH <c>ResourceExhausted</c> RATHER THAN DROPPING THE MESSAGE, and
+    /// the choice is forced. Dropping a notification would mean the chain skipped an event the client
+    /// believes was dispatched, and the item-change and validation arms read state the preceding event
+    /// wrote [<c>se_cst_dw.sru:L89-L96</c>] - so a silent gap produces a WRONG chain rather than a
+    /// short one. Refusing the whole call is the same posture strict ordering already takes for an
+    /// out-of-order arrival, and it leaves nothing half-applied because the refused message was never
+    /// dispatched. <c>ResourceExhausted</c> rather than <c>FailedPrecondition</c> because the remedy is
+    /// to converse instead of pipelining, which is a quota's remedy and not a corrupted-state one.
+    /// </para>
+    /// <para>
+    /// THE QUEUE ITSELF STAYS UNBOUNDED AND THE WRITE STAYS NON-BLOCKING, which is why this is a
+    /// counted ceiling rather than a bounded channel. A bounded channel would stall the READ LOOP once
+    /// full, and the read loop is the only thing that can deliver the answer the consumer is waiting
+    /// on - so a full queue would reinstate the original deadlock in a slower form. The admission
+    /// decision is therefore taken before the write, in constant time, and a refusal is raised on the
+    /// read loop instead of being waited out.
+    /// </para>
+    /// <para>
+    /// TWO IS THE SMALLEST COHERENT VALUE, AND 1 IS REFUSED FOR A PRECISE REASON RATHER THAN A
+    /// CAUTIOUS ONE. A slot is released when the dispatch that holds it has finished - which is
+    /// immediately AFTER its result has been written - so there is an instant in which the client has
+    /// already read the response and is entitled to send the next notification while the previous
+    /// slot is still counted. One slot for the conversation and one to cover that instant is
+    /// therefore the least that can never refuse a conforming client, and a ceiling of 1 would
+    /// refuse one intermittently. That is far worse than any value being too small, because it fails
+    /// only under timing.
+    /// </para>
+    /// </remarks>
+    [Range(2, int.MaxValue)]
+    public int MaxPendingNotifications { get; set; } = DefaultMaxPendingNotifications;
+
+    /// <summary>
+    /// The shipped ceiling on one stream's queued-or-in-flight notifications.
+    /// </summary>
+    /// <remarks>
+    /// NAMED SO THE VALUE IS ASSERTABLE WITHOUT RESTATING A LITERAL. 64 is chosen as a multiple of the
+    /// ONE outstanding notification the synchronous discipline admits, large enough that no conforming
+    /// client can reach it - including a relaxed-ordering deployment whose consumers pipeline the
+    /// sequenced notification-shaped events - and small enough that a flood is refused within 64
+    /// messages instead of within available memory. It is not a throughput figure and no performance
+    /// objective is asserted for it (AAP 0.8.5).
+    /// </remarks>
+    public const int DefaultMaxPendingNotifications = 64;
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -2046,6 +2172,12 @@ public sealed class DataServicesOptionsValidator : IValidateOptions<DataServices
         // --- question before the client could possibly answer, so the nine question-shaped events
         // --- would all fail with DeadlineExceeded and the whole synchronous half of the chain would
         // --- be unusable. Caught here because the failure looks like a client fault at run time.
+        // ---
+        // --- The pending-notification ceiling carries a range annotation, so it is only enforced if
+        // --- the annotations are actually walked. Without this a zero or negative value would bind
+        // --- silently and then refuse the FIRST notification of every event chain, which reads as a
+        // --- client fault at run time while being a configuration one - and a 1, which is legal-looking,
+        // --- would refuse a CONFORMING client intermittently.
         path = string.Concat(prefix, ":EventChain");
         if (EnsureGroupBound(options.EventChain, path, failures))
         {
@@ -2053,17 +2185,37 @@ public sealed class DataServicesOptionsValidator : IValidateOptions<DataServices
                 options.EventChain.AnswerTimeout,
                 string.Concat(path, ":AnswerTimeout"),
                 failures);
+
+            // The admission ceiling carries a range annotation, so it is only enforced if the annotations
+            // are actually walked. Without this a zero or negative value would bind silently and then refuse
+            // EVERY notification on every stream - the whole chain unusable, reported as a client fault.
+            AppendAnnotationFailures(options.EventChain, path, failures);
         }
 
         // The streamed-element bound carries a range annotation, so it is only enforced if the annotations
         // are actually walked. Without this the bound would bind a zero or a negative value silently and
         // then refuse EVERY streamed response at the first element.
-        if (EnsureGroupBound(options.RestProjection, string.Concat(prefix, ":RestProjection"), failures))
+        //
+        // The collection window's two rules cannot be annotations at all - a TimeSpan has no numeric range
+        // and the upper bound is a RELATIONSHIP - so the group checks them itself. Both are fail-fast for
+        // the same reason: a zero window answers every event-stream poll empty even with records waiting,
+        // and a window past the consumer's own budget cannot fire first, so the caller sees a transport
+        // failure instead of the empty collection the operation means. Either reads as a run-time fault
+        // while being a configuration one.
+        path = string.Concat(prefix, ":RestProjection");
+        if (EnsureGroupBound(options.RestProjection, path, failures))
         {
-            AppendAnnotationFailures(
-                options.RestProjection,
-                string.Concat(prefix, ":RestProjection"),
-                failures);
+            AppendAnnotationFailures(options.RestProjection, path, failures);
+
+            foreach (ValidationResult result in options.RestProjection.Validate(
+                path,
+                nameof(DataServicesOptions.RestProjection)))
+            {
+                if (result.ErrorMessage is { Length: > 0 } message)
+                {
+                    failures.Add(message);
+                }
+            }
         }
 
         // THE SESSION DESCRIPTOR IS FAIL-FAST BECAUSE EVERY RETRIEVAL AND EVERY UPDATE DEPENDS ON IT
@@ -2869,6 +3021,105 @@ public sealed class RestProjectionOptions
     /// </remarks>
     [Range(1, int.MaxValue)]
     public int MaxStreamedElements { get; set; } = 10_000;
+
+    /// <summary>
+    /// The shipped collection window for a projected stream that never ends on its own.
+    /// </summary>
+    /// <remarks>
+    /// TWO SECONDS ANSWERS AN IDLE SUBSCRIPTION PROMPTLY WHILE LEAVING A WIDE MARGIN under every patience
+    /// the request passes through. It is also the value Gateway's own projection of the same operation
+    /// ships, so the two windows cannot fight: a caller reaching this service directly and a caller
+    /// reaching it through the ingress observe the same completeness rule rather than two.
+    /// </remarks>
+    public static readonly TimeSpan DefaultStreamCollectionWindow = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// The exclusive upper bound on <see cref="StreamCollectionWindow"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// TEN SECONDS, BECAUSE THAT IS THE PER-ATTEMPT BUDGET THE ONE DOCUMENTED CONSUMER OF THIS PROJECTION
+    /// APPLIES TO IT. A window at or beyond that cannot fire first: the consumer abandons the attempt
+    /// while this service is still collecting, and the caller receives a transport failure instead of the
+    /// empty collection the operation means - which is the very defect the window exists to close, moved
+    /// one hop out rather than fixed.
+    /// </para>
+    /// <para>
+    /// THE NUMBER IS RESTATED HERE RATHER THAN READ FROM THE OTHER SERVICE, and that is constraint C-A
+    /// rather than duplication for its own sake: no behaviour and no options type crosses a service
+    /// boundary in this system, so a bound that reached into the ingress's configuration would be exactly
+    /// the coupling the decomposition forbids. It is documented on both sides instead, and the DEFAULT
+    /// leaves so much margin - two seconds against ten - that the two can only collide if an operator
+    /// deliberately moves one.
+    /// </para>
+    /// </remarks>
+    internal static readonly TimeSpan MaximumStreamCollectionWindow = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// How long the projection collects from a stream that never completes on its own, before answering
+    /// with what it has. Defaults to <see cref="DefaultStreamCollectionWindow"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THIS APPLIES TO ONE OPERATION AND NOT TO STREAMING IN GENERAL, WHICH IS WHY IT IS OPT-IN PER
+    /// ROUTE.</b> The expression event stream is a SUBSCRIPTION: the engine ends it only when the client
+    /// goes away, so a request/response projection of it has to decide for itself when the collection is
+    /// complete. Without that decision the projected route collected an intentionally open-ended stream
+    /// to completion and therefore never answered at all - a normal HTTP request received neither the
+    /// events nor a success status, and pinned a request thread, a relay subscription and a connection
+    /// for as long as the caller was willing to wait. Every OTHER projected stream terminates itself - a
+    /// retrieval ends with its final-marked chunk - so applying a window to one of those would truncate a
+    /// legitimate result.
+    /// </para>
+    /// <para>
+    /// A WINDOW THAT EXPIRES IS A COMPLETE ANSWER RATHER THAN A TRUNCATION. The caller asked for the
+    /// records available now, so the collected sequence - empty included - is exactly what the operation
+    /// means, and the response is a well-formed 200. That is the opposite of exceeding
+    /// <see cref="MaxStreamedElements"/>, which refuses the document precisely so the caller can tell it
+    /// did not receive everything.
+    /// </para>
+    /// <para>
+    /// It is a completeness rule and not a performance claim - no performance objective is asserted
+    /// anywhere in this refactor (AAP 0.8.5).
+    /// </para>
+    /// </remarks>
+    public TimeSpan StreamCollectionWindow { get; set; } = DefaultStreamCollectionWindow;
+
+    /// <summary>
+    /// Checks the one setting on this type whose correctness is a relationship rather than a range.
+    /// </summary>
+    /// <param name="configurationKeyPrefix">The configuration path this group binds from.</param>
+    /// <param name="memberName">The member name reported on a failure.</param>
+    /// <returns>The failures, or an empty sequence when the group is coherent.</returns>
+    /// <remarks>
+    /// BOTH BOUNDS ARE NAMED IN THE MESSAGE, AND SO IS THE KEY, because an operator reading a refusal to
+    /// start needs the setting to change rather than a description of a category of fault. Neither rule is
+    /// expressible as a range annotation: a <see cref="TimeSpan"/> has no numeric range, and the upper
+    /// bound is a relationship to another value rather than a constant a caller could read off the type.
+    /// </remarks>
+    internal IEnumerable<ValidationResult> Validate(string configurationKeyPrefix, string memberName)
+    {
+        if (StreamCollectionWindow <= TimeSpan.Zero)
+        {
+            yield return new ValidationResult(
+                $"'{configurationKeyPrefix}:{nameof(StreamCollectionWindow)}' is "
+                    + $"{StreamCollectionWindow}, which collects nothing at all: the projected event "
+                    + "stream would answer an empty collection for every request, including one with "
+                    + "records already waiting. It must be greater than zero.",
+                [memberName]);
+        }
+        else if (StreamCollectionWindow >= MaximumStreamCollectionWindow)
+        {
+            yield return new ValidationResult(
+                $"'{configurationKeyPrefix}:{nameof(StreamCollectionWindow)}' is "
+                    + $"{StreamCollectionWindow}, which is not below the "
+                    + $"{MaximumStreamCollectionWindow} per-attempt budget this projection's documented "
+                    + "consumer applies to it. A window that cannot fire first leaves the consumer's own "
+                    + "timeout to end an idle subscription, which reaches the caller as a transport "
+                    + "failure rather than as the empty collection the operation means.",
+                [memberName]);
+        }
+    }
 }
 
 /// <summary>

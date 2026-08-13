@@ -180,8 +180,9 @@ public sealed class PublishedDocumentAuthorizationTests(DataServicesTestHostFact
         }
 
         // Asserted so that a projection removed from the route table cannot make this pass by finding
-        // nothing to check. Forty is the contract's own figure: every unary and every server-streaming
-        // method of C-03 and C-04, and none of the three bidirectional ones.
-        Assert.Equal(40, projected);
+        // nothing to check. Thirty-nine is the contract's own figure: fifteen of C-03's sixteen methods and
+        // twenty-four of C-04's twenty-six - every unary and every server-streaming one, and none of the
+        // three bidirectional ones.
+        Assert.Equal(39, projected);
     }
 }

@@ -336,7 +336,7 @@ public sealed class CallerAuthorizationValidationTests
         Assert.True(new SecurityOptionsValidator().Validate(name: null, options).Succeeded);
 
         // And the issuer freezes them as two entries rather than refusing a phantom duplicate.
-        using RSA key = RSA.Create(SigningKeyFormats.DefaultMinimumKeySizeBits);
+        using RSA key = RSA.Create(SecurityAppFactory.DefaultSigningKeySizeInBits);
         options.SigningKey = key.ExportPkcs8PrivateKeyPem();
 
         TokenIssuer issuer = new(
@@ -459,7 +459,7 @@ public sealed class CallerAuthorizationValidationTests
                 break;
         }
 
-        using RSA key = RSA.Create(SigningKeyFormats.DefaultMinimumKeySizeBits);
+        using RSA key = RSA.Create(SecurityAppFactory.DefaultSigningKeySizeInBits);
         options.SigningKey = key.ExportPkcs8PrivateKeyPem();
 
         SigningKeyProvider keys = new(Options.Create(options));
@@ -527,7 +527,7 @@ public sealed class CallerAuthorizationValidationTests
     /// </remarks>
     private static SecurityOptions Bootable()
     {
-        using RSA key = RSA.Create(SigningKeyFormats.DefaultMinimumKeySizeBits);
+        using RSA key = RSA.Create(SecurityAppFactory.DefaultSigningKeySizeInBits);
 
         SecurityOptions options = new()
         {
@@ -557,25 +557,15 @@ public sealed class CallerAuthorizationValidationTests
     /// shape a TLS-terminating deployment uses and is valid on its own.
     /// </para>
     /// <para>
-    /// IT IS A METHOD RATHER THAN A LITERAL BLOCK BECAUSE THE ROSTER FOLLOWS THE AUDIENCE LIST. The
-    /// validator refuses an entry naming an audience the deployment does not serve, so a row that reshapes
-    /// <c>Security:Audiences</c> must reshape this too or fail on a rule it is not about.
+    /// IT IS A METHOD RATHER THAN A LITERAL BLOCK so that a row reshaping the deployment can reshape the
+    /// credential directory with it. The directory carries a SUBJECT and nothing else about permissions -
+    /// what an identity may request is stated once, in the grant matrix - so this is deliberately short.
     /// </para>
     /// </remarks>
     private static void Reroster(SecurityOptions options)
     {
         options.Clients.Clear();
-
-        SecurityClientOptions registered = new() { Subject = "a-rostered-subject" };
-
-        foreach (string audience in options.Audiences)
-        {
-            registered.Audiences.Add(audience);
-        }
-
-        registered.Scopes.Add("s");
-
-        options.Clients.Add(registered);
+        options.Clients.Add(new SecurityClientOptions { Subject = "a-rostered-subject" });
     }
 }
 
@@ -1415,18 +1405,25 @@ public sealed class ShippedCallerAuthorizationMatrixTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// THE ORDER AND THE COUNT ARE BOTH LOAD-BEARING, AND NOT FOR TIDINESS.
-    /// <c>orchestration/.env.example</c> adds the end-to-end suite's row through
-    /// <c>Security__CallerAuthorizations__3__*</c>, and the configuration provider merges an array BY
-    /// INDEX rather than by appending. A fourth row added to the settings file would therefore be wholly
-    /// SHADOWED by that environment block - silently, with the row count unchanged and nothing refused.
+    /// THE ORDER AND THE COUNT ARE BOTH LOAD-BEARING, AND NOT FOR TIDINESS. The development overlay adds
+    /// the end-to-end suite's row at index 3, and the configuration provider merges an array BY INDEX
+    /// rather than by appending - so a fourth row added to THIS file would be wholly SHADOWED by the
+    /// overlay's, silently, with the row count unchanged and nothing refused.
     /// </para>
     /// <para>
     /// There is no startup check that could catch it, because both configurations are individually valid;
     /// the collision produces a hybrid rather than a duplicate, so the issuer's duplicate-pair guard does
-    /// not fire either. This row is the guard. If it fails because a row was legitimately added, move the
-    /// environment block's index in <c>orchestration/.env.example</c> to match, then update the count
-    /// here.
+    /// not fire either. This row is the guard. If it fails because a row was legitimately added here, move
+    /// the overlay's row to the next free index, then update the count here.
+    /// </para>
+    /// <para>
+    /// THE HAZARD USED TO SPAN TWO REPOSITORIES' WORTH OF FILES AND NOW SPANS TWO SETTINGS FILES, which is
+    /// a real narrowing rather than a restatement. <c>orchestration/.env.example</c> and the Compose
+    /// manifest injected that same row through <c>Security:CallerAuthorizations</c> section-path variables
+    /// at the same literal index - redundantly in <c>Development</c>, where this service's own overlay
+    /// already states it beside the credential entry the caller needs, and wrongly in <c>Production</c>,
+    /// where no credential entry exists for it at all. Both are gone; the grant is stated once, where the
+    /// caller is registered.
     /// </para>
     /// </remarks>
     [Fact]

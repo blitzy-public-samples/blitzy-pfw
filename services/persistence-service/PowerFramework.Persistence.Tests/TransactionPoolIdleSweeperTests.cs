@@ -249,16 +249,23 @@ public sealed class TransactionPoolIdleSweeperTests
     /// <param name="fixture">The fixture under test.</param>
     /// <returns>A task that completes once the timer exists.</returns>
     /// <remarks>
+    /// <para>
     /// <c>StartAsync</c> returns at the loop's first await, which is BEFORE the timer is constructed on
-    /// some scheduling orders. Yielding until it appears removes that order dependence. NOT A TIMING
-    /// ASSERTION (AAP 0.8.5) - the bound exists only so a genuine failure fails rather than hangs.
+    /// some scheduling orders, so an advance issued immediately afterwards can find nothing to advance.
+    /// </para>
+    /// <para>
+    /// A SIGNAL, NOT A POLL. This used to be a bounded retry - up to two hundred five-millisecond delays -
+    /// which made the outcome a function of scheduler and host load: under a loaded agent the bound could
+    /// expire while the loop was merely slow to reach its first await, and the test then failed for a
+    /// reason that says nothing about the sweeper. The clock now completes a task the instant it registers
+    /// its first timer, so this awaits the event itself. There is no interval, no attempt count and
+    /// nothing to tune. The only bound is the test runner's own timeout, which is the correct owner of a
+    /// liveness bound; no timing is asserted anywhere here (AAP 0.8.5).
+    /// </para>
     /// </remarks>
     private static async Task WaitForTimer(Fixture fixture)
     {
-        for (int attempt = 0; attempt < 200 && fixture.Clock.TimerCount == 0; attempt++)
-        {
-            await Task.Delay(5, TestContext.Current.CancellationToken);
-        }
+        await fixture.Clock.FirstTimerCreated.WaitAsync(TestContext.Current.CancellationToken);
 
         Assert.Equal(1, fixture.Clock.TimerCount);
     }
@@ -270,15 +277,33 @@ public sealed class TransactionPoolIdleSweeperTests
     /// <param name="atLeast">The sweep count to wait for.</param>
     /// <returns>A task that completes once the count is reached.</returns>
     /// <remarks>
-    /// A tick signalled while the loop is awaiting is completed through a value-task source, so the sweep
-    /// runs on a continuation rather than inside the advance. This yields until the count appears. NOT A
-    /// TIMING ASSERTION (AAP 0.8.5).
+    /// <para>
+    /// WHY A WAIT IS NEEDED AT ALL. The tick is delivered SYNCHRONOUSLY inside
+    /// <see cref="ManualTimeProvider.Advance"/> - the callback has already run by the time the advance
+    /// returns - but the loop it releases resumes from <c>PeriodicTimer.WaitForNextTickAsync</c> on a
+    /// continuation, so the sweep itself happens just after. What is being awaited is therefore a
+    /// continuation the scheduler has ALREADY been handed, not an event that may or may not occur.
+    /// </para>
+    /// <para>
+    /// TOKEN-DRIVEN AND UNBOUNDED, WHICH IS THE POINT. This used to be a bounded retry of up to two
+    /// hundred five-millisecond delays, and a bound like that is a timing assumption wearing a
+    /// convenience's clothes: it can expire because the agent is busy, and the failure then accuses the
+    /// sweeper of not sweeping when the truth is that a thread was not scheduled within one second. The
+    /// loop now has no attempt count and no delay - it yields until the count appears, and the ONLY thing
+    /// that can end it early is the test's own cancellation token. A sweep that genuinely never happens
+    /// is therefore reported by the runner's timeout, which is the separate liveness bound that belongs
+    /// outside the assertion. Nothing here asserts a duration (AAP 0.8.5).
+    /// </para>
     /// </remarks>
     private static async Task WaitForSweeps(Fixture fixture, int atLeast)
     {
-        for (int attempt = 0; attempt < 200 && fixture.Sweeper.SweepCount < atLeast; attempt++)
+        while (fixture.Sweeper.SweepCount < atLeast)
         {
-            await Task.Delay(5, TestContext.Current.CancellationToken);
+            TestContext.Current.CancellationToken.ThrowIfCancellationRequested();
+
+            // Hands the scheduler the continuation carrying the sweep. No duration, so nothing here can
+            // expire; a run that never sweeps is ended by the runner rather than by this loop.
+            await Task.Yield();
         }
 
         Assert.True(
@@ -351,11 +376,31 @@ public sealed class TransactionPoolIdleSweeperTests
 
         private readonly List<ManualTimer> _timers = [];
 
+        /// <summary>
+        /// Completed the instant this clock registers its FIRST timer.
+        /// </summary>
+        /// <remarks>
+        /// The signal that replaced a polling loop in <c>WaitForTimer</c>. Run continuations
+        /// asynchronously, so completing the source cannot execute a waiter's continuation inline while
+        /// this clock still holds its own lock - which would be a deadlock rather than a flake.
+        /// </remarks>
+        private readonly TaskCompletionSource _firstTimerCreated =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         private DateTimeOffset _now;
 
         /// <summary>Positions the clock.</summary>
         /// <param name="start">The starting instant.</param>
         internal ManualTimeProvider(DateTimeOffset start) => _now = start;
+
+        /// <summary>
+        /// A task that completes when this clock has registered its first timer.
+        /// </summary>
+        /// <remarks>
+        /// Exposed so a test can await the EVENT rather than poll for its consequence. It never
+        /// transitions back: a clock registers a first timer once.
+        /// </remarks>
+        internal Task FirstTimerCreated => _firstTimerCreated.Task;
 
         /// <inheritdoc/>
         public override long TimestampFrequency => TimeSpan.TicksPerSecond;
@@ -416,6 +461,11 @@ public sealed class TransactionPoolIdleSweeperTests
                 _ = timer.ArmFrom(_now, dueTime, period);
                 _timers.Add(timer);
             }
+
+            // OUTSIDE THE LOCK, and after the timer is registered. Completing it inside would run a
+            // waiter's continuation while this clock still held its gate on a source configured otherwise;
+            // completing it before registration would let a waiter observe a clock with no timer.
+            _ = _firstTimerCreated.TrySetResult();
 
             return timer;
         }

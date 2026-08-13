@@ -34,10 +34,12 @@ using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using Grpc.Core;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using PowerFramework.Persistence.Concurrency;
 using PowerFramework.Persistence.Configuration;
+using PowerFramework.Persistence.Errors;
 using PowerFramework.Persistence.Grpc;
 using PowerFramework.Persistence.Tasks;
 using PowerFramework.Persistence.Tasks.TaskProxies;
@@ -1998,6 +2000,226 @@ public sealed class PersistenceRuntimeTests : IDisposable
     }
 
     /// <summary>
+    /// 🔴 AN UPDATE PAYLOAD THAT MOVED THE KEY AND LEFT THE KEY'S BASELINE UNSTATED IS REFUSED, and the
+    /// wrong-row write it used to produce is demonstrated here so the refusal is not mistaken for
+    /// pedantry.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE HAZARD IS SPECIFIC AND IT IS NOT A CONFLICT. Every predicate this service generates is built
+    /// from a row's ORIGINAL values [<c>Tasks/SqlUpdateCarrier.AppendWhere</c>], so a baseline inferred
+    /// from the value being WRITTEN names the row that already holds the new value. The payload below
+    /// moves the key from one existing row to another and states the originals of the other five columns
+    /// correctly, so the fabricated predicate matches a REAL row - just not the one the caller read. The
+    /// caller is told one row was updated, the row it read is untouched, and the row it never mentioned is
+    /// overwritten. Nothing about that surfaces as an <c>Aborted</c>, because from the statement's point
+    /// of view it succeeded.
+    /// </para>
+    /// <para>
+    /// AND IT ALSO BYPASSES THE MODE THE FIXTURE DECLARES. With the key's baseline equal to its current
+    /// value, <c>HasKeyChange</c> answers false and the walk takes the ordinary in-place UPDATE path -
+    /// so a key change under <c>updatekeyinplace=no</c> [dw_sqlite.srd:L14] generates neither the DELETE
+    /// nor the INSERT the mode requires.
+    /// </para>
+    /// <para>
+    /// THE TWO HALVES RUN IN THIS ORDER ON PURPOSE. The refusal is asserted against untouched storage
+    /// first, because that is the shipped behaviour; the counterfactual runs second precisely BECAUSE it
+    /// mutates the table, and its mutation is the evidence.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AKeyChangeThatLeftItsBaselineUnstatedIsRefusedRatherThanAimedAtTheRowHoldingTheNewKey()
+    {
+        // TWO ROWS THAT DIFFER ONLY IN THEIR KEY, which is what lets a predicate built from the WRONG
+        // baseline match a real row: every non-key original the payload states is true of both of them.
+        Seed(("Paul", 32, "California", 20000d, "1999-05-08"));
+        Seed(("Paul", 32, "California", 20000d, "1999-05-08"));
+
+        UpdateHarness strict = new(this);
+        using SqliteTransactionEngine engine = strict.Engine;
+        Assert.Equal(0, engine.Connect(TestContext.Current.CancellationToken).SqlCode);
+
+        long readRow = long.Parse(
+            ScalarText(engine, "SELECT MIN(ID) FROM COMPANY"),
+            CultureInfo.InvariantCulture);
+        long otherRow = long.Parse(
+            ScalarText(engine, "SELECT MAX(ID) FROM COMPANY"),
+            CultureInfo.InvariantCulture);
+
+        Assert.NotEqual(readRow, otherRow);
+
+        // The caller read `readRow`, re-keys it onto `otherRow`, edits the address - and omits the key's
+        // original. Every other original it states is the value it actually read.
+        CarrierState payload = WirePayload(
+            columns:
+            [
+                Wire(DwSqliteFixture.IdColumnNumber, otherRow),
+                Wire(DwSqliteFixture.NameColumnNumber, "Paul"),
+                Wire(DwSqliteFixture.AgeColumnNumber, 32L),
+                Wire(DwSqliteFixture.AddressColumnNumber, "Nevada"),
+                Wire(DwSqliteFixture.SalaryColumnNumber, 20000d),
+                Wire(DwSqliteFixture.BirthColumnNumber, "1999-05-08"),
+            ],
+            originals:
+            [
+                Wire(DwSqliteFixture.NameColumnNumber, "Paul"),
+                Wire(DwSqliteFixture.AgeColumnNumber, 32L),
+                Wire(DwSqliteFixture.AddressColumnNumber, "California"),
+                Wire(DwSqliteFixture.SalaryColumnNumber, 20000d),
+                Wire(DwSqliteFixture.BirthColumnNumber, "1999-05-08"),
+            ]);
+
+        // 🔴 REFUSED AT THE CARRIER, which is the failure value `of_setupdatedata` already carried for a
+        // malformed changeset - so the update task answers E_INVALID_DATA with the oracle's own
+        // diagnostic [n_cst_thread_task_sqlupdate.sru:L343-L344] rather than through a new failure mode.
+        Assert.Equal(DataWindowBufferStore.DataStoreFailure, strict.Carrier.SetChanges(payload));
+
+        // NOTHING WAS ADMITTED, so there is no half-applied payload for the caller to unwind.
+        Assert.Equal(0L, strict.Carrier.Store.Carrier.RowCount());
+
+        // AND STORAGE IS UNTOUCHED - both rows still hold the address the payload tried to move.
+        Assert.Equal("2", ScalarText(engine, "SELECT COUNT(*) FROM COMPANY WHERE ADDRESS = 'California'"));
+
+        // ==========================================================================================
+        //  THE COUNTERFACTUAL - WHAT THE LENIENT READING DOES WITH THE SAME PAYLOAD.
+        //  ----------------------------------------------------------------------------------------
+        //  `CarrierBaselineTrust.AsStated` is the TRANSFER reading and is correct there, because on
+        //  that path the producer is this service and an omitted original is its own statement of
+        //  equality. Applied to a CALLER-composed payload it resolves the key's baseline to the key
+        //  being written, and the statement below is the result. This is exactly why the update path
+        //  does not use it, and it is asserted rather than described so the distinction cannot be
+        //  quietly collapsed back into one rule.
+        // ==========================================================================================
+        UpdateHarness lenient = new(this);
+        using SqliteTransactionEngine lenientEngine = lenient.Engine;
+        Assert.Equal(0, lenientEngine.Connect(TestContext.Current.CancellationToken).SqlCode);
+
+        lenient.PrepareCompany();
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            new ChangesetPayloadCodec().TryApply(
+                lenient.Carrier.Store.Carrier,
+                payload,
+                CarrierBaselineTrust.AsStated));
+
+        // The key's baseline IS the key being written - the fabrication, stated as an assertion.
+        Assert.Equal(
+            otherRow,
+            lenient.Carrier.Store.Carrier.GetItemOriginalValue(
+                1L,
+                DwSqliteFixture.IdColumnNumber,
+                DwBuffer.Primary));
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            lenient.Carrier.Target.Update(
+                acceptText: true,
+                resetFlag: false,
+                TestContext.Current.CancellationToken));
+
+        // THE ROW THE CALLER NEVER MENTIONED IS THE ONE THAT MOVED, and the row it read did not.
+        Assert.Equal(
+            "Nevada",
+            ScalarText(lenientEngine, "SELECT ADDRESS FROM COMPANY WHERE ID = " + otherRow));
+        Assert.Equal(
+            "California",
+            ScalarText(lenientEngine, "SELECT ADDRESS FROM COMPANY WHERE ID = " + readRow));
+
+        // AND IT LOOKED LIKE A SUCCESS. One row was owed, one matched, so no mismatch is reported and a
+        // caller has nothing to retry - which is what makes this a silent wrong-row write rather than a
+        // conflict.
+        ConcurrencyEvidence lenientEvidence = Assert.IsType<ConcurrencyEvidence>(
+            lenient.Carrier.CaptureConcurrencyEvidence());
+
+        Assert.Equal(1L, lenientEvidence.RowsExpected);
+        Assert.Equal(1L, lenientEvidence.RowsMatched);
+        Assert.False(ConflictDetector.IsConcurrencyMismatch(lenientEvidence));
+
+        // AND NEITHER HALF OF THE DECLARED MODE RAN: an in-place UPDATE, no DELETE and no INSERT, for a
+        // payload whose key moved under `updatekeyinplace=no`.
+        Assert.Equal(1L, lenient.Carrier.Identity.Values.GetUpdatedCount());
+        Assert.Equal(0L, lenient.Carrier.Identity.Values.GetDeletedCount());
+        Assert.Equal(0L, lenient.Carrier.Identity.Values.GetInsertedCount());
+    }
+
+    /// <summary>
+    /// A key change that arrives over the wire WITH its baseline stated reaches the
+    /// <c>updatekeyinplace=no</c> DELETE-plus-INSERT, keyed on the OLD value.
+    /// </summary>
+    /// <remarks>
+    /// THE POSITIVE CONTROL FOR THE CASE ABOVE, AND IT PROVES THE ADMITTED BASELINE IS THE ONE THE WALK
+    /// READS. The sibling case at <c>AKeyChangeUnderKeyInPlaceNoBecomesADeleteAndAnInsert</c> stages the
+    /// key change by editing the store directly; this one stages it as a caller does - a
+    /// <c>persistence.v1.CarrierState</c> through <c>SetChanges</c> - so the decode, the baseline and
+    /// <c>HasKeyChange</c> are exercised as one path. Without it, the refusal above could be satisfied by
+    /// a carrier that refused every wire payload.
+    /// </remarks>
+    [Fact]
+    public void AKeyChangeArrivingOverTheWireWithItsBaselineStatedIsKeyedOnTheOldValue()
+    {
+        Seed(("Paul", 32, "California", 20000d, "1999-05-08"));
+
+        UpdateHarness harness = new(this);
+        using SqliteTransactionEngine engine = harness.Engine;
+        Assert.Equal(0, engine.Connect(TestContext.Current.CancellationToken).SqlCode);
+
+        harness.PrepareCompany();
+
+        long id = long.Parse(
+            ScalarText(engine, "SELECT ID FROM COMPANY WHERE NAME = 'Paul'"),
+            CultureInfo.InvariantCulture);
+        long moved = id + 100L;
+
+        CarrierState payload = WirePayload(
+            columns:
+            [
+                Wire(DwSqliteFixture.IdColumnNumber, moved),
+                Wire(DwSqliteFixture.NameColumnNumber, "Paul"),
+                Wire(DwSqliteFixture.AgeColumnNumber, 32L),
+                Wire(DwSqliteFixture.AddressColumnNumber, "California"),
+                Wire(DwSqliteFixture.SalaryColumnNumber, 20000d),
+                Wire(DwSqliteFixture.BirthColumnNumber, "1999-05-08"),
+            ],
+            originals:
+            [
+                Wire(DwSqliteFixture.IdColumnNumber, id),
+                Wire(DwSqliteFixture.NameColumnNumber, "Paul"),
+                Wire(DwSqliteFixture.AgeColumnNumber, 32L),
+                Wire(DwSqliteFixture.AddressColumnNumber, "California"),
+                Wire(DwSqliteFixture.SalaryColumnNumber, 20000d),
+                Wire(DwSqliteFixture.BirthColumnNumber, "1999-05-08"),
+            ]);
+
+        Assert.Equal(DataWindowBufferStore.DataStoreSuccess, harness.Carrier.SetChanges(payload));
+
+        // THE STATED BASELINE SURVIVED THE DECODE, which is what `HasKeyChange` compares against.
+        Assert.Equal(
+            id,
+            harness.Carrier.Store.Carrier.GetItemOriginalValue(
+                1L,
+                DwSqliteFixture.IdColumnNumber,
+                DwBuffer.Primary));
+
+        Assert.Equal(
+            DataWindowBufferStore.DataStoreSuccess,
+            harness.Carrier.Target.Update(
+                acceptText: true,
+                resetFlag: false,
+                TestContext.Current.CancellationToken));
+
+        // THE DELETE WAS AIMED AT THE OLD KEY and the insert wrote the new one.
+        Assert.Equal("0", ScalarText(engine, "SELECT COUNT(*) FROM COMPANY WHERE ID = " + id));
+        Assert.Equal("1", ScalarText(engine, "SELECT COUNT(*) FROM COMPANY WHERE ID = " + moved));
+        Assert.Equal("1", ScalarText(engine, "SELECT COUNT(*) FROM COMPANY"));
+
+        // COUNTED AS THE PAIR THE MODE REQUIRES, not as an update.
+        Assert.Equal(1L, harness.Carrier.Identity.Values.GetDeletedCount());
+        Assert.Equal(1L, harness.Carrier.Identity.Values.GetInsertedCount());
+        Assert.Equal(0L, harness.Carrier.Identity.Values.GetUpdatedCount());
+    }
+
+    /// <summary>
     /// An unattached carrier and one whose definition names no updatable table both refuse.
     /// </summary>
     /// <remarks>
@@ -2182,6 +2404,113 @@ public sealed class PersistenceRuntimeTests : IDisposable
     // ==============================================================================================
     //  HELPERS
     // ==============================================================================================
+
+    // ==============================================================================================
+    //  THE STATEMENT NEVER REACHES THE LOG, AND THE EXCEPTION OBJECT IS WHY IT USED TO
+    // ==============================================================================================
+
+    /// <summary>
+    /// A statement fault records the fault's type chain and a REDACTED message, and attaches no
+    /// exception - so the literal values interpolated into the statement reach no record.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE DEFECT WAS COMPLETE AND WAS INVISIBLE TO EVERY TEST THAT EXISTED.</b> Each log site in
+    /// this engine wrote a carefully bounded message - an operation name and a mapped numeric code -
+    /// and then passed the exception OBJECT as the logging abstraction's exception argument. Every
+    /// provider renders that argument by calling <c>ToString()</c>, which prints the unredacted
+    /// message, every inner exception's unredacted message and the stack. A capturing test logger
+    /// records <c>formatter(state, exception)</c>, which renders the TEMPLATE and does NOT render that
+    /// argument, so a suite asserting "the statement is absent" passed while every real provider
+    /// printed it.
+    /// </para>
+    /// <para>
+    /// THIS CASE THEREFORE ASSERTS THE EXCEPTION ARGUMENT ITSELF, which is the only assertion that can
+    /// tell the fixed code from the unfixed code. Persistence is the ONLY service that generates or
+    /// executes SQL (AAP 0.1.1), and the legacy runs without bind variables whenever
+    /// <c>DisableBind</c> is set
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L128-L129</c>], so a
+    /// statement here carries its row's values inline - which is exactly the field constraint C-F
+    /// exists to keep out of a record.
+    /// </para>
+    /// <para>
+    /// A CONSTRAINT VIOLATION IS THE CHEAPEST REAL FAULT ON THIS PATH: the column is declared
+    /// <c>NOT NULL</c> by the only DDL in the repository
+    /// [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469</c>], so the provider refuses the
+    /// insert AFTER the statement text exists, which is the shape every interesting fault here has.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AStatementFaultRecordsARedactedChainAndAttachesNoException()
+    {
+        const string Literal = "O'Hara-super-secret-salary-99999";
+
+        RecordingEngineLogger logger = new();
+
+        using SqliteTransactionEngine engine = new(_connections, logger);
+
+        Assert.Equal(0L, engine.Connect(TestContext.Current.CancellationToken).SqlCode);
+
+        // NAME is NOT NULL, so this is refused with the statement already composed.
+        SqlState failed = engine.Execute(
+            $"INSERT INTO COMPANY (NAME, AGE, ADDRESS, SALARY, BIRTH) "
+                + $"VALUES (NULL, 41, '{Literal}', 1, '1980-01-01')",
+            TestContext.Current.CancellationToken);
+
+        Assert.NotEqual(0L, failed.SqlCode);
+
+        string recorded = string.Join("\n", logger.Records);
+
+        Assert.NotEmpty(logger.Records);
+
+        // 1. NO EXCEPTION IS ATTACHED. This is the assertion the formatted text cannot make.
+        Assert.All(logger.Exceptions, Assert.Null);
+
+        // 2. THE LITERAL IS ABSENT from what a provider would render.
+        Assert.DoesNotContain(Literal, recorded, StringComparison.Ordinal);
+
+        // 3. THE FAULT IS STILL IDENTIFIED, so nothing an operator needed was lost: the provider's own
+        //    exception type is named, and the redacted message is present rather than dropped.
+        Assert.Contains(typeof(SqliteException).FullName!, recorded, StringComparison.Ordinal);
+        Assert.Contains("RedactedMessage=", recorded, StringComparison.Ordinal);
+        Assert.Contains(SqlRedactor.DefaultPlaceholder, recorded, StringComparison.Ordinal);
+
+        _ = engine.Disconnect();
+    }
+
+    /// <summary>
+    /// Captures both halves of every record this engine writes - the formatted text AND the exception
+    /// argument - because the defect lived entirely in the half a formatter never renders.
+    /// </summary>
+    private sealed class RecordingEngineLogger : ILogger<SqliteTransactionEngine>
+    {
+        /// <summary>The formatted records, in order.</summary>
+        internal List<string> Records { get; } = [];
+
+        /// <summary>The exception argument of each record, in the same order.</summary>
+        internal List<Exception?> Exceptions { get; } = [];
+
+        /// <inheritdoc/>
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        /// <inheritdoc/>
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        /// <inheritdoc/>
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            ArgumentNullException.ThrowIfNull(formatter);
+
+            Records.Add(formatter(state, exception));
+            Exceptions.Add(exception);
+        }
+    }
 
     /// <summary>Builds an engine over this class's temporary database.</summary>
     private SqliteTransactionEngine CreateEngine() => CreateEngine(_connections);
@@ -2372,6 +2701,67 @@ public sealed class PersistenceRuntimeTests : IDisposable
     /// </remarks>
     private static ColumnValue ColumnOf(IEnumerable<ColumnValue> values, int columnNumber) =>
         values.Single(value => value.ColumnId == columnNumber);
+
+    /// <summary>
+    /// Builds the one-row <c>persistence.v1.CarrierState</c> an update caller sends, in the canonical
+    /// segment order the codec requires.
+    /// </summary>
+    /// <param name="columns">The row's current values.</param>
+    /// <param name="originals">The row's original values - deliberately incomplete in one case.</param>
+    /// <returns>A conforming carrier state carrying exactly one <c>DataModified!</c> primary row.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE THREE SEGMENTS ARE ALL PRESENT AND IN ORDER even though only the primary one carries a row,
+    /// because the contract requires exactly one segment per buffer in canonical order and a payload with
+    /// fewer is refused for a reason that has nothing to do with the case under test.
+    /// </para>
+    /// <para>
+    /// NO PER-COLUMN STATUS IS SUPPLIED, which is what the published contract describes: the field is
+    /// proto3 <c>optional</c> and its own documentation calls absence the normal case, so the row's status
+    /// governs and the value pair says which columns moved.
+    /// </para>
+    /// </remarks>
+    private static CarrierState WirePayload(ColumnValue[] columns, ColumnValue[] originals)
+    {
+        DataWindowRow row = new()
+        {
+            Buffer = DwBuffer.Primary,
+            Row = 1L,
+            ItemStatus = ItemStatus.DataModified,
+        };
+
+        row.Columns.AddRange(columns);
+        row.OriginalValues.AddRange(originals);
+
+        CarrierState state = new() { Processing = DwSqliteFixture.ProcessingValue };
+
+        foreach (DwBuffer dwBuffer in ChangesetPayloadCodec.SerializedBuffers)
+        {
+            CarrierBufferSegment segment = new() { Buffer = dwBuffer };
+
+            if (dwBuffer == DwBuffer.Primary)
+            {
+                segment.Rows.Add(row);
+            }
+
+            state.Segments.Add(segment);
+        }
+
+        return state;
+    }
+
+    /// <summary>Builds one wire column value through the same mapper the encoder uses.</summary>
+    /// <param name="columnNumber">The one-based column number. R9: never rebased.</param>
+    /// <param name="value">The value, which must be one the mapper can express.</param>
+    /// <returns>The column value, with no per-column status.</returns>
+    private static ColumnValue Wire(int columnNumber, object? value)
+    {
+        Assert.True(
+            CarrierValue.TryToWire(value, out AnyValue? wire),
+            "A payload value must be representable; an unrepresentable one belongs in its own test.");
+
+        return new ColumnValue { ColumnId = columnNumber, Value = wire };
+    }
 
     /// <summary>
     /// The transaction surface one classified attempt reads, over a real connected engine.

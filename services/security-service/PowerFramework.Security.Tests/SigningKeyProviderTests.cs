@@ -443,9 +443,21 @@ public sealed class SigningKeyProviderTests
     /// Nothing derived from the private key appears in the serialized public surface.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// A belt-and-braces assertion over the whole rendered document rather than over member names: it
     /// would catch a private component smuggled into a member that is permitted, which a member-set
     /// assertion cannot.
+    /// </para>
+    /// <para>
+    /// EVERY ONE OF THESE IS A BOOLEAN OVER A FIXED MESSAGE, NOT AN <c>Assert.DoesNotContain</c>. The
+    /// needle in each case is live RSA private key material - the PKCS#8 and PKCS#1 encodings of this
+    /// suite's key and its six private components - and `DoesNotContain` renders BOTH its needle and its
+    /// haystack into the failure message. The failure case of this row is exactly the case in which the
+    /// private key IS in the document, so the obvious spelling would write the whole key, twice, into the
+    /// test output, the CI log and every artifact that ingests them - which is the disclosure defect
+    /// CWE-532 describes and which constraint C-F forbids. The useful diagnostic is WHICH projection
+    /// leaked, and that is prose. See SensitiveValueAssertions.cs for the full reasoning.
+    /// </para>
     /// </remarks>
     [Fact]
     public void SerializedPublicSurfaceContainsNoPrivateMaterial()
@@ -454,12 +466,26 @@ public sealed class SigningKeyProviderTests
 
         string json = JsonSerializer.Serialize(provider.PublishedKeySet, WebSerializerOptions());
 
-        Assert.DoesNotContain(Material.Pkcs8Base64, json, StringComparison.Ordinal);
-        Assert.DoesNotContain(Material.Pkcs1Base64, json, StringComparison.Ordinal);
+        Assert.False(
+            SensitiveValueAssertions.Carries(json, Material.Pkcs8Base64),
+            "The published key set carried the configured PKCS#8 private key encoding. Neither the "
+                + "document nor this message renders it.");
 
-        foreach (string component in Material.PrivateComponents)
+        Assert.False(
+            SensitiveValueAssertions.Carries(json, Material.Pkcs1Base64),
+            "The published key set carried the PKCS#1 encoding of the private key. Neither the document "
+                + "nor this message renders it.");
+
+        for (int index = 0; index < Material.PrivateComponents.Length; index++)
         {
-            Assert.DoesNotContain(component, json, StringComparison.Ordinal);
+            // The component is identified by its POSITION rather than by its value, so a failure names
+            // which private component leaked without reproducing any part of it.
+            Assert.False(
+                SensitiveValueAssertions.Carries(json, Material.PrivateComponents[index]),
+                "The published key set carried private RSA component at index "
+                    + index.ToString(CultureInfo.InvariantCulture)
+                    + " of the private-component set. Neither the component nor the document is "
+                    + "rendered here.");
         }
     }
 
@@ -728,12 +754,25 @@ public sealed class SigningKeyProviderTests
     /// <param name="message">The failure message.</param>
     /// <param name="material">The configured value the message must not disclose.</param>
     /// <remarks>
+    /// <para>
     /// Checked in windows rather than only in full, so a message that quoted a fragment would still
     /// fail. The window is deliberately short: a long window would only catch a wholesale echo.
+    /// </para>
+    /// <para>
+    /// BOOLEANS OVER FIXED MESSAGES, BECAUSE THE NEEDLE IS THE SECRET. Every caller passes configured key
+    /// material, and the sliding window means a naive spelling would hand a FRAGMENT of that material to
+    /// an assertion overload that renders its needle - so a failure would publish the very bytes the row
+    /// exists to prove absent, and would publish them into a CI log that outlives the key. The offending
+    /// window is reported by its OFFSET rather than by its content, which is what an operator needs in
+    /// order to find the echo in the message being produced.
+    /// </para>
     /// </remarks>
     private static void AssertMessageDisclosesNothingAbout(string message, string material)
     {
-        Assert.DoesNotContain(material, message, StringComparison.Ordinal);
+        Assert.False(
+            SensitiveValueAssertions.Carries(message, material),
+            "The failure message echoed the configured signing material in full. Neither the message nor "
+                + "the material is rendered here.");
 
         const int windowLength = 8;
 
@@ -741,7 +780,14 @@ public sealed class SigningKeyProviderTests
         {
             string window = material.Substring(start, windowLength);
 
-            Assert.DoesNotContain(window, message, StringComparison.Ordinal);
+            Assert.False(
+                SensitiveValueAssertions.Carries(message, window),
+                "The failure message echoed a fragment of the configured signing material: the "
+                    + windowLength.ToString(CultureInfo.InvariantCulture)
+                    + "-character window at offset "
+                    + start.ToString(CultureInfo.InvariantCulture)
+                    + ". The window is identified by position rather than by content, so neither the "
+                    + "fragment nor the message is rendered here.");
         }
     }
 
@@ -915,11 +961,12 @@ public sealed class SigningKeyProviderTests
     /// GENERATED RATHER THAN WRITTEN DOWN. No key literal appears in this file, and nothing is copied
     /// from any hardcoded-secret site in the repository. Generating also proves more than a fixture
     /// would: the provider must read what it is handed rather than recognise a known value. 2048 bits
-    /// because that is the provider's OWN floor for the issuer identity
-    /// (Security:SigningKeyMinimumSizeBits, default 2048), which it enforces before any credential
-    /// exists; the minting library's separate asymmetric minimum is satisfied by the same value. The
-    /// legacy allowance of 1024 bits [ws_objects/pfw.shared.pbl.src/enums.sru:L965] belongs to C-02's
-    /// key-GENERATION surface and is untouched - SigningKeyPolicyTests pins the two apart.
+    /// because that is the size at and above which the provider stops remarking on the modulus
+    /// (SecurityOptions.LegacyWeakSigningKeySizeBits), so these cases run with no weak-key warning in
+    /// the way; the minting library's separate asymmetric minimum is satisfied by the same value. NO
+    /// SIZE IS REFUSED: the legacy allowance of 1024 bits
+    /// [ws_objects/pfw.shared.pbl.src/enums.sru:L965] holds for the issuer identity as well as for
+    /// C-02's key-GENERATION surface, and SigningKeyPolicyTests pins the two together.
     /// </remarks>
     private sealed class GeneratedKeyMaterial
     {

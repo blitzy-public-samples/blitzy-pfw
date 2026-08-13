@@ -69,8 +69,9 @@
 //         type, no `Microsoft.Data.Sqlite` type, no connection string, no connection factory and no
 //         migration call anywhere below. Persistence is the only service in the system that holds a
 //         storage provider; storage lives behind the Persistence edge, which section 4 substitutes.
-//    C-I / C-J / AAP 0.6.7 R4  no network, no Docker daemon, no live upstream. Docker was unavailable in
-//         the authoring environment, so nothing here may depend on compose. Every outbound edge is
+//    C-I / C-J / AAP 0.6.7 R4  no network, no Docker daemon, no live upstream. A unit and service suite
+//         must pass on a host with no daemon at all, so nothing here may depend on compose even though
+//         the orchestrated bring-up itself has been exercised. Every outbound edge is
 //         intercepted: the primary HTTP message handler for EVERY factory-created client is replaced,
 //         and an unmatched request FAILS LOUDLY rather than being answered with a plausible status. The
 //         bearer handler resolves its metadata LAZILY, so the mandated 401 needs no network at all.
@@ -1486,6 +1487,48 @@ public sealed class DataServicesTestHostFactory : WebApplicationFactory<Program>
                 serviceProvider.GetRequiredService<IExpressionPageResolver>()));
     }
 
+    /// <summary>
+    /// Resolves the RETAINED headless host this fixture serves for one data-object name, so a suite can
+    /// populate the DataWindow the published surface will then operate over.
+    /// </summary>
+    /// <param name="dataWindowName">The registered data-object name, for example the primary fixture.</param>
+    /// <returns>The retained host, or <see langword="null"/> when this fixture declines the name.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="dataWindowName"/> is <see langword="null"/>.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// THIS IS THE SEAM THAT REPLACES A PUBLISHED ROW-INGESTION OPERATION, and the substitution is the
+    /// contract rather than a convenience. Neither C-03 nor C-04 publishes an operation that materializes a
+    /// row into a DataWindow: the ported surface never had one, because in process the application owned
+    /// the DataWindow and the five attached services operated over whatever it already held. A suite that
+    /// needs rows therefore arranges them the same way the application does - directly on the host - and
+    /// then drives the published surface over them.
+    /// </para>
+    /// <para>
+    /// IT ANSWERS THE SAME INSTANCE THE SERVICES RESOLVE, because the binding is retentive by name. That is
+    /// what makes a row seeded here visible to C-03's headless models and to a C-04 expression session over
+    /// the same name, which is precisely the composition the two contracts rely on.
+    /// </para>
+    /// </remarks>
+    internal DataWindowServiceHost BindDataWindowHost(string dataWindowName)
+    {
+        ArgumentNullException.ThrowIfNull(dataWindowName);
+
+        // RESOLVED FROM THE RUNNING HOST'S OWN CONTAINER rather than from a field, so this answers whichever
+        // factory the fixture actually registered - the deployed one by default, and the bound double when
+        // BindsDataWindowHost is set. A field read would have quietly answered the double even in the
+        // configuration that does not install it.
+        IDataWindowHostFactory factory = Services.GetRequiredService<IDataWindowHostFactory>();
+
+        return factory.Create(dataWindowName)
+            ?? throw new InvalidOperationException(
+                "The registered DataWindow host factory declined the data-object name '"
+                    + dataWindowName
+                    + "'. A suite seeding rows must name a DataWindow the catalogue carries; a declined "
+                    + "name is a setup fault rather than an empty DataWindow.");
+    }
+
     // -------------------------------------------------------------------------------------------------
     //  5. DISPOSAL
     // -------------------------------------------------------------------------------------------------
@@ -2748,28 +2791,6 @@ internal sealed class BoundDataWindowHostFactory : IDataWindowHostFactory
         return _hosts.GetOrAdd(dataWindowName, _ => FakeDataWindowFixtures.CreateCompanyFixture(_broker));
     }
 
-    /// <inheritdoc/>
-    /// <remarks>
-    /// A FRESH HOST, NOT THE RETAINED ONE, because this double's <see cref="Create"/> IS retentive by name
-    /// and so reproduces the production factory's C-03 behaviour. An expression session must not share a
-    /// host with another session, so this deliberately bypasses the retention table.
-    /// <para>
-    /// THE BROKER IS STILL THE SHARED ONE. This double exists to let a test observe events on a broker it
-    /// holds, and isolating the host is about ROW STATE, not about severing the test's observation point.
-    /// </para>
-    /// </remarks>
-    public DataWindowServiceHost? CreateIsolated(string dataWindowName)
-    {
-        ArgumentNullException.ThrowIfNull(dataWindowName);
-
-        return string.IsNullOrWhiteSpace(dataWindowName)
-            || string.Equals(
-                dataWindowName,
-                DataServicesTestHostFactory.UnboundDataWindowName,
-                StringComparison.Ordinal)
-            ? null
-            : FakeDataWindowFixtures.CreateCompanyFixture(_broker);
-    }
 }
 
 /// <summary>

@@ -175,7 +175,19 @@ import {
   requireServiceToken,
 } from '../fixtures/token-issuance';
 
-import { probeStackAvailability } from '../fixtures/live-stack';
+import { requireLiveStack } from '../fixtures/live-stack';
+
+import {
+  COLUMN_VALUE,
+  DATAWINDOW_ROW,
+  JSON_MEDIA_TYPE,
+  PROBLEM_JSON_MEDIA_TYPE,
+  RETRIEVE_CHUNK,
+  assertMediaType,
+  assertMembers,
+  describeShapeForFailure,
+  readCanonicalMember,
+} from '../fixtures/contract-shape';
 
 /* ------------------------------------------------------------------------- *
  * THE ROUTE TABLE — THE SINGLE EDIT POINT FOR ROUTE SHAPE IN THIS FILE
@@ -335,62 +347,87 @@ interface WireUpdateRequest {
 }
 
 /* ------------------------------------------------------------------------- *
- * THE RESPONSE SIDE — ONE CANDIDATE-KEY TABLE, RESOLVED TOLERANTLY
+ * THE RESPONSE SIDE — ONE CANDIDATE-KEY TABLE, RESOLVED CANONICALLY
  *
- * Reading is treated differently from writing, and the asymmetry is deliberate.
- * A request must be exact because the parser rejects an unknown field; a
- * RESPONSE is the thing under test, so a reader that assumed its own spelling
- * would report "the field is missing" for a boundary that had merely serialized
- * it differently — the least useful diagnostic available. Every member this file
- * reads therefore resolves through the table below, which lists the canonical
- * mapping's spelling FIRST and the plausible alternatives after it.
+ * 🔴 THIS TABLE USED TO LIST ALTERNATIVES, AND THAT WAS A DEFECT RATHER THAN A
+ * KINDNESS. Each entry carried the canonical spelling plus "plausible"
+ * alternatives — `Rows` beside `rows`, `row_count` beside `rowCount`, `isFinal`
+ * beside `final`, and an `items`/`result`/`data` envelope beside a body the
+ * contract publishes as a bare array. The stated intent was a better diagnostic.
+ * The actual effect was that THIS SUITE COULD PASS AGAINST A BOUNDARY NO
+ * GENERATED CLIENT CAN CONSUME: a service emitting `row_count` would satisfy
+ * every assertion here while a client generated from the OpenAPI document or
+ * from protobuf JSON read `undefined`. A contract test that accepts a shape the
+ * contract does not publish is not testing the contract.
  *
- * This is emphatically NOT a licence to guess a shape: nothing below asserts
- * deep structural equality against a schema, and no member is read that the
- * published contract does not declare. It is a tolerance in SPELLING only, and
- * it is the reason a serialization surprise costs one edit in this table rather
- * than an edit at every call site. Spec 06 resolves its conflict payload the
- * same way.
+ * ⚠ THE ALTERNATIVES ARE DETECTED, NOT ACCEPTED. This table used to be resolved
+ * TOLERANTLY: whichever spelling appeared was returned, so `ret_code`, `is_final`
+ * and `Rows` each satisfied a read and everything downstream passed. The
+ * diagnostic reasoning above is sound and is preserved — a boundary that merely
+ * serialized a member differently should be told so in those words rather than
+ * accused of omitting it — but the VERDICT was wrong: a response-field rename is
+ * a contract change, and it is the single most likely drift on a freshly
+ * decomposed boundary. The canonical spelling is now required, and an alternative
+ * found in its place produces that same good diagnostic AS A FAILURE.
+ *
+ * This is emphatically NOT a licence to guess a shape: no member is read that the
+ * published contract does not declare, and the exact member sets are asserted
+ * from `fixtures/contract-shape.ts` where the schema declares
+ * `additionalProperties: false`. The table remains the one edit point, so a
+ * genuine contract change still costs one edit here rather than an edit at every
+ * call site. Spec 06 resolves its conflict payload the same way.
  * ------------------------------------------------------------------------- */
 const RESPONSE_KEYS = {
   /**
-   * The row collection.
+   * ⚠ THE ENVELOPE ENTRY IS GONE, AND ITS ABSENCE IS THE ASSERTION.
    *
-   * A retrieval answers the ORDERED SEQUENCE OF CHUNKS the server stream would
-   * have delivered — a bare collection rather than an invented envelope, because
-   * the protocol definition has no envelope message for a stream. `rows` is a
-   * member of each chunk. The alternatives cover an envelope appearing anyway.
+   * It read `chunkCollection: ['chunks', 'items', 'result', 'data']`, described as
+   * covering "an envelope appearing anyway" — four member names, not one of which
+   * the published contract declares. `RetrieveResult` is `type: array`: a
+   * retrieval answers the ORDERED SEQUENCE OF CHUNKS the server stream would have
+   * delivered, a bare collection, because the protocol definition has no envelope
+   * message for a stream and wrapping one would add a member the gRPC contract
+   * does not have.
+   *
+   * Removing the entry is what makes an invented envelope FAIL rather than be
+   * silently unwrapped — and the old fallback was worse than tolerant: when none
+   * of the four matched it yielded an EMPTY collection, so an unrecognised envelope
+   * produced zero rows and every downstream assertion reported a missing row
+   * instead of a wrong shape. `readChunks` now refuses a non-array body outright
+   * and says so.
    */
-  chunkCollection: ['chunks', 'items', 'result', 'data'],
 
   /** Rows within one chunk. */
   rows: ['rows', 'Rows'],
 
   /** Per-chunk chunking-contract members, retained rather than flattened away. */
-  rowCount: ['rowCount', 'row_count'],
-  chunkIndex: ['chunkIndex', 'chunk_index'],
-  cumulativeRowCount: ['cumulativeRowCount', 'cumulative_row_count'],
-  final: ['final', 'isFinal', 'is_final'],
+  rowCount: ['rowCount'],
+  chunkIndex: ['chunkIndex'],
+  cumulativeRowCount: ['cumulativeRowCount'],
+  final: ['final'],
 
   /** Row-level carrier members. Their presence is what makes this a DataWindow. */
-  buffer: ['buffer', 'Buffer'],
-  itemStatus: ['itemStatus', 'item_status'],
-  columns: ['columns', 'Columns'],
-  originalValues: ['originalValues', 'original_values'],
+  buffer: ['buffer'],
+  itemStatus: ['itemStatus'],
+  columns: ['columns'],
+  originalValues: ['originalValues'],
 
-  /** Column-level members. */
-  columnName: ['columnName', 'column_name'],
-  columnId: ['columnId', 'column_id'],
-  columnValue: ['value', 'Value'],
+  /** Column-level members. Schema: `ColumnValue`. */
+  columnName: ['columnName'],
+  columnId: ['columnId'],
+  columnValue: ['value'],
 
-  /** The scalar arms this workflow reads, in the order a numeric read prefers them. */
-  valueIsNull: ['isNull', 'is_null'],
-  valueText: ['stringValue', 'string_value'],
-  valueInt64: ['int64Value', 'int64_value'],
-  valueDouble: ['doubleValue', 'double_value'],
-  valueDecimal: ['decimalValue', 'decimal_value'],
-  valueDate: ['dateValue', 'date_value'],
-  wrappedValue: ['value', 'Value'],
+  /**
+   * The scalar arms this workflow reads, in the order a numeric read prefers
+   * them. Schema: `AnyValue`, which declares exactly one member per value.
+   */
+  valueIsNull: ['isNull'],
+  valueText: ['stringValue'],
+  valueInt64: ['int64Value'],
+  valueDouble: ['doubleValue'],
+  valueDecimal: ['decimalValue'],
+  valueDate: ['dateValue'],
+  wrappedValue: ['value'],
 
   /**
    * The identity round-trip.
@@ -401,16 +438,16 @@ const RESPONSE_KEYS = {
    * source [`n_cst_thread_task_sqlupdate.sru:L235-L241`]. A row inserted into the
    * primary buffer lands in the first of the two.
    */
-  identity: ['identity', 'Identity'],
-  identityColumnId: ['identityColumnId', 'identity_column_id'],
-  identityPrimaryValues: ['primaryValues', 'primary_values'],
+  identity: ['identity'],
+  identityColumnId: ['identityColumnId'],
+  identityPrimaryValues: ['primaryValues'],
 
   /** The affected-row counts. Emitted as strings, because they are 64-bit. */
-  rowsInserted: ['rowsInserted', 'rows_inserted'],
-  rowsUpdated: ['rowsUpdated', 'rows_updated'],
+  rowsInserted: ['rowsInserted'],
+  rowsUpdated: ['rowsUpdated'],
 
   /** The legacy return code the response or the problem document carries. */
-  retCode: ['retCode', 'ret_code'],
+  retCode: ['retCode'],
 
   /**
    * The structured-error members.
@@ -423,7 +460,7 @@ const RESPONSE_KEYS = {
    * rendered into an assertion message.
    */
   problemMembers: ['type', 'title', 'status', 'detail', 'instance'],
-  problemStatus: ['status', 'Status'],
+  problemStatus: ['status'],
 } as const;
 
 /**
@@ -458,27 +495,35 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 /**
- * Reads the first member present out of a candidate list.
+ * Reads a member by its CANONICAL name, failing when only a variant is present.
  *
- * Presence is tested with `hasOwnProperty` rather than by comparing against
- * `undefined`, so a member that is genuinely present and null is reported as
- * present. That distinction matters on this boundary: null is a value of its
- * own in the legacy scalar domain, not an absence.
+ * ⚠ THIS USED TO RETURN THE FIRST CANDIDATE PRESENT, AND THAT WAS THE DEFECT.
+ * The table's first entry is the spelling the published contract declares and the
+ * rest are plausible re-serializations, so `ret_code`, `is_final` and `Rows` each
+ * satisfied a read and every assertion downstream of it passed — meaning a
+ * response-field rename, the most likely drift on a freshly decomposed boundary,
+ * could not be detected by this file at all.
+ *
+ * The table and its diagnostic value both survive; only the verdict changed. The
+ * canonical name is required, and a variant found in its place is reported as the
+ * drift it is, naming both spellings — which is a better message than the
+ * "member is missing" the original reasoning was written to avoid, and it now
+ * arrives as a failure rather than as a silent pass.
+ *
+ * Presence is still tested with `hasOwnProperty` rather than against `undefined`,
+ * so a member that is genuinely present and null reads as present. That
+ * distinction matters on this boundary: null is a value of its own in the legacy
+ * scalar domain, not an absence.
  */
 function readMember(container: unknown, candidates: readonly string[]): unknown {
-  const record = asRecord(container);
+  const [canonical = '', ...variants] = candidates;
 
-  if (record === undefined) {
-    return undefined;
-  }
-
-  for (const candidate of candidates) {
-    if (Object.prototype.hasOwnProperty.call(record, candidate)) {
-      return record[candidate];
-    }
-  }
-
-  return undefined;
+  return readCanonicalMember(
+    container,
+    canonical,
+    variants,
+    `the response member '${canonical}'`,
+  );
 }
 
 /** Reads a member expected to be an array, or `undefined` when it is not one. */
@@ -553,30 +598,57 @@ function columnOrdinal(column: CompanyColumnName): number {
  * identifier.
  */
 function findColumnValue(row: unknown, column: CompanyColumnName): unknown {
-  const columns: readonly unknown[] | undefined = readArray(row, RESPONSE_KEYS.columns);
+  return findColumnValueIn(readArray(row, RESPONSE_KEYS.columns), column);
+}
 
+/**
+ * Locates one column's ENTRY within an arbitrary column collection.
+ *
+ * Separated from the row-scoped reader above because `DataWindowRow` carries TWO
+ * such collections — `columns` and `originalValues` — and the concurrency
+ * contract is a statement about both: the baseline is required per column, so a
+ * reader that could only look inside `columns` could not check it. The matching
+ * rule is the row-scoped one unchanged: name first, case-insensitively, then the
+ * one-based ordinal, because a carrier-projected row legitimately carries
+ * ordinals and no names.
+ */
+function findColumnEntryIn(
+  columns: readonly unknown[] | undefined,
+  column: CompanyColumnName,
+): unknown {
   if (columns === undefined) {
     return undefined;
   }
 
-  const ordinal: number = columnOrdinal(column);
   const wanted: string = column.toLowerCase();
 
   for (const candidate of columns) {
     const name: unknown = readMember(candidate, RESPONSE_KEYS.columnName);
 
     if (typeof name === 'string' && name.trim().toLowerCase() === wanted) {
-      return readMember(candidate, RESPONSE_KEYS.columnValue);
+      return candidate;
     }
   }
 
+  const ordinal: number = columnOrdinal(column);
+
   for (const candidate of columns) {
     if (readInt64(candidate, RESPONSE_KEYS.columnId) === ordinal) {
-      return readMember(candidate, RESPONSE_KEYS.columnValue);
+      return candidate;
     }
   }
 
   return undefined;
+}
+
+/** The scalar value node of one column within a collection, or `undefined`. */
+function findColumnValueIn(
+  columns: readonly unknown[] | undefined,
+  column: CompanyColumnName,
+): unknown {
+  const entry: unknown = findColumnEntryIn(columns, column);
+
+  return entry === undefined ? undefined : readMember(entry, RESPONSE_KEYS.columnValue);
 }
 
 /** Reads the `value` member out of a wrapper arm such as a decimal or a date. */
@@ -602,8 +674,18 @@ function isNullValue(value: unknown): boolean {
  * only comparison the storage type justifies.
  */
 function readColumnText(row: unknown, column: CompanyColumnName): string | undefined {
-  const value: unknown = findColumnValue(row, column);
+  return textOfValue(findColumnValue(row, column));
+}
 
+/**
+ * Reads one already-located value node as TEXT.
+ *
+ * Split out of {@link readColumnText} so the same reading applies to a value from
+ * `originalValues` as to one from `columns` — the baseline comparison needs both
+ * sides read the same way, and re-implementing the arm selection for one of them
+ * would compare two different readings rather than two values.
+ */
+function textOfValue(value: unknown): string | undefined {
   if (value === undefined || isNullValue(value)) {
     return undefined;
   }
@@ -921,27 +1003,91 @@ function requestUpdate(
 /**
  * Reads the chunk sequence out of a retrieval response.
  *
- * The contract publishes the body as a BARE ORDERED COLLECTION rather than an
- * envelope, because the protocol definition has no envelope message for a
- * stream — so the array case is the expected one and the envelope case is only a
- * tolerance. Element order is the stream's order and is never re-sorted here.
+ * The contract publishes the body as a BARE ORDERED COLLECTION — `RetrieveResult`
+ * is `type: array` of `RetrieveChunk`, because the protocol definition has no
+ * envelope message for a stream. Element order is the stream's order and is never
+ * re-sorted here.
+ *
+ * 🔴 AN ENVELOPE IS NO LONGER TOLERATED. This used to fall back to reading
+ * `chunks`/`items`/`result`/`data` off an object body, which meant a projection
+ * that wrapped the stream in an invented envelope satisfied every assertion in
+ * this file while a client generated from the published document received an
+ * object where it expected an array. A non-array body now yields an empty
+ * sequence, and the caller reports that as the shape failure it is.
  */
 async function readChunks(response: APIResponse): Promise<readonly unknown[]> {
+  assertMediaType(
+    response.headers()['content-type'],
+    JSON_MEDIA_TYPE,
+    `${ROUTES.retrieve}`,
+  );
+
   const body: unknown = await response.json();
 
-  if (Array.isArray(body)) {
-    return body as readonly unknown[];
+  // A BARE ARRAY, AND NOTHING ELSE. `RetrieveResult` is `type: array` on the
+  // published contract: the retrieval answers the ordered sequence of chunks the
+  // server stream would have delivered, and the protocol definition has no
+  // envelope message for a stream, so there is no envelope to permit. This used to
+  // fall back to `readArray(body, ['chunks','items','result','data'])` when the
+  // body was not an array — four invented envelope names, none of which the
+  // contract declares — and, worse, it returned `[]` when none matched, so an
+  // envelope nobody recognised produced ZERO ROWS and every downstream assertion
+  // reported "the row is missing" rather than "the payload is the wrong shape".
+  if (!Array.isArray(body)) {
+    throw new Error(
+      `${ROUTES.retrieve} answered a JSON value that is not an array. The ` +
+        'published RetrieveResult is a bare array of chunks — the protocol has no ' +
+        'envelope message for a stream, so an object here is an invented envelope ' +
+        'rather than a permitted variation. ' +
+        `${describeShapeForFailure(JSON.stringify(body))}.`,
+    );
   }
 
-  return readArray(body, RESPONSE_KEYS.chunkCollection) ?? [];
+  // Each chunk against the exact `RetrieveChunk` member set: five required members
+  // — `rows`, `rowCount`, `chunkIndex`, `final`, `cumulativeRowCount` — and
+  // `additionalProperties: false`. The chunking contract is the reason those exist,
+  // and a chunk that had dropped `final` or renamed `cumulativeRowCount` would
+  // still have yielded its rows to every assertion in this file.
+  for (const [index, chunk] of body.entries()) {
+    assertMembers(chunk, RETRIEVE_CHUNK, `${ROUTES.retrieve} chunk[${index}]`);
+  }
+
+  return body as readonly unknown[];
 }
 
-/** Flattens every chunk's rows into one sequence, preserving arrival order. */
+/**
+ * Flattens every chunk's rows into one sequence, preserving arrival order.
+ *
+ * Each row is asserted against `DataWindowRow` and each of its columns against
+ * `ColumnValue` as it passes through. That is the assertion that makes the payload
+ * a DATAWINDOW CARRIER rather than a flat rowset — the distinction the whole
+ * update contract rests on, since `buffer`, `row`, `itemStatus` and the optional
+ * `originalValues` are exactly what a rowset would have discarded. It was
+ * previously unasserted anywhere: the file read `buffer` and `itemStatus` off
+ * individual rows where it happened to need them, so a projection that had dropped
+ * them from every OTHER row went unnoticed.
+ */
 function collectRows(chunks: readonly unknown[]): readonly unknown[] {
   const rows: unknown[] = [];
 
-  for (const chunk of chunks) {
-    for (const row of readArray(chunk, RESPONSE_KEYS.rows) ?? []) {
+  for (const [chunkIndex, chunk] of chunks.entries()) {
+    for (const [rowIndex, row] of (readArray(chunk, RESPONSE_KEYS.rows) ?? []).entries()) {
+      const carrier: Record<string, unknown> = assertMembers(
+        row,
+        DATAWINDOW_ROW,
+        `chunk[${chunkIndex}].rows[${rowIndex}]`,
+      );
+
+      for (const [columnIndex, column] of (
+        readArray(carrier, RESPONSE_KEYS.columns) ?? []
+      ).entries()) {
+        assertMembers(
+          column,
+          COLUMN_VALUE,
+          `chunk[${chunkIndex}].rows[${rowIndex}].columns[${columnIndex}]`,
+        );
+      }
+
       rows.push(row);
     }
   }
@@ -1125,6 +1271,34 @@ const INVALID_INPUT: CompanyRowInput = buildCompanyRow({
 /** The column the refused insert nulls. `AGE INT NOT NULL` is the invariant under test. */
 const NOT_NULL_VIOLATION_COLUMNS: readonly CompanyColumnName[] = ['age'];
 
+/**
+ * The scope of the row the UPDATE test arranges for itself.
+ *
+ * Distinct from {@link INSERT_SCOPE} for the same load-bearing reason the refusal
+ * scope is distinct: the update test mutates its row, and mutating the row the
+ * insert test asserted on would couple two tests that are now deliberately
+ * independent. Neither test finds a row by label — the engine-assigned key is the
+ * only identifier either uses — but two labels keep a store read by hand legible.
+ */
+const UPDATE_SCOPE = 'dw-workflow-update';
+
+/**
+ * The baseline row the update test arranges, inserts and then updates.
+ *
+ * Identical to {@link INSERT_INPUT} in every constrained field — the same
+ * `NOT NULL` obligations, the same ten-character address well inside the narrower
+ * declared width, the same fixture-formatted birth text and the same
+ * exactly-representable quarter-step salary — and different only in the label,
+ * which is what makes it a different row rather than a different kind of row.
+ */
+const UPDATE_BASELINE_INPUT: CompanyRowInput = buildCompanyRow({
+  name: deterministicLabel(UPDATE_SCOPE, 0),
+  age: 41,
+  address: 'California',
+  salary: 20000.25,
+  birth: formatBirth(1991, 5, 11),
+});
+
 /** The `address` the update writes. A label, and 32 characters — well inside every bound. */
 const UPDATED_ADDRESS: string = deterministicLabel('dw-workflow-address', 0);
 
@@ -1148,38 +1322,134 @@ const UPDATED_SALARY = 20000.5;
 const BIRTH_TEXT_PATTERN = new RegExp(`^${BIRTH_FORMAT.replace(/[a-z]/g, '\\d')}$`);
 
 /* ------------------------------------------------------------------------- *
- * State carried between the steps of the workflow
+ * ARRANGEMENT, NOT CARRIED STATE
  *
- * Module scope is legitimate here only because the describe block below runs
- * SERIALLY: the steps are one workflow rather than four independent assertions,
- * and each later step needs the key the engine assigned in an earlier one. The
- * runner is already configured `workers: 1` and `fullyParallel: false`, so
- * nothing else can interleave with them.
+ * This spec once held two module-scope `let` bindings — the inserted row and its
+ * verbatim column values — written by the insert test and read by the update
+ * test, with the group configured `mode: 'serial'` to guarantee the order. That
+ * arrangement had a cost the ordering hid: the update test could not run on its
+ * own at all. `npx playwright test -g "an update carrying original values"`
+ * reported a contrived failure about a missing binding rather than exercising
+ * the contract, and after any insert-test failure the update test was either
+ * skipped or meaningless. A test that cannot be run by itself cannot be used to
+ * diagnose the thing it tests.
+ *
+ * So each test now ARRANGES ITS OWN ROW and keeps every value local to itself.
+ * {@link arrangeStoredRow} performs the insert as a precondition — not as an
+ * assertion, which is the insert test's job and its alone — and hands back the
+ * row as the retrieval answered it. Two consequences worth stating:
+ *
+ *   * THE UPDATE TEST IS NOW SELF-CONTAINED and independently runnable, and its
+ *     failure means what it says.
+ *   * THE TESTS WRITE DIFFERENT ROWS. The arranged baseline carries its own
+ *     scope label, so the row the update test mutates is never the row the
+ *     insert test asserted on. Nothing is found by label in either case — the
+ *     engine-assigned key is the only identifier used — but two distinct labels
+ *     make a store inspected by hand legible rather than ambiguous.
+ *
+ * The extra insert per test is a write to a store that is never reseeded, which
+ * is exactly what this suite already does by design; rows accumulate across runs
+ * and identity is what distinguishes them.
  * ------------------------------------------------------------------------- */
 
-/**
- * The inserted row as the RETRIEVAL answered it — the baseline an update is
- * built on, and the carrier of the key the engine assigned.
- */
-let insertedRow: CompanyRow | undefined;
+/** A row that exists in storage, together with the wire values it came back as. */
+interface StoredRow {
+  /** The row as the RETRIEVAL answered it, carrying the key the engine assigned. */
+  readonly row: CompanyRow;
+
+  /**
+   * The retrieved row's own column values, verbatim, for reuse as an update's
+   * originals. See {@link encodeUpdateRow} for why re-encoding them would be worse.
+   */
+  readonly verbatimColumns: readonly WireColumnValue[];
+}
 
 /**
- * The retrieved row's own column values, kept verbatim for reuse as the update's
- * originals. See {@link encodeUpdateRow} for why re-encoding them would be worse.
+ * Insert a row and read it back, as ARRANGEMENT for a test whose subject is
+ * something else.
+ *
+ * Deliberately thin on assertions, and deliberately loud when it fails. Every
+ * check here exists so that an arrangement fault is reported AS an arrangement
+ * fault — the caller's subject has not been reached yet, and a bare type error
+ * or a confusing expectation failure would send a reader to the wrong place. The
+ * exhaustive insert assertions — the identity round-trip, the counts, the
+ * per-column fidelity and the salary tolerance — belong to the insert test and
+ * are NOT duplicated here; duplicating them would make an insert regression fail
+ * every test in the file with the same message.
+ *
+ * @param request the Playwright request context for this test
+ * @param token a service token this test already obtained
+ * @param input the row to insert; give each caller its own so two tests never
+ *              mutate one row
+ * @returns the stored row and its verbatim wire columns
+ * @throws Error when the insert does not answer 200, does not report an
+ *         identity, or the row cannot be read back by that identity
  */
-let insertedVerbatimColumns: readonly WireColumnValue[] = [];
+async function arrangeStoredRow(
+  request: APIRequestContext,
+  token: ServiceToken,
+  input: CompanyRowInput,
+): Promise<StoredRow> {
+  const response: APIResponse = await requestUpdate(request, token, [
+    encodeInsertRow(input),
+  ]);
 
-/** Fails with a diagnosis rather than a type error when an earlier step did not run. */
-function requireInsertedRow(): CompanyRow {
-  if (insertedRow === undefined) {
+  if (response.status() !== 200) {
     throw new Error(
-      'No inserted row is available. Serial execution guarantees the insert ' +
-        'step runs first, so an absence here means that step failed or was ' +
-        'skipped — read its failure rather than this one.',
+      `ARRANGEMENT FAILED: ${ROUTES.update} answered ${response.status()} for ` +
+        'the baseline insert, so the row this test needs does not exist and its ' +
+        'own subject was never reached. Read the insert test — it asserts this ' +
+        'path directly and will say what is wrong with it.',
     );
   }
 
-  return insertedRow;
+  const body: unknown = await response.json();
+
+  const identity: number | undefined = readInt64(
+    (readArray(
+      (readArray(body, RESPONSE_KEYS.identity) ?? [])[0],
+      RESPONSE_KEYS.identityPrimaryValues,
+    ) ?? [])[0],
+    RESPONSE_KEYS.wrappedValue,
+  );
+
+  if (identity === undefined) {
+    throw new Error(
+      'ARRANGEMENT FAILED: the baseline insert reported no engine-assigned ' +
+        'identity, so there is no key to address the row by. The insert test ' +
+        'asserts the identity round-trip in full; read its result.',
+    );
+  }
+
+  const stored: unknown = findRowByIdentity(
+    await retrieveRows(request, token),
+    Number(identity),
+  );
+
+  if (stored === undefined) {
+    throw new Error(
+      `ARRANGEMENT FAILED: the baseline row reported key ${identity} but is not ` +
+        'retrievable by it, so the insert reported success without the write ' +
+        'reaching storage. The insert test asserts exactly this and is the one ' +
+        'to read.',
+    );
+  }
+
+  // Built from what the RETRIEVAL answered rather than from what was sent,
+  // because an update's WHERE clause has to match what is STORED. The fallbacks
+  // are the sent values, which is correct for the two NOT NULL columns and
+  // unreachable for them in practice; the three nullable ones fall back to null.
+  return {
+    row: {
+      id: Number(identity),
+      name: readColumnText(stored, 'name') ?? input.name,
+      age: readColumnNumber(stored, 'age') ?? input.age,
+      address: readColumnText(stored, 'address') ?? null,
+      salary: readColumnNumber(stored, 'salary') ?? null,
+      birth: readColumnText(stored, 'birth') ?? null,
+    },
+    verbatimColumns: verbatimColumnsFrom(stored),
+  };
 }
 
 test.describe('DataWindow retrieve / validate / update workflow (C-03 over C-09)', () => {
@@ -1211,31 +1481,42 @@ test.describe('DataWindow retrieve / validate / update workflow (C-03 over C-09)
   // The probe is memoised per worker, so this costs one request per worker and
   // not one per test.
   //
-  // TESTS TAGGED `@no-stack` ARE EXEMPT, and the tag is why this is a tag rather
-  // than a title match: several specs mix pure-fixture assertions in with HTTP
-  // ones, those assertions are exactly the part that still holds with nothing
-  // running, and skipping them would throw away the only coverage available
-  // before a bring-up. A tag is declarative and machine-read; a title substring
-  // would silently start skipping the moment someone reworded a test name, and
-  // two stack-free tests in this suite never carried the wording at all.
+  // ⚠ AN ABSENT STACK NOW FAILS A FULL ACCEPTANCE RUN RATHER THAN SKIPPING IT.
+  // This hook used to probe and then skip, which left the one state a
+  // misconfigured pipeline is in - nothing running - as the state that exited
+  // zero. `requireLiveStack` fails instead unless the run has explicitly
+  // acknowledged an absent stack with E2E_ALLOW_ABSENT_STACK, in which case it
+  // skips with a stated reason and the run is labelled api-partial-no-stack in
+  // every reported line so its result cannot be read as an acceptance result.
+  //
+  // THE DECISION LIVES IN ONE PLACE FOR ALL SIX SPECS. It was written out six
+  // times, once per spec, so the six could disagree about what an absent stack
+  // means - which mattered little while the answer was a skip and matters a great
+  // deal now that it gates acceptance. Tests tagged `@no-stack` are still exempt,
+  // and the tag is still why this is a tag rather than a title match; that
+  // reasoning now lives with the function.
   // ---------------------------------------------------------------------------
   test.beforeEach(async ({}, testInfo) => {
-    if (testInfo.tags.includes('@no-stack')) {
-      return;
-    }
-
-    const availability = await probeStackAvailability();
-
-    test.skip(!availability.reachable, availability.reason);
+    await requireLiveStack(testInfo);
   });
 
-  // SERIAL, because these five assertions are one workflow over shared COMPANY
-  // state rather than five independent checks. The benefit is diagnostic: when a
-  // step fails, the steps that depended on it are reported as SKIPPED instead of
-  // producing a cascade of derived failures that all have the same single cause.
-  // `retries` is already 0 globally and must stay so — a retry on a mutating
-  // workflow would re-issue a write and could convert a real failure into a pass.
-  test.describe.configure({ mode: 'serial' });
+  // NOT SERIAL, AND THAT IS THE POINT. This group was configured
+  // `mode: 'serial'` while two of its five tests shared module-scope state, and
+  // the ordering guarantee was what made the sharing work. It also made the
+  // update test impossible to run on its own and meaningless after any earlier
+  // failure — the cost of a diagnostic convenience being paid in independence.
+  //
+  // Each test now arranges everything it needs (see `arrangeStoredRow`), so there
+  // is no order to guarantee and no reason to declare one. What serial mode
+  // bought — no cascade of derived failures from one cause — is bought instead by
+  // the arrangement helper, which fails with `ARRANGEMENT FAILED` and names the
+  // test that owns the fault.
+  //
+  // Execution order and isolation are unaffected by the removal: `workers: 1` and
+  // `fullyParallel: false` are global, so these tests still run one at a time in
+  // declaration order in one worker. `retries` is 0 globally and must stay so — a
+  // retry on a mutating workflow would re-issue a write and could convert a real
+  // failure into a pass.
 
   test('the COMPANY column contract carries updatewhere=1 with all six columns marked', { tag: '@no-stack' }, () => {
     // NO NETWORK. This step asserts the precondition the whole concurrency
@@ -1375,25 +1656,22 @@ test.describe('DataWindow retrieve / validate / update workflow (C-03 over C-09)
         'in transit and a network call can.',
     ).toBe(200);
 
-    const body: unknown = await response.json();
-
-    // The contract publishes this body as a BARE ORDERED COLLECTION rather than
-    // an envelope, because the protocol definition has no envelope message for a
-    // stream — wrapping one would add a member the gRPC contract does not have.
-    // The envelope spelling is resolved as a tolerance, never as an expectation.
-    const chunks: readonly unknown[] | undefined = Array.isArray(body)
-      ? (body as readonly unknown[])
-      : readArray(body, RESPONSE_KEYS.chunkCollection);
+    // THE BARE ORDERED COLLECTION, REQUIRED RATHER THAN PREFERRED. The contract
+    // publishes this body as `RetrieveResult`, `type: array`, because the protocol
+    // definition has no envelope message for a stream — wrapping one would add a
+    // member the gRPC contract does not have. The envelope spelling used to be
+    // "resolved as a tolerance, never as an expectation", which in practice meant
+    // an invented envelope was accepted; `readChunks` now refuses anything that is
+    // not an array and asserts every chunk against `RetrieveChunk` as it passes.
+    const sequence: readonly unknown[] = await readChunks(response);
 
     expect(
-      chunks,
+      sequence.length,
       'the retrieval must answer a collection of chunks. A single flat rowset ' +
         'would mean the chunking contract had been flattened away, and a ' +
         'consumer could then no longer tell a complete retrieval from a ' +
         'truncated one.',
-    ).toBeDefined();
-
-    const sequence: readonly unknown[] = chunks ?? [];
+    ).toBeGreaterThan(0);
 
     // The chunking contract, asserted as SELF-CONSISTENCY rather than as any
     // absolute quantity. Every member below is marked required by the published
@@ -1483,13 +1761,41 @@ test.describe('DataWindow retrieve / validate / update workflow (C-03 over C-09)
           'row itself rather than as a column',
       ).toBeDefined();
 
+      const retrievedOriginals: readonly unknown[] | undefined = readArray(
+        firstRow,
+        RESPONSE_KEYS.originalValues,
+      );
+
       expect(
-        readArray(firstRow, RESPONSE_KEYS.originalValues),
-        'each row must carry an originals collection, even when it is empty. ' +
-          'Originals are populated on the update path and normally empty on ' +
-          'retrieve, so an empty array is expected here — but the member has to ' +
-          'exist, because it is the shape an update is built in.',
+        retrievedOriginals,
+        'each row must carry an originals collection. It is a REQUIRED member of ' +
+          'DataWindowRow in both directions, because it is the baseline the ' +
+          "updatewhere=1 predicate compares against and it is the shape an update " +
+          'is built in.',
       ).toBeDefined();
+
+      // ONE BASELINE PER COLUMN ON A RETRIEVED ROW, and it must agree with the
+      // current value: a retrieval baselines every row, so original and current
+      // are the same value stated twice. An earlier revision let a producer omit a
+      // column whose original equalled its current one, which meant a freshly
+      // retrieved row carried NO baseline at all and a caller had to reconstruct
+      // the concurrency predicate from an absence — and the other legal reading of
+      // that absence, "no baseline exists", drops the predicate and silently
+      // overwrites.
+      for (const column of COMPANY_COLUMNS) {
+        expect(
+          findColumnEntryIn(retrievedOriginals, column.name),
+          `a retrieved row must carry an original for ${column.name}. All six ` +
+            'columns are marked updatewhereclause=yes, so all six originals go ' +
+            'into the generated WHERE clause.',
+        ).toBeDefined();
+
+        expect(
+          textOfValue(findColumnValueIn(retrievedOriginals, column.name)),
+          `${column.name}'s original must equal its current value immediately ` +
+            'after retrieval, because the retrieval is what established the baseline',
+        ).toBe(textOfValue(findColumnValue(firstRow, column.name)));
+      }
     }
 
     // RELATIVE ordering only, and only over rows already proved present. Never a
@@ -1704,19 +2010,12 @@ test.describe('DataWindow retrieve / validate / update workflow (C-03 over C-09)
         'the storage introduces.',
     ).toBeLessThanOrEqual(SALARY_COMPARISON_TOLERANCE);
 
-    // Carried forward for the update step. The baseline is built from what the
-    // RETRIEVAL answered rather than from what was sent, because the update's
-    // WHERE clause has to match what is STORED — and the verbatim column values
-    // are kept alongside it so the originals can be sent back untouched.
-    insertedVerbatimColumns = verbatimColumnsFrom(created);
-    insertedRow = {
-      id: Number(identity),
-      name: readColumnText(created, 'name') ?? INSERT_INPUT.name,
-      age: readColumnNumber(created, 'age') ?? INSERT_INPUT.age,
-      address: readColumnText(created, 'address') ?? null,
-      salary: readColumnNumber(created, 'salary') ?? null,
-      birth: readColumnText(created, 'birth') ?? null,
-    };
+    // NOTHING IS CARRIED OUT OF THIS TEST. It once assigned the retrieved row and
+    // its verbatim columns to two module-scope bindings for the update test to
+    // read, which made that test unrunnable on its own. The update test now
+    // arranges its own baseline through `arrangeStoredRow`, so this test ends
+    // where its subject ends: the identity round-trip and the per-column fidelity
+    // of one insert.
   });
 
   test('a NOT NULL violation is refused as a structured error and persists nothing', async ({
@@ -1771,22 +2070,17 @@ test.describe('DataWindow retrieve / validate / update workflow (C-03 over C-09)
     // the category, the substitution arguments and the severity are preserved and
     // only the DELIVERY CHANNEL changed. A caller must be able to branch on the
     // body without parsing prose out of markup.
-    const contentType: string = (response.headers()['content-type'] ?? '').toLowerCase();
-
-    expect(
-      contentType,
-      'the refusal must be machine-readable JSON. The legacy surfaced this class ' +
-        'of failure through a modal dialog; the migration changed the channel, ' +
-        'not the content, so what arrives here is a structured document.',
-    ).toContain('json');
-
-    expect(
-      contentType,
-      'the refusal must not be an HTML page. A developer-exception page or an ' +
-        'error page would mean the failure escaped the contract error path — and ' +
-        'such a page can carry a stack trace or a file path, neither of which may ' +
-        'reach a caller.',
-    ).not.toContain('text/html');
+    // ASSERTED EXACTLY, AND AS THE PROBLEM SUBTYPE. This was `toContain('json')`
+    // plus `not.toContain('text/html')`, which a plain `application/json` body
+    // satisfied as readily as a problem document — and the two are not
+    // interchangeable: every refusal on this boundary declares
+    // `application/problem+json` so that ONE client-side error handler serves them
+    // all without first parsing a body to discover whether it is one.
+    assertMediaType(
+      response.headers()['content-type'],
+      PROBLEM_JSON_MEDIA_TYPE,
+      `${ROUTES.update} refusal`,
+    );
 
     const problem: unknown = await response.json();
 
@@ -1881,7 +2175,18 @@ test.describe('DataWindow retrieve / validate / update workflow (C-03 over C-09)
     request,
   }) => {
     const token: ServiceToken = await requireServiceToken(request);
-    const baseline: CompanyRow = requireInsertedRow();
+
+    // ARRANGED HERE, BY THIS TEST, rather than inherited from the insert test.
+    // That is what makes this test independently runnable and its failure
+    // attributable: a fault in the arrangement throws with `ARRANGEMENT FAILED`
+    // and points at the insert test, while everything below this line is about
+    // the update contract and nothing else.
+    const arranged: StoredRow = await arrangeStoredRow(
+      request,
+      token,
+      UPDATE_BASELINE_INPUT,
+    );
+    const baseline: CompanyRow = arranged.row;
 
     // asUpdate produces the {current, original} PAIR the contract needs: the
     // original half is the row exactly as retrieved, and it is what the generated
@@ -1901,7 +2206,7 @@ test.describe('DataWindow retrieve / validate / update workflow (C-03 over C-09)
     ).toBe(baseline.address);
 
     const response: APIResponse = await requestUpdate(request, token, [
-      encodeUpdateRow(update, insertedVerbatimColumns),
+      encodeUpdateRow(update, arranged.verbatimColumns),
     ]);
 
     expect(

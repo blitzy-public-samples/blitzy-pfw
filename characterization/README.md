@@ -35,19 +35,21 @@ all belong to it. Where this document and that one could drift, that one wins.
 
 ## Current state of what this document describes
 
-Stated first, because a store that describes a discipline it has not yet exercised must say so before it
-says anything else. The labels are the four this documentation set uses, defined in
-[`../docs/BUILD.md`](../docs/BUILD.md).
+Stated first, because the store's machinery and the store's *results* are in different states and a reader
+who conflates them will draw the wrong conclusion from everything below. The labels are the four this
+documentation set uses, defined in [`../docs/BUILD.md`](../docs/BUILD.md).
 
 | Artifact | State |
 | --- | --- |
 | `characterization/README.md` — this document | **Present but unexercised.** It is the specification the captures will be taken against |
-| `characterization/recordings/legacy/<workflowId>/` | **Planned — not yet present.** No legacy recording exists; the PowerBuilder oracle has not been executed here |
-| `characterization/recordings/dotnet/<workflowId>/` | **Planned — not yet present.** No target-side recording exists |
-| `characterization/workflows/` | **Planned — not yet present.** No workflow definition and no determinism mask exists yet |
+| [`workflows/`](workflows) — [`README.md`](workflows/README.md), 15 definitions and [`workflow.schema.json`](workflows/workflow.schema.json) | **Present but unexercised.** Every definition validates against the schema, and each carries its own determinism mask ([§5.1](#51-the-seams)) and the defects its pair must prove. The folder readme holds the canonical roster and the correction register |
+| [`recordings/legacy/`](recordings/legacy) | **Present but unexercised**, and empty of recordings. The directory and its [readme](recordings/legacy/README.md) exist; no `<workflowId>` directory and no legacy recording does, because the PowerBuilder oracle has not been executed here |
+| [`recordings/dotnet/`](recordings/dotnet) | **Present but unexercised**, and empty of recordings. Same shape, same reason — a candidate with no master to compare against is not worth capturing |
 
-**No paired recording exists, therefore no parity result exists, and none is claimed anywhere below.**
-[§7](#7-what-has-not-been-exercised--stated-plainly) states the limitation in full rather than in passing.
+**Fifteen workflows are specified; zero have been captured.** So no paired recording exists, therefore no
+parity result exists, and none is claimed anywhere below.
+[§7](#7-what-has-not-been-exercised--stated-plainly) states the limitation in full rather than in passing,
+and separates the parts that are genuinely blocked from the parts that merely have not been run yet.
 
 ## What this document deliberately does not duplicate
 
@@ -196,7 +198,7 @@ The attached environment names the persistence volume after a `data-service`, on
 in its own placeholder roster — a roster its own STEP 0 labels placeholders lifted from a *not
 prescriptive* example grouping. The service that actually owns storage in this phase is
 `persistence-service`, so the volume is renamed to match its owner: a volume named after a service that
-does not exist is a standing invitation to mount it on the wrong thing.
+this phase never builds is a standing invitation to mount it on the wrong thing.
 
 The volume is declared in [`../orchestration/docker-compose.yml`](../orchestration/docker-compose.yml) and
 is mounted by **`persistence-service` alone**. No other service, and no bind mount, touches it. Restating
@@ -257,18 +259,31 @@ applies to it in full.
 ```text
 characterization/
 ├── recordings/
-│   ├── legacy/<workflowId>/    PowerBuilder oracle output
-│   └── dotnet/<workflowId>/    target-side output
-├── workflows/                  workflow definitions and determinism masks
+│   ├── legacy/                 README.md only; <workflowId>/ appears when a capture lands
+│   │   └── <workflowId>/       PowerBuilder oracle output (none exists yet)
+│   └── dotnet/                 README.md only; same shape, same state
+│       └── <workflowId>/       target-side output (none exists yet)
+├── workflows/                  15 definitions, one per workflow, each carrying its own mask
+│   ├── README.md               the canonical roster and the correction register
+│   └── workflow.schema.json    the schema every definition validates against
 └── README.md                   this file
 ```
 
 | Path | Contents |
 | --- | --- |
-| `characterization/recordings/legacy/<workflowId>/` | The PowerBuilder oracle's output for that workflow — the golden master |
-| `characterization/recordings/dotnet/<workflowId>/` | The target-side output for the same workflow — the candidate |
-| `characterization/workflows/` | Each workflow definition, together with its determinism mask |
+| [`workflows/`](workflows) | The 15 workflow definitions, each **with** its determinism mask, plus the schema they validate against and the roster readme |
+| [`recordings/legacy/`](recordings/legacy) `<workflowId>/` | The PowerBuilder oracle's output for that workflow — the golden master. The parent exists; no `<workflowId>` directory does |
+| [`recordings/dotnet/`](recordings/dotnet) `<workflowId>/` | The target-side output for the same workflow — the candidate. Likewise |
 | `characterization/README.md` | This document |
+
+**The 15 workflows, and how they distribute.** Six characterize DataServices, five Persistence, one Gateway,
+one Security, and two the shared libraries — `shared-diagnostics-assert-payload` and
+`shared-eventful-broker-ordering`. Fourteen are subject to the capture rule of
+[§2.1](#21-the-rule-canonical-text); exactly one, `persistence-sql-paging-rewrite`, declares itself exempt
+for the reason [§2.7](#27-the-one-exemption-stated-so-it-is-not-ambiguous) gives. Every definition names its
+oracle fixtures by repository locator and every one declares a non-empty mask.
+[`workflows/README.md`](workflows/README.md) is the authority for the roster and for why a capability with
+no oracle window has no workflow.
 
 ### 3.2 `<workflowId>` is the pairing key
 
@@ -279,18 +294,29 @@ were captured under the rule of [§2.1](#21-the-rule-canonical-text).
 > **A recording whose workflow identifier does not exist on the other side is not a partial comparison — it
 > is not a comparison at all, and it must not be reported as a pass.**
 
-**The naming convention is already fixed, in code rather than in prose.** The parity model leaves
-identifiers to discovery, and the first consumer of this store resolved that by naming a workflow after the
-**legacy oracle window that produces the recording**. That consumer is:
+**The naming convention is fixed in two places that agree on the principle and differ on one spelling, and
+the divergence is registered rather than glossed over.**
 
-`services/dataservices-service/PowerFramework.DataServices.Tests/PinyinFirstLetterMatcherTests.cs`
+The principle both hold to is that an identifier must be traceable to its oracle: **an invented identifier is
+arbitrary, a window-derived one is checkable.** The canonical grammar is
+[`workflows/workflow.schema.json`](workflows/workflow.schema.json)'s `workflowId` pattern — lower-case
+alphanumeric segments separated by single hyphens, derived from the capability area plus the legacy oracle
+window with that window's underscores rendered as hyphens. The 15 roster identifiers in
+[`workflows/README.md`](workflows/README.md) all conform, and **that roster is the only source of a
+directory name in this store.**
 
-whose `PinyinOracleCharacterizationHookTests` class pins `WorkflowId` to `w_test_dwsvc_dropdownsearch` —
-the window that enables the drop-down search service with every filter rule on, and therefore the workflow
-that exercises the pinyin clause. Follow that convention: **an invented identifier is arbitrary, a window
-name is traceable.** The same class also demonstrates how paths into this store are resolved — the
-repository root is located by walking up to the `PowerFramework.slnx` marker, and the two directories are
-spelled with forward slashes exactly as this document writes them.
+The one divergence is a test constant.
+`services/dataservices-service/PowerFramework.DataServices.Tests/PinyinFirstLetterMatcherTests.cs` pins
+`WorkflowId` to the oracle window's own name, `w_test_dwsvc_dropdownsearch`, and derives its two recording
+paths from it — a spelling the schema pattern rejects, because it carries underscores. **The roster
+identifier `dataservices-dwsvc-dropdownsearch` is canonical**; the correction register in
+[`workflows/README.md`](workflows/README.md) owns the reconciliation and records when the constant changes,
+which is the moment a real recording lands rather than now, because renaming a pairing key that no recording
+uses yet buys nothing and renaming one that a recording *does* use orphans both halves silently.
+
+That same test class is still the worked example of how paths into this store are resolved: the repository
+root is located by walking up to the `PowerFramework.slnx` marker, and the two directories are spelled with
+forward slashes exactly as this document writes them.
 
 ### 3.3 The mask lives with the workflow, not with a recording
 
@@ -329,8 +355,9 @@ repository-wide ignore rule to accommodate a badly named one.
 
 ### 3.6 The placeholder trap — an ordinary file can activate a skipped test
 
-There is a second silent trap, in the opposite direction, and it is why this store ships with **only** this
-document and no pre-created workflow directories.
+There is a second silent trap, in the opposite direction, and it is why this store ships with **no
+pre-created `<workflowId>` directory** under either side of `recordings/` — and why the two files it does
+ship there are named `README.md`, which the predicate below treats as a placeholder by design.
 
 The hook named in [§3.2](#32-workflowid-is-the-pairing-key) is a skipped test matrix — one case per closed
 input of [§5.5](#55-the-one-genuine-parity-risk--pinyin-first-letter-matching) — that **un-skips itself as
@@ -459,10 +486,27 @@ A workflow definition therefore separates two phases:
 | **Seed** | The file delete, the DDL, and any row seeding — everything that establishes the starting state | **Once, before the pair begins.** Never between its two halves |
 | **Capture** | The behaviour under characterization, and nothing else | **Twice** — once on the legacy side, once on the target side, both against the already-seeded state |
 
-On the target side the equivalent seeding step is the schema provisioning that no build performs, described
-in [`../docs/BUILD.md`](../docs/BUILD.md) §5.6. It is idempotent and non-destructive — re-running it
-reports that the database is already up to date and leaves existing rows byte-identical — which is exactly
-what makes it safe to re-run between the two halves of a pair, unlike the legacy fixture's own setup.
+On the target side the equivalent seeding step is the schema provisioning described in
+[`../docs/BUILD.md`](../docs/BUILD.md) §5.6. It is idempotent and non-destructive — re-running it reports
+that the database is already up to date and leaves existing rows byte-identical — which is exactly what
+makes it safe to re-run between the two halves of a pair, unlike the legacy fixture's own setup.
+
+**Persistence now performs that step ITSELF on the documented Compose bring-up, and that does not weaken the
+rule.** `Schema__ApplyMigrationsOnStartup` is true in the manifest, so the service applies its pending
+migrations at startup rather than waiting for an operator command. What it calls is `Database.Migrate` and
+nothing else: on an already-current schema it performs no write at all and reports that it found nothing
+pending, so a container restart in the middle of a pair neither recreates nor reseeds the volume — the two
+things [§2.1](#21-the-rule-canonical-text) actually forbids. The distinction worth holding onto is that the
+rule is about the VOLUME's state, not about which process establishes it: what would break a pair is
+recreating the volume, re-running the legacy fixture's own `FileDelete` and DDL, or reseeding rows, and none
+of those is on this path.
+
+**A capture operator who wants the schema step out of the picture entirely can have that**, without editing
+the manifest: set `PERSISTENCE_APPLY_MIGRATIONS_ON_STARTUP=false` in `orchestration/.env` and provision once,
+before the pair begins, exactly as the Seed row above prescribes. Persistence's own settings default the
+switch to false, so the opted-out behaviour is the code default rather than an override — which is the point
+of that default: a parity run's reliance on an untouched volume never depends on remembering to disable
+something.
 
 ### 4.5 The connection URI grammar the fixture documents
 
@@ -519,16 +563,18 @@ enters, so the sources are enumerated rather than described in the abstract. Eac
 dependency a test replaces with a deterministic double while production takes the platform implementation.
 [`../docs/PARITY.md`](../docs/PARITY.md) §5.1 is the authoritative register: it carries the injection point
 and the doubles for each of the first four rows below, and their statuses are reproduced from it. The fifth
-row is this document's own and is stated with the same discipline. **The status column is the point:** a
-blanket "every seam is injected" sentence would be false of the rows that have no injection point yet.
+row is this document's own and is stated with the same discipline. **The status column is kept now that all
+five rows agree**, because "present" and "exercised" are the distinction it draws: each seam has a named
+injection point in source and a double in a unit test, and **none has yet carried a paired capture** — which
+is the only thing that would make it exercised in this store's sense.
 
 | Seam | Where variation enters | Status |
 | --- | --- | --- |
 | GUID generation, random string generation, random blob generation | Security's cryptographic surface — the **primary** non-determinism sources in the in-scope estate. Every value differs on every run by design | **Present but unexercised** |
-| Transaction-pool idle expiry | CPU-clock based, keyed on the two keep-alive settings. Whether a pooled transaction is reused or discarded is observable, so the decision must be reproducible even though the elapsed time itself is never asserted | **Planned — not yet present** |
+| Transaction-pool idle expiry | CPU-clock based, keyed on the two keep-alive settings. Whether a pooled transaction is reused or discarded is observable, so the decision must be reproducible even though the elapsed time itself is never asserted | **Present but unexercised** — `Transactions/TransactionPool.cs` takes one injected `TimeProvider` and reads no ambient clock, so a fake drives every expiry; no capture has gone through it |
 | Every clock read | Anywhere a timestamp reaches an output or a decision. A timestamp in recorded output differs on every run | **Present but unexercised** |
 | Modify-call ordering | The DataWindow modify path, where a sequence of property modifications reaches a target state. Two orderings that reach the same state can emit different intermediate output | **Present but unexercised** |
-| Line endings | A platform artifact rather than a behaviour: the master is produced on Windows and the candidate in a Linux container, so the normalization convention of [§3.7](#37-newline-normalization-is-part-of-the-mask-not-an-accident) is declared in the workflow's mask and applied to both sides | **Planned — not yet present**, because no workflow mask exists to carry it |
+| Line endings | A platform artifact rather than a behaviour: the master is produced on Windows and the candidate in a Linux container, so the normalization convention of [§3.7](#37-newline-normalization-is-part-of-the-mask-not-an-accident) is declared in the workflow's mask and applied to both sides | **Present but unexercised.** All 15 masks carry a line-endings entry, and each names the multi-line fields it bites on for that workflow |
 
 ### 5.2 A mask is not a substitute for a seam
 
@@ -739,30 +785,35 @@ masked normalization) and record how that projection is produced in the workflow
 ## 7. What has not been exercised — stated plainly
 
 **No paired recording exists, therefore no parity result exists**, and nothing in this document should be
-read as reporting one. Specifically, and without softening any of it:
+read as reporting one. The obstacle is not a missing store, a missing definition or a missing mask — all
+three are here. Specifically, and without softening any of it:
 
-- **No capture has been taken**, on either side. This store currently holds only this document: neither
-  `recordings/` nor `workflows/` exists yet, so there is no recording to compare and no mask to compare it
-  under. The layout of [§3.1](#31-layout) is the shape the first capture creates, not an inventory.
+- **No capture has been taken**, on either side. `workflows/` carries fifteen definitions and the schema
+  they validate against, and both `recordings/` roots exist — but each root is **empty**, so there is no
+  recording to compare and no pair to compare under a mask. The layout of [§3.1](#31-layout) is the shape
+  the first capture fills in, not an inventory of captures.
 - **The legacy side of the oracle has not been executed here.** Running it requires a PowerBuilder
   toolchain that is not present, which is exactly what makes the pinyin risk of
   [§5.5](#55-the-one-genuine-parity-risk--pinyin-first-letter-matching) live rather than theoretical.
-- **The Compose bring-up and its ordered health gates have not been exercised, and no health gate is
-  claimed as passed.** Docker was additionally not installed in the environment where this migration was
-  planned, so that bring-up could not have been run there in any case. Container correctness for the stack
-  as a whole is therefore asserted by definition-and-manifest review plus CI — an *intended* assurance
-  mechanism, not a step that has been taken.
-- **A passing service test does not substitute for a capture.** An in-process test host mounts no volume,
-  so it cannot be the target half of a pair no matter how thorough it is — the rule of
+- **The stack has been brought up, and that is not a capture.** The bring-up, its ordered health gates and
+  the fresh-volume provisioning path *were* exercised — reported gate by gate in
+  [`../orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised),
+  which is the only execution-status statement in this repository and which this store defers to rather
+  than restating. What that run established is the **volume seam** a paired capture needs: a fresh
+  `persistence-db` provisions itself and survives a plain `down`. It produced no recording, and no
+  comparison may be claimed from it.
+- **A passing service test does not substitute for a capture either.** An in-process test host mounts no
+  volume, so it cannot be the target half of a pair no matter how thorough it is — the rule of
   [§2.1](#21-the-rule-canonical-text) is expressed against a Docker volume.
 
-What **was** empirically confirmed is narrower and is worth stating precisely so the two are not confused:
-the **per-service restore, release build and coverage-collecting test path** runs and produces
-`coverage.cobertura.xml`, the exact artifact the coverage gate reads.
+What **was** empirically confirmed on the build side is narrower and is worth stating precisely so the two
+are not confused: the **per-service restore, release build and coverage-collecting test path** runs and
+produces `coverage.cobertura.xml`, the exact artifact the coverage gate reads.
 [`../docs/BUILD.md`](../docs/BUILD.md) is the authority for what that run covered and what it did not.
 
 This position is not an expectation that things will work. It is the current state, and it is recorded here
-so that the first person to take a real capture knows they are the first.
+so that the first person to take a real capture knows they are the first — and knows that the only thing
+standing between the roster and a first pair is an oracle run.
 
 ---
 

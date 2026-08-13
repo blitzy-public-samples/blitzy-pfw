@@ -54,10 +54,10 @@
 //  `_SyntheticCrosstabNoOracle` so that its evidentiary status is legible at the point of failure
 //  rather than buried in this header. NO CHARACTERIZATION COVERAGE IS CLAIMED OR IMPLIED anywhere.
 //
-//  That is a deliberate posture rather than an apology. The migration plan likewise declines to claim
-//  a verified container bring-up where no Docker daemon was available, and requires reporting a
-//  limitation instead of approximating past it. Because no oracle exists here, unit coverage is the
-//  ONLY evidence available for this file, which is why this suite is exhaustive rather than
+//  That is a deliberate posture rather than an apology. The migration plan likewise requires reporting
+//  a limitation instead of approximating past it, and it keeps every claim about what has actually been
+//  run in ONE place - orchestration/README.md section 10. Because no oracle exists here, unit coverage
+//  is the ONLY evidence available for this file, which is why this suite is exhaustive rather than
 //  representative.
 //
 //  NO DATABASE, NO CONTAINER, NO CLOCK (C-E, C-H). Every case is a pure transform over in-memory
@@ -2586,34 +2586,39 @@ public sealed class FullStateCodecTests
     }
 
     /// <summary>
-    /// A <c>blob</c> ORIGINAL IS COMPARED BY CONTENT AND NOT BY REFERENCE, so an unchanged blob records
-    /// no original and a changed one records it.
+    /// A <c>blob</c> column's ORIGINAL travels as the baselined CONTENT on every row, whether or not the
+    /// current value still matches it.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>WHY REFERENCE EQUALITY WOULD BE WRONG IN BOTH DIRECTIONS.</b> <c>byte[]</c> is the one mutable
-    /// value a carrier holds, so it is COPIED at every crossing - which means a blob that was never
-    /// edited is nonetheless a DIFFERENT ARRAY INSTANCE from its own original. Comparing by reference
-    /// would therefore record an original for every blob column in every row, inflating the payload and
-    /// adding a WHERE-clause term for a column that did not change. Comparing by value in the other
-    /// direction - two distinct arrays with identical bytes - correctly records nothing.
+    /// 🔴 <b>THE BASELINE TRAVELS ON EVERY ROW NOW, INCLUDING THE ROW THAT DID NOT MOVE.</b> This theory
+    /// used to assert the opposite - that a blob whose content still matched its baseline carried NO
+    /// original - and the omission was defended as keeping a WHERE-clause term off a column that did not
+    /// change. It cannot be defended against AAP 0.6.3.2, which requires both the current and the original
+    /// value of every marked column per row with no exemption: applied to a FRESHLY RETRIEVED image, where
+    /// every column agrees by construction, the omission left the consumer with no baseline at all.
     /// </para>
     /// <para>
-    /// PowerScript assigns a <c>blob</c> BY VALUE, so content comparison is the oracle's semantics rather
-    /// than a convenience chosen here.
+    /// <b>WHAT THE BLOB CASE STILL PROVES, AND IT IS THE HARDER HALF.</b> <c>byte[]</c> is the one mutable
+    /// value a carrier holds, so it is COPIED at every crossing and a blob that was never edited is
+    /// nonetheless a DIFFERENT ARRAY INSTANCE from its own original. The emitted original must therefore be
+    /// read from the BASELINE the carrier captured and never from the live array - and the unedited row is
+    /// the row where those two are indistinguishable by eye and distinguishable only by this assertion.
+    /// Every row below expects the baselined <c>{1, 2, 3}</c>, whatever was written over it.
+    /// </para>
+    /// <para>
+    /// PowerScript assigns a <c>blob</c> BY VALUE, which is why the baseline is a content snapshot rather
+    /// than an alias in the first place.
     /// </para>
     /// </remarks>
     /// <param name="edited">The value written over the baselined blob.</param>
-    /// <param name="expectOriginalRecorded">Whether the image should carry an original for the column.</param>
     [Theory]
-    [InlineData(new byte[] { 1, 2, 3 }, false)]
-    [InlineData(new byte[] { 1, 2, 4 }, true)]
-    [InlineData(new byte[] { 1, 2 }, true)]
-    [InlineData(new byte[] { 1, 2, 3, 0 }, true)]
-    [InlineData(new byte[0], true)]
-    public void Capture_ComparesABlobOriginalByContent_UnitLevelNoOracle(
-        byte[] edited,
-        bool expectOriginalRecorded)
+    [InlineData(new byte[] { 1, 2, 3 })]
+    [InlineData(new byte[] { 1, 2, 4 })]
+    [InlineData(new byte[] { 1, 2 })]
+    [InlineData(new byte[] { 1, 2, 3, 0 })]
+    [InlineData(new byte[0])]
+    public void Capture_CarriesTheBaselinedBlobOriginalWhateverTheEdit_UnitLevelNoOracle(byte[] edited)
     {
         DataWindowBufferStore source = NewCrosstabCarrier();
         long row = source.AppendRow(DwBuffer.Primary, ItemStatus.NotModified);
@@ -2631,15 +2636,12 @@ public sealed class FullStateCodecTests
         Assert.Single(projected.Columns);
         Assert.Equal(edited, projected.Columns[0].Value.BlobValue.ToByteArray());
 
-        // THE CONTENT COMPARISON DECIDES WHETHER AN ORIGINAL IS CARRIED AT ALL.
-        Assert.Equal(expectOriginalRecorded, projected.OriginalValues.Count == 1);
+        // ONE BASELINE PER COLUMN CARRIED, AND IT IS THE BASELINED CONTENT RATHER THAN THE LIVE ARRAY.
+        Assert.Single(projected.OriginalValues);
 
-        if (expectOriginalRecorded)
-        {
-            Assert.Equal(
-                new byte[] { 1, 2, 3 },
-                projected.OriginalValues[0].Value.BlobValue.ToByteArray());
-        }
+        Assert.Equal(
+            new byte[] { 1, 2, 3 },
+            projected.OriginalValues[0].Value.BlobValue.ToByteArray());
     }
 
     /// <summary>

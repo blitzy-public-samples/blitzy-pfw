@@ -700,8 +700,8 @@ public sealed class PersistenceOptionsTests
     }
 
     /// <summary>
-    /// The SQLite group is exactly the six evidenced parts - no provider, no dialect and no second
-    /// connection has been invented.
+    /// The SQLite group is exactly the six evidenced URI parts - no provider, no dialect and no second
+    /// connection has been invented, and the provisioning switch is NOT here.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -715,6 +715,15 @@ public sealed class PersistenceOptionsTests
     /// <para>
     /// A TIMEOUT OR AUTO-COMMIT MEMBER WOULD ALSO FAIL THIS ROW, correctly: those are runtime calls on
     /// the connection in the legacy binding and have no configuration key anywhere in the estate.
+    /// </para>
+    /// <para>
+    /// THE PROVISIONING SWITCH IS DELIBERATELY ABSENT FROM THIS SET, and its absence is part of the claim.
+    /// Every member here is a component of the one evidenced connection URI
+    /// [<c>ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L450-L456</c>]; whether a deployment applies its
+    /// pending migrations when the process starts is a RUNTIME decision with no URI component and no
+    /// legacy analogue at all, so it lives in its own top-level <c>Schema</c> section - asserted by
+    /// <see cref="TheSchemaGroupCarriesExactlyTheProvisioningSwitchAndItIsOffByDefault"/> - rather than
+    /// widening this group into a grab bag of storage-adjacent settings.
     /// </para>
     /// </remarks>
     [Fact]
@@ -731,6 +740,85 @@ public sealed class PersistenceOptionsTests
         ];
 
         Assert.Equal(expected, PublicMemberNamesOf(typeof(SqliteOptions)));
+    }
+
+    /// <summary>
+    /// The schema group carries exactly the provisioning switch, and provisioning is OFF by default.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE FALSE DEFAULT IS THE ASSERTION THAT MATTERS, AND IT PROTECTS THREE THINGS AT ONCE. A
+    /// characterization run must be able to rely on the <c>persistence-db</c> volume being untouched
+    /// between the legacy-side and target-side captures of one workflow identifier (AAP 0.6.7), so a
+    /// service that provisioned unasked would violate the parity rule on every restart. Every existing
+    /// deployment, and every service-level test in this project - all of which boot the same composition
+    /// root - behaves exactly as it did before this section existed only because the default is off. And a
+    /// service that mutates its own storage without being asked is the surprise the fail-fast posture is
+    /// meant to preclude. The orchestration manifest turns it ON explicitly, in one place; if this row
+    /// ever fails because the default flipped, that is the defect and not this assertion.
+    /// </para>
+    /// <para>
+    /// ONE MEMBER, AND THE SINGLE-MEMBER SET IS PART OF THE CLAIM. A retry count, a timeout or a
+    /// "recreate" flag appearing here would each be a policy this section has no evidence for - and the
+    /// third would be the destructive capability <c>SchemaProvisioner</c> is forbidden to have. The lock
+    /// attempt count is a constructor parameter with a compiled default precisely so it stays off this
+    /// surface.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheSchemaGroupCarriesExactlyTheProvisioningSwitchAndItIsOffByDefault()
+    {
+        Assert.Equal(
+            [nameof(SchemaOptions.ApplyMigrationsOnStartup)],
+            PublicMemberNamesOf(typeof(SchemaOptions)));
+
+        Assert.False(new SchemaOptions().ApplyMigrationsOnStartup);
+        Assert.False(new PersistenceOptions().Schema.ApplyMigrationsOnStartup);
+        Assert.False(PersistenceOptionsBuilder.Default().Schema.ApplyMigrationsOnStartup);
+    }
+
+    /// <summary>
+    /// Both values of the provisioning switch validate, and a section bound to null is reported against
+    /// its own key path.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// NEITHER VALUE IS REFUSED, DELIBERATELY. <see langword="false"/> is the shipped code default and
+    /// <see langword="true"/> is what the orchestration manifest sets so the one documented bring-up
+    /// command reaches a healthy stack on a fresh volume - a deployment is entitled to either, and a rule
+    /// here could only refuse one of the two positions it may legitimately hold. That is the same
+    /// treatment <c>TransactionPool</c> receives, and for the same reason.
+    /// </para>
+    /// <para>
+    /// THE NULL SECTION IS STILL REPORTED, WHICH IS NOT THE SAME THING AS BEING UNVALIDATED. Provisioning
+    /// reads this section during startup, so a group bound to an explicit null would be a null-reference
+    /// exception with no configuration path attached to it rather than a message naming a key. Being
+    /// checked for having been BOUND while carrying no rule about its VALUE is exactly the distinction.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void BothValuesOfTheProvisioningSwitchValidateAndANullSectionIsReported()
+    {
+        foreach (bool configured in (bool[])[false, true])
+        {
+            PersistenceOptions options = PersistenceOptionsBuilder.Default();
+            options.Schema.ApplyMigrationsOnStartup = configured;
+
+            ValidateOptionsResult result = new PersistenceOptionsValidator().Validate(name: null, options);
+
+            Assert.True(result.Succeeded, Describe(result));
+            Assert.Equal(configured, options.Schema.ApplyMigrationsOnStartup);
+        }
+
+        PersistenceOptions unbound = PersistenceOptionsBuilder.Default();
+        unbound.Schema = null!;
+
+        ValidateOptionsResult refusal = new PersistenceOptionsValidator().Validate(name: null, unbound);
+
+        Assert.True(refusal.Failed);
+        Assert.Contains(
+            refusal.Failures!,
+            failure => failure.StartsWith("Schema was bound to null", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -1084,7 +1172,7 @@ public sealed class PersistenceOptionsTests
     // ==============================================================================================
 
     /// <summary>
-    /// The option graph is exactly the nine declared groups, discovered by walking it rather than by
+    /// The option graph is exactly the ten declared groups, discovered by walking it rather than by
     /// restating a list.
     /// </summary>
     /// <remarks>
@@ -1101,7 +1189,7 @@ public sealed class PersistenceOptionsTests
     /// </para>
     /// </remarks>
     [Fact]
-    public void TheOptionGraphIsExactlyTheNineDeclaredGroups()
+    public void TheOptionGraphIsExactlyTheTenDeclaredGroups()
     {
         string[] expected =
         [
@@ -1112,6 +1200,13 @@ public sealed class PersistenceOptionsTests
             nameof(JwtOptions),
             nameof(PersistenceOptions),
             nameof(QueryOptions),
+
+            // The schema-provisioning switch, added when startup provisioning became configurable so the
+            // documented single-command bring-up could reach a healthy stack on a fresh volume. It is its
+            // own group rather than a member of SqliteOptions precisely because the row below pins that
+            // group to the evidenced connection-URI grammar and nothing else.
+            nameof(SchemaOptions),
+
             nameof(SqliteOptions),
             nameof(TransactionPoolOptions),
         ];

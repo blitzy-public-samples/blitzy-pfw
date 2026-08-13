@@ -217,7 +217,16 @@ import {
   requireServiceToken,
 } from '../fixtures/token-issuance';
 
-import { probeStackAvailability } from '../fixtures/live-stack';
+import { requireLiveStack } from '../fixtures/live-stack';
+
+import {
+  CONFLICT_DETAIL,
+  CONFLICT_ROW,
+  PROBLEM_JSON_MEDIA_TYPE,
+  assertMediaType,
+  assertMembers,
+  readCanonicalMember,
+} from '../fixtures/contract-shape';
 
 /* ------------------------------------------------------------------------- *
  * THE ROUTE TABLE — ONE OF THIS FILE'S TWO EDIT POINTS FOR WIRE SHAPE
@@ -390,72 +399,81 @@ interface WireUpdateRequest {
 }
 
 /* ------------------------------------------------------------------------- *
- * THE RESPONSE SIDE — THE FILE'S SECOND EDIT POINT, ONE CANDIDATE-KEY TABLE
+ * THE RESPONSE SIDE — THE FILE'S SECOND EDIT POINT, CANONICAL SPELLINGS ONLY
  *
- * Reading is treated differently from writing, and the asymmetry is deliberate. A
- * request must be exact because the parser rejects an unknown field; a RESPONSE is
- * the thing under test, so a reader that assumed its own spelling would report
- * "the member is missing" for a boundary that had merely serialized it
- * differently — the least useful diagnostic available, and the most misleading on
- * a conflict payload, where "missing" is itself a contract violation with real
- * consequences. Every member this file reads therefore resolves through the table
- * below, which lists the canonical mapping's spelling FIRST and the plausible
- * alternatives after it.
+ * 🔴 THIS TABLE USED TO LIST ALTERNATIVES, AND ON THIS FILE ONE OF THEM WAS
+ * ACTIVELY DANGEROUS. `conflictCurrentValues` accepted `columns` alongside
+ * `currentValues`, and the two mean DIFFERENT THINGS: on a retrieved row
+ * `columns` is what the row holds, while on a conflict row `currentValues` is the
+ * SERVER-SIDE state a retry must be rebased onto. `ConflictRow` marks both
+ * `currentValues` and `originalValues` required and declares
+ * `additionalProperties: false`, so a payload carrying `columns` instead is not a
+ * spelling variant — it is a different, non-conformant message. Accepting it let
+ * this suite pass against a `409` body no generated client can read, on the one
+ * payload whose whole purpose is to make a retry-or-surface decision possible.
  *
- * This is emphatically NOT a licence to guess a shape. Nothing below asserts deep
- * structural equality against a schema, and no member is read that the published
- * contract does not declare — the `409` body is `ConflictProblemDetails`, an RFC
- * 9457 problem document whose `conflict` member is the field-for-field mirror of
- * `common.v1.ConflictDetail`. It is a tolerance in SPELLING only, and it is why a
- * serialization surprise costs one edit here rather than an edit at every call
- * site. Spec 05 resolves its retrieval payload the same way.
+ * ⚠ THE ALTERNATIVES ARE DETECTED, NOT ACCEPTED. This table used to be resolved
+ * tolerantly: whichever spelling appeared was returned. The diagnostic reasoning
+ * above is sound and is preserved — a boundary that merely serialized a member
+ * differently should be told so in those words — but the VERDICT was wrong, and
+ * nowhere more so than here: the conflict payload's two value sets ARE the
+ * optimistic-concurrency evidence, so a reader that accepted either spelling of
+ * `originalValues` could not tell a renamed member from an absent one, and the
+ * comment above says in its own words that "missing" is itself a contract
+ * violation with real consequences. The canonical spelling is now required, and an
+ * alternative found in its place produces that same good diagnostic AS A FAILURE.
+ *
+ * The same applied less dramatically throughout: `Rows` beside `rows`,
+ * `rows_expected` beside `rowsExpected`, an `items`/`result`/`data` envelope
+ * beside a body the contract publishes as a bare array. Every entry is now the ONE
+ * canonical spelling, lowerCamelCase because that is what protobuf-JSON produces
+ * and what `gateway.v1.yaml` declares. The resolver still reports a missing member
+ * by name, so the diagnostic survives; only the tolerance is gone.
+ *
+ * No member is read that the published contract does not declare — the `409` body
+ * is `ConflictProblemDetails`, an RFC 9457 problem document whose `conflict`
+ * member is the field-for-field mirror of `common.v1.ConflictDetail` — and the
+ * detail's and the row's member sets are now asserted EXACTLY, from
+ * `fixtures/contract-shape.ts`, both schemas setting
+ * `additionalProperties: false`. The table remains the one edit point. Spec 05
+ * resolves its retrieval payload the same way.
  * ------------------------------------------------------------------------- */
 const RESPONSE_KEYS = {
-  /**
-   * The retrieval's row collection.
-   *
-   * A retrieval answers the ORDERED SEQUENCE OF CHUNKS the server stream would
-   * have delivered — a bare collection rather than an invented envelope, because
-   * the protocol definition has no envelope message for a stream. `rows` is a
-   * member of each chunk; the alternatives cover an envelope appearing anyway.
-   */
-  chunkCollection: ['chunks', 'items', 'result', 'data'],
-
   /** Rows within one chunk, and the rows within a conflict detail. Same spelling. */
-  rows: ['rows', 'Rows'],
+  rows: ['rows'],
 
   /** Row-level carrier members. Their presence is what makes this a DataWindow. */
-  buffer: ['buffer', 'Buffer'],
-  rowOrdinal: ['row', 'Row'],
-  itemStatus: ['itemStatus', 'item_status'],
-  columns: ['columns', 'Columns'],
-  originalValues: ['originalValues', 'original_values'],
+  buffer: ['buffer'],
+  rowOrdinal: ['row'],
+  itemStatus: ['itemStatus'],
+  columns: ['columns'],
+  originalValues: ['originalValues'],
 
   /**
    * The conflict row's CURRENT value set.
    *
-   * Named `currentValues` rather than `columns`, and the difference is meaningful
-   * rather than cosmetic: on a retrieved row `columns` is what the row holds,
-   * while on a conflict row `currentValues` is the SERVER-SIDE state a retry would
-   * be rebased onto. Both spellings are accepted for the same value set, in the
-   * contract's order first, so a projection that reused the retrieval's member
-   * name still resolves.
+   * `currentValues` and NOT `columns`. See the header: the two carry different
+   * meanings, `ConflictRow` requires this one, and a body that used the other
+   * spelling would be unreadable to every generated client.
    */
-  conflictCurrentValues: ['currentValues', 'current_values', 'columns'],
+  conflictCurrentValues: ['currentValues'],
 
-  /** Column-level members. */
-  columnName: ['columnName', 'column_name'],
-  columnId: ['columnId', 'column_id'],
-  columnValue: ['value', 'Value'],
+  /** Column-level members. Schema: `ColumnValue`. */
+  columnName: ['columnName'],
+  columnId: ['columnId'],
+  columnValue: ['value'],
 
-  /** The scalar arms this workflow reads, in the order a numeric read prefers them. */
-  valueIsNull: ['isNull', 'is_null'],
-  valueText: ['stringValue', 'string_value'],
-  valueInt64: ['int64Value', 'int64_value'],
-  valueDouble: ['doubleValue', 'double_value'],
-  valueDecimal: ['decimalValue', 'decimal_value'],
-  valueDate: ['dateValue', 'date_value'],
-  wrappedValue: ['value', 'Value'],
+  /**
+   * The scalar arms this workflow reads, in the order a numeric read prefers
+   * them. Schema: `AnyValue`, which declares exactly one member per value.
+   */
+  valueIsNull: ['isNull'],
+  valueText: ['stringValue'],
+  valueInt64: ['int64Value'],
+  valueDouble: ['doubleValue'],
+  valueDecimal: ['decimalValue'],
+  valueDate: ['dateValue'],
+  wrappedValue: ['value'],
 
   /**
    * The identity round-trip on the update response.
@@ -466,16 +484,16 @@ const RESPONSE_KEYS = {
    * [`n_cst_thread_task_sqlupdate.sru:L235-L241`]. A row inserted into the primary
    * buffer lands in the first of the two, which is the only one read here.
    */
-  identity: ['identity', 'Identity'],
-  identityColumnId: ['identityColumnId', 'identity_column_id'],
-  identityPrimaryValues: ['primaryValues', 'primary_values'],
+  identity: ['identity'],
+  identityColumnId: ['identityColumnId'],
+  identityPrimaryValues: ['primaryValues'],
 
   /** The affected-row counts. Emitted as strings, because they are 64-bit. */
-  rowsInserted: ['rowsInserted', 'rows_inserted'],
-  rowsUpdated: ['rowsUpdated', 'rows_updated'],
+  rowsInserted: ['rowsInserted'],
+  rowsUpdated: ['rowsUpdated'],
 
   /** The legacy return code the response or the problem document carries. */
-  retCode: ['retCode', 'ret_code'],
+  retCode: ['retCode'],
 
   /**
    * THE CONFLICT DETAIL ITSELF — the member this file exists to read.
@@ -488,14 +506,14 @@ const RESPONSE_KEYS = {
    * one legitimate shape that carries no such member and why it is still a failure
    * of this workflow.
    */
-  conflict: ['conflict', 'Conflict', 'conflictDetail', 'conflict_detail'],
+  conflict: ['conflict'],
 
   /** Which table the failing statement targeted. Present because multi-table update is real. */
-  conflictUpdateTable: ['updateTable', 'update_table'],
+  conflictUpdateTable: ['updateTable'],
 
   /** How many rows the statement expected to affect, and how many it matched. */
-  conflictRowsExpected: ['rowsExpected', 'rows_expected'],
-  conflictRowsMatched: ['rowsMatched', 'rows_matched'],
+  conflictRowsExpected: ['rowsExpected'],
+  conflictRowsMatched: ['rowsMatched'],
 
   /**
    * The problem-document members.
@@ -507,8 +525,8 @@ const RESPONSE_KEYS = {
    * that a missing `conflict` member is diagnosed rather than merely reported.
    */
   problemMembers: ['type', 'title', 'status', 'detail', 'instance'],
-  problemType: ['type', 'Type'],
-  problemStatus: ['status', 'Status'],
+  problemType: ['type'],
+  problemStatus: ['status'],
 } as const;
 
 /**
@@ -545,28 +563,36 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 /**
- * Reads the first member present out of a candidate list.
+ * Reads a member by its CANONICAL name, failing when only a variant is present.
  *
- * Presence is tested with `hasOwnProperty` rather than by comparing against
- * `undefined`, so a member that is genuinely present and null is reported as
- * present. That distinction matters on this boundary: null is a value of its own
- * in the legacy scalar domain, not an absence, and the concurrency comparison
- * compares nulls.
+ * ⚠ THIS USED TO RETURN THE FIRST CANDIDATE PRESENT, AND THAT WAS THE DEFECT.
+ * The table's first entry is the spelling the published contract declares and the
+ * rest are plausible re-serializations, so `current_values`, `ret_code` and `Rows`
+ * each satisfied a read and every assertion downstream of it passed — meaning a
+ * response-field rename, the most likely drift on a freshly decomposed boundary,
+ * could not be detected by this file at all. It matters most HERE: the conflict
+ * payload's two value sets are the whole of the optimistic-concurrency evidence,
+ * and a reader that accepts either spelling of `originalValues` cannot tell a
+ * renamed member from an absent one.
+ *
+ * The table and its diagnostic value both survive; only the verdict changed. The
+ * canonical name is required, and a variant found in its place is reported as the
+ * drift it is, naming both spellings.
+ *
+ * Presence is still tested with `hasOwnProperty` rather than against `undefined`,
+ * so a member that is genuinely present and null reads as present. That
+ * distinction matters on this boundary: null is a value of its own in the legacy
+ * scalar domain, not an absence, and the concurrency comparison compares nulls.
  */
 function readMember(container: unknown, candidates: readonly string[]): unknown {
-  const record = asRecord(container);
+  const [canonical = '', ...variants] = candidates;
 
-  if (record === undefined) {
-    return undefined;
-  }
-
-  for (const candidate of candidates) {
-    if (Object.prototype.hasOwnProperty.call(record, candidate)) {
-      return record[candidate];
-    }
-  }
-
-  return undefined;
+  return readCanonicalMember(
+    container,
+    canonical,
+    variants,
+    `the response member '${canonical}'`,
+  );
 }
 
 /** Reads a member expected to be an array, or `undefined` when it is not one. */
@@ -1031,19 +1057,21 @@ function requestUpdate(
 /**
  * Reads the chunk sequence out of a retrieval response.
  *
- * The contract publishes the body as a BARE ORDERED COLLECTION rather than an
- * envelope, because the protocol definition has no envelope message for a stream —
- * so the array case is the expected one and the envelope case is only a tolerance.
- * Element order is the stream's order and is never re-sorted here.
+ * The contract publishes the body as a BARE ORDERED COLLECTION — `RetrieveResult`
+ * is `type: array` of `RetrieveChunk`, because the protocol definition has no
+ * envelope message for a stream. Element order is the stream's order and is never
+ * re-sorted here.
+ *
+ * 🔴 AN ENVELOPE IS NO LONGER TOLERATED, for the reason given in the member-name
+ * table above: a projection that wrapped the stream satisfied every assertion here
+ * while a client generated from the published document received an object where it
+ * expected an array. A non-array body yields an empty sequence and the read-back
+ * that wanted rows reports the absence.
  */
 async function readChunks(response: APIResponse): Promise<readonly unknown[]> {
   const body: unknown = await response.json();
 
-  if (Array.isArray(body)) {
-    return body as readonly unknown[];
-  }
-
-  return readArray(body, RESPONSE_KEYS.chunkCollection) ?? [];
+  return Array.isArray(body) ? (body as readonly unknown[]) : [];
 }
 
 /** Flattens every chunk's rows into one sequence, preserving arrival order. */
@@ -1354,84 +1382,85 @@ const RETRIED_SALARY = 20001;
 const BIRTH_TEXT_PATTERN = new RegExp(`^${BIRTH_FORMAT.replace(/[a-z]/g, '\\d')}$`);
 
 /* ------------------------------------------------------------------------- *
- * State carried between the steps of the workflow
+ * ONE ATOMIC WORKFLOW, AND WHY IT IS NOT SIX TESTS
  *
- * Module scope is legitimate here only because the describe block below runs
- * SERIALLY: the steps are one workflow rather than six independent assertions, and
- * each later step needs what an earlier one learned — above all the key the engine
- * assigned, which is the only stable way to address the row. The runner is already
- * configured `workers: 1` and `fullyParallel: false`, so nothing else can interleave.
+ * The six numbered steps below were once six separate `test()` declarations that
+ * shared five module-scope `let` bindings, with the group configured
+ * `mode: 'serial'` to guarantee they ran in order. Every one of the five bindings
+ * needed a `require*()` guard whose failure message said, in effect, "an earlier
+ * test did not run" — five functions whose entire purpose was to apologise for an
+ * arrangement, which is a fair description of the problem.
+ *
+ * IT WAS NEVER SIX INDEPENDENT ASSERTIONS. A conflict is a function of a known
+ * row state: step 3's `409` means nothing unless step 1 created the row and step 2
+ * made the snapshot stale, and step 4 asserts on THE VERY RESPONSE step 3
+ * received — a body may be read only once, so the two cannot be separate tests
+ * that each obtain their own. Splitting the narrative into six results made them
+ * look independently runnable when not one of steps 2 to 6 was, and after any
+ * earlier failure the survivors were skipped or meaningless.
+ *
+ * So it is one test now, and the six steps are `test.step` blocks inside it. Three
+ * properties follow, and the third is the one that matters:
+ *
+ *   * THE REPORT IS UNCHANGED IN GRANULARITY. Each step is still named and still
+ *     timed individually, and a failure still points at the step that failed.
+ *   * NO MUTABLE STATE ANYWHERE. `test.step` returns whatever its callback
+ *     returns, so step 1 RETURNS the created row, step 2 RETURNS the applied
+ *     state and step 3 RETURNS the captured response, each bound to a `const` in
+ *     the test's own scope. Nothing is assigned after declaration; nothing is
+ *     visible outside the test; the five guards are gone because a step cannot
+ *     observe a value an earlier step did not produce.
+ *   * THE RESULT IS HONEST. One workflow reports as one result. It can no longer
+ *     present as five passes and one failure when what happened is that one
+ *     workflow broke at step 3, nor as five skips that a reader has to reconstruct
+ *     a story from.
+ *
+ * `mode: 'serial'` is consequently gone — there is nothing left to order. The
+ * `retries: 0` pin stays, and stays deliberately; see the note at the pin.
  * ------------------------------------------------------------------------- */
 
 /**
- * The row as step 1 created it, read back from the RETRIEVAL.
+ * How many steps the one workflow test below has.
  *
- * THIS SNAPSHOT IS WHAT GOES STALE. Step 2 changes the stored row without touching
- * this value, and step 3 then submits it as the `original` half — which is precisely
- * the condition `updatewhere=1` exists to detect.
+ * Used for exactly one thing: restoring the liveness budget the six former tests
+ * had between them. Named rather than inlined so the number and the reason travel
+ * together, and so a seventh step added later is one edit rather than two.
  */
-let createdSnapshot: CompanyRow | undefined;
+const WORKFLOW_STEP_COUNT = 6;
 
-/** The created row's own column values, kept verbatim for the legitimate update's originals. */
-let createdVerbatimColumns: readonly WireColumnValue[] = [];
+/** What step 1 produces: the created row, and the wire values it came back as. */
+interface CreatedRow {
+  /**
+   * The row as step 1 created it, read back from the RETRIEVAL.
+   *
+   * THIS SNAPSHOT IS WHAT GOES STALE. Step 2 changes the stored row without
+   * touching this value, and step 3 then submits it as the `original` half — which
+   * is precisely the condition `updatewhere=1` exists to detect.
+   */
+  readonly snapshot: CompanyRow;
 
-/** The row as step 2's legitimate update left it. The state steps 4, 5 and 6 measure against. */
-let appliedSnapshot: CompanyRow | undefined;
+  /** The created row's own column values, verbatim, for the legitimate update's originals. */
+  readonly verbatimColumns: readonly WireColumnValue[];
+}
 
 /**
- * The `409` response, captured in step 3 and asserted on in step 4.
+ * What step 3 produces: the `409` response, captured rather than re-requested.
  *
- * The BODY TEXT is carried rather than the response object, for two reasons. A body
- * may be read once, so reading it in the step that asserts the status and parsing it
- * in the step that asserts the payload is the only arrangement in which both steps
- * can be about one response. And carrying text rather than a parsed object is what
- * lets step 4 assert that the body PARSES at all, which is the machine-readability
- * claim — an HTML error page is a failure, and a page cannot be detected by looking
- * at an object somebody has already parsed.
+ * THE BODY TEXT IS CARRIED RATHER THAN THE RESPONSE OBJECT, for two reasons that
+ * both still hold now that the steps share one test. A body may be read only once,
+ * so the step that asserts the status and the step that asserts the payload can
+ * only both be about ONE response if the text is read once and passed on. And
+ * carrying text rather than a parsed object is what lets step 4 assert that the
+ * body PARSES at all, which is the machine-readability claim — an HTML error page
+ * is a failure, and a page cannot be detected by inspecting an object somebody has
+ * already parsed.
  */
-let conflictBodyText: string | undefined;
+interface CapturedConflict {
+  /** The response's content type, lower-cased, captured alongside the body. */
+  readonly contentType: string;
 
-/** The `409` response's content type, captured alongside the body for the same reason. */
-let conflictContentType = '';
-
-/** Fails with a diagnosis rather than a type error when an earlier step did not run. */
-function requireCreatedSnapshot(): CompanyRow {
-  if (createdSnapshot === undefined) {
-    throw new Error(
-      'No created row is available. Serial execution guarantees the creating ' +
-        'step runs first, so an absence here means that step failed or was ' +
-        'skipped — read its failure rather than this one.',
-    );
-  }
-
-  return createdSnapshot;
-}
-
-/** The same, for the state the legitimate update left behind. */
-function requireAppliedSnapshot(): CompanyRow {
-  if (appliedSnapshot === undefined) {
-    throw new Error(
-      'No post-update snapshot is available. Serial execution guarantees the ' +
-        'legitimate update runs before anything that measures against it, so an ' +
-        'absence here means that step failed or was skipped — read its failure ' +
-        'rather than this one.',
-    );
-  }
-
-  return appliedSnapshot;
-}
-
-/** The same, for the captured conflict body. */
-function requireConflictBodyText(): string {
-  if (conflictBodyText === undefined) {
-    throw new Error(
-      'No conflict body is available. Serial execution guarantees the step that ' +
-        'provokes the 409 runs first, so an absence here means that step failed ' +
-        'or was skipped — read its failure rather than this one.',
-    );
-  }
-
-  return conflictBodyText;
+  /** The response body, as text, read exactly once. */
+  readonly bodyText: string;
 }
 
 test.describe('Optimistic-concurrency conflict: HTTP 409, and no silent overwrite (C-06 over C-09)', () => {
@@ -1463,995 +1492,1042 @@ test.describe('Optimistic-concurrency conflict: HTTP 409, and no silent overwrit
   // The probe is memoised per worker, so this costs one request per worker and
   // not one per test.
   //
-  // TESTS TAGGED `@no-stack` ARE EXEMPT, and the tag is why this is a tag rather
-  // than a title match: several specs mix pure-fixture assertions in with HTTP
-  // ones, those assertions are exactly the part that still holds with nothing
-  // running, and skipping them would throw away the only coverage available
-  // before a bring-up. A tag is declarative and machine-read; a title substring
-  // would silently start skipping the moment someone reworded a test name, and
-  // two stack-free tests in this suite never carried the wording at all.
+  // ⚠ AN ABSENT STACK NOW FAILS A FULL ACCEPTANCE RUN RATHER THAN SKIPPING IT.
+  // This hook used to probe and then skip, which left the one state a
+  // misconfigured pipeline is in - nothing running - as the state that exited
+  // zero. `requireLiveStack` fails instead unless the run has explicitly
+  // acknowledged an absent stack with E2E_ALLOW_ABSENT_STACK, in which case it
+  // skips with a stated reason and the run is labelled api-partial-no-stack in
+  // every reported line so its result cannot be read as an acceptance result.
+  //
+  // THE DECISION LIVES IN ONE PLACE FOR ALL SIX SPECS. It was written out six
+  // times, once per spec, so the six could disagree about what an absent stack
+  // means - which mattered little while the answer was a skip and matters a great
+  // deal now that it gates acceptance. Tests tagged `@no-stack` are still exempt,
+  // and the tag is still why this is a tag rather than a title match; that
+  // reasoning now lives with the function.
   // ---------------------------------------------------------------------------
   test.beforeEach(async ({}, testInfo) => {
-    if (testInfo.tags.includes('@no-stack')) {
-      return;
-    }
-
-    const availability = await probeStackAvailability();
-
-    test.skip(!availability.reachable, availability.reason);
+    await requireLiveStack(testInfo);
   });
 
   // TWO FLAGS, AND BOTH ARE LOAD-BEARING.
   //
-  // `mode: 'serial'` because this is one multi-step MUTATION SEQUENCE over shared
-  // COMPANY state, not six independent assertions: a conflict is a function of a
-  // known row state, so a later step is meaningless if an earlier one failed. The
-  // benefit is diagnostic as well — when a step fails, the steps that depended on
-  // it are reported as SKIPPED instead of producing a cascade of derived failures
-  // that all have the same single cause.
+  // `mode: 'serial'` IS DELIBERATELY ABSENT NOW. It was here to order six tests
+  // that shared module-scope state; the workflow is one atomic test with one
+  // `test.step` per former step, so there is no order left to declare and no
+  // sharing left to protect. Nothing about execution changed by removing it —
+  // `workers: 1` and `fullyParallel: false` are global — but the claim it implied,
+  // that these were six tests whose order merely mattered, was the thing worth
+  // removing.
   //
-  // `retries: 0` as a DELIBERATE LOCAL PIN, even though the runner is already
-  // configured with zero retries globally. The conflict assertion below must never
-  // be retried into a pass: a stale update MUST fail, because there is no silent
-  // overwrite anywhere in this system, and a retry count introduced repository-wide
-  // for CI flake at some later date would silently turn that from an assertion into
-  // a coin toss. The runner configuration names this file as one of the two that
-  // must pin it back locally, so this line is that pin. It is the only kind of
-  // "retry" permitted anywhere near this file — a retry of the WORKFLOW in step 6
-  // is a different thing entirely, and a retry of an ASSERTION remains forbidden.
-  test.describe.configure({ mode: 'serial', retries: 0 });
+  // `retries: 0` REMAINS, as a DELIBERATE LOCAL PIN, even though the runner is
+  // already configured with zero retries globally. The conflict assertion below
+  // must never be retried into a pass: a stale update MUST fail, because there is
+  // no silent overwrite anywhere in this system, and a retry count introduced
+  // repository-wide for CI flake at some later date would silently turn that from
+  // an assertion into a coin toss. The runner configuration names this file as one
+  // of the two that must pin it back locally, so this line is that pin. Making the
+  // six steps one test RAISES the stakes on it rather than lowering them: a retry
+  // would now re-run the whole mutation sequence, insert a second row and re-provoke
+  // the conflict. It is the only kind of "retry" permitted anywhere near this file —
+  // a retry of the WORKFLOW in step 6 is a different thing entirely, and a retry of
+  // an ASSERTION remains forbidden.
+  test.describe.configure({ retries: 0 });
 
-  test('step 1 — a known starting row is created through the public workflow', async ({
+  // ONE TEST, SIX STEPS. The title states the whole workflow rather than a step of
+  // it, because one result is what this reports. `request` is destructured once
+  // here and threaded into the steps that need it: step 4 makes no request at all,
+  // which is why it takes none.
+  test('a stale-original update is refused with 409, changes nothing, and is recoverable by refresh-and-retry', async ({
     request,
-  }) => {
-    const token: ServiceToken = await requireServiceToken(request);
+  }, testInfo) => {
+    // THE LIVENESS BUDGET IS RESTORED TO WHAT THE SIX TESTS HAD BETWEEN THEM, and
+    // this is bookkeeping rather than a new allowance. Each of the six former tests
+    // carried the runner's per-test budget in full; collapsing them into one test
+    // would have left the whole workflow with a SIXTH of the time it previously
+    // had, so a refactor whose subject is test isolation could have introduced a
+    // timeout that has nothing to do with isolation. Multiplying by the former step
+    // count restores the identical total.
+    //
+    // DERIVED, NOT RESTATED: the multiplicand is the runner's configured value read
+    // back through `testInfo`, so the two can never disagree, and the multiplier is
+    // the step count this workflow actually has.
+    //
+    // IT IS A LIVENESS GUARD AND NOT A LATENCY BUDGET. It asserts nothing about how
+    // long any request may take; it exists only so a wedged upstream ends the run
+    // instead of hanging a pipeline. No service-level agreement, latency target,
+    // throughput target or availability commitment is published anywhere for this
+    // system, so none is implied here (AAP §0.8.5).
+    testInfo.setTimeout(testInfo.timeout * WORKFLOW_STEP_COUNT);
 
-    // CREATED THROUGH THE PUBLIC WORKFLOW, NEVER SEEDED. Storage is never touched
-    // directly and the volume is never reset, reseeded, dropped or recreated: the
-    // paired-capture rule forbids recreating or reseeding it between the two halves
-    // of a comparison, so the only legitimate way to obtain a KNOWN row state is to
-    // create one through the ingress. A pre-existing row is not a known state — the
-    // volume is shared and a previous run's row carries this same deterministic
-    // label — which is why nothing below looks the row up by name.
-    const response: APIResponse = await requestUpdate(request, token, [
-      encodeInsertRow(CREATED_INPUT),
-    ]);
+    const createdRow: CreatedRow = await test.step('step 1 — a known starting row is created through the public workflow', async () => {
+      const token: ServiceToken = await requireServiceToken(request);
 
-    expect(
-      response.status(),
-      `${ROUTES.update} must answer 200 for a well-formed insert. A ${CONFLICT_STATUS} ` +
-        'here would be an optimistic-concurrency report against a row that has no ' +
-        'prior state to conflict with, which would mean originals were being ' +
-        'compared for an insert; a 400 means the payload was refused by binding or ' +
-        'by validation, and a 401 that the token was not accepted.',
-    ).toBe(200);
+      // CREATED THROUGH THE PUBLIC WORKFLOW, NEVER SEEDED. Storage is never touched
+      // directly and the volume is never reset, reseeded, dropped or recreated: the
+      // paired-capture rule forbids recreating or reseeding it between the two halves
+      // of a comparison, so the only legitimate way to obtain a KNOWN row state is to
+      // create one through the ingress. A pre-existing row is not a known state — the
+      // volume is shared and a previous run's row carries this same deterministic
+      // label — which is why nothing below looks the row up by name.
+      const response: APIResponse = await requestUpdate(request, token, [
+        encodeInsertRow(CREATED_INPUT),
+      ]);
 
-    const body: unknown = await response.json();
-
-    const retCode: unknown = readMember(body, RESPONSE_KEYS.retCode);
-
-    if (retCode !== undefined) {
       expect(
-        isZeroRetCode(retCode),
-        'an applied insert must report the zero return code. Asserted as ZERO ' +
-          'specifically rather than through a success test, because a prevention is ' +
-          '1 and reads as a success under the legacy predicate while a cancellation ' +
-          'is neither succeeded nor failed — both are preserved behaviours and ' +
-          'neither is what an applied write reports.',
+        response.status(),
+        `${ROUTES.update} must answer 200 for a well-formed insert. A ${CONFLICT_STATUS} ` +
+          'here would be an optimistic-concurrency report against a row that has no ' +
+          'prior state to conflict with, which would mean originals were being ' +
+          'compared for an insert; a 400 means the payload was refused by binding or ' +
+          'by validation, and a 401 that the token was not accepted.',
+      ).toBe(200);
+
+      const body: unknown = await response.json();
+
+      const retCode: unknown = readMember(body, RESPONSE_KEYS.retCode);
+
+      if (retCode !== undefined) {
+        expect(
+          isZeroRetCode(retCode),
+          'an applied insert must report the zero return code. Asserted as ZERO ' +
+            'specifically rather than through a success test, because a prevention is ' +
+            '1 and reads as a success under the legacy predicate while a cancellation ' +
+            'is neither succeeded nor failed — both are preserved behaviours and ' +
+            'neither is what an applied write reports.',
+        ).toBe(true);
+      }
+
+      // REQUIRED, NOT CONDITIONAL — a contract distinction rather than a strictness
+      // preference. The canonical protobuf JSON mapping omits a field only when it
+      // holds its type's DEFAULT, so the single omission this projection may
+      // legitimately produce for an int64 is zero. Exactly one row was submitted, so
+      // the only correct value is 1 and 1 is not omissible. An absent member means
+      // either that nothing was inserted despite the success status, or that the
+      // projection dropped a count the caller needs — and this file needs it more
+      // than most, because every later step addresses the row this step created.
+      const inserted: number | undefined = readInt64(body, RESPONSE_KEYS.rowsInserted);
+
+      expect(
+        inserted,
+        'the response must report the inserted-row count. One row was submitted, ' +
+          'so the count is non-zero and cannot be a permissible protobuf-default ' +
+          'omission: its absence means either that nothing was inserted despite ' +
+          'the success status, or that the projection dropped a count the caller ' +
+          'needs in order to know what was applied.',
+      ).toBeDefined();
+
+      expect(inserted, 'exactly one row was submitted for insert').toBe(1);
+
+      // THE IDENTITY ROUND-TRIP. The engine assigns the key, so the caller learns it
+      // from the response rather than choosing it — which is the whole reason the
+      // insert payload omits the column, and the reason every later step in this file
+      // can address one specific row in a table it does not own.
+      const identityEntries: readonly unknown[] | undefined = readArray(
+        body,
+        RESPONSE_KEYS.identity,
+      );
+
+      expect(
+        identityEntries,
+        'an insert must report the identity data. Without it this workflow cannot ' +
+          'address the row it just created, and a conflict spec that cannot name its ' +
+          'own row cannot assert anything about concurrency at all.',
+      ).toBeDefined();
+
+      const entries: readonly unknown[] = identityEntries ?? [];
+
+      expect(
+        entries.length,
+        'the identity report must carry at least one entry for an inserted row',
+      ).toBeGreaterThan(0);
+
+      const entry: unknown = entries[0];
+
+      expect(
+        readInt64(entry, RESPONSE_KEYS.identityColumnId),
+        'the identity column reported must be the one the DataWindow declares as the ' +
+          'identity column, addressed by its one-based ordinal',
+      ).toBe(columnOrdinal('id'));
+
+      // The PRIMARY buffer's values. The response carries a second array collected
+      // from the filter buffer BACKWARDS, because that buffer's order is inverted
+      // relative to the source; a row inserted into the primary buffer lands in the
+      // first array, and the second is not read here.
+      const primaryValues: readonly unknown[] | undefined = readArray(
+        entry,
+        RESPONSE_KEYS.identityPrimaryValues,
+      );
+
+      expect(
+        primaryValues,
+        'the identity entry must carry the values collected from the primary buffer',
+      ).toBeDefined();
+
+      const identity: number | undefined = readInt64(
+        (primaryValues ?? [])[0],
+        RESPONSE_KEYS.wrappedValue,
+      );
+
+      expect(
+        identity,
+        'the assigned key must come back as a readable 64-bit integer. It is declared ' +
+          'int64 on the contract and the canonical mapping emits such a value as a ' +
+          'decimal string, so a value arriving as a number beyond the ' +
+          'exactly-representable range has already been rounded and is refused rather ' +
+          'than accepted as plausible — a rounded key here would make every later ' +
+          'step address the wrong row and would report as a phantom conflict.',
+      ).toBeDefined();
+
+      const assignedIdentity: number = Number(identity);
+
+      expect(
+        assignedIdentity,
+        'the assigned key must be a positive integer — an auto-increment rowid starts ' +
+          'at 1, so a zero or negative value means no key was assigned',
+      ).toBeGreaterThan(0);
+
+      // Read the row back, and CAPTURE THE FULL SIX-COLUMN SNAPSHOT. Built from what
+      // the retrieval answered rather than from what was sent, because any subsequent
+      // update's WHERE clause has to match what is STORED. This snapshot is the value
+      // step 2 makes stale and step 3 submits.
+      const rows: readonly unknown[] = await retrieveRows(request, token);
+      const created: unknown = findRowByIdentity(rows, assignedIdentity);
+
+      expect(
+        created,
+        'the created row must be retrievable by the key the engine assigned. Its ' +
+          'absence means the insert reported success without the write reaching ' +
+          'storage, which would make every concurrency assertion below meaningless.',
+      ).toBeDefined();
+
+      expect(readColumnText(created, 'name'), 'name must round-trip unchanged').toBe(
+        CREATED_INPUT.name,
+      );
+
+      expect(readColumnNumber(created, 'age'), 'age must round-trip unchanged').toBe(
+        CREATED_INPUT.age,
+      );
+
+      // Compared as sent. NO LENGTH ASSERTION AT 50 OR AT 200 is made here or anywhere
+      // else in this file: the width disagreement between the two oracles is a
+      // preserved defect, not a validation rule, and SQLite constrains neither
+      // declaration anyway.
+      expect(readColumnText(created, 'address'), 'address must round-trip unchanged').toBe(
+        CREATED_INPUT.address,
+      );
+
+      // Compared as a STRING, because the column is TEXT in storage while the
+      // DataWindow declares a date — a preserved mismatch, so the text actually
+      // written is the whole of the value's semantics.
+      const birth: string | undefined = readColumnText(created, 'birth');
+
+      expect(birth, 'birth must round-trip unchanged, as text').toBe(CREATED_INPUT.birth);
+
+      expect(
+        BIRTH_TEXT_PATTERN.test(birth ?? ''),
+        'birth must come back in the layout the DataWindow edit mask declares; the ' +
+          'pattern is derived from that same format description rather than restated',
       ).toBe(true);
-    }
 
-    // REQUIRED, NOT CONDITIONAL — a contract distinction rather than a strictness
-    // preference. The canonical protobuf JSON mapping omits a field only when it
-    // holds its type's DEFAULT, so the single omission this projection may
-    // legitimately produce for an int64 is zero. Exactly one row was submitted, so
-    // the only correct value is 1 and 1 is not omissible. An absent member means
-    // either that nothing was inserted despite the success status, or that the
-    // projection dropped a count the caller needs — and this file needs it more
-    // than most, because every later step addresses the row this step created.
-    const inserted: number | undefined = readInt64(body, RESPONSE_KEYS.rowsInserted);
+      // WITHIN A TOLERANCE, NEVER EXACT: a two-place decimal stored in a REAL column
+      // is not guaranteed to return an identical double.
+      const salary: number | undefined = readColumnNumber(created, 'salary');
 
-    expect(
-      inserted,
-      'the response must report the inserted-row count. One row was submitted, ' +
-        'so the count is non-zero and cannot be a permissible protobuf-default ' +
-        'omission: its absence means either that nothing was inserted despite ' +
-        'the success status, or that the projection dropped a count the caller ' +
-        'needs in order to know what was applied.',
-    ).toBeDefined();
+      expect(salary, 'salary must round-trip as a readable number').toBeDefined();
 
-    expect(inserted, 'exactly one row was submitted for insert').toBe(1);
+      expect(
+        Math.abs(Number(salary) - Number(CREATED_INPUT.salary)),
+        'salary must round-trip within the fixture tolerance, compared with a ' +
+          'tolerance rather than exactly because the DataWindow declares a two-place ' +
+          'decimal over a floating-point column',
+      ).toBeLessThanOrEqual(SALARY_COMPARISON_TOLERANCE);
 
-    // THE IDENTITY ROUND-TRIP. The engine assigns the key, so the caller learns it
-    // from the response rather than choosing it — which is the whole reason the
-    // insert payload omits the column, and the reason every later step in this file
-    // can address one specific row in a table it does not own.
-    const identityEntries: readonly unknown[] | undefined = readArray(
-      body,
-      RESPONSE_KEYS.identity,
-    );
+      const verbatimColumns: readonly WireColumnValue[] = verbatimColumnsFrom(created);
+      const snapshot: CompanyRow = snapshotOf(created, assignedIdentity);
 
-    expect(
-      identityEntries,
-      'an insert must report the identity data. Without it this workflow cannot ' +
-        'address the row it just created, and a conflict spec that cannot name its ' +
-        'own row cannot assert anything about concurrency at all.',
-    ).toBeDefined();
+      // The snapshot must be a faithful record of what is stored, because everything
+      // that follows is built from it. A snapshot that had silently substituted a
+      // default would make step 3 fail for a reason that had nothing to do with
+      // concurrency.
+      expect(
+        snapshot.name,
+        'the captured snapshot must carry the stored name; it is the value step 3 ' +
+          'falsifies to provoke the conflict',
+      ).toBe(CREATED_INPUT.name);
 
-    const entries: readonly unknown[] = identityEntries ?? [];
+      expect(
+        verbatimColumns.length,
+        'the verbatim column set must cover every marked column, because it is what ' +
+          "the legitimate update sends as its originals — and under updatewhere=1 the " +
+          'generated where-clause compares all six of them',
+      ).toBe(MARKED_COLUMNS.length);
 
-    expect(
-      entries.length,
-      'the identity report must carry at least one entry for an inserted row',
-    ).toBeGreaterThan(0);
-
-    const entry: unknown = entries[0];
-
-    expect(
-      readInt64(entry, RESPONSE_KEYS.identityColumnId),
-      'the identity column reported must be the one the DataWindow declares as the ' +
-        'identity column, addressed by its one-based ordinal',
-    ).toBe(columnOrdinal('id'));
-
-    // The PRIMARY buffer's values. The response carries a second array collected
-    // from the filter buffer BACKWARDS, because that buffer's order is inverted
-    // relative to the source; a row inserted into the primary buffer lands in the
-    // first array, and the second is not read here.
-    const primaryValues: readonly unknown[] | undefined = readArray(
-      entry,
-      RESPONSE_KEYS.identityPrimaryValues,
-    );
-
-    expect(
-      primaryValues,
-      'the identity entry must carry the values collected from the primary buffer',
-    ).toBeDefined();
-
-    const identity: number | undefined = readInt64(
-      (primaryValues ?? [])[0],
-      RESPONSE_KEYS.wrappedValue,
-    );
-
-    expect(
-      identity,
-      'the assigned key must come back as a readable 64-bit integer. It is declared ' +
-        'int64 on the contract and the canonical mapping emits such a value as a ' +
-        'decimal string, so a value arriving as a number beyond the ' +
-        'exactly-representable range has already been rounded and is refused rather ' +
-        'than accepted as plausible — a rounded key here would make every later ' +
-        'step address the wrong row and would report as a phantom conflict.',
-    ).toBeDefined();
-
-    const assignedIdentity: number = Number(identity);
-
-    expect(
-      assignedIdentity,
-      'the assigned key must be a positive integer — an auto-increment rowid starts ' +
-        'at 1, so a zero or negative value means no key was assigned',
-    ).toBeGreaterThan(0);
-
-    // Read the row back, and CAPTURE THE FULL SIX-COLUMN SNAPSHOT. Built from what
-    // the retrieval answered rather than from what was sent, because any subsequent
-    // update's WHERE clause has to match what is STORED. This snapshot is the value
-    // step 2 makes stale and step 3 submits.
-    const rows: readonly unknown[] = await retrieveRows(request, token);
-    const created: unknown = findRowByIdentity(rows, assignedIdentity);
-
-    expect(
-      created,
-      'the created row must be retrievable by the key the engine assigned. Its ' +
-        'absence means the insert reported success without the write reaching ' +
-        'storage, which would make every concurrency assertion below meaningless.',
-    ).toBeDefined();
-
-    expect(readColumnText(created, 'name'), 'name must round-trip unchanged').toBe(
-      CREATED_INPUT.name,
-    );
-
-    expect(readColumnNumber(created, 'age'), 'age must round-trip unchanged').toBe(
-      CREATED_INPUT.age,
-    );
-
-    // Compared as sent. NO LENGTH ASSERTION AT 50 OR AT 200 is made here or anywhere
-    // else in this file: the width disagreement between the two oracles is a
-    // preserved defect, not a validation rule, and SQLite constrains neither
-    // declaration anyway.
-    expect(readColumnText(created, 'address'), 'address must round-trip unchanged').toBe(
-      CREATED_INPUT.address,
-    );
-
-    // Compared as a STRING, because the column is TEXT in storage while the
-    // DataWindow declares a date — a preserved mismatch, so the text actually
-    // written is the whole of the value's semantics.
-    const birth: string | undefined = readColumnText(created, 'birth');
-
-    expect(birth, 'birth must round-trip unchanged, as text').toBe(CREATED_INPUT.birth);
-
-    expect(
-      BIRTH_TEXT_PATTERN.test(birth ?? ''),
-      'birth must come back in the layout the DataWindow edit mask declares; the ' +
-        'pattern is derived from that same format description rather than restated',
-    ).toBe(true);
-
-    // WITHIN A TOLERANCE, NEVER EXACT: a two-place decimal stored in a REAL column
-    // is not guaranteed to return an identical double.
-    const salary: number | undefined = readColumnNumber(created, 'salary');
-
-    expect(salary, 'salary must round-trip as a readable number').toBeDefined();
-
-    expect(
-      Math.abs(Number(salary) - Number(CREATED_INPUT.salary)),
-      'salary must round-trip within the fixture tolerance, compared with a ' +
-        'tolerance rather than exactly because the DataWindow declares a two-place ' +
-        'decimal over a floating-point column',
-    ).toBeLessThanOrEqual(SALARY_COMPARISON_TOLERANCE);
-
-    createdVerbatimColumns = verbatimColumnsFrom(created);
-    createdSnapshot = snapshotOf(created, assignedIdentity);
-
-    // The snapshot must be a faithful record of what is stored, because everything
-    // that follows is built from it. A snapshot that had silently substituted a
-    // default would make step 3 fail for a reason that had nothing to do with
-    // concurrency.
-    expect(
-      createdSnapshot.name,
-      'the captured snapshot must carry the stored name; it is the value step 3 ' +
-        'falsifies to provoke the conflict',
-    ).toBe(CREATED_INPUT.name);
-
-    expect(
-      createdVerbatimColumns.length,
-      'the verbatim column set must cover every marked column, because it is what ' +
-        "the legitimate update sends as its originals — and under updatewhere=1 the " +
-        'generated where-clause compares all six of them',
-    ).toBe(MARKED_COLUMNS.length);
-  });
-
-  test('step 2 — a legitimate update applies, which makes the captured snapshot stale', async ({
-    request,
-  }) => {
-    const token: ServiceToken = await requireServiceToken(request);
-    const baseline: CompanyRow = requireCreatedSnapshot();
-
-    // `asUpdate` produces the {current, original} PAIR the contract needs, with the
-    // original half being the row exactly as retrieved — so the generated
-    // where-clause matches what is stored and the update applies. This is the
-    // SUCCESS-path fixture; its sibling that falsifies the originals belongs to step
-    // 3 and is deliberately not used here.
-    const update: CompanyRowUpdate = asUpdate(baseline, {
-      address: APPLIED_ADDRESS,
-      salary: APPLIED_SALARY,
+      return { snapshot, verbatimColumns };
     });
 
-    expect(
-      update.original.address,
-      'the original half must still hold the value as retrieved; if a change leaked ' +
-        'into it, the where-clause would be built from the new value and would match ' +
-        'nothing — which would produce a conflict in the step that is supposed to ' +
-        'succeed',
-    ).toBe(baseline.address);
+    const appliedRow: CompanyRow = await test.step('step 2 — a legitimate update applies, which makes the captured snapshot stale', async () => {
+      const token: ServiceToken = await requireServiceToken(request);
+      const baseline: CompanyRow = createdRow.snapshot;
 
-    const response: APIResponse = await requestUpdate(request, token, [
-      encodeUpdateRow(update, createdVerbatimColumns),
-    ]);
+      // `asUpdate` produces the {current, original} PAIR the contract needs, with the
+      // original half being the row exactly as retrieved — so the generated
+      // where-clause matches what is stored and the update applies. This is the
+      // SUCCESS-path fixture; its sibling that falsifies the originals belongs to step
+      // 3 and is deliberately not used here.
+      const update: CompanyRowUpdate = asUpdate(baseline, {
+        address: APPLIED_ADDRESS,
+        salary: APPLIED_SALARY,
+      });
 
-    expect(
-      response.status(),
-      `${ROUTES.update} must answer 200 for an update whose originals match what is ` +
-        `stored. A ${CONFLICT_STATUS} here would report a mismatch on a row nothing ` +
-        'else has touched — under a single worker with no parallelism that points at ' +
-        'the originals in the payload rather than at a genuine concurrent write, and ' +
-        'it would leave the conflict this file is about untested.',
-    ).toBe(200);
-
-    const body: unknown = await response.json();
-
-    const retCode: unknown = readMember(body, RESPONSE_KEYS.retCode);
-
-    if (retCode !== undefined) {
       expect(
-        isZeroRetCode(retCode),
-        'an applied update must report the zero return code. The legacy is defensive ' +
-          'about exactly this: it REWRITES a claimed success into a failure when the ' +
-          'transaction reports an error, so a success here has to be the ' +
-          "transaction's answer and not merely the update call's.",
+        update.original.address,
+        'the original half must still hold the value as retrieved; if a change leaked ' +
+          'into it, the where-clause would be built from the new value and would match ' +
+          'nothing — which would produce a conflict in the step that is supposed to ' +
+          'succeed',
+      ).toBe(baseline.address);
+
+      const response: APIResponse = await requestUpdate(request, token, [
+        encodeUpdateRow(update, createdRow.verbatimColumns),
+      ]);
+
+      expect(
+        response.status(),
+        `${ROUTES.update} must answer 200 for an update whose originals match what is ` +
+          `stored. A ${CONFLICT_STATUS} here would report a mismatch on a row nothing ` +
+          'else has touched — under a single worker with no parallelism that points at ' +
+          'the originals in the payload rather than at a genuine concurrent write, and ' +
+          'it would leave the conflict this file is about untested.',
+      ).toBe(200);
+
+      const body: unknown = await response.json();
+
+      const retCode: unknown = readMember(body, RESPONSE_KEYS.retCode);
+
+      if (retCode !== undefined) {
+        expect(
+          isZeroRetCode(retCode),
+          'an applied update must report the zero return code. The legacy is defensive ' +
+            'about exactly this: it REWRITES a claimed success into a failure when the ' +
+            'transaction reports an error, so a success here has to be the ' +
+            "transaction's answer and not merely the update call's.",
+        ).toBe(true);
+      }
+
+      // REQUIRED, NOT CONDITIONAL, for the reason recorded on the inserted-row count
+      // in step 1 — and it matters most precisely here. This step exists to make the
+      // captured snapshot STALE, so a count of zero, or an absent count standing for
+      // zero, would mean the row was never moved and the conflict step that follows
+      // would be asserting against a row that had not changed. A conditional guard
+      // would have let that pass as a green workflow proving nothing.
+      const updatedCount: number | undefined = readInt64(body, RESPONSE_KEYS.rowsUpdated);
+
+      expect(
+        updatedCount,
+        'the response must report the updated-row count. One row was submitted, so ' +
+          'the count is non-zero and cannot be a permissible protobuf-default ' +
+          'omission: its absence means the update matched no row while still ' +
+          'reporting success, which would leave the following conflict step ' +
+          'measuring a row nothing had moved.',
+      ).toBeDefined();
+
+      expect(updatedCount, 'exactly one row was submitted for update').toBe(1);
+
+      // Re-read and confirm. A read-back is what distinguishes an update that was
+      // APPLIED from one that was merely accepted — and it is what establishes the
+      // state steps 4, 5 and 6 measure against.
+      const rows: readonly unknown[] = await retrieveRows(request, token);
+      const stored: unknown = findRowByIdentity(rows, baseline.id);
+
+      expect(
+        stored,
+        'the updated row must still be retrievable by its key. Its disappearance would ' +
+          'mean the update executed as a delete-plus-insert against a new key, which is ' +
+          'the documented consequence of a KEY change — and nothing in this file ' +
+          'changes the key.',
+      ).toBeDefined();
+
+      expect(
+        readColumnText(stored, 'address'),
+        'address must now hold the new value; the update changed it, and that change ' +
+          'is what makes the snapshot captured in step 1 stale',
+      ).toBe(APPLIED_ADDRESS);
+
+      const salary: number | undefined = readColumnNumber(stored, 'salary');
+
+      expect(salary, 'salary must be readable after the update').toBeDefined();
+
+      expect(
+        Math.abs(Number(salary) - APPLIED_SALARY),
+        'salary must now hold the new value, compared within the fixture tolerance ' +
+          'for the same reason as on insert',
+      ).toBeLessThanOrEqual(SALARY_COMPARISON_TOLERANCE);
+
+      // The columns this update did not name must be untouched. An update that
+      // rewrote an unmentioned column would itself be a silent overwrite.
+      expect(readColumnText(stored, 'name'), 'name was not changed by this update').toBe(
+        baseline.name,
+      );
+
+      expect(readColumnNumber(stored, 'age'), 'age was not changed by this update').toBe(
+        baseline.age,
+      );
+
+      const birth: string | undefined = readColumnText(stored, 'birth');
+
+      expect(birth, 'birth was not changed by this update, and is still text').toBe(baseline.birth);
+
+      expect(
+        BIRTH_TEXT_PATTERN.test(birth ?? ''),
+        'birth must still be in the layout the edit mask declares',
       ).toBe(true);
-    }
 
-    // REQUIRED, NOT CONDITIONAL, for the reason recorded on the inserted-row count
-    // in step 1 — and it matters most precisely here. This step exists to make the
-    // captured snapshot STALE, so a count of zero, or an absent count standing for
-    // zero, would mean the row was never moved and the conflict step that follows
-    // would be asserting against a row that had not changed. A conditional guard
-    // would have let that pass as a green workflow proving nothing.
-    const updatedCount: number | undefined = readInt64(body, RESPONSE_KEYS.rowsUpdated);
+      const applied: CompanyRow = snapshotOf(stored, baseline.id);
 
-    expect(
-      updatedCount,
-      'the response must report the updated-row count. One row was submitted, so ' +
-        'the count is non-zero and cannot be a permissible protobuf-default ' +
-        'omission: its absence means the update matched no row while still ' +
-        'reporting success, which would leave the following conflict step ' +
-        'measuring a row nothing had moved.',
-    ).toBeDefined();
+      // THE POINT OF THIS STEP, STATED AS AN ASSERTION. The snapshot step 1 captured
+      // no longer describes the stored row, which is exactly the precondition step 3
+      // needs: under updatewhere=1 the where-clause is built from the original values,
+      // so a payload carrying step 1's originals can now match nothing.
+      expect(
+        applied.address,
+        "the stored row must now differ from step 1's snapshot. If the two still " +
+          'agreed, the payload step 3 sends would not be stale and its 409 assertion ' +
+          'would be testing nothing.',
+      ).not.toBe(baseline.address);
 
-    expect(updatedCount, 'exactly one row was submitted for update').toBe(1);
-
-    // Re-read and confirm. A read-back is what distinguishes an update that was
-    // APPLIED from one that was merely accepted — and it is what establishes the
-    // state steps 4, 5 and 6 measure against.
-    const rows: readonly unknown[] = await retrieveRows(request, token);
-    const stored: unknown = findRowByIdentity(rows, baseline.id);
-
-    expect(
-      stored,
-      'the updated row must still be retrievable by its key. Its disappearance would ' +
-        'mean the update executed as a delete-plus-insert against a new key, which is ' +
-        'the documented consequence of a KEY change — and nothing in this file ' +
-        'changes the key.',
-    ).toBeDefined();
-
-    expect(
-      readColumnText(stored, 'address'),
-      'address must now hold the new value; the update changed it, and that change ' +
-        'is what makes the snapshot captured in step 1 stale',
-    ).toBe(APPLIED_ADDRESS);
-
-    const salary: number | undefined = readColumnNumber(stored, 'salary');
-
-    expect(salary, 'salary must be readable after the update').toBeDefined();
-
-    expect(
-      Math.abs(Number(salary) - APPLIED_SALARY),
-      'salary must now hold the new value, compared within the fixture tolerance ' +
-        'for the same reason as on insert',
-    ).toBeLessThanOrEqual(SALARY_COMPARISON_TOLERANCE);
-
-    // The columns this update did not name must be untouched. An update that
-    // rewrote an unmentioned column would itself be a silent overwrite.
-    expect(readColumnText(stored, 'name'), 'name was not changed by this update').toBe(
-      baseline.name,
-    );
-
-    expect(readColumnNumber(stored, 'age'), 'age was not changed by this update').toBe(
-      baseline.age,
-    );
-
-    const birth: string | undefined = readColumnText(stored, 'birth');
-
-    expect(birth, 'birth was not changed by this update, and is still text').toBe(baseline.birth);
-
-    expect(
-      BIRTH_TEXT_PATTERN.test(birth ?? ''),
-      'birth must still be in the layout the edit mask declares',
-    ).toBe(true);
-
-    appliedSnapshot = snapshotOf(stored, baseline.id);
-
-    // THE POINT OF THIS STEP, STATED AS AN ASSERTION. The snapshot step 1 captured
-    // no longer describes the stored row, which is exactly the precondition step 3
-    // needs: under updatewhere=1 the where-clause is built from the original values,
-    // so a payload carrying step 1's originals can now match nothing.
-    expect(
-      appliedSnapshot.address,
-      "the stored row must now differ from step 1's snapshot. If the two still " +
-        'agreed, the payload step 3 sends would not be stale and its 409 assertion ' +
-        'would be testing nothing.',
-    ).not.toBe(baseline.address);
-  });
-
-  test(`step 3 — a stale-original update is refused with HTTP ${CONFLICT_STATUS}`, async ({
-    request,
-  }) => {
-    const token: ServiceToken = await requireServiceToken(request);
-
-    // THE STALE ORIGINALS COME FROM THE FIXTURE, NEVER FROM HERE. `asStaleUpdate` is
-    // the one place in this suite where a stale original set may be constructed, and
-    // it exists for this file. It falsifies a NON-KEY column only — so the row is
-    // still FOUND by its key and then REJECTED on its original values, which is the
-    // branch under test; corrupting the key instead would produce a
-    // row-does-not-exist outcome, a different condition entirely. It also refuses to
-    // build a payload whose staleness would be a no-op, which is the false pass this
-    // step is most exposed to.
-    //
-    // The originals are additionally still those of step 1, which step 2 has just
-    // made obsolete — so the payload is stale twice over, by the sentinel AND by the
-    // address and salary the legitimate update rewrote.
-    const staleUpdate: CompanyRowUpdate = asStaleUpdate(requireCreatedSnapshot(), {
-      address: STALE_ADDRESS,
-      salary: STALE_SALARY,
+      return applied;
     });
 
-    expect(
-      staleUpdate.original.name,
-      'the fixture must have falsified a non-key original. That falsified value is ' +
-        'the mismatch the where-clause cannot satisfy, and it is what the conflict ' +
-        "detail's original side must echo back in step 4.",
-    ).toBe(STALE_ORIGINAL_SENTINEL);
+    const capturedConflict: CapturedConflict = await test.step(`step 3 — a stale-original update is refused with HTTP ${CONFLICT_STATUS}`, async () => {
+      const token: ServiceToken = await requireServiceToken(request);
 
-    expect(
-      staleUpdate.current.id,
-      'the key must be untouched, so the row is found and then refused on its ' +
-        'original values rather than simply not found',
-    ).toBe(requireCreatedSnapshot().id);
+      // THE STALE ORIGINALS COME FROM THE FIXTURE, NEVER FROM HERE. `asStaleUpdate` is
+      // the one place in this suite where a stale original set may be constructed, and
+      // it exists for this file. It falsifies a NON-KEY column only — so the row is
+      // still FOUND by its key and then REJECTED on its original values, which is the
+      // branch under test; corrupting the key instead would produce a
+      // row-does-not-exist outcome, a different condition entirely. It also refuses to
+      // build a payload whose staleness would be a no-op, which is the false pass this
+      // step is most exposed to.
+      //
+      // The originals are additionally still those of step 1, which step 2 has just
+      // made obsolete — so the payload is stale twice over, by the sentinel AND by the
+      // address and salary the legitimate update rewrote.
+      const staleUpdate: CompanyRowUpdate = asStaleUpdate(createdRow.snapshot, {
+        address: STALE_ADDRESS,
+        salary: STALE_SALARY,
+      });
 
-    // NO VERBATIM ORIGINALS HERE, DELIBERATELY. Passing the server's own values
-    // would overwrite the staleness with the truth, the update would apply, and this
-    // assertion would fail while reporting nothing about the system.
-    const response: APIResponse = await requestUpdate(request, token, [
-      encodeUpdateRow(staleUpdate),
-    ]);
-
-    // Captured BEFORE any assertion that could end the test, so step 4 has the body
-    // even when the status assertion below is the thing that fails. A body may be
-    // read only once, which is why it is read here rather than in step 4.
-    conflictContentType = (response.headers()['content-type'] ?? '').toLowerCase();
-    conflictBodyText = await response.text();
-
-    // THE ASSERTION THIS WHOLE FILE EXISTS FOR.
-    //
-    // Strict equality against one number, and never a range: a caller's
-    // retry-or-surface branch keys off exactly this code, so a 400 or a 412 would
-    // send a correct caller down the wrong path even though both are "some 4xx". A
-    // 200, a 201 or a 204 would be the SILENT OVERWRITE the contract forbids
-    // outright — a write applied whose optimistic precondition could not have held.
-    //
-    // THERE IS NO RETRY, NO POLL AND NO SECOND ATTEMPT HERE, and that is a
-    // requirement rather than an omission. Retrying a conflict assertion is precisely
-    // how a silent overwrite would slip through undetected, so the runner's retry
-    // count is pinned to zero for this describe block and nothing in this file wraps
-    // the request in a wait-and-try-again.
-    expect(
-      response.status(),
-      `${ROUTES.update} must answer exactly ${CONFLICT_STATUS} for an update whose ` +
-        'original values are stale. Persistence answers gRPC Aborted on an ' +
-        'updatewhereclause mismatch, DataServices relays it and Gateway projects it ' +
-        `as ${CONFLICT_STATUS} — the canonical mapping. A 2xx here would mean the ` +
-        'stale write was APPLIED, which is the silent overwrite this system forbids ' +
-        'absolutely; a 400 would mean the payload was rejected as malformed rather ' +
-        'than recognised as a conflict, and a caller could not distinguish "retry ' +
-        'after re-reading" from "this request can never work".',
-    ).toBe(CONFLICT_STATUS);
-
-    expect(
-      response.ok(),
-      'the refused update must not report success. Asserted alongside the status ' +
-        'rather than instead of it: the status is what a caller branches on, and this ' +
-        'is the coarser guarantee that no success path was taken.',
-    ).toBe(false);
-  });
-
-  test('step 4 — the conflict payload carries both value sets for all six marked columns', async () => {
-    // NO NETWORK IN THIS STEP. It asserts on the response step 3 captured, so the
-    // conflict is provoked exactly once: a second request would be a second attempt
-    // at the assertion, which is the thing this file must never do.
-    const bodyText: string = requireConflictBodyText();
-    const baseline: CompanyRow = requireAppliedSnapshot();
-
-    // MACHINE-READABLE, NOT A PAGE. This is the migration of the legacy MessageBox
-    // surface into a structured error result: the text, the category, the
-    // substitution arguments and the severity are preserved and only the DELIVERY
-    // CHANNEL changed. A caller must be able to branch on the body without parsing
-    // prose out of markup, and a developer-exception page could carry a stack trace
-    // or a file path, neither of which may reach a caller.
-    expect(
-      conflictContentType,
-      'the conflict must be machine-readable JSON — a problem document, which is the ' +
-        'shape every refusal on this boundary uses so that one error handler serves ' +
-        'them all',
-    ).toContain('json');
-
-    expect(
-      conflictContentType,
-      'the conflict must not be an HTML page. A page here would mean the failure ' +
-        'escaped the contract error path entirely.',
-    ).not.toContain('text/html');
-
-    let parsed: unknown;
-    let parseFailed = false;
-
-    try {
-      parsed = JSON.parse(bodyText) as unknown;
-    } catch {
-      // The parser error is deliberately not attached and the body is deliberately
-      // not quoted: this is the one payload in the suite that is being checked for
-      // leaked material, so republishing it in a failure message would be the leak.
-      parseFailed = true;
-    }
-
-    expect(
-      parseFailed,
-      'the conflict body must parse as JSON. A body that does not parse cannot be ' +
-        'branched on, so a caller could not implement the retry-or-surface policy at ' +
-        'all. The parser error is omitted from this message on purpose — the body is ' +
-        'the thing under examination for leaked material.',
-    ).toBe(false);
-
-    expect(
-      asRecord(parsed),
-      'the conflict body must be a JSON object. An array or a bare string could not ' +
-        'carry the members a consumer branches on.',
-    ).toBeDefined();
-
-    // The problem document's own members, and the status repeated inside it.
-    const declaredMembers: readonly string[] = RESPONSE_KEYS.problemMembers.filter(
-      (member: string) => readMember(parsed, [member]) !== undefined,
-    );
-
-    expect(
-      declaredMembers.length,
-      'the conflict must carry at least one of the standard problem members, so that ' +
-        'one error handler serves every failure on this boundary',
-    ).toBeGreaterThan(0);
-
-    const declaredStatus: number | undefined = readInt64(parsed, RESPONSE_KEYS.problemStatus);
-
-    if (declaredStatus !== undefined) {
       expect(
-        declaredStatus,
-        'the status repeated in the body must agree with the transport status. The ' +
-          'repetition exists so a logged body is self-describing, and a disagreement ' +
-          'would make the record misleading rather than redundant.',
+        staleUpdate.original.name,
+        'the fixture must have falsified a non-key original. That falsified value is ' +
+          'the mismatch the where-clause cannot satisfy, and it is what the conflict ' +
+          "detail's original side must echo back in step 4.",
+      ).toBe(STALE_ORIGINAL_SENTINEL);
+
+      expect(
+        staleUpdate.current.id,
+        'the key must be untouched, so the row is found and then refused on its ' +
+          'original values rather than simply not found',
+      ).toBe(createdRow.snapshot.id);
+
+      // NO VERBATIM ORIGINALS HERE, DELIBERATELY. Passing the server's own values
+      // would overwrite the staleness with the truth, the update would apply, and this
+      // assertion would fail while reporting nothing about the system.
+      const response: APIResponse = await requestUpdate(request, token, [
+        encodeUpdateRow(staleUpdate),
+      ]);
+
+      // Captured BEFORE any assertion that could end the test, so step 4 has the body
+      // even when the status assertion below is the thing that fails. A body may be
+      // read only once, which is why it is read here rather than in step 4.
+      const contentType: string = (
+        response.headers()['content-type'] ?? ''
+      ).toLowerCase();
+      const bodyText: string = await response.text();
+
+      // THE ASSERTION THIS WHOLE FILE EXISTS FOR.
+      //
+      // Strict equality against one number, and never a range: a caller's
+      // retry-or-surface branch keys off exactly this code, so a 400 or a 412 would
+      // send a correct caller down the wrong path even though both are "some 4xx". A
+      // 200, a 201 or a 204 would be the SILENT OVERWRITE the contract forbids
+      // outright — a write applied whose optimistic precondition could not have held.
+      //
+      // THERE IS NO RETRY, NO POLL AND NO SECOND ATTEMPT HERE, and that is a
+      // requirement rather than an omission. Retrying a conflict assertion is precisely
+      // how a silent overwrite would slip through undetected, so the runner's retry
+      // count is pinned to zero for this describe block and nothing in this file wraps
+      // the request in a wait-and-try-again.
+      expect(
+        response.status(),
+        `${ROUTES.update} must answer exactly ${CONFLICT_STATUS} for an update whose ` +
+          'original values are stale. Persistence answers gRPC Aborted on an ' +
+          'updatewhereclause mismatch, DataServices relays it and Gateway projects it ' +
+          `as ${CONFLICT_STATUS} — the canonical mapping. A 2xx here would mean the ` +
+          'stale write was APPLIED, which is the silent overwrite this system forbids ' +
+          'absolutely; a 400 would mean the payload was rejected as malformed rather ' +
+          'than recognised as a conflict, and a caller could not distinguish "retry ' +
+          'after re-reading" from "this request can never work".',
       ).toBe(CONFLICT_STATUS);
-    }
-
-    const problemType: unknown = readMember(parsed, RESPONSE_KEYS.problemType);
-
-    // THE CONFLICT DETAIL ITSELF. Required by the contract on this body, so an
-    // absence is a finding rather than a tolerance — and the diagnosis names the one
-    // legitimate shape that carries no such member, because that shape is still a
-    // failure of THIS workflow: it means the upstream reported a conflict it could
-    // not describe, and a caller cannot rebase against a description it never got.
-    const conflict: unknown = readMember(parsed, RESPONSE_KEYS.conflict);
-
-    expect(
-      asRecord(conflict),
-      'the conflict body must carry the conflict detail. It is the one member a ' +
-        'caller must be able to read in order to ACT: without it a caller cannot see ' +
-        'which column moved, so it would re-send the same stale originals and receive ' +
-        `the same ${CONFLICT_STATUS} for ever. If the problem type instead names the ` +
-        'without-detail projection, the status was preserved correctly but the ' +
-        'upstream attached nothing decodable — which is an upstream fault to fix, not ' +
-        `a tolerated shape. Problem type present: ${typeof problemType === 'string'}.`,
-    ).toBeDefined();
-
-    const conflictRows: readonly unknown[] | undefined = readArray(
-      conflict,
-      RESPONSE_KEYS.rows,
-    );
-
-    expect(
-      conflictRows,
-      'the conflict detail must carry its rows collection. It is a collection rather ' +
-        'than a single row because one update submits a whole changeset and more than ' +
-        'one row can conflict, and reporting only the first would send a caller round ' +
-        'the retry loop once per conflicting row.',
-    ).toBeDefined();
-
-    expect(
-      (conflictRows ?? []).length,
-      'the conflict detail must never be empty. A conflict with no rows tells a ' +
-        'caller nothing it can act on, which is the same as not reporting it.',
-    ).toBeGreaterThan(0);
-
-    const conflictRow: unknown = (conflictRows ?? [])[0];
-
-    // The DataWindow-carrier members. Their presence is what makes this a buffer-
-    // shaped payload rather than a flat rowset — the distinction the whole contract
-    // rests on.
-    expect(
-      readMember(conflictRow, RESPONSE_KEYS.buffer),
-      'the conflicting row must name the buffer it is in. Silence would read as the ' +
-        'primary buffer, which is a specific buffer a caller is entitled to believe — ' +
-        "and the filter buffer's row order is inverted relative to the source, so a " +
-        'mis-tagged row would be counted in the wrong direction.',
-    ).toBeDefined();
-
-    expect(
-      readMember(conflictRow, RESPONSE_KEYS.itemStatus),
-      'the conflicting row must carry its item status as the SERVER sees it now, read ' +
-        'the legacy way as the row itself rather than as a column',
-    ).toBeDefined();
-
-    const rowOrdinal: number | undefined = readInt64(conflictRow, RESPONSE_KEYS.rowOrdinal);
-
-    if (rowOrdinal !== undefined) {
-      expect(
-        rowOrdinal,
-        'the row ordinal must be one-based, like every row ordinal in this system',
-      ).toBeGreaterThanOrEqual(1);
-    }
-
-    // BOTH VALUE SETS, FOR ALL SIX MARKED COLUMNS. This is the substance of the
-    // payload: `updatewhere=1` with all six columns marked means the failed
-    // where-clause compared six original values, so a payload that carried fewer —
-    // or that carried only current values — could not express what was compared and
-    // a caller could not tell which column moved.
-    const currentValues: readonly unknown[] | undefined = readArray(
-      conflictRow,
-      RESPONSE_KEYS.conflictCurrentValues,
-    );
-
-    const originalValues: readonly unknown[] | undefined = readArray(
-      conflictRow,
-      RESPONSE_KEYS.originalValues,
-    );
-
-    expect(
-      currentValues,
-      'the conflicting row must carry the CURRENT server-side values — the state a ' +
-        'retry would be rebased onto',
-    ).toBeDefined();
-
-    expect(
-      originalValues,
-      'the conflicting row must carry the ORIGINAL values the caller believed were ' +
-        'current — the set that formed the failed where-clause, and the only thing ' +
-        'that lets a caller identify which column changed underneath it',
-    ).toBeDefined();
-
-    // Iterated per column and per side, so a partial-payload regression names the
-    // exact column and side that went missing. A count assertion would report "five
-    // instead of six" and leave a reader to work out which five.
-    for (const column of MARKED_COLUMNS) {
-      expect(
-        findColumnEntry(currentValues, column),
-        `the conflict detail must report a CURRENT value for '${column}'. All six ` +
-          'columns are marked updatewhereclause=yes, so all six participate in the ' +
-          'comparison and all six have to be reportable; a caller missing this one ' +
-          'could not rebase it.',
-      ).toBeDefined();
 
       expect(
-        findColumnEntry(originalValues, column),
-        `the conflict detail must report an ORIGINAL value for '${column}'. Under ` +
-          'updatewhere=1 the where-clause carried the original value of every marked ' +
-          'column, so omitting this one would hide half of what the failed statement ' +
-          'actually compared.',
-      ).toBeDefined();
-    }
+        response.ok(),
+        'the refused update must not report success. Asserted alongside the status ' +
+          'rather than instead of it: the status is what a caller branches on, and this ' +
+          'is the coarser guarantee that no success path was taken.',
+      ).toBe(false);
 
-    // THE DETAIL MUST REPORT REALITY, NOT ECHO THE CALLER'S STALE INPUT. This is the
-    // assertion that distinguishes a conflict payload a caller can rebase against
-    // from one that merely reflects the request back.
-    expect(
-      textOfValue(findColumnValue(currentValues, 'address')),
-      "the current side must report what is actually stored — the legitimate update's " +
-        'value. Reporting the value the refused request tried to write would make the ' +
-        'payload an echo of the caller and useless for a rebase.',
-    ).toBe(baseline.address);
-
-    const reportedSalary: number | undefined = numberOfValue(
-      findColumnValue(currentValues, 'salary'),
-    );
-
-    expect(reportedSalary, 'the current side must report a readable salary').toBeDefined();
-
-    expect(
-      Math.abs(Number(reportedSalary) - APPLIED_SALARY),
-      'the current side must report the stored salary within the fixture tolerance, ' +
-        'compared with a tolerance rather than exactly for the same reason as ' +
-        'everywhere else: a two-place decimal in a REAL column',
-    ).toBeLessThanOrEqual(SALARY_COMPARISON_TOLERANCE);
-
-    expect(
-      textOfValue(findColumnValue(currentValues, 'name')),
-      'the current side must report the stored name, which the refused request never ' +
-        'changed. It must NOT be the falsified original: that value is the mismatch, ' +
-        'and finding it on the current side would mean the server was reporting the ' +
-        "caller's belief as the truth.",
-    ).toBe(baseline.name);
-
-    // The other side of the same coin: the ORIGINAL side must carry the falsified
-    // value, because that is what the failed where-clause compared. Together with
-    // the assertion above, this is what proves the two sides are genuinely distinct
-    // and that the payload identifies the column that moved.
-    expect(
-      textOfValue(findColumnValue(originalValues, 'name')),
-      'the original side must echo the value the request believed was current. ' +
-        'Comparing it against the current side is what tells a caller which column ' +
-        'moved, so the two sides carrying identical values would defeat the entire ' +
-        'diagnostic purpose of the payload.',
-    ).toBe(STALE_ORIGINAL_SENTINEL);
-
-    // Which table the failing statement targeted. Present because MULTI-TABLE UPDATE
-    // FROM ONE DATAWINDOW IS A REAL LEGACY CAPABILITY — the update contract is
-    // re-derived at run time from an ARRAY of table descriptors rather than from the
-    // DataWindow's static definition — so "which table" is a genuine question.
-    const updateTable: unknown = readMember(conflict, RESPONSE_KEYS.conflictUpdateTable);
-
-    expect(
-      updateTable,
-      'the conflict detail must name the table the failing statement targeted',
-    ).toBeDefined();
-
-    if (typeof updateTable === 'string' && updateTable.length > 0) {
-      expect(
-        updateTable.toLowerCase(),
-        'the targeted table must be the one this workflow updates. Compared without ' +
-          'regard to case, because the oracle writes the table name in upper case in ' +
-          'its DDL and in lower case in its column metadata, and identifiers are ' +
-          'case-insensitive in this engine.',
-      ).toBe(COMPANY_TABLE_NAME.toLowerCase());
-    }
-
-    // The size of the mismatch, not merely its existence. Reporting both numbers is
-    // what keeps "the row changed" distinguishable from "the row was deleted"
-    // without a second round trip.
-    //
-    // THE GAP IS ASSERTED, NOT THE TWO NUMBERS. The contract documents 1 and 0 for
-    // the classic single-row failure, but the invariant that DEFINES a mismatch is
-    // that fewer rows matched than were expected — and asserting the invariant rather
-    // than the pair avoids pinning a number the projection is entitled to report
-    // differently for a larger changeset.
-    const rowsExpected: number | undefined = readInt64(
-      conflict,
-      RESPONSE_KEYS.conflictRowsExpected,
-    );
-
-    const rowsMatched: number | undefined = readInt64(conflict, RESPONSE_KEYS.conflictRowsMatched);
-
-    expect(
-      rowsExpected,
-      'the conflict detail must report how many rows the statement expected to affect',
-    ).toBeDefined();
-
-    expect(
-      rowsMatched,
-      'the conflict detail must report how many rows it actually matched',
-    ).toBeDefined();
-
-    expect(
-      Number(rowsExpected),
-      'a statement that expected to affect no rows could not have produced a ' +
-        'concurrency mismatch',
-    ).toBeGreaterThanOrEqual(1);
-
-    expect(
-      Number(rowsMatched),
-      'fewer rows must have matched than were expected. That gap IS the optimistic-' +
-        'concurrency mismatch: the where-clause carried original values that no ' +
-        'stored row satisfies any longer.',
-    ).toBeLessThan(Number(rowsExpected));
-
-    // The legacy return code, read for its TYPE and not for its value. The value is
-    // deliberately unasserted: the tri-state algebra means a two-way test over this
-    // field would misclassify both a prevention and a cancellation, and the plan of
-    // record fixes the STATUS for this outcome rather than a particular code.
-    const problemRetCode: unknown = readMember(parsed, RESPONSE_KEYS.retCode);
-
-    if (problemRetCode !== undefined) {
-      expect(
-        typeof problemRetCode,
-        'the legacy return code is an integer extension member on the problem ' +
-          'document, so a consumer can identify the specific legacy outcome and not ' +
-          'only the HTTP class',
-      ).toBe('number');
-    }
-
-    // NO STATEMENT TEXT, NO CREDENTIAL-SHAPED MATERIAL. The legacy error structure's
-    // statement member carries the complete generated statement including
-    // interpolated literal values, and the legacy logger performs no redaction at
-    // all — so the projection redacts or parameter-separates it. This enforces that
-    // rather than assuming it.
-    //
-    // The detector reports its NAME and never the text it matched, because a failure
-    // message reaches the console and the CI log and republishing the payload would
-    // be the very leak being detected.
-    const leak: string | undefined = findLeak(bodyText);
-
-    expect(
-      leak,
-      `the conflict body must not leak statement text or credential-shaped material; ` +
-        `a detector fired for ${leak ?? 'nothing'}. The legacy statement field carries ` +
-        'interpolated literal values against a logger that performs no redaction, so ' +
-        'the projection has to redact or parameter-separate it before it reaches a ' +
-        'caller. The matched text is deliberately not reproduced here.',
-    ).toBeUndefined();
-  });
-
-  test('step 5 — the refused update changed nothing: there was no silent overwrite', async ({
-    request,
-  }) => {
-    // THE ASSERTION THE WHOLE FILE EXISTS FOR, in its positive and negative forms.
-    // A rejection that still wrote something would be the worst of both worlds: the
-    // caller is told to retry while the data has already been changed underneath it.
-    const token: ServiceToken = await requireServiceToken(request);
-    const baseline: CompanyRow = requireAppliedSnapshot();
-
-    const rows: readonly unknown[] = await retrieveRows(request, token);
-    const stored: unknown = findRowByIdentity(rows, baseline.id);
-
-    expect(
-      stored,
-      'the row must still exist after the refused update. Its disappearance would ' +
-        'mean the rejected statement had nonetheless executed as a delete, which is ' +
-        'the most destructive outcome a conflict path could produce.',
-    ).toBeDefined();
-
-    // DIRECTION ONE: the good value is still there.
-    expect(
-      readColumnText(stored, 'address'),
-      "address must still hold the legitimate update's value. Anything else means the " +
-        `refused request wrote to storage despite answering ${CONFLICT_STATUS}.`,
-    ).toBe(baseline.address);
-
-    const salary: number | undefined = readColumnNumber(stored, 'salary');
-
-    expect(salary, 'salary must still be readable').toBeDefined();
-
-    expect(
-      Math.abs(Number(salary) - APPLIED_SALARY),
-      "salary must still hold the legitimate update's value, within the fixture " +
-        'tolerance',
-    ).toBeLessThanOrEqual(SALARY_COMPARISON_TOLERANCE);
-
-    // DIRECTION TWO: the bad value did not land. Both directions are asserted because
-    // neither implies the other — a partial write could leave the good value in one
-    // column and the bad value in another, and only checking both excludes it.
-    expect(
-      readColumnText(stored, 'address'),
-      'address must NOT hold the value the refused request tried to write. This is ' +
-        'the silent overwrite the contract forbids absolutely, stated as its own ' +
-        'assertion rather than inferred from the one above.',
-    ).not.toBe(STALE_ADDRESS);
-
-    expect(
-      Math.abs(Number(salary) - STALE_SALARY),
-      'salary must NOT have moved towards the value the refused request tried to ' +
-        'write. The two candidate values are a full quarter apart — fifty times the ' +
-        'comparison tolerance — so this cannot pass or fail by rounding.',
-    ).toBeGreaterThan(SALARY_COMPARISON_TOLERANCE);
-
-    // The columns the refused request did not name must be untouched as well, and
-    // `name` matters most: the falsified ORIGINAL was a name, so a boundary that had
-    // confused the two value sets would have written the sentinel here.
-    expect(
-      readColumnText(stored, 'name'),
-      'name must be unchanged. The refused payload carried the falsified sentinel as ' +
-        'an ORIGINAL value, so finding it stored would mean the boundary had ' +
-        'confused the original set with the current set — a defect that would corrupt ' +
-        'data while reporting a conflict.',
-    ).toBe(baseline.name);
-
-    expect(
-      readColumnText(stored, 'name'),
-      'name must not have been overwritten with the falsified original value',
-    ).not.toBe(STALE_ORIGINAL_SENTINEL);
-
-    expect(readColumnNumber(stored, 'age'), 'age must be unchanged').toBe(baseline.age);
-
-    const birth: string | undefined = readColumnText(stored, 'birth');
-
-    expect(birth, 'birth must be unchanged, and still text').toBe(baseline.birth);
-
-    expect(
-      BIRTH_TEXT_PATTERN.test(birth ?? ''),
-      'birth must still be in the layout the edit mask declares',
-    ).toBe(true);
-  });
-
-  test('step 6 — the conflict is recoverable by an explicit refresh-and-retry', async ({
-    request,
-  }) => {
-    // THE OTHER ARM OF THE POLICY. The contract requires a DEFINED
-    // retry-or-surface policy rather than a bare rejection, so the retry arm is
-    // demonstrated to resolve cleanly: re-read, rebase on what is actually stored,
-    // and resubmit. That is also why the upstream status is Aborted rather than
-    // FailedPrecondition — Aborted means the operation MAY succeed if retried at a
-    // higher level, and this step is that higher level.
-    //
-    // THIS IS A DELIBERATE RETRY OF THE WORKFLOW, NOT OF AN ASSERTION. The two are
-    // different in kind: the workflow retry re-reads first and therefore submits a
-    // DIFFERENT payload, whereas a runner retry would re-run the same assertion
-    // against the same conditions and could convert a real failure into a pass. The
-    // second remains forbidden, and is pinned off for this describe block.
-    const token: ServiceToken = await requireServiceToken(request);
-    const previous: CompanyRow = requireAppliedSnapshot();
-
-    // Re-read FIRST. Re-sending the same payload would produce the same conflict,
-    // because the original values it carries are still stale — the contract says so
-    // explicitly, and a retry that skipped the re-read would be a busy loop rather
-    // than a policy.
-    const beforeRows: readonly unknown[] = await retrieveRows(request, token);
-    const current: unknown = findRowByIdentity(beforeRows, previous.id);
-
-    expect(
-      current,
-      'the row must be re-readable before a retry. A retry is only well-defined ' +
-        'against a freshly read state.',
-    ).toBeDefined();
-
-    const refreshed: CompanyRow = snapshotOf(current, previous.id);
-    const refreshedVerbatimColumns: readonly WireColumnValue[] = verbatimColumnsFrom(current);
-
-    expect(
-      refreshedVerbatimColumns.length,
-      'the refreshed originals must cover every marked column, because all six are ' +
-        'compared',
-    ).toBe(MARKED_COLUMNS.length);
-
-    // Rebased on what is ACTUALLY stored, so the where-clause matches. Built with
-    // `asUpdate` from the freshly read row — never with the stale-original builder,
-    // which exists only for step 3.
-    const retry: CompanyRowUpdate = asUpdate(refreshed, {
-      address: RETRIED_ADDRESS,
-      salary: RETRIED_SALARY,
+      return { contentType, bodyText };
     });
 
-    const response: APIResponse = await requestUpdate(request, token, [
-      encodeUpdateRow(retry, refreshedVerbatimColumns),
-    ]);
+    await test.step('step 4 — the conflict payload carries both value sets for all six marked columns', async () => {
+      // NO NETWORK IN THIS STEP. It asserts on the response step 3 captured, so the
+      // conflict is provoked exactly once: a second request would be a second attempt
+      // at the assertion, which is the thing this file must never do.
+      const bodyText: string = capturedConflict.bodyText;
+      const baseline: CompanyRow = appliedRow;
 
-    expect(
-      response.status(),
-      `${ROUTES.update} must answer 200 once the originals have been refreshed from ` +
-        'storage. This is the retry arm of the retry-or-surface policy, and it is why ' +
-        'the upstream status is Aborted rather than FailedPrecondition: the operation ' +
-        `may succeed when retried at a higher level. A second ${CONFLICT_STATUS} here ` +
-        'would mean the conflict is not recoverable by re-reading, which would leave a ' +
-        'caller with no path forward at all.',
-    ).toBe(200);
+      // MACHINE-READABLE, NOT A PAGE. This is the migration of the legacy MessageBox
+      // surface into a structured error result: the text, the category, the
+      // substitution arguments and the severity are preserved and only the DELIVERY
+      // CHANNEL changed. A caller must be able to branch on the body without parsing
+      // prose out of markup, and a developer-exception page could carry a stack trace
+      // or a file path, neither of which may reach a caller.
+      // ASSERTED EXACTLY, AND AS THE PROBLEM SUBTYPE SPECIFICALLY. This was
+      // `toContain('json')` plus `not.toContain('text/html')`, which a `text/html`
+      // response could not satisfy but a plain `application/json` one could — and
+      // the two are not interchangeable here. `components/responses/Conflict`
+      // declares `application/problem+json` and nothing else, and the distinction
+      // is what lets one client-side error handler serve every refusal on this
+      // boundary without first parsing the body to find out whether it is one.
+      assertMediaType(
+        capturedConflict.contentType,
+        PROBLEM_JSON_MEDIA_TYPE,
+        `the ${CONFLICT_STATUS} from ${ROUTES.update}`,
+      );
 
-    const body: unknown = await response.json();
+      let parsed: unknown;
+      let parseFailed = false;
 
-    const retCode: unknown = readMember(body, RESPONSE_KEYS.retCode);
+      try {
+        parsed = JSON.parse(bodyText) as unknown;
+      } catch {
+        // The parser error is deliberately not attached and the body is deliberately
+        // not quoted: this is the one payload in the suite that is being checked for
+        // leaked material, so republishing it in a failure message would be the leak.
+        parseFailed = true;
+      }
 
-    if (retCode !== undefined) {
       expect(
-        isZeroRetCode(retCode),
-        'the retried update must report the zero return code. The legacy rewrites a ' +
-          'claimed success into a failure when the transaction disagrees, so a success ' +
-          "here has to be the transaction's answer.",
+        parseFailed,
+        'the conflict body must parse as JSON. A body that does not parse cannot be ' +
+          'branched on, so a caller could not implement the retry-or-surface policy at ' +
+          'all. The parser error is omitted from this message on purpose — the body is ' +
+          'the thing under examination for leaked material.',
+      ).toBe(false);
+
+      expect(
+        asRecord(parsed),
+        'the conflict body must be a JSON object. An array or a bare string could not ' +
+          'carry the members a consumer branches on.',
+      ).toBeDefined();
+
+      // The problem document's own members, and the status repeated inside it.
+      const declaredMembers: readonly string[] = RESPONSE_KEYS.problemMembers.filter(
+        (member: string) => readMember(parsed, [member]) !== undefined,
+      );
+
+      expect(
+        declaredMembers.length,
+        'the conflict must carry at least one of the standard problem members, so that ' +
+          'one error handler serves every failure on this boundary',
+      ).toBeGreaterThan(0);
+
+      const declaredStatus: number | undefined = readInt64(parsed, RESPONSE_KEYS.problemStatus);
+
+      if (declaredStatus !== undefined) {
+        expect(
+          declaredStatus,
+          'the status repeated in the body must agree with the transport status. The ' +
+            'repetition exists so a logged body is self-describing, and a disagreement ' +
+            'would make the record misleading rather than redundant.',
+        ).toBe(CONFLICT_STATUS);
+      }
+
+      const problemType: unknown = readMember(parsed, RESPONSE_KEYS.problemType);
+
+      // THE CONFLICT DETAIL ITSELF. Required by the contract on this body, so an
+      // absence is a finding rather than a tolerance — and the diagnosis names the one
+      // legitimate shape that carries no such member, because that shape is still a
+      // failure of THIS workflow: it means the upstream reported a conflict it could
+      // not describe, and a caller cannot rebase against a description it never got.
+      const conflict: unknown = readMember(parsed, RESPONSE_KEYS.conflict);
+
+      expect(
+        asRecord(conflict),
+        'the conflict body must carry the conflict detail. It is the one member a ' +
+          'caller must be able to read in order to ACT: without it a caller cannot see ' +
+          'which column moved, so it would re-send the same stale originals and receive ' +
+          `the same ${CONFLICT_STATUS} for ever. If the problem type instead names the ` +
+          'without-detail projection, the status was preserved correctly but the ' +
+          'upstream attached nothing decodable — which is an upstream fault to fix, not ' +
+          `a tolerated shape. Problem type present: ${typeof problemType === 'string'}.`,
+      ).toBeDefined();
+
+      // THE DETAIL'S MEMBER SET, EXACTLY. Previously nothing about this object was
+      // asserted beyond the presence of its `rows` member, so a detail that had
+      // dropped `updateTable`, `rowsExpected` or `rowsMatched` — the three members
+      // that tell a caller WHAT was compared and how far the comparison got —
+      // passed unnoticed. `ConflictDetail` marks all four required and sets
+      // `additionalProperties: false`.
+      assertMembers(conflict, CONFLICT_DETAIL, 'the conflict detail');
+
+      const conflictRows: readonly unknown[] | undefined = readArray(
+        conflict,
+        RESPONSE_KEYS.rows,
+      );
+
+      expect(
+        conflictRows,
+        'the conflict detail must carry its rows collection. It is a collection rather ' +
+          'than a single row because one update submits a whole changeset and more than ' +
+          'one row can conflict, and reporting only the first would send a caller round ' +
+          'the retry loop once per conflicting row.',
+      ).toBeDefined();
+
+      expect(
+        (conflictRows ?? []).length,
+        'the conflict detail must never be empty. A conflict with no rows tells a ' +
+          'caller nothing it can act on, which is the same as not reporting it.',
+      ).toBeGreaterThan(0);
+
+      const conflictRow: unknown = (conflictRows ?? [])[0];
+
+      // THE ROW'S MEMBER SET, EXACTLY, BEFORE ANY MEMBER IS READ FROM IT. Five
+      // required members and `additionalProperties: false`, so this single call
+      // establishes what the four separate presence checks below used to establish
+      // individually — and, unlike them, it also fails on a member the schema does
+      // NOT declare, which is the half that catches a rename. The individual
+      // assertions are kept because each carries the reason its member matters, and
+      // a reason is what a reader of a failure needs.
+      assertMembers(conflictRow, CONFLICT_ROW, 'the conflicting row');
+
+      // The DataWindow-carrier members. Their presence is what makes this a buffer-
+      // shaped payload rather than a flat rowset — the distinction the whole contract
+      // rests on.
+      expect(
+        readMember(conflictRow, RESPONSE_KEYS.buffer),
+        'the conflicting row must name the buffer it is in. Silence would read as the ' +
+          'primary buffer, which is a specific buffer a caller is entitled to believe — ' +
+          "and the filter buffer's row order is inverted relative to the source, so a " +
+          'mis-tagged row would be counted in the wrong direction.',
+      ).toBeDefined();
+
+      expect(
+        readMember(conflictRow, RESPONSE_KEYS.itemStatus),
+        'the conflicting row must carry its item status as the SERVER sees it now, read ' +
+          'the legacy way as the row itself rather than as a column',
+      ).toBeDefined();
+
+      const rowOrdinal: number | undefined = readInt64(conflictRow, RESPONSE_KEYS.rowOrdinal);
+
+      if (rowOrdinal !== undefined) {
+        expect(
+          rowOrdinal,
+          'the row ordinal must be one-based, like every row ordinal in this system',
+        ).toBeGreaterThanOrEqual(1);
+      }
+
+      // BOTH VALUE SETS, FOR ALL SIX MARKED COLUMNS. This is the substance of the
+      // payload: `updatewhere=1` with all six columns marked means the failed
+      // where-clause compared six original values, so a payload that carried fewer —
+      // or that carried only current values — could not express what was compared and
+      // a caller could not tell which column moved.
+      const currentValues: readonly unknown[] | undefined = readArray(
+        conflictRow,
+        RESPONSE_KEYS.conflictCurrentValues,
+      );
+
+      const originalValues: readonly unknown[] | undefined = readArray(
+        conflictRow,
+        RESPONSE_KEYS.originalValues,
+      );
+
+      expect(
+        currentValues,
+        'the conflicting row must carry the CURRENT server-side values — the state a ' +
+          'retry would be rebased onto',
+      ).toBeDefined();
+
+      expect(
+        originalValues,
+        'the conflicting row must carry the ORIGINAL values the caller believed were ' +
+          'current — the set that formed the failed where-clause, and the only thing ' +
+          'that lets a caller identify which column changed underneath it',
+      ).toBeDefined();
+
+      // Iterated per column and per side, so a partial-payload regression names the
+      // exact column and side that went missing. A count assertion would report "five
+      // instead of six" and leave a reader to work out which five.
+      for (const column of MARKED_COLUMNS) {
+        expect(
+          findColumnEntry(currentValues, column),
+          `the conflict detail must report a CURRENT value for '${column}'. All six ` +
+            'columns are marked updatewhereclause=yes, so all six participate in the ' +
+            'comparison and all six have to be reportable; a caller missing this one ' +
+            'could not rebase it.',
+        ).toBeDefined();
+
+        expect(
+          findColumnEntry(originalValues, column),
+          `the conflict detail must report an ORIGINAL value for '${column}'. Under ` +
+            'updatewhere=1 the where-clause carried the original value of every marked ' +
+            'column, so omitting this one would hide half of what the failed statement ' +
+            'actually compared.',
+        ).toBeDefined();
+      }
+
+      // THE DETAIL MUST REPORT REALITY, NOT ECHO THE CALLER'S STALE INPUT. This is the
+      // assertion that distinguishes a conflict payload a caller can rebase against
+      // from one that merely reflects the request back.
+      expect(
+        textOfValue(findColumnValue(currentValues, 'address')),
+        "the current side must report what is actually stored — the legitimate update's " +
+          'value. Reporting the value the refused request tried to write would make the ' +
+          'payload an echo of the caller and useless for a rebase.',
+      ).toBe(baseline.address);
+
+      const reportedSalary: number | undefined = numberOfValue(
+        findColumnValue(currentValues, 'salary'),
+      );
+
+      expect(reportedSalary, 'the current side must report a readable salary').toBeDefined();
+
+      expect(
+        Math.abs(Number(reportedSalary) - APPLIED_SALARY),
+        'the current side must report the stored salary within the fixture tolerance, ' +
+          'compared with a tolerance rather than exactly for the same reason as ' +
+          'everywhere else: a two-place decimal in a REAL column',
+      ).toBeLessThanOrEqual(SALARY_COMPARISON_TOLERANCE);
+
+      expect(
+        textOfValue(findColumnValue(currentValues, 'name')),
+        'the current side must report the stored name, which the refused request never ' +
+          'changed. It must NOT be the falsified original: that value is the mismatch, ' +
+          'and finding it on the current side would mean the server was reporting the ' +
+          "caller's belief as the truth.",
+      ).toBe(baseline.name);
+
+      // The other side of the same coin: the ORIGINAL side must carry the falsified
+      // value, because that is what the failed where-clause compared. Together with
+      // the assertion above, this is what proves the two sides are genuinely distinct
+      // and that the payload identifies the column that moved.
+      expect(
+        textOfValue(findColumnValue(originalValues, 'name')),
+        'the original side must echo the value the request believed was current. ' +
+          'Comparing it against the current side is what tells a caller which column ' +
+          'moved, so the two sides carrying identical values would defeat the entire ' +
+          'diagnostic purpose of the payload.',
+      ).toBe(STALE_ORIGINAL_SENTINEL);
+
+      // Which table the failing statement targeted. Present because MULTI-TABLE UPDATE
+      // FROM ONE DATAWINDOW IS A REAL LEGACY CAPABILITY — the update contract is
+      // re-derived at run time from an ARRAY of table descriptors rather than from the
+      // DataWindow's static definition — so "which table" is a genuine question.
+      const updateTable: unknown = readMember(conflict, RESPONSE_KEYS.conflictUpdateTable);
+
+      expect(
+        updateTable,
+        'the conflict detail must name the table the failing statement targeted',
+      ).toBeDefined();
+
+      if (typeof updateTable === 'string' && updateTable.length > 0) {
+        expect(
+          updateTable.toLowerCase(),
+          'the targeted table must be the one this workflow updates. Compared without ' +
+            'regard to case, because the oracle writes the table name in upper case in ' +
+            'its DDL and in lower case in its column metadata, and identifiers are ' +
+            'case-insensitive in this engine.',
+        ).toBe(COMPANY_TABLE_NAME.toLowerCase());
+      }
+
+      // The size of the mismatch, not merely its existence. Reporting both numbers is
+      // what keeps "the row changed" distinguishable from "the row was deleted"
+      // without a second round trip.
+      //
+      // THE GAP IS ASSERTED, NOT THE TWO NUMBERS. The contract documents 1 and 0 for
+      // the classic single-row failure, but the invariant that DEFINES a mismatch is
+      // that fewer rows matched than were expected — and asserting the invariant rather
+      // than the pair avoids pinning a number the projection is entitled to report
+      // differently for a larger changeset.
+      const rowsExpected: number | undefined = readInt64(
+        conflict,
+        RESPONSE_KEYS.conflictRowsExpected,
+      );
+
+      const rowsMatched: number | undefined = readInt64(conflict, RESPONSE_KEYS.conflictRowsMatched);
+
+      expect(
+        rowsExpected,
+        'the conflict detail must report how many rows the statement expected to affect',
+      ).toBeDefined();
+
+      expect(
+        rowsMatched,
+        'the conflict detail must report how many rows it actually matched',
+      ).toBeDefined();
+
+      expect(
+        Number(rowsExpected),
+        'a statement that expected to affect no rows could not have produced a ' +
+          'concurrency mismatch',
+      ).toBeGreaterThanOrEqual(1);
+
+      expect(
+        Number(rowsMatched),
+        'fewer rows must have matched than were expected. That gap IS the optimistic-' +
+          'concurrency mismatch: the where-clause carried original values that no ' +
+          'stored row satisfies any longer.',
+      ).toBeLessThan(Number(rowsExpected));
+
+      // The legacy return code, read for its TYPE and not for its value. The value is
+      // deliberately unasserted: the tri-state algebra means a two-way test over this
+      // field would misclassify both a prevention and a cancellation, and the plan of
+      // record fixes the STATUS for this outcome rather than a particular code.
+      const problemRetCode: unknown = readMember(parsed, RESPONSE_KEYS.retCode);
+
+      if (problemRetCode !== undefined) {
+        expect(
+          typeof problemRetCode,
+          'the legacy return code is an integer extension member on the problem ' +
+            'document, so a consumer can identify the specific legacy outcome and not ' +
+            'only the HTTP class',
+        ).toBe('number');
+      }
+
+      // NO STATEMENT TEXT, NO CREDENTIAL-SHAPED MATERIAL. The legacy error structure's
+      // statement member carries the complete generated statement including
+      // interpolated literal values, and the legacy logger performs no redaction at
+      // all — so the projection redacts or parameter-separates it. This enforces that
+      // rather than assuming it.
+      //
+      // The detector reports its NAME and never the text it matched, because a failure
+      // message reaches the console and the CI log and republishing the payload would
+      // be the very leak being detected.
+      const leak: string | undefined = findLeak(bodyText);
+
+      expect(
+        leak,
+        `the conflict body must not leak statement text or credential-shaped material; ` +
+          `a detector fired for ${leak ?? 'nothing'}. The legacy statement field carries ` +
+          'interpolated literal values against a logger that performs no redaction, so ' +
+          'the projection has to redact or parameter-separate it before it reaches a ' +
+          'caller. The matched text is deliberately not reproduced here.',
+      ).toBeUndefined();
+    });
+
+    await test.step('step 5 — the refused update changed nothing: there was no silent overwrite', async () => {
+      // THE ASSERTION THE WHOLE FILE EXISTS FOR, in its positive and negative forms.
+      // A rejection that still wrote something would be the worst of both worlds: the
+      // caller is told to retry while the data has already been changed underneath it.
+      const token: ServiceToken = await requireServiceToken(request);
+      const baseline: CompanyRow = appliedRow;
+
+      const rows: readonly unknown[] = await retrieveRows(request, token);
+      const stored: unknown = findRowByIdentity(rows, baseline.id);
+
+      expect(
+        stored,
+        'the row must still exist after the refused update. Its disappearance would ' +
+          'mean the rejected statement had nonetheless executed as a delete, which is ' +
+          'the most destructive outcome a conflict path could produce.',
+      ).toBeDefined();
+
+      // DIRECTION ONE: the good value is still there.
+      expect(
+        readColumnText(stored, 'address'),
+        "address must still hold the legitimate update's value. Anything else means the " +
+          `refused request wrote to storage despite answering ${CONFLICT_STATUS}.`,
+      ).toBe(baseline.address);
+
+      const salary: number | undefined = readColumnNumber(stored, 'salary');
+
+      expect(salary, 'salary must still be readable').toBeDefined();
+
+      expect(
+        Math.abs(Number(salary) - APPLIED_SALARY),
+        "salary must still hold the legitimate update's value, within the fixture " +
+          'tolerance',
+      ).toBeLessThanOrEqual(SALARY_COMPARISON_TOLERANCE);
+
+      // DIRECTION TWO: the bad value did not land. Both directions are asserted because
+      // neither implies the other — a partial write could leave the good value in one
+      // column and the bad value in another, and only checking both excludes it.
+      expect(
+        readColumnText(stored, 'address'),
+        'address must NOT hold the value the refused request tried to write. This is ' +
+          'the silent overwrite the contract forbids absolutely, stated as its own ' +
+          'assertion rather than inferred from the one above.',
+      ).not.toBe(STALE_ADDRESS);
+
+      expect(
+        Math.abs(Number(salary) - STALE_SALARY),
+        'salary must NOT have moved towards the value the refused request tried to ' +
+          'write. The two candidate values are a full quarter apart — fifty times the ' +
+          'comparison tolerance — so this cannot pass or fail by rounding.',
+      ).toBeGreaterThan(SALARY_COMPARISON_TOLERANCE);
+
+      // The columns the refused request did not name must be untouched as well, and
+      // `name` matters most: the falsified ORIGINAL was a name, so a boundary that had
+      // confused the two value sets would have written the sentinel here.
+      expect(
+        readColumnText(stored, 'name'),
+        'name must be unchanged. The refused payload carried the falsified sentinel as ' +
+          'an ORIGINAL value, so finding it stored would mean the boundary had ' +
+          'confused the original set with the current set — a defect that would corrupt ' +
+          'data while reporting a conflict.',
+      ).toBe(baseline.name);
+
+      expect(
+        readColumnText(stored, 'name'),
+        'name must not have been overwritten with the falsified original value',
+      ).not.toBe(STALE_ORIGINAL_SENTINEL);
+
+      expect(readColumnNumber(stored, 'age'), 'age must be unchanged').toBe(baseline.age);
+
+      const birth: string | undefined = readColumnText(stored, 'birth');
+
+      expect(birth, 'birth must be unchanged, and still text').toBe(baseline.birth);
+
+      expect(
+        BIRTH_TEXT_PATTERN.test(birth ?? ''),
+        'birth must still be in the layout the edit mask declares',
       ).toBe(true);
-    }
+    });
 
-    // Confirm the change LANDED. An accepted retry that changed nothing would be as
-    // wrong as a rejected update that changed something.
-    const afterRows: readonly unknown[] = await retrieveRows(request, token);
-    const stored: unknown = findRowByIdentity(afterRows, previous.id);
+    await test.step('step 6 — the conflict is recoverable by an explicit refresh-and-retry', async () => {
+      // THE OTHER ARM OF THE POLICY. The contract requires a DEFINED
+      // retry-or-surface policy rather than a bare rejection, so the retry arm is
+      // demonstrated to resolve cleanly: re-read, rebase on what is actually stored,
+      // and resubmit. That is also why the upstream status is Aborted rather than
+      // FailedPrecondition — Aborted means the operation MAY succeed if retried at a
+      // higher level, and this step is that higher level.
+      //
+      // THIS IS A DELIBERATE RETRY OF THE WORKFLOW, NOT OF AN ASSERTION. The two are
+      // different in kind: the workflow retry re-reads first and therefore submits a
+      // DIFFERENT payload, whereas a runner retry would re-run the same assertion
+      // against the same conditions and could convert a real failure into a pass. The
+      // second remains forbidden, and is pinned off for this describe block.
+      const token: ServiceToken = await requireServiceToken(request);
+      const previous: CompanyRow = appliedRow;
 
-    expect(stored, 'the row must still be retrievable after the retry').toBeDefined();
+      // Re-read FIRST. Re-sending the same payload would produce the same conflict,
+      // because the original values it carries are still stale — the contract says so
+      // explicitly, and a retry that skipped the re-read would be a busy loop rather
+      // than a policy.
+      const beforeRows: readonly unknown[] = await retrieveRows(request, token);
+      const current: unknown = findRowByIdentity(beforeRows, previous.id);
 
-    expect(
-      readColumnText(stored, 'address'),
-      'address must now hold the retried value, which proves the conflict was ' +
-        'recoverable by an explicit refresh rather than only reportable',
-    ).toBe(RETRIED_ADDRESS);
+      expect(
+        current,
+        'the row must be re-readable before a retry. A retry is only well-defined ' +
+          'against a freshly read state.',
+      ).toBeDefined();
 
-    const salary: number | undefined = readColumnNumber(stored, 'salary');
+      const refreshed: CompanyRow = snapshotOf(current, previous.id);
+      const refreshedVerbatimColumns: readonly WireColumnValue[] = verbatimColumnsFrom(current);
 
-    expect(salary, 'salary must be readable after the retry').toBeDefined();
+      expect(
+        refreshedVerbatimColumns.length,
+        'the refreshed originals must cover every marked column, because all six are ' +
+          'compared',
+      ).toBe(MARKED_COLUMNS.length);
 
-    expect(
-      Math.abs(Number(salary) - RETRIED_SALARY),
-      'salary must now hold the retried value, within the fixture tolerance',
-    ).toBeLessThanOrEqual(SALARY_COMPARISON_TOLERANCE);
+      // Rebased on what is ACTUALLY stored, so the where-clause matches. Built with
+      // `asUpdate` from the freshly read row — never with the stale-original builder,
+      // which exists only for step 3.
+      const retry: CompanyRowUpdate = asUpdate(refreshed, {
+        address: RETRIED_ADDRESS,
+        salary: RETRIED_SALARY,
+      });
 
-    expect(
-      readColumnText(stored, 'address'),
-      'address must still not hold the value the refused request tried to write. The ' +
-        'retry resolved the conflict on its own terms; it did not retroactively let ' +
-        'the rejected payload through.',
-    ).not.toBe(STALE_ADDRESS);
+      const response: APIResponse = await requestUpdate(request, token, [
+        encodeUpdateRow(retry, refreshedVerbatimColumns),
+      ]);
 
-    expect(readColumnText(stored, 'name'), 'name was not changed by the retry').toBe(
-      refreshed.name,
-    );
+      expect(
+        response.status(),
+        `${ROUTES.update} must answer 200 once the originals have been refreshed from ` +
+          'storage. This is the retry arm of the retry-or-surface policy, and it is why ' +
+          'the upstream status is Aborted rather than FailedPrecondition: the operation ' +
+          `may succeed when retried at a higher level. A second ${CONFLICT_STATUS} here ` +
+          'would mean the conflict is not recoverable by re-reading, which would leave a ' +
+          'caller with no path forward at all.',
+      ).toBe(200);
 
-    expect(readColumnNumber(stored, 'age'), 'age was not changed by the retry').toBe(
-      refreshed.age,
-    );
+      const body: unknown = await response.json();
 
-    expect(readColumnText(stored, 'birth'), 'birth was not changed by the retry').toBe(
-      refreshed.birth,
-    );
+      const retCode: unknown = readMember(body, RESPONSE_KEYS.retCode);
 
-    // THE ROW IS LEFT IN PLACE. Not deleted, not reset, not reseeded, and there is no
-    // cleanup hook in this file. The paired-capture rule forbids recreating or
-    // reseeding the volume between the two halves of a comparison, so tidying up here
-    // would void every pair — and because each run creates its own row and no
-    // absolute count is asserted anywhere above, leaving it behind costs the next run
-    // nothing.
+      if (retCode !== undefined) {
+        expect(
+          isZeroRetCode(retCode),
+          'the retried update must report the zero return code. The legacy rewrites a ' +
+            'claimed success into a failure when the transaction disagrees, so a success ' +
+            "here has to be the transaction's answer.",
+        ).toBe(true);
+      }
+
+      // Confirm the change LANDED. An accepted retry that changed nothing would be as
+      // wrong as a rejected update that changed something.
+      const afterRows: readonly unknown[] = await retrieveRows(request, token);
+      const stored: unknown = findRowByIdentity(afterRows, previous.id);
+
+      expect(stored, 'the row must still be retrievable after the retry').toBeDefined();
+
+      expect(
+        readColumnText(stored, 'address'),
+        'address must now hold the retried value, which proves the conflict was ' +
+          'recoverable by an explicit refresh rather than only reportable',
+      ).toBe(RETRIED_ADDRESS);
+
+      const salary: number | undefined = readColumnNumber(stored, 'salary');
+
+      expect(salary, 'salary must be readable after the retry').toBeDefined();
+
+      expect(
+        Math.abs(Number(salary) - RETRIED_SALARY),
+        'salary must now hold the retried value, within the fixture tolerance',
+      ).toBeLessThanOrEqual(SALARY_COMPARISON_TOLERANCE);
+
+      expect(
+        readColumnText(stored, 'address'),
+        'address must still not hold the value the refused request tried to write. The ' +
+          'retry resolved the conflict on its own terms; it did not retroactively let ' +
+          'the rejected payload through.',
+      ).not.toBe(STALE_ADDRESS);
+
+      expect(readColumnText(stored, 'name'), 'name was not changed by the retry').toBe(
+        refreshed.name,
+      );
+
+      expect(readColumnNumber(stored, 'age'), 'age was not changed by the retry').toBe(
+        refreshed.age,
+      );
+
+      expect(readColumnText(stored, 'birth'), 'birth was not changed by the retry').toBe(
+        refreshed.birth,
+      );
+
+      // THE ROW IS LEFT IN PLACE. Not deleted, not reset, not reseeded, and there is no
+      // cleanup hook in this file. The paired-capture rule forbids recreating or
+      // reseeding the volume between the two halves of a comparison, so tidying up here
+      // would void every pair — and because each run creates its own row and no
+      // absolute count is asserted anywhere above, leaving it behind costs the next run
+      // nothing.
+    });
   });
 });

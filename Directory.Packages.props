@@ -47,11 +47,30 @@
     HOW EVERY VERSION BELOW WAS ESTABLISHED
     Each was verified twice. First it was resolved as a real published STABLE release from the
     NuGet flat container index. Then all of them together were assembled into a single net10.0
-    project and COMPILED with SDK 10.0.302 under TreatWarningsAsErrors and central package
-    management. The composite restored clean with no NuGet audit warnings and reported
+    project and COMPILED under TreatWarningsAsErrors and central package management. The composite
+    restored clean with no NuGet audit warnings and reported
     "Build succeeded, 0 Warning(s), 0 Error(s)", and a protocol definition carrying
     GrpcServices="Both" genuinely generated both its message and its service stubs. No version
-    here is a guess, a placeholder, or "latest". Do not change any of them.
+    here is a guess, a placeholder, or "latest". Do not change any of them EXCEPT to advance a
+    platform patch level, for which see the next paragraph.
+
+    THE PLATFORM PATCH LEVEL IS 10.0.11, AND ADVANCING IT IS MAINTENANCE RATHER THAN A CHANGE OF
+    DEPENDENCY. The six entries below that carry a 10.0.x version - Microsoft.AspNetCore.OpenApi,
+    Microsoft.AspNetCore.Authentication.JwtBearer, Microsoft.EntityFrameworkCore.Sqlite,
+    Microsoft.EntityFrameworkCore.Design, Microsoft.Data.Sqlite and Microsoft.AspNetCore.Mvc.Testing
+    - are platform packages that ship WITH a .NET patch release, so they move together with the
+    runtime and the SDK or not at all. They were on 10.0.10 and are now on 10.0.11, which is the
+    2026-08-11 SECURITY release of the 10.0 channel: the release metadata marks it security true and
+    lists ten CVEs fixed against 10.0.10, so remaining on 10.0.10 was a known-vulnerable platform
+    (CWE-1104). The three coordinates that have to move together were moved together:
+      * this file's six platform pins, to 10.0.11;
+      * global.json, to SDK 10.0.303 - the 10.0.11 release's patch of the SDK feature band this
+        repository already pinned, so rollForward semantics are unchanged;
+      * the four service container definitions, to the mcr.microsoft.com/dotnet/sdk:10.0.400 and
+        mcr.microsoft.com/dotnet/aspnet:10.0.11 tags of the same release, because a floating
+        family tag does not refresh an already-cached local base image.
+    Microsoft.OpenApi is NOT one of the six and deliberately did not move: it versions
+    independently of the platform and its pin is adjudicated on its own terms immediately below.
 
     REGISTRY
     nuget.org for every entry. There are no private or internal package feeds in this refactor,
@@ -146,14 +165,14 @@
        projection of DataServices that only Gateway calls.
        ============================================================================================ -->
   <ItemGroup Label="OpenAPI and REST">
-    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.11" />
 
     <!--
       MANDATORY PIN. Do not bump this, in EITHER direction. Both halves of the reason matter, and
       each half rules out one of the two obvious "helpful" edits:
 
       (a) It must not be left to transitive resolution, and must not be lower.
-          Microsoft.AspNetCore.OpenApi 10.0.10 pulls Microsoft.OpenApi 2.0.0 transitively, and the
+          Microsoft.AspNetCore.OpenApi 10.0.11 pulls Microsoft.OpenApi 2.0.0 transitively, and the
           stock net10.0 web template therefore emits NU1903 at restore, a KNOWN HIGH SEVERITY
           advisory. An explicit direct pin is what overrides that and clears the audit.
           Reproduced on this repository by omitting the pin. Verbatim:
@@ -172,7 +191,7 @@
             Microsoft.AspNetCore.OpenApi.SourceGenerators.XmlCommentGenerator/
             OpenApiXmlCommentSupport.generated.cs
           rather than in any code of ours, so there is nothing to work around at the call site and
-          no amount of editing our own sources will clear it. The cause is that the 10.0.10 OpenAPI
+          no amount of editing our own sources will clear it. The cause is that the 10.0.11 OpenAPI
           XML comment source generator is compiled against the 2.x object model, in which the
           media type Example property is settable, and cannot be satisfied by a 3.x assembly, in
           which IOpenApiMediaType exposes it as read only.
@@ -242,7 +261,7 @@
          services. The stock bearer handler fetches Security's /.well-known/jwks.json and OIDC
          discovery document with zero bespoke code, which is the reason Security speaks REST
          rather than gRPC: it keeps the security critical path in framework code. -->
-    <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.11" />
 
     <!-- Token MINTING, and consumed by the SECURITY SERVICE ONLY, because Security is the sole
          issuer in the system. No other service may reference this package: acquiring a minting
@@ -266,21 +285,21 @@
        running, no client package is required for them, and adding one would fabricate a database.
        ============================================================================================ -->
   <ItemGroup Label="Data and SQLite">
-    <PackageVersion Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.11" />
 
     <!-- Design time migration generation for the COMPANY schema, which is the only DDL anywhere in
          the repository. Reference it with PrivateAssets="all" from the project that owns the
          migrations, since it is a build time only concern. -->
-    <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11" />
 
     <!-- ADO level access, required IN ADDITION to the EF Core provider rather than instead of it.
          Two legacy behaviours cannot be expressed through EF Core alone: the connection URI
          grammar of the form file?mode=rwc with its optional password, integrity check and journal
          mode extensions, and raw command execution with positional parameter binding. -->
-    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.11" />
 
     <!--
-      MANDATORY PIN. Microsoft.EntityFrameworkCore.Sqlite 10.0.10 transitively pulls a 2.1.x
+      MANDATORY PIN. Microsoft.EntityFrameworkCore.Sqlite 10.0.11 transitively pulls a 2.1.x
       SQLitePCLRaw native bundle, which raises NU1903 at restore. An explicit DIRECT reference to
       the 3.0.5 bundle overrides that transitive choice and clears the audit.
       Reproduced on this repository by omitting the pin. Verbatim:
@@ -332,12 +351,12 @@
   <ItemGroup Label="Testing and coverage">
     <!-- In process host for the service level tests that sit alongside the unit tests, so that
          endpoints, authorization and status code mapping are exercised without a container. -->
-    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.11" />
 
     <!-- Unit and service test framework.
          Two authoring consequences, both per project rather than settable here. First, an
          xunit.v3 test project MUST set OutputType to Exe. Second, these projects are HAND
-         AUTHORED: dotnet new xunit3 does not exist in SDK 10.0.302, and dotnet new xunit
+         AUTHORED: dotnet new xunit3 does not exist in the pinned SDK, and dotnet new xunit
          scaffolds the v2 line with older test SDK and coverage packages. The hand authored shape
          was validated end to end: it restores, builds, runs, and emits Cobertura. -->
     <PackageVersion Include="xunit.v3" Version="3.2.2" />

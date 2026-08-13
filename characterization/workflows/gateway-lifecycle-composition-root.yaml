@@ -1518,13 +1518,14 @@ sharedVolume:
   applies: true
 
 # No paired capture has been taken, on either side, and nothing above may be read as reporting a
-# parity outcome. The legacy half needs a PowerBuilder toolchain that is not present. The target half
-# is unobserved for a second, independent reason worth stating on its own: DOCKER WAS NOT INSTALLED
-# AND NO DAEMON WAS AVAILABLE in the environment this definition was authored in, so the Compose
-# bring-up that the shared-volume capture rule is expressed against was never exercised there - and
-# for a workflow whose whole subject is process startup and shutdown, that means THE TARGET-SIDE
-# LIFECYCLE HAS NOT BEEN OBSERVED AT ALL, not merely that it has not been compared. No health gate is
-# claimed as passed. characterization/README.md section 7 states the store-wide position.
+# parity outcome. The legacy half needs a PowerBuilder toolchain that is not present. For the target
+# half the position needs stating precisely, because this workflow's whole subject is process startup
+# and shutdown: THE COMPOSE BRING-UP HAS BEEN EXERCISED, so the target lifecycle has been OBSERVED -
+# all four services started, reached healthy in the documented order and answered their gates - BUT
+# IT WAS NOT RECORDED. Observed and compared are different things, and only the first happened.
+# orchestration/README.md section 10 is the only place in this repository that reports execution
+# status and is the authority for exactly what that run showed; characterization/README.md section 7
+# states the store-wide capture position.
 executionStatus: "specified-not-executed"
 
 relatedWorkflows:

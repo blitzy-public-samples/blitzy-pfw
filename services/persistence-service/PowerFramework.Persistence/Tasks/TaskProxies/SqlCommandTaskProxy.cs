@@ -60,10 +60,11 @@
 //  saying "No user rules provided.", and nothing is invented, inferred or back-filled in their
 //  place. The binding set is the enterprise-standard baseline plus the named non-rule constraints,
 //  and the ruling FOR THIS FILE is:
-//    C-A/C-I  Only SqlTaskProxyBase, Tasks/SqlCommandTask.cs and the four project edges the .csproj
-//             already declares are referenced. No peer service, no PowerFramework.Shared.Eventful,
-//             no PowerFramework.Shared.Localization, and NO new PackageReference. Builds clean
-//             under TreatWarningsAsErrors with nullable enabled, in Debug and in Release.
+//    C-A/C-I  Only SqlTaskProxyBase, Tasks/SqlCommandTask.cs and the five project edges the .csproj
+//             declares are referenced. No peer service, no PowerFramework.Shared.Localization, and NO
+//             new PackageReference. PowerFramework.Shared.Eventful is reached only through the
+//             notification surface inherited from the base, whose header records why that edge exists.
+//             Builds clean under TreatWarningsAsErrors with nullable enabled, in Debug and in Release.
 //    C-B      Two legacy asymmetries are reproduced and annotated at the point of reproduction,
 //             never harmonised: the DEBUG-GATED assertion on the statement setter [:L36-L38]
 //             standing beside the WHOLLY UNVALIDATED auto-commit setter [:L43-L46]; and the fact

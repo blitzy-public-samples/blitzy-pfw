@@ -214,6 +214,19 @@ namespace PowerFramework.DataServices.Tests;
 public enum DialogPayloadShape
 {
     /// <summary>
+    /// NO payload at all, because the site raises nothing: the call exists in the oracle but sits inside a
+    /// comment. The only member with this shape is the dormant byte-length check at
+    /// <c>se_cst_dw.sru</c>:L286.
+    /// </summary>
+    /// <remarks>
+    /// A DISTINCT MEMBER RATHER THAN A NULLABLE SHAPE, so that "this site converts to nothing" is a value
+    /// the census can carry and a theory can assert on, rather than an absence a reader has to infer. It is
+    /// zero so it is also the default a forgotten initializer would produce - which fails a row immediately
+    /// instead of silently claiming one of the five real shapes.
+    /// </remarks>
+    NoConversion = 0,
+
+    /// <summary>
     /// A row-scoped refusal: a `Sprintf` row template, a detail key, the row as data, `StopSign`, and the
     /// localization category. Raised by <c>n_cst_dwsvc_rowselect.sru</c>:L239 and by the four
     /// change-refused context-menu sites.
@@ -247,7 +260,55 @@ public enum DialogPayloadShape
 }
 
 /// <summary>
-/// One census row: a live dialog site in the legacy DataWindow service layer, with everything needed to
+/// How a dialog site in the legacy DataWindow service layer stands: live and localizing, live and
+/// hardcoded, or present in the source but dormant because it is commented out.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>WHY A THREE-VALUED CLASSIFICATION RATHER THAN THE <c>Localizes</c> FLAG ALONE.</b> The census used to
+/// carry only live sites, so a site's classification was fully determined by one boolean and the DORMANT
+/// case had nowhere to live - it survived only as the number <c>2</c> in a per-object commented count.
+/// A number cannot say WHICH line is dormant, cannot be asserted to be still commented, and cannot record
+/// that it must produce no payload. This enumeration is what lets all forty-one sites be rows.
+/// </para>
+/// <para>
+/// The four words the checkpoint asks the inventory to classify by map onto these three members exactly:
+/// LIVE is <see cref="LiveLocalized"/> or <see cref="LiveHardcoded"/> (see <c>DialogSite.IsLive</c>),
+/// LOCALIZED and HARDCODED are the two halves of that split, and DORMANT is its own member. Localized and
+/// hardcoded are not orthogonal to live - a commented call routes nothing anywhere - so modelling them as
+/// two independent flags would admit two states that cannot exist.
+/// </para>
+/// </remarks>
+public enum DialogDisposition
+{
+    /// <summary>
+    /// A live call whose text routes through <c>I18N</c>. Twelve sites: one in the row-selection service,
+    /// ten in the context-menu service, and the validation-error dialog in the service extension.
+    /// </summary>
+    LiveLocalized = 1,
+
+    /// <summary>
+    /// A live call whose text is hardcoded Chinese and reaches no localization category at all. Twenty-eight
+    /// sites, every one of them in the column-expression engine. THE PRESERVED DEFECT (AAP 0.6.2.5, G2).
+    /// </summary>
+    LiveHardcoded = 2,
+
+    /// <summary>
+    /// A call that exists in the oracle but sits inside a comment, so it raises nothing and converts to
+    /// nothing. Exactly one site: the byte-length check at <c>se_cst_dw.sru</c>:L286, commented by a block
+    /// opened at :L280.
+    /// </summary>
+    /// <remarks>
+    /// IT IS MODELLED PRECISELY SO IT STAYS DORMANT. AAP 0.6.1.5 requires that dormant path be "carried
+    /// across as commented and inert, not revived", and 0.8.2 forbids reviving commented-out legacy code
+    /// generally. An unmodelled dormant site can be revived - in the oracle's reading or in the port - with
+    /// nothing failing; a modelled one cannot.
+    /// </remarks>
+    Dormant = 3,
+}
+
+/// <summary>
+/// One census row: a dialog site in the legacy DataWindow service layer, with everything needed to
 /// adjudicate it against both the oracle and the implementation.
 /// </summary>
 /// <remarks>
@@ -304,6 +365,19 @@ public sealed record DialogSite(
         LegacyFile[(LegacyFile.LastIndexOf('/') + 1)..]
             + ":L"
             + LegacyLine.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>How this site stands in the oracle: live and localizing, live and hardcoded, or dormant.</summary>
+    /// <remarks>
+    /// DERIVED FROM <see cref="Localizes"/> BY DEFAULT, so the forty live rows say nothing new and cannot
+    /// disagree with the flag they already carry. Only the dormant row sets it explicitly, which is exactly
+    /// the one case the flag cannot express - and <c>TheDispositionOfEveryLiveRowAgreesWithItsLocalizesFlag</c>
+    /// asserts the derivation rather than trusting it.
+    /// </remarks>
+    public DialogDisposition Disposition { get; init; } =
+        Localizes ? DialogDisposition.LiveLocalized : DialogDisposition.LiveHardcoded;
+
+    /// <summary>Whether this site raises a dialog at run time, as opposed to being commented out.</summary>
+    public bool IsLive => Disposition is not DialogDisposition.Dormant;
 
     /// <summary>Whether this row is one of the twenty-eight column-expression sites.</summary>
     public bool IsColumnExpressionSite =>
@@ -394,6 +468,57 @@ public static class DialogCensus
     public static ImmutableArray<DialogSite> All { get; } = Build();
 
     /// <summary>
+    /// The dormant sites: a dialog call that exists in the oracle but is commented out, so it raises
+    /// nothing. Exactly one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE FORTY-FIRST SITE, AND WHY IT IS A ROW RATHER THAN A COUNT.</b>
+    /// <c>se_cst_dw.sru</c>:L286 is a <c>MessageBoxEx</c> raising a byte-length refusal inside
+    /// <c>ondoitemchange</c>, and it is commented out by a block that opens at :L280 - the line itself
+    /// carries no comment marker at all. AAP 0.6.1.5 records it as a "dormant validation path" that is
+    /// "carried across as commented and inert, not revived", and 0.8.2 forbids reviving commented-out legacy
+    /// code. Held only as the number 2 in <see cref="CommentedCountByObject"/>, that requirement was
+    /// unnameable: a count cannot say which line, cannot assert the line is still commented, and cannot
+    /// require that nothing converts it. As a row it does all three.
+    /// </para>
+    /// <para>
+    /// SEPARATE FROM <see cref="All"/> ON PURPOSE. Twelve theories read <see cref="All"/> as "the sites that
+    /// produce a payload" and adjudicate each against the implementation; a dormant row placed among them
+    /// would be demanded to produce one. The union is <see cref="AllSites"/>, and the total count assertions
+    /// read that.
+    /// </para>
+    /// <para>
+    /// IT IS ONE ROW WHERE THE COMMENTED COUNT IS TWO, and the difference is not a discrepancy.
+    /// <c>se_cst_dw.sru</c>:L286 is a commented CALL; :L368 is PROSE that merely names the function in a
+    /// remark. The scanner cannot tell those apart - they are lexically identical - so it counts both, while
+    /// the census lists only the one that is a site. <c>TheDormantSiteIsOneOfTheTwoCommentedOccurrences</c>
+    /// asserts exactly that relationship instead of leaving the two numbers to look inconsistent.
+    /// </para>
+    /// </remarks>
+    public static ImmutableArray<DialogSite> Dormant { get; } =
+    [
+        new DialogSite(
+            ServiceExtensionObject,
+            286,
+            Localizes: false,
+            DialogPayloadShape.NoConversion,
+            CompanionLocalizationLine: null,
+            "Dormant byte-length refusal in ondoitemchange, commented out by the block opened at :L280.")
+        {
+            Disposition = DialogDisposition.Dormant,
+        },
+    ];
+
+    /// <summary>
+    /// Every dialog site in the layer, live and dormant alike: the forty-one-site inventory.
+    /// </summary>
+    /// <remarks>
+    /// Composed rather than written out a second time, so the union can never disagree with its two halves.
+    /// </remarks>
+    public static ImmutableArray<DialogSite> AllSites { get; } = [.. All, .. Dormant];
+
+    /// <summary>
     /// The live-dialog count this census claims for each object, INCLUDING the zero.
     /// </summary>
     /// <remarks>
@@ -459,6 +584,27 @@ public static class DialogCensus
     }
 
     /// <summary>
+    /// The FORTY-ONE-SITE inventory projected to primitives, one row per site, live and dormant alike.
+    /// </summary>
+    /// <returns>The object path, the line, and the disposition the census claims for it.</returns>
+    /// <remarks>
+    /// The disposition rather than the <c>Localizes</c> flag, because this is the projection whose subject is
+    /// the classification: a reader of a CI log sees <c>Dormant</c> or <c>LiveHardcoded</c> in the test name
+    /// and knows which contract the row was asserting without opening the file.
+    /// </remarks>
+    public static TheoryData<string, int, DialogDisposition> AllSiteRows()
+    {
+        TheoryData<string, int, DialogDisposition> rows = [];
+
+        foreach (DialogSite site in AllSites)
+        {
+            rows.Add(site.LegacyFile, site.LegacyLine, site.Disposition);
+        }
+
+        return rows;
+    }
+
+    /// <summary>
     /// The census projected to one row per in-scope object, for the per-object count theory.
     /// </summary>
     /// <returns>The object path, its live count, and its commented count.</returns>
@@ -488,6 +634,22 @@ public static class DialogCensus
             && site.LegacyLine == legacyLine)
         ?? throw new InvalidOperationException(
             "No census row for " + legacyFile + ":L"
+                + legacyLine.ToString(CultureInfo.InvariantCulture) + ".");
+
+    /// <summary>Recovers the full row for a locator from the forty-one-site inventory.</summary>
+    /// <param name="legacyFile">The object path exactly as the census spells it.</param>
+    /// <param name="legacyLine">The one-based line.</param>
+    /// <returns>The row, live or dormant.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// When no such row exists, which can only happen if a theory's member data and
+    /// <see cref="AllSites"/> have been allowed to diverge.
+    /// </exception>
+    public static DialogSite FindAnySite(string legacyFile, int legacyLine) =>
+        AllSites.SingleOrDefault(site =>
+            string.Equals(site.LegacyFile, legacyFile, StringComparison.Ordinal)
+            && site.LegacyLine == legacyLine)
+        ?? throw new InvalidOperationException(
+            "No inventory row for " + legacyFile + ":L"
                 + legacyLine.ToString(CultureInfo.InvariantCulture) + ".");
 
     /// <summary>Builds the forty rows.</summary>
@@ -1063,6 +1225,23 @@ public sealed class StructuredErrorParityTests
     /// </remarks>
     private const int ExpectedTotalLiveSites = 40;
 
+    /// <summary>
+    /// The whole inventory including the dormant site: forty live conversions plus the one that must stay
+    /// inert.
+    /// </summary>
+    /// <remarks>
+    /// A literal for the same reason <see cref="ExpectedTotalLiveSites"/> is one, and the number the
+    /// checkpoint states: an ALL-SITES inventory of forty-one, not forty. Adding a site to the layer, or
+    /// reviving the dormant one, moves this number as well as failing a named row.
+    /// </remarks>
+    private const int ExpectedTotalSitesIncludingDormant = 41;
+
+    /// <summary>How many sites are present in the oracle but dormant, so they convert to nothing.</summary>
+    private const int ExpectedDormantSites = 1;
+
+    /// <summary>The dormant site's locator, written out so the assertion names it rather than counting it.</summary>
+    private const string DormantSiteLocator = "se_cst_dw.sru:L286";
+
     /// <summary>How many of the twenty-eight column-expression sites are caret-bearing.</summary>
     private const int ExpectedCaretBearingSites = 11;
 
@@ -1184,6 +1363,249 @@ public sealed class StructuredErrorParityTests
                 .Order()];
 
         Assert.Equal(censusLines, scan.LiveLines);
+    }
+
+    /// <summary>
+    /// Every one of the forty-one sites - live and dormant - is classified exactly as the read-only oracle
+    /// has it.
+    /// </summary>
+    /// <param name="legacyFile">The oracle object.</param>
+    /// <param name="legacyLine">The line, which is the locator.</param>
+    /// <param name="disposition">The classification the inventory claims.</param>
+    /// <remarks>
+    /// <para>
+    /// THE ALL-SITES INVENTORY. The census theory above adjudicates the forty rows that PRODUCE something;
+    /// this one adjudicates the classification of all forty-one, which is what makes the dormant site
+    /// nameable. Its three arms are three different contracts:
+    /// </para>
+    /// <para>
+    /// * <c>LiveLocalized</c> - the line carries a live dialog call and routes through <c>I18N</c>, on its own
+    /// line or on the companion line the row names.
+    /// </para>
+    /// <para>
+    /// * <c>LiveHardcoded</c> - the line carries a live dialog call and reaches NO localization call. This is
+    /// the preserved defect (AAP 0.6.2.5): harmonizing any one of the twenty-eight fails here.
+    /// </para>
+    /// <para>
+    /// * <c>Dormant</c> - THE ASSERTION THAT KEEPS IT DORMANT. The line must appear among the COMMENTED
+    /// occurrences and must NOT appear among the live ones. Un-commenting it in the oracle - which AAP 0.6.1.5
+    /// and 0.8.2 both forbid - flips both halves at once and fails this row twice over. Nothing about it is
+    /// asserted against the implementation, because the correct implementation of a dormant path is an
+    /// absence, and that absence is asserted by
+    /// <see cref="TheDormantByteLengthDialogConvertsToNothingAtAll"/>.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(DialogCensus.AllSiteRows), MemberType = typeof(DialogCensus))]
+    public void EverySiteInTheInventoryIsClassifiedAsTheOracleHasIt(
+        string legacyFile,
+        int legacyLine,
+        DialogDisposition disposition)
+    {
+        DialogSite site = DialogCensus.FindAnySite(legacyFile, legacyLine);
+
+        // The projected row and the full row must be the same row, exactly as the census theory requires.
+        Assert.Equal(disposition, site.Disposition);
+
+        LegacyDialogScan scan = LegacyDialogScanner.Scan(legacyFile);
+
+        switch (disposition)
+        {
+            case DialogDisposition.LiveLocalized:
+                Assert.Contains(legacyLine, scan.LiveLines);
+                Assert.DoesNotContain(legacyLine, scan.CommentedLines);
+
+                bool onItsOwnLine = scan.LocalizationCallLines.Contains(legacyLine);
+                bool onItsCompanionLine =
+                    site.CompanionLocalizationLine is { } companion
+                    && scan.LocalizationCallLines.Contains(companion);
+
+                Assert.True(
+                    onItsOwnLine || onItsCompanionLine,
+                    site.ShortLocator + " is classified LiveLocalized, but the oracle makes no I18N call on "
+                        + "that line or on its companion line.");
+                break;
+
+            case DialogDisposition.LiveHardcoded:
+                Assert.Contains(legacyLine, scan.LiveLines);
+                Assert.DoesNotContain(legacyLine, scan.CommentedLines);
+                Assert.DoesNotContain(legacyLine, scan.LocalizationCallLines);
+                break;
+
+            case DialogDisposition.Dormant:
+                Assert.Contains(legacyLine, scan.CommentedLines);
+
+                Assert.DoesNotContain(legacyLine, scan.LiveLines);
+
+                Assert.False(
+                    site.IsLive,
+                    site.ShortLocator + " is classified Dormant but reports itself live.");
+                Assert.Equal(DialogPayloadShape.NoConversion, site.Shape);
+                break;
+
+            default:
+                Assert.Fail(
+                    "Unhandled disposition " + disposition + " for " + site.ShortLocator + ".");
+                break;
+        }
+    }
+
+    /// <summary>
+    /// The layer has forty-one dialog sites in total: forty live ones that convert, and one dormant one that
+    /// must not.
+    /// </summary>
+    /// <remarks>
+    /// THE ARITHMETIC OF THE ALL-SITES INVENTORY, stated as totals so that a site appearing or disappearing
+    /// moves a number here as well as failing a named row. The live total is asserted separately in
+    /// <see cref="TheLayerHasExactlyFortyLiveDialogSites"/>; what this adds is that the inventory is the live
+    /// set PLUS the dormant set with nothing double-counted and nothing missing between them.
+    /// </remarks>
+    [Fact]
+    public void TheInventoryHasFortyOneSitesOfWhichExactlyOneIsDormant()
+    {
+        Assert.Equal(ExpectedTotalSitesIncludingDormant, DialogCensus.AllSites.Length);
+        Assert.Equal(ExpectedTotalLiveSites, DialogCensus.AllSites.Count(static site => site.IsLive));
+        Assert.Equal(
+            ExpectedDormantSites,
+            DialogCensus.AllSites.Count(static site => !site.IsLive));
+
+        // The three dispositions partition the inventory: twelve, twenty-eight, one.
+        Assert.Equal(
+            ExpectedLocalizingSites,
+            DialogCensus.AllSites.Count(static site =>
+                site.Disposition is DialogDisposition.LiveLocalized));
+        Assert.Equal(
+            ExpectedCaretBearingSites + ExpectedPlainMessageSites,
+            DialogCensus.AllSites.Count(static site =>
+                site.Disposition is DialogDisposition.LiveHardcoded));
+
+        // No locator may appear twice ACROSS the union either - a dormant row that duplicated a live one
+        // would let a lost live site hide behind it.
+        Assert.Equal(
+            ExpectedTotalSitesIncludingDormant,
+            DialogCensus.AllSites.Select(static site => site.ShortLocator)
+                .Distinct(StringComparer.Ordinal)
+                .Count());
+
+        // And the dormant one is the line the AAP names, not merely "some dormant line".
+        Assert.Equal(
+            DormantSiteLocator,
+            Assert.Single(DialogCensus.Dormant).ShortLocator,
+            StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// The dormant site's disposition is the ONLY one that is not derived from the localization flag, and
+    /// every live row's derivation is correct.
+    /// </summary>
+    /// <remarks>
+    /// The derivation is a default on the record, so it is the kind of thing that is trusted rather than
+    /// checked. Checked here: if the default is ever changed - or if a live row sets a disposition explicitly
+    /// and gets it wrong - the row it describes stops matching the flag every other theory in this file reads,
+    /// and the two would then disagree silently.
+    /// </remarks>
+    [Fact]
+    public void TheDispositionOfEveryLiveRowAgreesWithItsLocalizesFlag()
+    {
+        Assert.All(
+            DialogCensus.All,
+            static site => Assert.Equal(
+                site.Localizes
+                    ? DialogDisposition.LiveLocalized
+                    : DialogDisposition.LiveHardcoded,
+                site.Disposition));
+
+        // The dormant row does NOT localize either, so the flag alone would have classified it as one of the
+        // twenty-eight hardcoded column-expression sites - which is the reason the disposition exists.
+        DialogSite dormant = Assert.Single(DialogCensus.Dormant);
+
+        Assert.False(dormant.Localizes);
+        Assert.Equal(DialogDisposition.Dormant, dormant.Disposition);
+    }
+
+    /// <summary>
+    /// The dormant byte-length dialog converts to nothing: no census row, no catalogue descriptor, no
+    /// context-menu locator, and no payload anywhere in the port.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE OTHER HALF OF "ASSERT THAT THE FORTY-FIRST REMAINS INERT".</b> Its remaining commented in the
+    /// ORACLE is asserted by the inventory theory; what this asserts is that the PORT did not convert it. A
+    /// structured error for :L286 would be a revival of a path AAP 0.6.1.5 requires be carried across
+    /// "commented and inert" - functionality the legacy does not have, which C-B forbids adding - and it
+    /// would be invisible to every other test in this file, because a payload nothing asks for fails nothing.
+    /// </para>
+    /// <para>
+    /// The three declared site sets are the complete set of conversion sources in this layer: the
+    /// column-expression catalogue's twenty-eight descriptors, the context-menu probe's ten locators, and the
+    /// two remaining live sites whose locators are checked directly. If :L286 is absent from all three it has
+    /// no conversion.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheDormantByteLengthDialogConvertsToNothingAtAll()
+    {
+        DialogSite dormant = Assert.Single(DialogCensus.Dormant);
+
+        // Not a live census row, so no theory in this file demands a payload for it.
+        Assert.DoesNotContain(
+            dormant.ShortLocator,
+            DialogCensus.All.Select(static site => site.ShortLocator));
+
+        // Not one of the twenty-eight column-expression descriptors.
+        Assert.DoesNotContain(
+            dormant.LegacyLine,
+            ExpressionErrorCatalog.All.Select(static descriptor => descriptor.LegacyLine));
+
+        // Not one of the ten context-menu locators.
+        Assert.DoesNotContain(dormant.ShortLocator, ContextMenuErrorProbe.EmitEveryLocator());
+
+        // And the two remaining live sites are the two the census names, neither of which is this line.
+        Assert.NotEqual(DialogCensus.RowSelectObject + ":L239", dormant.LegacyFile + ":L286");
+        Assert.DoesNotContain(
+            dormant.ShortLocator,
+            DialogCensus.All
+                .Where(static site => !site.IsColumnExpressionSite)
+                .Select(static site => site.ShortLocator));
+    }
+
+    /// <summary>
+    /// The dormant site is one of the two commented occurrences the scanner reports for the service
+    /// extension, and the other one is prose rather than a site.
+    /// </summary>
+    /// <remarks>
+    /// TWO NUMBERS THAT LOOK INCONSISTENT, RECONCILED AS AN ASSERTION. The per-object commented count for
+    /// <c>se_cst_dw.sru</c> is TWO while the dormant inventory holds ONE row for it, and the reason is that
+    /// the scanner cannot distinguish a commented CALL from a remark that merely names the function: :L286 is
+    /// the call and :L368 is prose. Left as two unexplained numbers, a future reader cannot tell whether the
+    /// census lost a site; asserted here, the relationship is checked on every run.
+    /// </remarks>
+    [Fact]
+    public void TheDormantSiteIsOneOfTheTwoCommentedOccurrences()
+    {
+        LegacyDialogScan scan = LegacyDialogScanner.Scan(DialogCensus.ServiceExtensionObject);
+
+        Assert.Equal(
+            DialogCensus.CommentedCountByObject[DialogCensus.ServiceExtensionObject],
+            scan.CommentedLines.Length);
+        Assert.Equal(2, scan.CommentedLines.Length);
+
+        ImmutableArray<int> dormantLines =
+            [.. DialogCensus.Dormant
+                .Where(static site =>
+                    string.Equals(
+                        site.LegacyFile,
+                        DialogCensus.ServiceExtensionObject,
+                        StringComparison.Ordinal))
+                .Select(static site => site.LegacyLine)];
+
+        Assert.Equal(286, Assert.Single(dormantLines));
+
+        // Every dormant line is a commented occurrence; the converse does not hold, and the one that is not
+        // a site is the prose line at :L368.
+        Assert.Contains(286, scan.CommentedLines);
+        Assert.Contains(368, scan.CommentedLines);
+        Assert.DoesNotContain(368, dormantLines);
     }
 
     /// <summary>

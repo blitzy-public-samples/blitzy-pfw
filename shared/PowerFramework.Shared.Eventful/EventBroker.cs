@@ -947,6 +947,36 @@ namespace PowerFramework.Shared.Eventful
         public int PendingPostedContinuationCount => _postedContinuations.Count;
 
         /// <summary>
+        /// The dispatch nesting depth - the port of <c>_nDeep</c>
+        /// (<c>n_cst_eventful.sru:L77</c>), readable by a derived broker.
+        /// </summary>
+        /// <value>Zero outside any dispatch; one inside a dispatch; higher inside a nested one.</value>
+        /// <remarks>
+        /// PROTECTED RATHER THAN PUBLIC, and read-only. It exists for a derived broker that has to publish
+        /// its own view of the depth - <c>n_cst_threading_eventful</c>'s consumers test it to explain why a
+        /// veto outside a dispatch is refused (<c>:L1293</c>) - and for nothing else. Writing it belongs to
+        /// the dispatch loop alone, so there is no setter: a derived type that could change the depth could
+        /// make <see cref="Prevent(bool)"/> legal where the oracle refuses it.
+        /// </remarks>
+        protected long DispatchDepth => _deep;
+
+        /// <summary>
+        /// The veto currently in force - the port of <c>_nPrevent</c>
+        /// (<c>n_cst_eventful.sru:L85</c>), readable by a derived broker.
+        /// </summary>
+        /// <value>
+        /// <see cref="VetoResult.Continue"/> when nothing is preventing;
+        /// <see cref="VetoResult.PreventOnce"/> or <see cref="VetoResult.PreventDeep"/> otherwise.
+        /// </value>
+        /// <remarks>
+        /// TRI-VALUED, AND EXPOSED AS THE ENUM RATHER THAN AS A BOOLEAN, for the same reason
+        /// <see cref="VetoResult"/> exists at all: a deep prevention survives the unwind of the level that
+        /// raised it and a shallow one does not, so a derived broker that flattened this to
+        /// "is something preventing" would silently turn every deep prevention into a shallow one.
+        /// </remarks>
+        protected VetoResult PendingPrevention => _prevent;
+
+        /// <summary>
         /// Reads back the four-line diagnostic block a dispatch recorded on a captured exception, or
         /// <see langword="null"/> when the exception did not pass through a dispatch.
         /// </summary>
@@ -2815,7 +2845,12 @@ namespace PowerFramework.Shared.Eventful
         /// Whether any enabled subscription exists for an event name - a cheap pre-test a caller uses to
         /// avoid assembling a payload for an event nobody listens to.
         /// </summary>
-        /// <param name="name">The event name, compared ordinally and case-sensitively.</param>
+        /// <param name="name">
+        /// The event name, compared ordinally and case-sensitively. <see langword="null"/> is accepted and
+        /// answers <see langword="false"/>, because the oracle's own first test is <c>name = ""</c>
+        /// (<c>:L766</c>) and PowerScript's always-present possibly-empty string reaches this member as an
+        /// empty one - so null and empty are one case here rather than two.
+        /// </param>
         /// <returns><see langword="true"/> when a subscription for that name appears to exist.</returns>
         /// <remarks>
         /// <para>
@@ -2838,7 +2873,7 @@ namespace PowerFramework.Shared.Eventful
         /// pre-test rather than an authority.
         /// </para>
         /// </remarks>
-        public bool IsSubscribed(string name)
+        public bool IsSubscribed(string? name)
         {
             // :L766 - if name = "" then return false
             if (string.IsNullOrEmpty(name))

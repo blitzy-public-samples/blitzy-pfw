@@ -595,7 +595,7 @@ public sealed class IssuerIdentityTests
     /// </remarks>
     private static SecurityOptions Bootable()
     {
-        using RSA key = RSA.Create(SigningKeyFormats.DefaultMinimumKeySizeBits);
+        using RSA key = RSA.Create(SecurityAppFactory.DefaultSigningKeySizeInBits);
 
         SecurityOptions options = new()
         {
@@ -606,12 +606,7 @@ public sealed class IssuerIdentityTests
 
         options.Audiences.Add("powerframework-gateway");
 
-        SecurityClientOptions registered = new() { Subject = "powerframework-gateway" };
-
-        registered.Audiences.Add("powerframework-gateway");
-        registered.Scopes.Add("s");
-
-        options.Clients.Add(registered);
+        options.Clients.Add(new SecurityClientOptions { Subject = "powerframework-gateway" });
 
         return options;
     }

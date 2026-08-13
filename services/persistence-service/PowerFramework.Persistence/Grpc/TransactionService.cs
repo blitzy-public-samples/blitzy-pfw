@@ -116,6 +116,7 @@ using PowerFramework.Persistence.Runtime;
 using PowerFramework.Persistence.Sql;
 using PowerFramework.Persistence.Tasks;
 using PowerFramework.Persistence.Transactions;
+using PowerFramework.Shared.Diagnostics;
 
 // The generated C-08 service base, reached through an alias for two reasons. First, the mandated
 // class name below is the contract's own service name, so the bare name has to resolve to exactly
@@ -960,7 +961,7 @@ internal sealed class TransactionSessionRegistry
                     + "RemoveRef answered {RemoveCode}. The usual cause is that the pool had already "
                     + "destroyed this session's transaction after it was condemned. The session handle value "
                     + "is deliberately not recorded.",
-                    session.Principal,
+                    LogSafeText.Render(session.Principal),
                     session.Lease.Id,
                     released,
                     removed);
@@ -1010,7 +1011,7 @@ internal sealed class TransactionSessionRegistry
                 "Reclaimed an abandoned transaction session held by caller {Principal} against pool lease "
                 + "{PoolLease}; the pool release answered {ReturnCode}. The session handle value is "
                 + "deliberately not recorded.",
-                candidate.Principal,
+                LogSafeText.Render(candidate.Principal),
                 candidate.Lease.Id,
                 code);
         }
@@ -1412,12 +1413,52 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// connect that <c>BeginSession</c> exists to issue.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// A fixed sentence quoting no value, for the same reason as
     /// <see cref="UnknownSessionDiagnostic"/> (constraint C-F).
+    /// </para>
+    /// <para>
+    /// IT MAY NAME THE CONNECT ONLY BECAUSE IT IS USED AT EXACTLY ONE ARM. Three arms of this member
+    /// answer a cancellation - one while queueing for the transaction's gate, this one inside the gate and
+    /// before the connect, and one after a connect that had ALREADY HAPPENED - and a single sentence
+    /// covering all three could not name the connect without misdescribing the third, where a connection is
+    /// open and held by the pool for whoever else is using it. The other two therefore carry
+    /// <see cref="CancelledBeforeRegistrationDiagnostic"/> instead, which is what leaves this one free to
+    /// state the distinguishing fact rather than the lowest common one. A caller can tell the three cases
+    /// apart from the text, which is the whole reason they are separate constants.
+    /// </para>
+    /// <para>
+    /// THE SUBJECT IS THE REQUEST, NOT THE POOL, and the last clause says so outright. On this arm the
+    /// pooled transaction may well be connected already - shared with other live sessions, which is
+    /// precisely the state a failed liveness probe is re-establishing - so what is true is that THIS
+    /// request opened nothing and left nothing behind.
+    /// </para>
     /// </remarks>
     private const string CancelledDiagnostic =
         "The request was cancelled before a connection was opened. No pool reference is held and no "
-        + "session was created, so there is nothing for the caller to end.";
+        + "session was created, so there is nothing for the caller to end. Any connection this service "
+        + "shares with other sessions is untouched.";
+
+    /// <summary>
+    /// The one sentence returned when the caller's request was cancelled after this service had reached
+    /// the acquisition gate but before it minted a session handle.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// SEPARATE FROM <see cref="CancelledDiagnostic"/> BECAUSE THAT SENTENCE WOULD BE UNTRUE HERE. On this
+    /// path the pooled transaction may well be connected already - shared with other live sessions - so
+    /// claiming no connection was opened would misdescribe the state. What IS true on both paths, and is
+    /// the part a caller needs, is that no session exists and no pool reference is held.
+    /// </para>
+    /// <para>
+    /// A fixed sentence quoting no value, for the same reason as
+    /// <see cref="UnknownSessionDiagnostic"/> (constraint C-F).
+    /// </para>
+    /// </remarks>
+    private const string CancelledBeforeRegistrationDiagnostic =
+        "The request was cancelled before a session was created. No pool reference is held and no session "
+        + "exists, so there is nothing for the caller to end. Any connection this service shares with "
+        + "other sessions is untouched.";
 
     /// <summary>
     /// Checks a stored reference index against the pool's current bounds, reproducing the guard the
@@ -1755,15 +1796,39 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     /// failure by the predicate.
     /// </para>
     /// <para>
-    /// <b>CANCELLATION: THIS IS THE ONLY RPC ON THIS CONTRACT THAT OBSERVES THE REQUEST'S TOKEN.</b> It
-    /// is the only one that issues new work, so it is the only one where a caller who has already
-    /// disconnected should stop the service from starting something. A cancelled request answers
-    /// <c>RetCode.CANCELLED</c>, holds no pool reference and creates no session, and it does so through
-    /// an arm of its own rather than through the connect's return value - because the connect's
-    /// <c>CANCELLED</c> reads as neither succeeded nor failed and that hole is the oracle's, reserved for
-    /// the oracle's own cause. Commit, rollback, auto-commit and <c>EndSession</c> deliberately do NOT
-    /// observe the token: each completes or undoes work already begun, and abandoning one would leave a
-    /// unit of work neither applied nor reverted, or leak a pool reference for the life of the process.
+    /// <b>CANCELLATION: THIS IS THE ONLY RPC ON THIS CONTRACT THAT OBSERVES THE REQUEST'S TOKEN, AND IT
+    /// OBSERVES IT AT THREE POINTS.</b> It is the only verb that both issues new work AND MINTS RETAINED
+    /// STATE, which is why: a caller who has gone should neither have work started for it nor be handed a
+    /// session it cannot receive. The three points are the gate wait (a cancelled caller gives up its
+    /// queue slot), the pre-connect arm (nothing is opened), and immediately before registration - the
+    /// last of which is what covers a caller that was cancelled while queueing or that found the pooled
+    /// transaction ALREADY CONNECTED, neither of which reaches the pre-connect arm at all.
+    /// </para>
+    /// <para>
+    /// EVERY ONE OF THE THREE ANSWERS <c>RetCode.CANCELLED</c> AND UNWINDS THE SAME WAY - the borrowed
+    /// pool reference is released and nothing else - so a cancelled request holds no pool reference and
+    /// creates no session, and NO PATH UNDOES A TRANSACTION ANOTHER SESSION IS USING: a descriptor-equal
+    /// sibling still holding a reference keeps its connected transaction, and the pool entry is released
+    /// only when this call held the last reference. The code is answered through arms of their own rather
+    /// than through the connect's return value - the connect's <c>CANCELLED</c> reads as neither succeeded
+    /// nor failed, and that hole is the oracle's, reserved for the oracle's own cause.
+    /// </para>
+    /// <para>
+    /// Commit, rollback, auto-commit and <c>EndSession</c> deliberately do NOT observe the token: each
+    /// completes or undoes work already begun, and abandoning one would leave a unit of work neither
+    /// applied nor reverted, or leak a pool reference for the life of the process.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>AND IT OBSERVES THE TOKEN AT THREE POINTS, NOT ONE, BECAUSE ONE OF THEM IS SKIPPABLE.</b> The
+    /// original arm sits inside the liveness gate, which a caller whose pooled transaction is ALREADY
+    /// CONNECTED never enters - so on the commonest path, a second session over a shared descriptor, the
+    /// cancellation was not observed at all and the request ran on to mint a session handle the caller
+    /// could never receive and therefore never end. The three points are: the acquisition-gate wait, which
+    /// now honours the token; the pre-connect arm, unchanged; and immediately before the handle is minted,
+    /// which is the last moment at which a cancellation costs nothing but the pool reference. All three
+    /// release that reference and answer <c>CANCELLED</c>. None of them undoes a connect: a connection this
+    /// caller's own attempt opened stays open under the pool's reference count for the other sessions
+    /// holding it, and the pool's idle collection reclaims it when none do.
     /// </para>
     /// </remarks>
     [Authorize(Policy = PersistenceAuthorizationPolicies.Read)]
@@ -1773,8 +1838,9 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        // The ONLY handler on this contract that reads its context, and it reads exactly one member of
-        // it - see the cancellation block below the acquisition for why this verb and no other.
+        // The ONLY handler on this contract that reads its context, and it reads exactly one member of it
+        // - at three points, because this verb both starts work and mints retained state. See the
+        // cancellation blocks around the gate for why this verb and no other.
         ArgumentNullException.ThrowIfNull(context);
 
         if (request.Descriptor_ is null)
@@ -1802,9 +1868,9 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
             _logger?.LogWarning(
                 "BeginSession refused a request for {Dbms} on {ServerName}/{Database} with code "
                 + "{ReturnCode}.",
-                descriptor.Dbms,
-                descriptor.ServerName,
-                descriptor.Database,
+                LogSafeText.Render(descriptor.Dbms),
+                LogSafeText.Render(descriptor.ServerName),
+                LogSafeText.Render(descriptor.Database),
                 guard);
 
             return new BeginSessionResponse
@@ -1879,33 +1945,69 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         //  ASYNC RATHER THAN A BLOCKING WAIT, so a queued acquisition parks its continuation instead of
         //  pinning a thread-pool thread while another caller's synchronous open completes.
         //
-        //  THE WAIT ITSELF DOES NOT HONOUR THE REQUEST TOKEN, AND THAT IS LOAD BEARING.
-        //  A cancellation here is a REFUSAL TO START WORK, never a refusal to hand back work already
-        //  done - so it belongs inside the liveness gate, where the original arm already sits, and NOT
-        //  around the wait. Honouring the token while queueing would refuse a caller whose pooled
-        //  transaction is ALREADY CONNECTED, for which no work would be issued and the cancellation has
-        //  nothing to refuse; that is the exact property
-        //  ACancellationArrivingAfterTheConnectDoesNotUndoTheSession pins, and an earlier draft of this
-        //  fix broke it. The wait is bounded by one liveness test plus one synchronous open - the same
-        //  bounded step the oracle's one-thread-per-pool model serialized implicitly - so nothing here
-        //  can queue indefinitely.
+        //  🔴 THE WAIT HONOURS THE REQUEST TOKEN, AND IT USED TO PASS CancellationToken.None.
+        //  The reasoning for None was that a cancellation here is a refusal to START work, so it belongs
+        //  inside the liveness gate where the arm below already sits - and that a token on the wait would
+        //  refuse a caller whose pooled transaction is ALREADY CONNECTED, "for which no work would be
+        //  issued and the cancellation has nothing to refuse". The first half is right about WHERE the
+        //  connect decision belongs. The second half mistakes what refusing costs: a caller whose token is
+        //  already signalled IS GONE, so there is nobody to refuse anything to - and proceeding on its
+        //  behalf runs straight past the arm below (a connected transaction skips it entirely) into
+        //  `Register`, which mints a session and charges it against that caller's handle ceiling. gRPC then
+        //  discards the response, so THE CALLER NEVER LEARNS THE SESSION ID AND CAN NEVER END IT. Nothing
+        //  reclaims it: this registry has no expiry sweep, and the pool reference the session holds keeps
+        //  the pool's own idle collection from reclaiming the entry either. Repeat the cancellation and the
+        //  caller exhausts its own ceiling against sessions it does not know it owns.
+        //
+        //  EnterAsync CANCELS THE WAIT AND NEVER THE HOLDER [Grpc/TransactionGate], throwing before the
+        //  gate is taken, so an abandoned wait releases nothing and disturbs no caller inside the gate. The
+        //  wait remains bounded by one liveness test plus one synchronous open - the same bounded step the
+        //  oracle's one-thread-per-pool model serialized implicitly - so this is a second safeguard rather
+        //  than the only thing standing between a caller and an unbounded queue.
         // =========================================================================================
-        using (await _sessions.GateFor(borrowed).EnterAsync(CancellationToken.None).ConfigureAwait(false))
+        TransactionGateScope gateScope;
+
+        try
+        {
+            gateScope = await _sessions.GateFor(borrowed)
+                .EnterAsync(context.CancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // NOTHING WAS TAKEN, so there is nothing to release but the pool reference - which goes back
+            // here exactly as on every other failure path.
+            _ = _pool.RemoveRef(lease);
+
+            return new BeginSessionResponse
+            {
+                Status = TransactionWireCodes.Status(
+                    RetCode.CANCELLED,
+                    CancelledBeforeRegistrationDiagnostic),
+            };
+        }
+
+        using (gateScope)
         {
             // [:L173] `if Not _transObject.of_IsConnected() then` - the liveness check gates the connect, so
             // a pooled connection that is still live is NOT reconnected.
             if (!borrowed.IsConnected())
             {
                 // =====================================================================================
-                //  THE REQUEST'S CANCELLATION IS OBSERVED HERE, AND NOT INSIDE THE CONNECT
+                //  THE SECOND OF THE THREE CANCELLATION POINTS: BEFORE THE CONNECT, AND NOT INSIDE IT
                 //
                 //  This is the one verb on this contract that ISSUES NEW WORK - every other verb either
                 //  completes work already begun (commit), undoes it (rollback), or reads state - so this
-                //  is the one place where a caller who has already gone should stop the service from
-                //  starting something. Observing the token before the call is also the ONLY cancellation
-                //  the connect could honour: Microsoft.Data.Sqlite is a synchronous provider with no
-                //  interrupt, so an open already in flight cannot be abandoned, and a token handed to it
-                //  could change nothing that this arm does not already decide.
+                //  is where a caller who has already gone stops the service from starting something.
+                //  It is NOT the only cancellation point on this verb, and it never could be: it sits
+                //  inside the disconnected arm, so a caller cancelled while queueing for the gate and a
+                //  caller that finds the transaction already connected both bypass it entirely. Those are
+                //  covered by the wait's own token and by the check before registration.
+                //
+                //  Observing the token here is, however, the ONLY cancellation the connect itself could
+                //  honour: Microsoft.Data.Sqlite is a synchronous provider with no interrupt, so an open
+                //  already in flight cannot be abandoned, and a token handed to it could change nothing
+                //  that this arm does not already decide.
                 //
                 //  WHY THE TOKEN IS NOT PASSED TO Connect ITSELF. `IPooledTransaction.Connect` answers
                 //  RetCode.CANCELLED when its own token is signalled, and the test below is IsFailed,
@@ -1943,9 +2045,9 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
                     _logger?.LogWarning(
                         "BeginSession could not connect to {Dbms} on {ServerName}/{Database}; driver code "
                         + "{SqlDbCode}.",
-                        descriptor.Dbms,
-                        descriptor.ServerName,
-                        descriptor.Database,
+                        LogSafeText.Render(descriptor.Dbms),
+                        LogSafeText.Render(descriptor.ServerName),
+                        LogSafeText.Render(descriptor.Database),
                         captured.SqlDbCode);
 
                     return new BeginSessionResponse
@@ -1962,6 +2064,42 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         // the connect one atomic step; registration touches only this registry's own concurrent
         // collections and needs no exclusion on the transaction. Holding it across Register would widen
         // the exclusion past what it protects and would serialize handle minting for no benefit.
+
+        // =========================================================================================
+        //  🔴 THE LAST MOMENT AT WHICH A CANCELLATION COSTS NOTHING, AND THERE WAS NO CHECK HERE.
+        //  -----------------------------------------------------------------------------------------
+        //  Register MINTS A HANDLE and charges it against the caller's ceiling, and the ONLY way that
+        //  handle reaches the caller is the response - which gRPC discards once the request is cancelled.
+        //  So a cancellation observed anywhere after this line produces a session nobody can name and
+        //  therefore nobody can end: this registry has no expiry sweep, and the pool reference the
+        //  session holds stops the pool's idle collection from reclaiming the entry as well. That is a
+        //  permanent leak of a connection plus a permanent charge against a per-caller ceiling, both
+        //  reachable by an authenticated caller that simply cancels, and both repeatable.
+        //
+        //  BEFORE the mint there is nothing to leak: the pool reference is the only thing taken, and it
+        //  goes straight back. The check is therefore placed here rather than after Register, because a
+        //  cancellation discovered after the mint would have to UNDO one - and unwinding a registration
+        //  is exactly the "refusal to hand back work already done" this contract does not do.
+        //
+        //  IT DOES NOT UNDO THE CONNECT. If this caller's own attempt connected the shared transaction,
+        //  that connection stays open under the pool's reference count for whatever other sessions hold
+        //  it, and is reclaimed by the pool's idle collection when none do. A cancellation is a refusal
+        //  to be issued a handle, never a rollback of the connect - which is the property
+        //  ACancellationArrivingAfterTheConnectDoesNotUndoTheSession pins, stated over the FIRST
+        //  caller's session where it actually belongs.
+        // =========================================================================================
+        if (context.CancellationToken.IsCancellationRequested)
+        {
+            _ = _pool.RemoveRef(lease);
+
+            return new BeginSessionResponse
+            {
+                Status = TransactionWireCodes.Status(
+                    RetCode.CANCELLED,
+                    CancelledBeforeRegistrationDiagnostic),
+            };
+        }
+
         TransactionSession? session =
             _sessions.Register(lease, in descriptor, borrowed, out string quotaDiagnostic);
 
@@ -1990,11 +2128,11 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
         _logger?.LogDebug(
             "BeginSession opened session {SessionId} on pool lease {Lease} for "
             + "{Dbms} on {ServerName}/{Database}.",
-            session.SessionId,
+            LogSafeText.Render(session.SessionId),
             session.Lease.Id,
-            descriptor.Dbms,
-            descriptor.ServerName,
-            descriptor.Database);
+            LogSafeText.Render(descriptor.Dbms),
+            LogSafeText.Render(descriptor.ServerName),
+            LogSafeText.Render(descriptor.Database));
 
         return new BeginSessionResponse
         {
@@ -2157,7 +2295,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
                 retiredQueries,
                 retiredUpdates,
                 retiredCommands,
-                session.SessionId);
+                LogSafeText.Render(session.SessionId));
         }
 
         long guard = GuardLease(session.Lease);
@@ -2194,7 +2332,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
 
         _logger?.LogDebug(
             "EndSession retired session {SessionId} on pool lease {Lease} with code {ReturnCode}.",
-            session.SessionId,
+            LogSafeText.Render(session.SessionId),
             session.Lease.Id,
             rtCode);
 
@@ -2647,7 +2785,7 @@ internal sealed class TransactionService : GeneratedTransactionServiceBase
                 + "reported on the response as sharing_session_count. Session handle values are "
                 + "deliberately not recorded.",
                 verb,
-                session.Principal,
+                LogSafeText.Render(session.Principal),
                 session.Lease.Id,
                 sharing);
         }

@@ -451,6 +451,125 @@ public sealed class ResilienceRetrySafetyTests
     }
 
     /// <summary>
+    /// A configured retry count of zero starts the host, installs NO gRPC retry configuration on any of
+    /// the four Persistence channels, and leaves the HTTP layer unable to retry anything.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE DISABLE USED TO BE UNDEPLOYABLE, WHICH IS WHY THE FIRST ASSERTION IS THAT THE HOST STARTS
+    /// AT ALL.</b> Zero was documented as disabling retrying and annotated as legal, while both retry
+    /// layers consumed it unconditionally. The resilience package declares its retry strategy's count in
+    /// the range one to <see cref="int.MaxValue"/>, so resolving a client threw "The field
+    /// &lt;client&gt;-standard.Retry.MaxRetryAttempts must be between 1 and 2147483647" - observed on the
+    /// sibling Gateway edge, whose wiring is identical - and the gRPC layer's <c>MaxAttempts = retries + 1</c>
+    /// became one, which its own retry policy rejects. Creating the client here is the whole of that first
+    /// claim.
+    /// </para>
+    /// <para>
+    /// <b>"DISABLED" IS AN ABSENCE AT ONE LAYER AND A PREDICATE AT THE OTHER</b>, because that is what the
+    /// two layers permit. The gRPC layer can simply not be configured, so no channel carries a service
+    /// configuration - the absence of a policy rather than a policy that does nothing. The HTTP layer
+    /// cannot express a zero count, so it names the smallest legal one and its predicate refuses
+    /// everything; asserting the predicate rather than the number is what distinguishes a real disable
+    /// from a single surviving retry.
+    /// </para>
+    /// <para>
+    /// THE HTTP HALF IS ONLY OBSERVABLE ON THE SECURITY EDGE, and the assertion is written to notice that
+    /// rather than to work around it. The four gRPC pipelines stand HTTP-level retry down by identity
+    /// whatever the count, so refusing a POST on them proves nothing about the count; the Security REST
+    /// edge is the one pipeline whose GET the shipped configuration retries. Both edges are therefore
+    /// configured to zero and the GET is asserted across all five, which is the exact inverse of
+    /// <c>ASafeMethodIsStillRetried</c>.
+    /// </para>
+    /// </remarks>
+    /// <returns>A task representing the assertions.</returns>
+    [Fact]
+    public async Task AZeroRetryCountDisablesRetryingAtBothLayers()
+    {
+        using DataServicesTestHostFactory host = new();
+
+        foreach (string edge in (string[])["Persistence", "Security"])
+        {
+            host.AdditionalSettings[
+                $"{DataServicesOptions.SectionName}:Resilience:{edge}:{nameof(ClientResilienceOptions.MaxRetryAttempts)}"] =
+                "0";
+        }
+
+        // THE HOST STARTS. On the build this row was written against, resolving a client threw here.
+        using HttpClient started = host.CreateAnonymousClient();
+
+        ClientResilienceOptions configured = host.Services
+            .GetRequiredService<IOptions<DataServicesOptions>>()
+            .Value
+            .Resilience
+            .Persistence;
+
+        Assert.Equal(0, configured.MaxRetryAttempts);
+        Assert.False(configured.RetriesEnabled);
+
+        IOptionsMonitor<GrpcClientFactoryOptions> monitor =
+            host.Services.GetRequiredService<IOptionsMonitor<GrpcClientFactoryOptions>>();
+
+        IReadOnlySet<string> grpcClientNames = GrpcClientNames(host.Services);
+
+        Assert.Equal(4, grpcClientNames.Count);
+
+        foreach (string name in grpcClientNames)
+        {
+            GrpcChannelOptions channelOptions = new();
+
+            foreach (Action<GrpcChannelOptions> configure in monitor.Get(name).ChannelOptionsActions)
+            {
+                configure(channelOptions);
+            }
+
+            // NO RETRY POLICY AT ALL - not a policy configured to attempt once.
+            Assert.Null(channelOptions.ServiceConfig);
+
+            // AND THE CEILING IS LEFT EXACTLY WHERE AN UNCONFIGURED CHANNEL HAS IT, asserted against a
+            // fresh instance rather than against `null`: GrpcChannelOptions ships a non-null default for
+            // this member, so `null` would be a claim about the library rather than about this composition
+            // root. With no service configuration there is no retry policy for a ceiling to bound.
+            Assert.Equal(new GrpcChannelOptions().MaxRetryAttempts, channelOptions.MaxRetryAttempts);
+        }
+
+        IOptionsMonitor<HttpStandardResilienceOptions> resilience =
+            host.Services.GetRequiredService<IOptionsMonitor<HttpStandardResilienceOptions>>();
+
+        IReadOnlySet<string> pipelineNames = ResiliencePipelineNames(host.Services);
+
+        // Five standard handlers - the four gRPC channels plus the Security REST edge. An empty set would
+        // make every assertion below vacuous, so the count is stated rather than assumed.
+        Assert.Equal(5, pipelineNames.Count);
+
+        bool anySafeMethodRetried = false;
+
+        foreach (string pipelineName in pipelineNames)
+        {
+            HttpStandardResilienceOptions installed = resilience.Get(pipelineName);
+
+            // A LEGAL COUNT, BECAUSE THE PACKAGE'S RANGE FORBIDS ZERO - the predicate is what disables.
+            Assert.Equal(
+                ClientResilienceOptions.DisabledRetryPlaceholderAttempts,
+                installed.Retry.MaxRetryAttempts);
+
+            anySafeMethodRetried |= await WouldRetryAsync(installed, HttpMethod.Get);
+
+            Assert.False(await WouldRetryAsync(installed, HttpMethod.Post));
+        }
+
+        // THE EXACT INVERSE OF ASafeMethodIsStillRetried, WHICH IS WHAT MAKES IT A DISABLE. That test
+        // proves the shipped configuration retries the Security verification-material GET; this one proves
+        // a configured zero takes even that away. Asserting the GET rather than only the POST is the whole
+        // discrimination: a POST is refused on every edge whatever the count, so a POST-only assertion
+        // would pass against a pipeline that still retried once.
+        Assert.False(
+            anySafeMethodRetried,
+            "A pipeline retried a GET with the attempt count configured to zero, so zero restricts nothing "
+                + "and the documented disable is still not deployable.");
+    }
+
+    /// <summary>
     /// Materializes the EFFECTIVE resilience options of every named pipeline the composition registers.
     /// </summary>
     /// <returns>The named pipelines.</returns>
@@ -477,14 +596,38 @@ public sealed class ResilienceRetrySafetyTests
 
         using ServiceProvider provider = services.BuildServiceProvider();
 
-        SortedSet<string> names = [];
+        IOptionsMonitor<HttpStandardResilienceOptions> monitor =
+            provider.GetRequiredService<IOptionsMonitor<HttpStandardResilienceOptions>>();
+
+        return
+        [
+            .. ResiliencePipelineNames(provider)
+                .OrderBy(name => name, StringComparer.Ordinal)
+                .Select(name => (name, monitor.Get(name))),
+        ];
+    }
+
+    /// <summary>
+    /// Discovers the names of every standard resilience pipeline a provider carries registrations for.
+    /// </summary>
+    /// <param name="provider">The provider the registrations are read from.</param>
+    /// <returns>The pipeline names, each carrying the package's <c>-standard</c> suffix.</returns>
+    /// <remarks>
+    /// DISCOVERED RATHER THAN LISTED, for the same reason the gRPC client names are: a client added later
+    /// is covered without editing this file, and the count assertion at each call site is what turns
+    /// "covered" into "noticed". The names are read through the <c>Name</c> property rather than a cast,
+    /// because the library uses its own named-configuration types alongside the framework's and a cast to
+    /// one concrete type would silently skip the others - which is how a client would drop out of this
+    /// suite without anything failing. The all-names registration contributes no name, which is correct
+    /// because it is not a pipeline of its own.
+    /// </remarks>
+    private static IReadOnlySet<string> ResiliencePipelineNames(IServiceProvider provider)
+    {
+        HashSet<string> names = new(StringComparer.Ordinal);
 
         foreach (IConfigureOptions<HttpStandardResilienceOptions> configure in provider
             .GetServices<IConfigureOptions<HttpStandardResilienceOptions>>())
         {
-            // Read through the property rather than a cast: the library uses its own named-configuration
-            // types alongside the framework's, and a cast to one concrete type would silently skip the
-            // others - which is how a client would drop out of this suite without anything failing.
             if (configure.GetType().GetProperty("Name")?.GetValue(configure) is string name
                 && !string.IsNullOrEmpty(name))
             {
@@ -492,10 +635,7 @@ public sealed class ResilienceRetrySafetyTests
             }
         }
 
-        IOptionsMonitor<HttpStandardResilienceOptions> monitor =
-            provider.GetRequiredService<IOptionsMonitor<HttpStandardResilienceOptions>>();
-
-        return [.. names.Select(name => (name, monitor.Get(name)))];
+        return names;
     }
 
     /// <summary>Asks a pipeline whether it would retry a transient failure of the given method.</summary>

@@ -157,22 +157,37 @@ public sealed class OrchestrationTemplateCoherenceTests
     /// the value the service itself declares.
     /// </para>
     /// <para>
-    /// THE LAST SIX ARE THE AUTHORIZATION FAMILY, and they are the only entries in the roster that are
-    /// not flat screaming-snake names. SECURITY_MTLS_CLIENT_REVOCATION_MODE belongs with the client-side
-    /// material above - it says how thoroughly a presented client certificate's revocation is checked, and
-    /// it is separate from the anchor because a deployment can trust an issuer without being able to reach
-    /// its revocation data. The other five are the end-to-end suite's row in Security's issuance
-    /// allowlist, spelled as SECTION-PATH variables because they address one element of an array of
-    /// objects and no flat name can express that shape.
+    /// SECURITY_MTLS_CLIENT_REVOCATION_MODE belongs with the client-side material above - it says how
+    /// thoroughly a presented client certificate's revocation is checked, and it is separate from the
+    /// anchor because a deployment can trust an issuer without being able to reach its revocation data.
     /// </para>
     /// <para>
-    /// THE INDEX 3 IS LOAD-BEARING AND MUST NOT BE CHANGED TO 0, 1 OR 2. Those three indices are authored
-    /// in the settings file, and the environment provider MERGES by index rather than replacing or
-    /// appending: naming an occupied index does not add a row and does not override the row either, it
-    /// produces a silently HYBRID row carrying the environment's value for the members it names and the
-    /// settings file's values for the rest, leaving the row count unchanged. That hybrid is not a
-    /// duplicate, so the validator's duplicate-pair guard does not fire on it either. 3 is the first free
-    /// index, which is why it is the one that appends a genuine fourth row.
+    /// 🔴 FIVE SECTION-PATH VARIABLES WERE REMOVED FROM THIS ROSTER, AND EVERY REMAINING ENTRY IS NOW A
+    /// FLAT SCREAMING-SNAKE NAME. <c>Security__CallerAuthorizations__3__{Caller,Audience,Scopes__0..2}</c>
+    /// granted the end-to-end suite's identity through the environment at a literal array index. They were
+    /// redundant in <c>Development</c>, where Security's own overlay already states that grant at that
+    /// index ALONGSIDE the credential entry the caller needs in order to authenticate for it - which no
+    /// environment block supplied - and wrong in <c>Production</c>, where the base settings file registers
+    /// no such caller, so the block created a permission nothing could authenticate to exercise. The index
+    /// was additionally load-bearing across two files under merge-by-index: a fourth row added to the
+    /// settings file would have been silently merged INTO the block rather than appended, yielding a hybrid
+    /// row that no duplicate guard could see. The grant now lives only where the caller is registered.
+    /// </para>
+    /// <para>
+    /// FOUR <c>_HOST_PORT</c> VARIABLES WERE ADDED, and they are the only entries that reach no
+    /// application setting at all: they are the LEFT half of each <c>ports:</c> mapping. The container half
+    /// stays fixed because it is what Kestrel binds, and a variable for it could only ever disagree with
+    /// the settings file. These exist because the documented second-stack recipe
+    /// (<c>docker compose -p pfw-2</c>) separates networks, volumes and container names but NOT published
+    /// ports, so with four fixed publications it collided on all four and could not start.
+    /// </para>
+    /// <para>
+    /// AND <c>INTERNAL_TLS_TRUSTED_CA_PATH</c> BECAME <c>INTERNAL_TLS_CA_PATH</c>, which is a change of
+    /// meaning rather than of spelling. The old variable's documented value was a path INSIDE a container
+    /// for a manifest that projected nothing there, so every internal channel and every image probe
+    /// verified against a file that did not exist. The manifest now declares the anchor as a Compose
+    /// secret, owns the container-side path as a literal, and this variable names the SOURCE on the
+    /// operator's host - which is why it also joins the must-be-empty set below.
     /// </para>
     /// </remarks>
     private static readonly string[] ExpectedVariableNames =
@@ -190,13 +205,32 @@ public sealed class OrchestrationTemplateCoherenceTests
         "GATEWAY_MTLS_CERT_PATH",
         "GATEWAY_MTLS_KEY_PATH",
 
-        // The trust anchor every internal client verifies its peer against. Three consumers, one
-        // variable: Gateway__InternalTls__TrustedCaPath, DataServices__InternalTls__TrustedCaPath and
-        // Persistence's unprefixed InternalTls__TrustedCaPath. Its absence was the defect behind an
-        // entire class of unreachable-upstream failure - the documented topology issues every internal
-        // certificate from a LOCAL authority that no container's OS trust store carries, so without an
-        // anchor named to each service every internal channel refuses the certificate it is presented.
-        "INTERNAL_TLS_TRUSTED_CA_PATH",
+        // The host side of Gateway's published port. See the remarks: these four are the left half of a
+        // `ports:` mapping and reach no application setting.
+        "GATEWAY_HOST_PORT",
+
+        // The trust anchor every internal client verifies its peer against, as a path ON THE HOST which
+        // the manifest projects as a Compose secret. Four consumers downstream of that one projection:
+        // Gateway__InternalTls__TrustedCaPath, DataServices__InternalTls__TrustedCaPath, Persistence's
+        // unprefixed InternalTls__TrustedCaPath, and the INTERNAL_TLS_TRUSTED_CA_PATH each image's own
+        // HEALTHCHECK reads - all four stated as the literal projected path by the manifest rather than
+        // as a variable. Its absence was the defect behind an entire class of unreachable-upstream
+        // failure: the documented topology issues every internal certificate from a LOCAL authority that
+        // no container's OS trust store carries, so without the anchor every internal channel refuses
+        // the certificate it is presented.
+        "INTERNAL_TLS_CA_PATH",
+
+        "DATASERVICES_HOST_PORT",
+        "PERSISTENCE_HOST_PORT",
+        "SECURITY_HOST_PORT",
+
+        // The switch that makes the ONE documented bring-up command sufficient on a fresh volume. It is
+        // true in the template and FALSE in Persistence's own settings file, and that asymmetry is the
+        // design rather than a drift: the code default is opted out, so nothing that fails to set it
+        // changes behaviour, and the template is the single visible place the stack opts in. It is
+        // consequently NOT a member of PreservedDefaults - that list compares a variable against a
+        // settings key it must AGREE with, and this pair is required to differ.
+        "PERSISTENCE_APPLY_MIGRATIONS_ON_STARTUP",
 
         "PERSISTENCE_BASE_URL",
         "PERSISTENCE_GRPC_URL",
@@ -220,15 +254,6 @@ public sealed class OrchestrationTemplateCoherenceTests
         "SECURITY_MTLS_CLIENT_CA_PATH",
         "SECURITY_MTLS_CLIENT_REVOCATION_MODE",
 
-        // The end-to-end suite's row in the issuance allowlist. Index 3 appends a fourth row to the three
-        // the settings file authors; see the remarks above for why an occupied index would silently
-        // produce a hybrid row instead.
-        "Security__CallerAuthorizations__3__Audience",
-        "Security__CallerAuthorizations__3__Caller",
-        "Security__CallerAuthorizations__3__Scopes__0",
-        "Security__CallerAuthorizations__3__Scopes__1",
-        "Security__CallerAuthorizations__3__Scopes__2",
-
         "TLS_CERTIFICATE_KEY_PATH",
         "TLS_CERTIFICATE_PATH",
     ];
@@ -247,6 +272,13 @@ public sealed class OrchestrationTemplateCoherenceTests
         "SECURITY_JWT_SIGNING_KEY",
         "TLS_CERTIFICATE_PATH",
         "TLS_CERTIFICATE_KEY_PATH",
+
+        // THE TRUST ANCHOR IS HERE FOR A REASON THAT IS NOT SECRECY, and saying so matters because the
+        // file is the PUBLIC half of an authority and is genuinely not sensitive. It is empty because it
+        // is a path on the OPERATOR'S OWN MACHINE, which this template cannot know - and because its
+        // previous non-empty value was a path inside a container, which is exactly the confusion that
+        // made every internal channel verify against a file nothing had put there.
+        "INTERNAL_TLS_CA_PATH",
 
         // THE FIVE CLIENT-SIDE MUTUAL-TLS PATHS BELONG HERE FOR A SECOND REASON BESIDES SECRECY, and it
         // is the sharper of the two: Gateway and DataServices load their pair EAGERLY at startup with
@@ -321,16 +353,22 @@ public sealed class OrchestrationTemplateCoherenceTests
     /// would be an address for a service that does not exist.
     /// </para>
     /// <para>
-    /// 5111 and 5112 are the gRPC endpoints of Persistence and DataServices. They sit OUTSIDE the
-    /// documented 5101-5105 band on purpose: the attached environment fixes <c>/health</c> addresses on
-    /// that band and documents no gRPC address at all, so an address it never named can be added without
-    /// moving one it did. Every documented port keeps exactly the meaning it was given.
+    /// THE ROSTER IS FOUR PORTS AND NOT SIX, WHICH IS THE COLLAPSE MADE ASSERTABLE. An earlier revision
+    /// also listed 5111 and 5112, the separate <c>Http2</c>-only gRPC endpoints of Persistence and
+    /// DataServices, placed outside the documented band so that an address the attached environment never
+    /// named could be added without moving one it did. They were withdrawn: AAP 0.3.2.2 assigns contracts
+    /// C-05..C-08 to 5101 and C-03/C-04 to 5102, so a gRPC contract answering anywhere else is not on the
+    /// port the map gives it. Each of those two services now binds ONE TLS endpoint with
+    /// <c>Protocols: Http1AndHttp2</c>, where ALPN carries the readiness probe and the gRPC contracts
+    /// together. Every documented port keeps exactly the meaning it was given, and a template value naming
+    /// 5111 or 5112 is now an address no listener answers.
     /// </para>
     /// </remarks>
-    private static readonly int[] AssignedPorts = [5101, 5102, 5104, 5105, 5111, 5112];
+    private static readonly int[] AssignedPorts = [5101, 5102, 5104, 5105];
 
     /// <summary>Each address variable, the port it must name, and the scheme it must use.</summary>
     /// <remarks>
+    /// <para>
     /// EVERY SCHEME IS <c>https</c>, AND THAT IS ASSERTED RATHER THAN TOLERATED. The environment gates
     /// each service's readiness on <c>curl -sf http://localhost:&lt;port&gt;/health</c>, which fixes the
     /// probe SHAPE - an anonymous <c>GET</c> of <c>/health</c> on that port answering 200 - and not the
@@ -340,13 +378,22 @@ public sealed class OrchestrationTemplateCoherenceTests
     /// decomposition itself created (AAP 0.1.4). The issuer is held to the same scheme as the base address
     /// because the two are compared byte for byte against the <c>iss</c> claim: a one-character divergence
     /// rejects every token in the system, silently, until the first authenticated request.
+    /// </para>
+    /// <para>
+    /// A BASE-URL VARIABLE AND ITS <c>_GRPC_URL</c> SIBLING NOW NAME THE SAME PORT, AND BOTH SURVIVE. Each
+    /// gRPC-serving service binds one endpoint carrying both protocol versions, so the two variables no
+    /// longer differ in ADDRESS - they differ in the EDGE they configure, and each binds a different
+    /// service setting: the base URL reaches a readiness probe, the gRPC URL is the call address a caller
+    /// builds a channel from. Keeping them separate keeps a call address out of a probe setting, which is
+    /// a substitution neither side would report.
+    /// </para>
     /// </remarks>
     private static readonly AddressExpectation[] AddressExpectations =
     [
         new("PERSISTENCE_BASE_URL", 5101, Uri.UriSchemeHttps),
-        new("PERSISTENCE_GRPC_URL", 5111, Uri.UriSchemeHttps),
+        new("PERSISTENCE_GRPC_URL", 5101, Uri.UriSchemeHttps),
         new("DATASERVICES_BASE_URL", 5102, Uri.UriSchemeHttps),
-        new("DATASERVICES_GRPC_URL", 5112, Uri.UriSchemeHttps),
+        new("DATASERVICES_GRPC_URL", 5102, Uri.UriSchemeHttps),
         new("SECURITY_BASE_URL", 5104, Uri.UriSchemeHttps),
         new("SECURITY_JWT_ISSUER", 5104, Uri.UriSchemeHttps),
         new("GATEWAY_HEALTH_PROBE_PERSISTENCE_URL", 5101, Uri.UriSchemeHttps),

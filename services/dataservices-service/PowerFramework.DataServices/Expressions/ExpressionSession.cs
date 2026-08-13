@@ -252,6 +252,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PowerFramework.DataServices.Configuration;
 using PowerFramework.DataServices.Domain;
+using PowerFramework.Shared.Diagnostics;
 using PowerFramework.Shared.Containers;
 using PowerFramework.Shared.Kernel;
 
@@ -2660,10 +2661,16 @@ public sealed class ExpressionSession
     /// </para>
     /// </remarks>
     /// <summary>The separator between links of a described fault chain, outermost towards innermost.</summary>
-    private const string FaultChainSeparator = " <- ";
+    /// <remarks>
+    /// FORWARDED RATHER THAN DECLARED. This walk was written twice - here and in Persistence's status
+    /// interceptor - with the same three values, while other sites in both services still attached the
+    /// exception object itself. Three independent copies of one security control drift; the walk therefore
+    /// moved to <see cref="ExceptionChain"/> and these names forward to it.
+    /// </remarks>
+    private const string FaultChainSeparator = ExceptionChain.Separator;
 
     /// <summary>The marker appended when a fault chain is deeper than the bound below.</summary>
-    private const string FaultChainTruncationMarker = "...";
+    private const string FaultChainTruncationMarker = ExceptionChain.TruncationMarker;
 
     /// <summary>
     /// How many links of a fault chain are described before truncation.
@@ -2673,7 +2680,7 @@ public sealed class ExpressionSession
     /// through aggregation, and an unbounded walk over one would build a string until the process ran out of
     /// memory - while handling a fault, which is the worst moment for a second one.
     /// </remarks>
-    private const int MaximumDescribedFaultDepth = 8;
+    private const int MaximumDescribedFaultDepth = ExceptionChain.MaximumDepth;
 
     private const string HostFaultedTemplate =
         "Cross-DataWindow expression reference FAILED: the expression service behind DataWindow handle "
@@ -2825,8 +2832,8 @@ public sealed class ExpressionSession
                 + "{Handle}, expression session {SessionId}, fault types {FaultTypes}. The caller received "
                 + "fixed text carrying this correlation id and no exception detail.",
             faultId,
-            handle.Value,
-            SessionId,
+            LogSafeText.Render(handle.Value),
+            LogSafeText.Render(SessionId),
             DescribeExceptionTypes(exception));
 
         ImmutableArray<string> arguments =
@@ -2916,31 +2923,8 @@ public sealed class ExpressionSession
     /// aggregation; a truncation marker is appended so a shortened chain is never mistaken for a complete
     /// one.
     /// </remarks>
-    private static string DescribeExceptionTypes(Exception error)
-    {
-        StringBuilder chain = new();
-        Exception? current = error;
-
-        for (int depth = 0; depth < MaximumDescribedFaultDepth && current is not null; depth++)
-        {
-            if (depth > 0)
-            {
-                _ = chain.Append(FaultChainSeparator);
-            }
-
-            Type type = current.GetType();
-
-            _ = chain.Append(type.FullName ?? type.Name);
-            current = current.InnerException;
-        }
-
-        if (current is not null)
-        {
-            _ = chain.Append(FaultChainSeparator).Append(FaultChainTruncationMarker);
-        }
-
-        return chain.ToString();
-    }
+    private static string DescribeExceptionTypes(Exception error) =>
+        ExceptionChain.DescribeTypes(error);
 
 
     /// <summary>

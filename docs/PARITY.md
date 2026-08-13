@@ -53,7 +53,7 @@ eventually disagree with itself:
 | Secret locators, severities and required actions; the token-topology register | [`SECRETS.md`](SECRETS.md) |
 | Which legacy library and which of the 544 objects each fixture belongs to | [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) |
 | The four deferred destinations, which receive no project, no container and no test in this phase | [`DEFERRED.md`](DEFERRED.md) |
-| Compose bring-up detail and the readiness gates step by step | `orchestration/README.md` |
+| Compose bring-up detail, the readiness gates step by step, and **the single statement of what has and has not been exercised** | [`orchestration/README.md`](../orchestration/README.md) |
 
 One duplication in this document is **deliberate and mandated** rather than an oversight: the
 shared-volume capture rule in [§4.2](#42-the-rule-stated-in-full) is restated word for word in
@@ -61,28 +61,35 @@ shared-volume capture rule in [§4.2](#42-the-rule-stated-in-full) is restated w
 
 ## Current state of the artifacts this document references
 
-Some artifacts named below are **planned and not yet present in this repository**. They are named
-because they are where the corresponding work belongs, not because a reader can open them today:
+**Every artifact named below exists in the tree, with one exception that is the point of this section.**
+The `characterization/` store is present as structure — its readme, its fifteen workflow definitions and
+the JSON Schema they validate against, and both recording roots — but **no recording has been captured on
+either side**:
 
-| Artifact | What it will carry | State |
-| --- | --- | --- |
-| `characterization/README.md` | The paired-capture store's own readme, restating the shared-volume rule verbatim | **Planned — not yet present** |
-| `characterization/workflows/` | Workflow definitions and their determinism masks | **Planned — not yet present** |
-| `characterization/recordings/legacy/<workflowId>/`, `characterization/recordings/dotnet/<workflowId>/` | The paired recordings themselves | **Planned — not yet present** |
-| `orchestration/docker-compose.yml`, `orchestration/README.md` | Local orchestration, the `persistence-db` volume and the readiness gates. `orchestration/.env.example` is present; the manifest and its readme are not | **Planned — not yet present** |
+| Artifact | State |
+| --- | --- |
+| `characterization/README.md` | **Present.** The paired-capture store's own readme, restating the shared-volume rule verbatim |
+| `characterization/workflows/` | **Present.** Fifteen workflow definitions with their determinism masks, plus `workflow.schema.json` and a readme |
+| `characterization/recordings/legacy/<workflowId>/`, `characterization/recordings/dotnet/<workflowId>/` | **Present as empty roots.** No recording exists on either side, so **no paired comparison has been made** |
+| `orchestration/docker-compose.yml`, `orchestration/README.md`, `orchestration/.env.example` | **Present.** Local orchestration, the `persistence-db` volume and the readiness gates |
 
-Everything else this document references **is present in the tree today**: the read-only legacy tree
-including the entire fixture corpus, the six shared library projects and their test projects, the four
-service applications with entry points and their four test projects, the protocol and OpenAPI definitions
-under `shared/PowerFramework.Contracts/`, the Playwright specs under `tests/e2e/specs/`,
-`orchestration/.env.example`, and the six sibling documents in this folder. All twenty projects build in
-Release with zero warnings and zero errors and all ten test projects pass; what remains unexercised is
-everything requiring a **container or a network hop** rather than anything requiring code.
+Everything else this document references is present too: the read-only legacy tree including the entire
+fixture corpus, the six shared library projects and their test projects, the four service applications with
+entry points and their four test projects, the protocol and OpenAPI definitions under
+`shared/PowerFramework.Contracts/`, the Playwright specs under `tests/e2e/specs/`, and the six sibling
+documents in this folder. All twenty projects build in Release with zero warnings and zero errors and all
+ten test projects pass.
+
+**Present is not the same claim as exercised, and this document does not keep its own account of what was
+run.** One place does, for the whole repository:
+[`orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised).
+It is explicit that the orchestrated bring-up was exercised and that **no characterization capture was**,
+which is exactly the gap this document is the specification for.
 
 The distinction matters here more than it looks. A parity model whose *inputs* were also hypothetical
 would be unfalsifiable — but the inputs are not hypothetical. **The oracle and its fixtures exist
-today, in this checkout, and have been counted.** What is planned is only the store the recordings will
-land in and the pipeline that will gate them.
+today, in this checkout, and have been counted.** What is missing is the recordings themselves and the
+pipeline that will gate them.
 
 ---
 
@@ -182,12 +189,13 @@ Stated narrowly, because a parity document that overclaims its own verification 
   a throwaway skeleton project, not against this repository's services**, and it is evidence that the
   command and the coverage collector work rather than a result for the four services.
   [`BUILD.md`](BUILD.md) §13 states the same caveat and is the authority for it.
-- **Separately, in this repository:** restore is audit-clean and the shared libraries, the contracts
-  project and the four service projects build with zero warnings and zero errors, with the test suites
-  passing, and all four container definitions exist. What has **not** been exercised here is the STACK
-  starting: one image was built and run in isolation, no request crossed a boundary between two services,
-  and no orchestration manifest exists to bring the four up together, so nothing in this document should be
-  read as evidence that a service answers another service over the network. [`BUILD.md`](BUILD.md) §13 carries the current figures.
+- **Separately, in this repository:** restore is audit-clean, all twenty projects build with zero warnings
+  and zero errors, all ten test suites pass, all four images build, and the **four-service stack has been
+  brought up** — every container reaching Docker health `healthy` in dependency order, with `/health`
+  answering anonymously over TLS on all four and Gateway's aggregate answering against three live
+  upstreams. [`BUILD.md`](BUILD.md) §1.3 is the canonical record of what was run; no figure is restated
+  here. **None of that is a parity result** — it establishes that the capture *environment* works, which is
+  a precondition of a comparison rather than a comparison.
 - **Every locator in this document was resolved against the file on disk**, and the cited line numbers
   were checked against their content rather than trusted.
 - **Every count in [§3](#3-the-oracle-and-its-fixture-corpus) was produced by counting the files**, and
@@ -199,48 +207,47 @@ Stated narrowly, because a parity document that overclaims its own verification 
   that object for any localization call at all. There are none. See
   [§7.8](#78-the-non-localized-expression-messages).
 
-### 1.5 What was not verified — stated plainly
+### 1.5 What this document does not claim — stated plainly
 
-**No verified multi-service container bring-up is claimed anywhere in this document**, and the reason is no
-longer that nothing exists to bring up. The four service applications all have entry points and all start
-under `dotnet run`, **all four container definitions are authored**, and so is
-`.github/workflows/ci.yml`. What is missing is the thing that ASSEMBLES them:
-`orchestration/docker-compose.yml` and `orchestration/README.md` are absent, so the health-condition chain
-has no expression in the tree, and **two of the four images have not been built here**. Docker was
-additionally not installed in the environment where this migration was planned, so the Compose bring-up
-and its ordered health probes could not have been exercised there in any case.
+**No parity result is claimed anywhere in this document, and that is the claim that matters here.** The
+services build, their suites pass and the stack has been brought up — but **no characterization recording
+exists on either side**, so nothing has been compared. `characterization/recordings/legacy/` and
+`characterization/recordings/dotnet/` are present and empty. This document is the model and the method; it
+reports no comparison, because the legacy oracle has not been exercised here
+([R1](#r1--pinyin-first-letter-matching-cannot-be-proven-bit-exact-from-the-repository-alone)) and no
+target-side capture has been taken either.
 
-This matters more in this document than in any other, because the capture rule in
-[§4.2](#42-the-rule-stated-in-full) is expressed in terms of a Docker volume. So the position must be
-exact: **the rule is authoritative, and the multi-service environment it presumes has never been stood up
-here** — and it cannot be until the Compose manifest exists. One relevant half HAS since been exercised,
-and stating it is not the same as claiming the rule was honoured: the Persistence image was built and run
-against a **fresh named volume**, which confirmed that Docker seeds such a volume from the image directory
-as `1654:1654` so the non-root process can write its database, and that `/health` answers 503 naming an
-unprovisioned database and 200 once the schema is applied to that volume
-([`ARCHITECTURE.md`](ARCHITECTURE.md) §10.6 records the run in full). That establishes the volume seam a
-capture would use; it does not constitute a capture, and no comparison is claimed from it. Container
-correctness for the stack as a whole is therefore **still not asserted**: definition-and-manifest review
-plus CI is the intended assurance mechanism once the manifest is authored, not a step that has been taken,
-and
-[R4](#r4--nothing-assembles-the-container-set-so-no-multi-service-bring-up-has-been-reviewed)
-carries that as a tracked risk rather than a footnote.
+**This document keeps no account of what was run — one place does.**
+[`orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised)
+is the single execution-status statement for the repository. It records that the orchestrated bring-up was
+exercised, and it lists the absence of any characterization capture first among the things that were not.
 
-**No paired recording exists, therefore no parity result exists.** This is the claim that survives the
-services being built: `characterization/` does not exist, so there is nowhere to write a recording to. This
-document is the model and the method; it reports no comparison, because the legacy oracle has not been
-exercised here
-([R1](#r1--pinyin-first-letter-matching-cannot-be-proven-bit-exact-from-the-repository-alone)) and the
-target side has no *deployed* service to capture from — an in-process test host is not a capture
-environment, because the capture rule of [§4.2](#42-the-rule-stated-in-full) is expressed against a
-Docker volume that no manifest mounts.
+The distinction matters more in this document than in any other, because the capture rule of
+[§4.2](#42-the-rule-stated-in-full) is expressed in terms of a Docker volume — and that volume seam has now
+been observed rather than assumed. Persistence provisions a **fresh** `persistence-db` volume during
+startup, additively and idempotently, and survives a plain `down`; the single statement above quotes the
+log lines. **Observing the seam is not taking a capture**, and no comparison is claimed from it: what the
+seam establishes is that a paired capture *can* be taken against one unrecreated volume, which is precisely
+what the rule requires of the work that produces the first pair.
 
-Two further things are not claimed. **No paired recording exists yet** — the store described in §4 is
-planned, so this document defines the model and the discipline, not a completed comparison. And **the
-legacy side of the oracle has not been executed in this environment**; running it requires a
-PowerBuilder toolchain that is not present, which is exactly what makes
-[R1](#r1--pinyin-first-letter-matching-cannot-be-proven-bit-exact-from-the-repository-alone) a real risk
-rather than a theoretical one.
+- `characterization/recordings/legacy/` holds **no recording**, and none can be produced here.
+- `characterization/recordings/dotnet/` holds **no recording** either, because a target-side capture with
+  nothing to pair against is not half a comparison — it is an artifact with no counterpart, and
+  [§4](#4-paired-recordings-and-the-shared-volume-capture-rule) explains why storing one is worse than
+  storing none.
+- **No behavioural claim in this documentation set rests on a comparison.** Every one rests on a source
+  locator into the read-only legacy tree, which is the discipline [§1.4](#14-what-was-verified-by-execution)
+  describes and the reason it exists.
+
+That is the whole of the gap, and it is tracked as
+[R4](#r4--the-stack-has-been-brought-up-but-no-capture-has-been-taken-against-it) rather than as a
+footnote. What this document is, therefore, remains what it always was: **the model, the fixture corpus,
+the determinism seams and the method** — with the capture environment now proven and the oracle still
+unrun.
+
+One consequence for a reader in a position to run the oracle: everything on the target side is ready. The
+15 workflow definitions, their masks, the schema and the store are authored; the stack comes up; the seams
+are injected. The next step is a legacy run, not more scaffolding.
 
 ### 1.6 No performance claim appears in this document
 
@@ -582,7 +589,6 @@ path. Adding one would refuse a value the oracle accepts — a divergence dresse
 treatment is the one taken: record it, so that a reader meeting a `length()` that disagrees with the
 string they sent finds the reason here rather than filing it as data loss in the port.
 
-
 ---
 
 ## 4. Paired recordings and the shared-volume capture rule
@@ -638,6 +644,18 @@ single workflow identifier must stay inside a single working tree against one un
 `persistence-db` volume. Where several clones run concurrently, each needs its own Compose project and
 its own volume so that one clone's teardown cannot invalidate another clone's half-finished pair.
 
+**One thing the rule is regularly misread as forbidding, and does not: Persistence applying its own pending
+migrations at startup.** The manifest turns that step on
+([`ARCHITECTURE.md`](ARCHITECTURE.md) §8.6), so a `persistence-service` container started or restarted in the
+middle of a pair will run it. What it calls is EF Core's `Database.Migrate` and nothing else — additive, and
+performing no write at all when the history table already records everything — so it neither recreates nor
+reseeds the volume, which are the two acts §4.2 names. The rule is about the **volume's state**, not about
+which process establishes it: what voids a pair is recreating the volume, re-running the legacy fixture's own
+file delete and DDL, or reseeding rows. A capture operator who would rather have the step out of the picture
+altogether sets `PERSISTENCE_APPLY_MIGRATIONS_ON_STARTUP=false` and provisions once before the pair begins;
+that is also the code default, so relying on an untouched volume never depends on remembering to switch
+something off. `characterization/README.md` §4.4 carries the same ruling at the point of capture.
+
 ### 4.3 The rename is a deliberate, documented deviation
 
 The attached environment names the persistence volume after a *data service*. In the reviewed
@@ -659,9 +677,9 @@ Two things about the rename are recorded rather than assumed (C-K):
   situational: an operator capturing a recording is working inside `characterization/`, and a rule that
   lives only in a documentation folder they have no reason to open is a rule that will be broken by
   someone acting in good faith. This is the one place in this documentation set where restatement beats
-  cross-reference, and §4.2 is the canonical text both copies carry. **That second copy does not exist
-  yet**: the `characterization/` directory is planned and absent, so the obligation is on the work that
-  creates it, and whoever writes it copies §4.2 rather than re-deriving it.
+  cross-reference, and §4.2 is the canonical text both copies carry. **That second copy exists**:
+  [`../characterization/README.md`](../characterization/README.md) §2 carries the rule, and a change to
+  either copy is a change to both.
 
 ### 4.4 The rule is the technique's own prerequisite, not merely a local convention
 
@@ -688,25 +706,25 @@ the abstract.
 
 A seam that is documented but not injected has no effect on a single test (§5.2), so each row below
 carries **its own status** in the vocabulary [`BUILD.md`](BUILD.md) §1 declares, rather than a blanket
-claim over all four. Three of the four are injected in source; the fourth is not in the tree yet. The
-per-row status is the point: a single "every seam is injected" sentence would be false of the fourth row,
-and — because it names no injection point — unfalsifiable for the other three.
+claim over all four. **All four are now injected in source**, each at a named injection point, so every
+row is checkable rather than asserted — which is the reason the per-row status column exists and the reason
+it is kept now that the statuses agree.
 
-**Each implemented seam here is executed by its service's own suite** — all four service test projects
-build and pass ([§1.4](#14-what-was-verified-by-execution)) — but by unit and in-process host tests rather
-than by a paired characterization capture, which is what the store below is for and which does not exist
-yet. Exactly one piece of *executed* evidence bears on this section, and it is negative:
+**Each seam here is executed by its service's own suite** — all four service test projects build and pass
+([§1.4](#14-what-was-verified-by-execution)) — but by unit and in-process host tests rather than by a
+paired characterization capture, which is what the store below is for and which holds no recording. Exactly
+one piece of *executed* evidence bears on this section, and it is negative:
 `shared/PowerFramework.Contracts.Tests/ContractsCarryNoBehaviourTests.cs` lists `System.TimeProvider`
 among the ambient capabilities the boundary must not hold (`:L1545-L1556`) and
 `NoExportedTypeMentionsIoNetworkDatabaseConfigurationOrAmbientStateInItsSignature` (`:L1595`) fails the
 build if any exported contract type mentions one. So the clock seam is provably **not** smuggled into the
-published boundary. That project builds and that test is among its 4,418 passing, which is why this one
-can be cited as a result rather than as an intention.
+published boundary. That project builds and that test passes ([`BUILD.md`](BUILD.md) §1.3 carries the
+count), which is why this one can be cited as a result rather than as an intention.
 
 | Seam | Where it originates | Why it must be seamed | Status |
 | --- | --- | --- | --- |
 | GUID generation, random string generation, random blob generation | The cryptographic surface — `ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L14-L18` (`GenRandomBlob`, `GenRandomString` in two arities, `GenGUID` in two arities), plus the `guid.srf` and `randomstring.srf` wrappers in the same library | The **primary** non-determinism sources in the in-scope estate. Every value differs on every run by design, so any recording that contains one is unmatchable unless the value is masked on both sides | **Present but unexercised** |
-| Transaction-pool idle expiry | CPU-clock based, keyed on the two keep-alive settings — `ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L76-L79` reads them, `:L97` stamps the idle start, `:L215` compares elapsed against the expiry | Elapsed-time-dependent behaviour cannot be reproduced without a controllable clock. Whether a pooled transaction is reused or discarded is **observable**, so the decision must be reproducible even though the elapsed time itself is never asserted | **Planned — not yet present** |
+| Transaction-pool idle expiry | CPU-clock based, keyed on the two keep-alive settings — `ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru:L76-L79` reads them, `:L97` stamps the idle start, `:L215` compares elapsed against the expiry | Elapsed-time-dependent behaviour cannot be reproduced without a controllable clock. Whether a pooled transaction is reused or discarded is **observable**, so the decision must be reproducible even though the elapsed time itself is never asserted | **Present but unexercised** |
 | Every clock read | Throughout the in-scope estate, wherever a timestamp reaches an output or a decision | A timestamp in recorded output differs on every run. Seaming the clock is what makes a recording containing one comparable at all | **Present but unexercised** |
 | Modify-call ordering | The DataWindow modify path, where a sequence of property modifications is applied to reach a target state | Two orderings that reach the same state can emit different intermediate output. An unpinned ordering surfaces as a spurious difference — a diff that reports a change where no behaviour changed | **Present but unexercised** |
 
@@ -721,12 +739,24 @@ Each status above is checkable, because the mechanism carrying it is named. Taki
   unreachable from the provider, so no code path can bypass the double. Two doubles are written:
   `SequencedEntropySource` and `ConstantEntropySource`, at
   `services/security-service/PowerFramework.Security.Tests/RandomProviderTests.cs:L81` and `:L108`.
-- **Transaction-pool idle expiry — no injection point exists, because the type does not.**
-  `Transactions/TransactionPool.cs` is absent from
-  `services/persistence-service/PowerFramework.Persistence/`; the only file in that folder is
-  `Transactions/TransactionData.cs`. The row states the requirement the type will be built against; it
-  reports nothing about the tree. This is the row a blanket claim misrepresented, and it is why the status
-  column exists.
+- **Transaction-pool idle expiry — injected as `TimeProvider`, taken by constructor, and it is the SAME
+  clock that drives the other two legacy clocks in this service.** The type exists:
+  `services/persistence-service/PowerFramework.Persistence/Transactions/TransactionPool.cs`, alongside
+  `Transactions/TransactionPoolIdleSweeper.cs` and `Transactions/TransactionData.cs`. The pooled
+  transaction holds the clock as a field (`TransactionPool.cs:L1710`), takes it as a constructor parameter
+  (`:L1773`) and captures a monotonic origin at construction (`:L1781`); expiry is then decided by
+  `_timeProvider.GetElapsedTime(_monotonicOrigin, _timeProvider.GetTimestamp())` (`:L2575`), and the pool
+  itself and its options type hold the same clock (`:L2877`/`:L2906`, `:L3418`/`:L3539`). **`GetTimestamp`
+  against a construction-time origin rather than a wall-clock read is load-bearing rather than stylistic**,
+  and the file says so at `:L107-L108`: the legacy `CPU()` is elapsed processor time since start, so a
+  wall-clock substitute would be a different quantity that happened to be measured in milliseconds.
+  `TransactionPoolIdleSweeper` builds its `PeriodicTimer` **on the injected clock** (`:L147`), so a
+  deterministic test drives the sweep rather than waiting for it.
+  The doubles are the framework's own `FakeTimeProvider` from `Microsoft.Extensions.TimeProvider.Testing`,
+  advanced explicitly: `TransactionPoolTests.cs` drives the 30-second idle window and the 10-second
+  liveness cache off one shared fake (`:L233`, `:L260`) across **113** facts and theories, and
+  `TransactionPoolIdleSweeperTests.cs` advances it in 5-, 20- and 50-second steps and by an hour (`:L98`,
+  `:L143`, `:L164`, `:L167`, `:L193`) across **7**. No test in either file waits on real time.
 - **Clock reads — injected as `TimeProvider`, taken by constructor, with no ambient read behind it.**
   Present at
   `services/dataservices-service/PowerFramework.DataServices/Domain/ValidationSession.cs:L858,L909`,
@@ -814,12 +844,13 @@ class directly cannot see them.
 > against the implicitly generated internal `Program` with no `public partial` shim — the Gateway
 > authorization, health-aggregation and route-census suites, the Security endpoint suites and the
 > Persistence composition-root and endpoint suites all boot an in-process host. `Microsoft.AspNetCore.Mvc.Testing`
-> is referenced by all four because all four use it. The suite totals are in
-> [`BUILD.md`](BUILD.md) §5.5: 8,278 shared-layer and 10,325 service-layer, 18,603 passing in all.
+> is referenced by all four because all four use it. The per-project totals and the shared-versus-service
+> split are in [`BUILD.md`](BUILD.md) §1.3, which is the canonical record; none is restated here.
 >
 > **What an in-process host still cannot see.** It performs no TLS handshake, no ALPN negotiation, no real
-> gRPC channel setup and no client-certificate exchange, and it is not a capture environment for §4 — the
-> capture rule is expressed against a Docker volume, and no manifest mounts one (§1.5).
+> gRPC channel setup and no client-certificate exchange. Those gaps are closed by the container bring-up of
+> [`BUILD.md`](BUILD.md) §1.3 rather than by any test — but a bring-up is still not a *capture*: no
+> recording has been taken on either side (§1.5).
 
 ### 6.2 The paging rewriters are pure-function matrices requiring no storage engine
 
@@ -865,7 +896,7 @@ are observable in the generated text, so all three **must be** pinned.
 > in the tree and all three are driven: `SqlServerPagingRewriterTests.cs` carries 27 cases across the three
 > SQL Server strategies, `PagingRewriterByteExactTests.cs` carries 3 more, and between them they cover the
 > dispatcher's `DBT_MSSQL` / `DBT_ORACLE` selection and its `E_NO_IMPLEMENTATION` arm for anything else.
-> `PowerFramework.Persistence.Tests` builds and its 2,742 tests pass. So the sentinel register, the
+> `PowerFramework.Persistence.Tests` builds and its 4,470 tests pass. So the sentinel register, the
 > four-form cross-product and the count wrapper above are pinned by byte-exact assertions rather than
 > specified for someone else to write — which is what makes them testable with no instance of either DBMS,
 > the property that let this matrix be written at all.
@@ -1069,12 +1100,18 @@ already pins. The live path is the resource lookup at `:L51`; the commented tabl
 
 Three provider shapes travel with this and are reproduced as they are:
 
-- **The Simplified Chinese provider is a genuine no-op.** It is 28 lines long and carries **no
-  translation table at all**: its translate handler
-  [`ws_objects/pfw.ui.controls.ext.pbl.src/n_cst_i18n_chs.sru:L19-L27`] reports framework-sourced text as
-  already handled and returns "not handled" for everything else, because Simplified Chinese **is** the
-  base locale and there is nothing to translate into. The three-provider shape including this no-op is
-  reproduced; collapsing it to two providers would change which provider a locale selects.
+- **The Simplified Chinese provider mutates no text — but it is not a no-op, and the difference is
+  observable.** It is 28 lines long and carries **no translation table at all**, because Simplified Chinese
+  **is** the base locale and there is nothing to translate into. What it still does is *answer*: its
+  translate handler [`ws_objects/pfw.ui.controls.ext.pbl.src/n_cst_i18n_chs.sru:L19-L27`] returns **1,
+  meaning handled**, for framework-sourced text, and **0, meaning not handled**, for everything else. Those
+  are two different answers to the caller, so "no-op" is the wrong word for it: a genuine no-op would
+  return one value unconditionally, and collapsing the `return 1` into the `return 0` would discard the
+  claim that no further processing is required for framework text. Call it a **no-mutation base-locale
+  provider**. The three-provider shape including this one is reproduced; collapsing it to two providers
+  would change which provider a locale selects. `SERVICE_MAPPING.md` states the same distinction from the
+  mapping side, and the .NET provider preserves both return values with a comment saying why neither may be
+  merged into the other.
 - **The three providers are of very different sizes, and that is expected**: English 164 lines,
   Traditional Chinese 68 lines [`n_cst_i18n_cht.sru`], Simplified Chinese 28. Both non-base providers
   read the same resource table [`n_cst_i18n_en.sru:L158-L159`, `n_cst_i18n_cht.sru:L62-L63`].
@@ -1397,21 +1434,25 @@ single line.
 Coverage is the only quantitative non-functional requirement in the entire brief (C-H, and §1.6), so its
 mechanics are stated precisely rather than as an aspiration.
 
-- **The collector emits `coverage.cobertura.xml`, and it now does so for every service.** All four service
+- **The collector emits `coverage.cobertura.xml`, and it does so for every service.** All four service
   test projects build and run, and each produces that report — the exact artifact the gate is measured
-  from, not an inferred one. Measured line rates: **Gateway 88.77%, DataServices 91.19%,
-  Persistence 88.05%, Security 91.68%**.
-- **What the report covers is scoped deliberately, and the figures above depend on it.** The repository-root
-  `coverage.runsettings` restricts the report to the four service assemblies. Without it, each service's
-  report also covers the shared libraries and the thousands of generated protobuf sequence points in
-  `PowerFramework.Contracts`, and the same four runs read **22.77%, 50.93%, 34.30% and 13.39%** — so an
-  unscoped gate would fail all four services for a reason unrelated to any service's tests. That settings
-  file carries both sets of measurements and the full reasoning.
+  from, not an inferred one. The measured line rates are in [`BUILD.md`](BUILD.md) §1.3, which is the
+  canonical record; **all four clear the floor**, and that is the claim this document needs.
+- **What the report covers is scoped deliberately, and those rates depend on it.** The collector runs
+  unconfigured, so each service's report carries **one Cobertura package per instrumented assembly** — its
+  own, plus the shared libraries and the thousands of generated protobuf sequence points that arrive by
+  `ProjectReference` from `PowerFramework.Contracts`. The gate **selects the package named for that
+  service's own assembly** and reads its line rate; selecting by name *is* the measurement scope, and it is
+  expressed inline in the workflow because **no settings file exists anywhere in this repository and none
+  may be added**. The report's own top-level rate is far lower and means nothing about any service, so **a
+  top-level gate would fail all four services** for a reason unrelated to any service's tests.
+  [`BUILD.md`](BUILD.md) §5.5 carries that comparison.
 - **CI enforces 80% line coverage per in-scope service.** `.github/workflows/ci.yml` exists and does it, in
-  four independent matrix legs. Each leg reads its own service's report and checks three things, the second
-  and third of which are what make the first trustworthy: the line rate clears the floor; the report
-  contains **exactly one** package, which proves the settings file applied; and that package is that
-  service's own assembly, which proves the leg measured the service it claims to. The legs do not fail
+  four independent matrix legs. Each leg reads its own service's report and checks three things, the first
+  and third of which are what make the second trustworthy: that service's own assembly **appears in the
+  report at all**, which proves the leg measured the service it claims to; that assembly's line rate clears
+  the floor; and every other package's rate is **printed but never gated on**, so code the root solution leg
+  owns can neither raise nor lower the verdict. The legs do not fail
   fast against one another, so every run yields all four verdicts rather than one failure and three
   unknowns. Four services are in scope; the four deferred destinations have no project, no test and
   therefore no coverage figure at all (see [`DEFERRED.md`](DEFERRED.md)), and none of them appears in the
@@ -1454,7 +1495,7 @@ correct engineering answer is *report blocked rather than approximate*, that is 
 | R1 | Pinyin first-letter matching cannot be proven bit-exact from the repository alone — the **flags are documented**, the lookup table, the matching algorithm and the exact fuzzy-equivalence set are not | Parity — the **single genuine parity risk in the in-scope set** | Characterize the table, the algorithm and the fuzzy set from the oracle, else **report BLOCKED**. The flag decoding needs no characterization |
 | R2 | Cross-session foreign column-expression variables cannot cross a process boundary | Deliberate contract narrowing | Support co-resident references; **BLOCK the rest with a defined error** |
 | R3 | Encrypted-SQLite page-format parity | Out of Phase-1 scope | Provision the unencrypted path; document the limitation |
-| R4 | Nothing assembles the container set, so no multi-service bring-up has been reviewed | Unverified claim, disclaimed | All four definitions exist and so does CI; the Compose manifest and its readme are absent, so the readiness chain has no expression in the tree. One image was built and run in isolation. Definition-and-manifest review plus CI is the intended mechanism once the manifest exists; claim neither a multi-service bring-up nor a completed review |
+| R4 | The stack has been brought up, but no capture has been taken against it | Residual gap, not retired | The bring-up is exercised and reported in one place; what is missing is a **capture** on either side. A bring-up establishes the volume seam a paired capture needs; it is not itself a capture, and no comparison may be claimed from it |
 | R5 | No authoritative legacy build definition exists to translate | Reconstituting the behavioural oracle | Author the .NET build clean; read the legacy definitions for intent only |
 | R6 | The changelog is stale and is not a specification | Evidence discipline | Derive behaviour from source, with a locator on every claim |
 
@@ -1546,38 +1587,34 @@ a format the target provider cannot produce. An attempt would fail in a way that
 defect, which is worse than a documented gap. [`ARCHITECTURE.md`](ARCHITECTURE.md) records the same decision
 from the storage side.
 
-### R4 — Nothing assembles the container set, so no multi-service bring-up has been reviewed
+### R4 — The stack has been brought up, but no capture has been taken against it
 
-`orchestration/docker-compose.yml` and `orchestration/README.md` do not exist. All four container
-definitions **do** — `gateway-service`, `dataservices-service`, `persistence-service` and
-`security-service` — and so does `.github/workflows/ci.yml`. Two images, Security and Persistence, were
-built and run and reached Docker health `healthy`; for the other two — Gateway and DataServices —
-**`docker build` has not been run here**, so no layer, no `HEALTHCHECK` and no non-root switch in them has
-been observed to work. Docker was additionally not installed in the environment where this migration was
-planned, so the Compose bring-up and its ordered health probes **were not run** and could not have been
-there.
+**What changed, and why the risk is narrowed rather than retired.** An earlier revision of this entry said
+nothing assembled the container set. `orchestration/docker-compose.yml` and `orchestration/README.md` now
+exist alongside all four container definitions and `.github/workflows/ci.yml`, and the bring-up **has** been
+exercised: all four images built, all four services reached Docker health `healthy` in the documented order,
+and Persistence provisioned a fresh `persistence-db` volume by itself. That is reported gate by gate in one
+place —
+[`orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised)
+— and this document does not restate it.
 
-**Mitigation.** Definition-and-manifest review plus CI is the **intended** assurance mechanism for that
-path once the remaining artifacts are authored. It is not a step that has been taken: the manifest half has
-nothing to review and no pipeline exists to run either half.
+**What remains, and it is the half this document is about: no capture exists on either side.** §4.2's
+capture rule is expressed in terms of a Docker volume, and the seam is now observed rather than presumed —
+but observing that a fresh volume provisions itself and survives a plain `down` is **not** a recording. No
+legacy-side capture has been taken, no target-side capture has been taken, and therefore no comparison
+exists.
 
-> **No verified bring-up is claimed anywhere in this document, and no completed review is claimed
-> either.** No sentence here should be read as reporting a successful stack start, a built image or a
-> reviewed manifest.
+> **No parity result is claimed anywhere in this document.** No sentence here should be read as reporting a
+> comparison, a matched pair, or a masked difference that was actually diffed.
 
-This risk is sharper in this document than elsewhere, because §4.2's capture rule is expressed in terms of a
-Docker volume: the rule is authoritative and the environment it presumes is, at the time of writing,
-unexercised here. **A passing service test does not retire this risk** — an in-process host mounts no
-volume, so it cannot be the target side of a paired capture no matter how thorough it is. What **was**
-exercised is the per-service restore, release build and coverage-collecting test **command shape** —
-passing with zero warnings and zero errors and producing a Cobertura report — and that run was against a
-**throwaway skeleton**, not against these services (§1.4, §8, and [`BUILD.md`](BUILD.md) §13, which is the
-authority for the distinction). Separately, this repository's own twenty projects restore audit-clean and
-build with zero warnings and zero errors, and all ten test suites pass. **Two services have since been
-started in a container and have served requests over a mapped port** — Security and Persistence, the
-latter recorded in [`ARCHITECTURE.md`](ARCHITECTURE.md) §10.6 — and neither run retires this risk, because
-a single container answering its own probe is not a stack and mounts none of the dependency conditions
-this risk is about.
+**A passing service test does not retire this risk either** — an in-process host mounts no volume, so it
+cannot be the target side of a paired capture no matter how thorough it is. Two further gaps travel with
+this one and are recorded in the same single statement rather than here: the mutual-TLS arm of the issuance
+edge, and any gRPC call across a container boundary.
+
+**Mitigation.** Take the first pair against one unrecreated `persistence-db` volume, in the order §4.2
+prescribes, and record the workflow identifier on both sides. Until then, treat every parity assertion in
+this document as a specification.
 
 ### R5 — There is no authoritative legacy build definition to translate
 
@@ -1616,26 +1653,35 @@ prerequisite; that the four determinism seams of §5.1 are the enumerated source
 the twelve groups in §7 are legacy behaviours to be reproduced and annotated, each with locators that
 resolve; that the coverage gate is measured from `coverage.cobertura.xml` at 80% line coverage per in-scope
 service and is enforced by `.github/workflows/ci.yml` in four independent legs, with all four services
-measured above the floor; and that all ten test projects build and pass in this repository with 18,603
-tests, 4 skipped and zero failures.
+measured above the floor; and that all ten test projects build and pass in this repository, with the
+counts held in [`BUILD.md`](BUILD.md) §1.3 rather than restated here.
 
-**It does not claim.** That any container bring-up was verified — `orchestration/docker-compose.yml` does
-not exist, so the documented bring-up and its five health gates have not been run, and R4 says so. That any
-service STARTS or serves a request from its image — all four images build, and none was started here. That
-the CI workflow has run on a GitHub-hosted runner — `.github/workflows/ci.yml` exists and enforces the
-80%-per-service floor, and its gate step was extracted verbatim and exercised locally against all four real
-reports under four injected faults, but the workflow itself has not been dispatched. That any paired
-recording exists — the `characterization/` store is still planned and absent, which is what leaves the
-single parity risk of R1 open and is why the four pinyin oracle hooks skip rather than pass. That the legacy oracle has been executed in this environment — it has not, which is what makes R1
-live. That the pinyin filter can be delivered at bit-exact parity from repository evidence alone. That
-cross-session foreign expression variables will be supported. That encrypted SQLite reaches parity in this
-phase. And **no performance claim of any kind**, because the repository publishes no baseline and
-characterization compares observable outputs only, never execution time (§1.6).
+**It does not claim.** That any **paired recording** exists — the store exists and holds none on either
+side, which is what leaves the single parity risk of R1 open and is why the four pinyin oracle hooks skip
+rather than pass. That the legacy oracle has been executed in this environment — it has not, and it cannot
+be here, which is what makes R1 live. That the CI workflow has run on a GitHub-hosted runner —
+`.github/workflows/ci.yml` exists and enforces the 80%-per-service floor, and its gate step was extracted
+verbatim and exercised locally against all four real reports under four injected faults, but the workflow
+itself has not been dispatched. That the pinyin filter can be delivered at bit-exact parity from repository
+evidence alone. That cross-session foreign expression variables will be supported. That encrypted SQLite
+reaches parity in this phase. And **no performance claim of any kind**, because the repository publishes no
+baseline and characterization compares observable outputs only, never execution time (§1.6).
 
-**It also does not claim** that any service has served a request **across a network** — every service
-test drives its host in process, so no TLS handshake, ALPN negotiation, real gRPC channel setup or
-client-certificate exchange has occurred — nor **that the paging matrix certifies agreement with the
-oracle**: its expectations are transcribed from a run of the .NET rewriters, so it detects drift and
+**It reports nothing of its own about the running stack.** The bring-up was exercised and one document says
+what that showed and what it did not —
+[`orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised).
+Nothing here duplicates it, and nothing here contradicts it: a bring-up is not a capture, which is R4.
+
+**One thing it now claims that an earlier revision denied**, because the state changed: the container path
+*was* exercised. All four images build and the four-service stack came up healthy with requests crossing
+real boundaries ([`BUILD.md`](BUILD.md) §1.3). **That is not a parity claim** and nothing here should be
+read as one — which is precisely why R4 was repointed from "nothing assembles the container set" to the
+oracle gap rather than being closed.
+
+**It also does not claim** that any service has served a request across a network **in a test** — every
+service test drives its host in process, so no TLS handshake, ALPN negotiation, real gRPC channel setup or
+client-certificate exchange happens inside a suite — nor **that the paging matrix certifies agreement with
+the oracle**: its expectations are transcribed from a run of the .NET rewriters, so it detects drift and
 nothing more (§6.2).
 
 **It is additive.** This document created one file and changed nothing that already existed. No file under

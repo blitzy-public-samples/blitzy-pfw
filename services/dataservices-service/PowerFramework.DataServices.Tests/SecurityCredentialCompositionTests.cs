@@ -210,7 +210,7 @@ public sealed class SecurityCredentialCompositionTests
     /// documented, and the handler that opens the channel to the issuance endpoint never carried it - so
     /// the handshake completed anonymously, <c>POST /v1/tokens</c> refused the request for want of a
     /// caller identity, and this service could not obtain a credential for any of its 35 Persistence RPCs
-    /// or its 17 crypto calls. An options test cannot catch that: the options were correct. This walks the
+    /// or its 18 crypto calls. An options test cannot catch that: the options were correct. This walks the
     /// real handler chain the factory builds for the registered channel and asserts the certificate is on
     /// the socket handler that performs the handshake.
     /// </para>
@@ -556,21 +556,43 @@ public sealed class SecurityCredentialCompositionTests
     }
 
     /// <summary>
-    /// A generated certificate written to two temporary PEM files, deleted on dispose.
+    /// A generated certificate written to a private temporary directory, removed on dispose.
     /// </summary>
     /// <remarks>
-    /// GENERATED, NEVER COMMITTED. The material exists only for the duration of one test, and both files
-    /// are removed by the same object that wrote them. The certificate is self-signed because nothing
-    /// here validates a chain - the subject is whether the composition LOADS an identity.
+    /// <para>
+    /// GENERATED, NEVER COMMITTED. The material exists only for the duration of one test, and it is removed
+    /// by the same object that wrote it. The certificate is self-signed because nothing here validates a
+    /// chain - the subject is whether the composition LOADS an identity.
+    /// </para>
+    /// <para>
+    /// <b>REMOVAL FAILURES ARE RAISED, NOT SWALLOWED, and that is the correction.</b> Disposal used to catch
+    /// <c>IOException</c> and <c>UnauthorizedAccessException</c> around each delete on the reasoning that a
+    /// temporary-directory condition is "not a failure of the subject". One of the two files is a 2048-bit
+    /// RSA PRIVATE KEY, so the outcome that reasoning permits is a private key left on disk with nothing
+    /// said about it - and a silent leak is strictly worse than a failing test, because only the test can
+    /// tell anyone. The removal is now unconditional and its failure is the caller's to see.
+    /// </para>
+    /// <para>
+    /// <b>A DIRECTORY OF ITS OWN RATHER THAN TWO LOOSE FILES.</b> The pair used to be written straight into
+    /// the shared system temporary directory, where a leak is indistinguishable from any other run's and can
+    /// neither be attributed nor swept. A GUID-scoped directory named for this suite is both, and it makes
+    /// removal ONE recursive delete whose success covers everything written rather than a delete per file
+    /// that can half-succeed.
+    /// </para>
     /// </remarks>
     private sealed class CertificatePair : IDisposable
     {
+        private readonly string _directory;
+        private bool _disposed;
+
         private CertificatePair(
             X509Certificate2 certificate,
+            string directory,
             string certificatePath,
             string certificateKeyPath)
         {
             Certificate = certificate;
+            _directory = directory;
             CertificatePath = certificatePath;
             CertificateKeyPath = certificateKeyPath;
         }
@@ -601,39 +623,39 @@ public sealed class SecurityCredentialCompositionTests
                 now.AddMinutes(-5),
                 now.AddHours(1));
 
-            string root = System.IO.Path.Combine(
+            string directory = System.IO.Path.Combine(
                 System.IO.Path.GetTempPath(),
-                string.Create(CultureInfo.InvariantCulture, $"pfw-identity-{Guid.NewGuid():N}"));
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"pfw-dataservices-identity-{Guid.NewGuid():N}"));
 
-            string certificatePath = root + ".crt";
-            string certificateKeyPath = root + ".key";
+            System.IO.Directory.CreateDirectory(directory);
+
+            string certificatePath = System.IO.Path.Combine(directory, "client.crt");
+            string certificateKeyPath = System.IO.Path.Combine(directory, "client.key");
 
             System.IO.File.WriteAllText(certificatePath, certificate.ExportCertificatePem());
             System.IO.File.WriteAllText(certificateKeyPath, key.ExportPkcs8PrivateKeyPem());
 
-            return new CertificatePair(certificate, certificatePath, certificateKeyPath);
+            return new CertificatePair(certificate, directory, certificatePath, certificateKeyPath);
         }
 
+        /// <inheritdoc/>
         public void Dispose()
         {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+
             Certificate.Dispose();
 
-            foreach (string path in (string[])[CertificatePath, CertificateKeyPath])
-            {
-                try
-                {
-                    System.IO.File.Delete(path);
-                }
-                catch (System.IO.IOException)
-                {
-                    // A file that cannot be removed is a temporary-directory condition and not a
-                    // failure of the subject, so it is not allowed to fail the test that wrote it.
-                }
-                catch (UnauthorizedAccessException)
-                {
-                    // Same reasoning.
-                }
-            }
+            // NO try/catch. A directory that cannot be removed is a private key still on disk, and the
+            // caller has to be told - see the remarks. Double disposal is idempotent, which is not the same
+            // thing as suppressing a failure: the first call still has to succeed.
+            System.IO.Directory.Delete(_directory, recursive: true);
         }
     }
 }

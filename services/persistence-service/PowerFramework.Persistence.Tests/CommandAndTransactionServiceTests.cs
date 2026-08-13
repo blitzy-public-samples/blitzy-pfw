@@ -882,28 +882,29 @@ public sealed class CommandAndTransactionServiceTests
     }
 
     /// <summary>
-    /// The WIRE boundary refuses a blank statement with the SAME code and its OWN diagnostic, while the
-    /// empty string still reaches the worker's message-free guard.
+    /// The WIRE boundary adds NOTHING to the setter's rule: a blank statement is accepted and installed,
+    /// and only the empty string is refused - by the worker's own message-free guard.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>THE BOUNDARY REFUSAL IS A SEPARATE, DOCUMENTED ACT AND NOT A TRIM ADDED TO THE SETTER.</b>
-    /// The distinction is worth pinning precisely because the two are easy to conflate: the PORTED
-    /// SETTER adds nothing to the oracle - the case above proves that - while the BOUNDARY declines a
-    /// request that would submit nothing and be reported as a success that changed no rows. The
-    /// evidence that they are different acts is in the response: the boundary's refusal carries a
-    /// diagnostic and the worker's does not, which is exactly the oracle's message-free answer preserved
-    /// [<c>:L45</c>].
+    /// 🔴 <b>A BOUNDARY BLANKNESS REFUSAL EXISTED HERE AND HAS BEEN WITHDRAWN, AND THIS ROW IS THE
+    /// REGRESSION GUARD FOR ITS ABSENCE (constraint C-B, AAP G2).</b> It answered <c>E_INVALID_SQL</c> with
+    /// its own diagnostic for a whitespace-only statement, on the reasoning that submitting one produces a
+    /// success that changed no rows and that an actionable refusal serves a caller better. That is a
+    /// judgement about the legacy's DESIGN rather than a statement about its BEHAVIOUR, and the oracle's
+    /// guard compares against the empty string only [<c>:L45</c>, <c>:L65-L68</c>]. A port that refuses
+    /// input its oracle accepts has changed behaviour just as much as one that accepts input its oracle
+    /// refuses, so the boundary is now silent on blankness and the whole rule is the setter's.
     /// </para>
     /// <para>
-    /// Nothing is trimmed on either path. A blank statement is REFUSED, never silently rewritten.
+    /// THE PAIR IS ASSERTED TOGETHER BECAUSE THE TWO CASES LOOK ALIKE AND DIFFER. Blank is accepted and
+    /// INSTALLED - so the next <c>Exec</c> submits it - while empty is refused; nothing is trimmed on
+    /// either path, and nothing is rewritten.
     /// </para>
     /// <para>
     /// <b>THE EMPTY-STRING HALF IS SPLIT BY BUILD, and the split is the port's intent rather than a
-    /// defect.</b> The blank statement is declined at the BOUNDARY, before the proxy is entered, so it
-    /// answers identically in both configurations. The empty string is not: it passes the boundary and
-    /// reaches <c>SqlCommandTaskProxy.SetSql</c>, which reproduces the oracle's own
-    /// <c>#IF DEFINED DEBUG</c> assertion verbatim
+    /// defect.</b> The empty string passes the boundary and reaches <c>SqlCommandTaskProxy.SetSql</c>, which
+    /// reproduces the oracle's own <c>#IF DEFINED DEBUG</c> assertion verbatim
     /// [<c>n_cst_threading_task_sqlcommand.sru:L36-L38</c>], so an <see cref="AssertionFailure"/> leaves
     /// the handler before the worker's message-free guard is ever reached in a Debug build. Both arms are
     /// asserted because both are shipped - the container image is built <c>-c Release</c> while the
@@ -913,7 +914,7 @@ public sealed class CommandAndTransactionServiceTests
     /// </para>
     /// </remarks>
     [Fact]
-    public async Task TheWireRefusesABlankStatementWithADiagnosticAndTheEmptyStringWithout()
+    public async Task TheWireAcceptsABlankStatementAndRefusesOnlyTheEmptyString()
     {
         Harness harness = new();
         TaskHandle handle = await CreateTask(harness);
@@ -922,8 +923,11 @@ public sealed class CommandAndTransactionServiceTests
             new SetCommandSqlRequest { Task = handle, Sql = "   " },
             Context);
 
-        Assert.Equal(WireRetCode.EInvalidSql, blank.Status.RetCode);
-        Assert.NotEmpty(blank.Status.ErrorText);
+        Assert.Equal(WireRetCode.Ok, blank.Status.RetCode);
+        Assert.Empty(blank.Status.ErrorText);
+
+        // INSTALLED, verbatim: the boundary forwarded it and the worker stored what arrived.
+        Assert.Equal("   ", Resolve(harness, handle).Worker.Sql);
 
 #if DEBUG
         AssertionFailure failure = await Assert.ThrowsAsync<AssertionFailure>(
@@ -944,8 +948,9 @@ public sealed class CommandAndTransactionServiceTests
         Assert.Empty(empty.Status.ErrorText);
 #endif
 
-        // Neither path installed anything: the statement is still the constructor's empty string.
-        Assert.Equal(string.Empty, Resolve(harness, handle).Worker.Sql);
+        // AND THE REFUSED CALL CHANGED NOTHING: the blank statement installed above is still installed,
+        // which is what makes the empty-string arm a refusal rather than a reset.
+        Assert.Equal("   ", Resolve(harness, handle).Worker.Sql);
     }
 
     /// <summary>
@@ -2138,14 +2143,23 @@ public sealed class CommandAndTransactionServiceTests
     {
         Assembly persistence = typeof(SqlCommandTask).Assembly;
 
-        // The four in-family assemblies this service may depend on: the published contracts, plus the
-        // three shared behaviour libraries. Nothing else in the PowerFramework family is permitted.
+        // The five in-family assemblies this service may depend on: the published contracts, plus the
+        // four shared behaviour libraries. Nothing else in the PowerFramework family is permitted.
+        //
+        // Shared.Eventful is one of the five, and it is a REQUIREMENT rather than a convenience: AAP
+        // 0.4.1 assigns the whole of ws_objects/pfw.thread.pbl.src to Persistence in scope, one of that
+        // library's six objects is n_cst_threading_eventful.sru, and it derives from n_cst_eventful -
+        // which is itself one of the two structural facts the AAP cites as proof the base belongs in a
+        // shared in-scope library. Tasks/TaskProxies/ThreadingEventBroker.cs is that derived port.
+        // Shared.Localization is deliberately NOT on this list: nothing in this service consumes
+        // localized text, so it would be an unused coupling.
         string[] permitted =
         [
             "PowerFramework.Contracts",
             "PowerFramework.Shared.Kernel",
             "PowerFramework.Shared.Diagnostics",
             "PowerFramework.Shared.Containers",
+            "PowerFramework.Shared.Eventful",
         ];
 
         IReadOnlyList<string> family =
@@ -2169,6 +2183,7 @@ public sealed class CommandAndTransactionServiceTests
             "PowerFramework.Documents",
             "PowerFramework.Integration",
             "PowerFramework.ScriptBridge",
+            "PowerFramework.Shared.Localization",
         ];
 
         Assert.All(forbidden, name => Assert.DoesNotContain(name, family));

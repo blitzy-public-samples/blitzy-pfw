@@ -90,7 +90,7 @@ internal sealed class RecordingHandler : HttpMessageHandler
     /// <remarks>
     /// <para>
     /// This exists because the two edges of the Security contract are authenticated differently. Token
-    /// issuance is authenticated by the transport and carries no bearer credential; all seventeen C-02
+    /// issuance is authenticated by the transport and carries no bearer credential; all eighteen C-02
     /// crypto operations DO carry one, which they must acquire first. A suite testing a C-02 operation is
     /// therefore answering two different endpoints, and a strict first-in-first-out queue would hand the
     /// operation's own canned response to the credential acquisition instead.

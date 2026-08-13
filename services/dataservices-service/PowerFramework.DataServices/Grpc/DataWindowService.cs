@@ -233,6 +233,7 @@ using TransactionDescriptor = global::PowerFramework.Contracts.Persistence.V1.Tr
 // twin is `common.v1.RetCode`, a wrapper message whose nested enum is aliased below as WireRetCode; the
 // two agree value for value by construction (see the note on ToWireRetCode) but they are different types
 // and the bare name must resolve to exactly one of them.
+using PowerFramework.Shared.Diagnostics;
 using RetCode = PowerFramework.Shared.Kernel.RetCode;
 using WireContextMenuModel = global::PowerFramework.Contracts.DataServices.V1.ContextMenuModel;
 using WireEventGate = global::PowerFramework.Contracts.DataServices.V1.EventGate;
@@ -1280,9 +1281,17 @@ internal static class DataWindowWireProjection
 /// <see cref="DataWindowEventSequencer.Accept"/>'s remarks carry the numbers - one dispatch of token 1
 /// leaves the next expected token at 4, because the chain's outcome report and the result write each take
 /// one from the same counter - so a message held awaiting token 2 waits for a number no client will send.
-/// A client must also read a response to learn its next token, so it cannot pipeline, and one gRPC stream
+/// A client FOLLOWING THE CONVENTION also reads a response to learn its next token, and one gRPC stream
 /// delivers a sender's messages in order: a displaced pattern-(a) arrival is a client defect rather than
 /// a transport artifact, and the answer to a client defect is a defined error (AAP 0.1.5).
+/// </para>
+/// <para>
+/// THE CONVENTION IS NOT AN ENFORCEMENT, AND NOTHING HERE RELIES ON IT AS ONE. Since the enforced rule is
+/// "above the mark" rather than "the immediate successor", a pattern-(a) client may legitimately pipeline
+/// by leaving gaps, and no client of any kind is obliged to read its responses at all. The depth of what
+/// arrives is therefore bounded by the server -
+/// <see cref="EventChainOptions.MaxPendingNotifications"/>, refused past the ceiling with
+/// <c>ResourceExhausted</c> - rather than assumed of the caller.
 /// </para>
 /// <para>
 /// THE DISCIPLINE IS THE SERVER'S TO RESOLVE, NOT THE CLIENT'S TO DECLARE. The token carries a
@@ -1477,18 +1486,23 @@ internal sealed class DataWindowEventConversation
         }
         catch (DataWindowEventSequenceException violation) when (!strictOrdering)
         {
+            // THE OBJECT ADDED NOTHING HERE AND COST A STACK. Every field this violation carries is
+            // already written as structured data below, so the attached exception contributed only its
+            // rendered message - which restates those fields - and a stack of the read loop, which is the
+            // same stack on every occurrence. The type chain is kept because it is what distinguishes this
+            // violation from a future sibling.
             _logger?.LogWarning(
-                violation,
                 "A DataWindow event arrived out of order on session {SessionId}: {EventId} carried "
                     + "sequence {ActualSequence} where {ExpectedSequence} was expected under the "
                     + "{Discipline} discipline. Strict ordering is relaxed for this deployment, so the "
                     + "message is processed IN ARRIVAL ORDER and is NOT reordered; the consumer owns the "
-                    + "ordering check.",
-                _sessionId,
+                    + "ordering check. FaultTypes={FaultTypes}",
+                LogSafeText.Render(_sessionId),
                 violation.EventId,
                 violation.ActualSequence,
                 violation.ExpectedSequence,
-                violation.Discipline);
+                violation.Discipline,
+                ExceptionChain.DescribeTypes(violation));
         }
     }
 
@@ -2012,6 +2026,17 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// </summary>
     private static readonly string SupportedRichErrorPayloadType = RichErrorTrailer.Descriptor.FullName;
 
+    /// <summary>
+    /// What the validation record writes for a column the caller addressed by ordinal alone.
+    /// </summary>
+    /// <remarks>
+    /// A COLUMN ADDRESSED BY ORDINAL CARRIES NO NAME, and an empty field in the middle of a rendered
+    /// record reads as a missing value rather than as a deliberate one. Named here because it is the
+    /// empty-value marker <see cref="LogSafeText.Render(string, int)"/> is given for a column name, and its
+    /// value belongs beside the record it appears in rather than inside a general-purpose helper.
+    /// </remarks>
+    private const string PositionalColumnMarker = "(positional)";
+
     private readonly ValidationSessionRegistry _sessions;
     private readonly IDataWindowEventChainFactory _chainFactory;
     private readonly IDataWindowModelSetProvider _models;
@@ -2289,18 +2314,26 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
             // are the same situation and take the same status, matching MapOutcomeToStatus for the first
             // and Gateway's in-band projection for all four.
             //
-            // E_INVALID_HANDLE IS DELIBERATELY NOT IN THIS GROUP, and the divergence is recorded rather
-            // than tidied: it stays FailedPrecondition below because AcquisitionFailure documents that
-            // agreement explicitly and both statuses reach the caller as a 4xx. MapOutcomeToStatus spells
-            // the same code NotFound, which is a pre-existing inconsistency between two 4xx answers on one
-            // route; changing either would break a documented agreement for no finding-driven gain.
-            RetCode.E_OBJECT_NOT_FOUND
+            // 🔴 E_INVALID_HANDLE JOINS THIS GROUP, WHICH SETTLES A DIVERGENCE THAT WAS PREVIOUSLY ONLY
+            // RECORDED. It used to sit on FailedPrecondition below, on the reasoning that both statuses
+            // reach the caller as a 4xx - which understated what the difference costs. Gateway's published
+            // projection declares NO FailedPrecondition row [docs/CONTRACTS.md, C-09 status table], so that
+            // status falls to the canonical mapping and reaches the caller as 400 CARRYING
+            // E_INVALID_ARGUMENT: the originating code is not re-spelled, it is REPLACED, and a caller who
+            // named a handle the upstream no longer holds is told its argument was malformed. NotFound is
+            // published, projects to 404, and is already what MapOutcomeToStatus in this same file and the
+            // REST projection's in-band map give this code - so all three now agree, which is what makes a
+            // caller's retry-or-surface policy writable at all.
+            RetCode.E_INVALID_HANDLE
+                or RetCode.E_OBJECT_NOT_FOUND
                 or RetCode.E_NOT_EXISTS
                 or RetCode.E_VAR_NOT_FOUND
                 or RetCode.E_MEMBER_NOT_FOUND => StatusCode.NotFound,
 
-            // A handle or transaction that is not valid is a state rejection rather than a bad argument.
-            RetCode.E_INVALID_HANDLE or RetCode.E_INVALID_TRANSACTION => StatusCode.FailedPrecondition,
+            // A transaction that is not valid stays a state rejection rather than a bad argument or a
+            // not-found: the descriptor named a transaction the upstream will not accept, which is a
+            // precondition on the session and not something the caller failed to locate.
+            RetCode.E_INVALID_TRANSACTION => StatusCode.FailedPrecondition,
 
             // A refusal by policy, which must NOT be retried - the reason it cannot stay in the default.
             RetCode.E_ACCESS_DENIED => StatusCode.PermissionDenied,
@@ -2335,12 +2368,19 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
             _ => StatusCode.Internal,
         };
 
+        // 🔴 THE HANDLE IS CALLER-CHOSEN TEXT AND USED TO BE WRITTEN VERBATIM. The empty case was already
+        // handled, which is what made the omission easy to miss: everything ELSE about the value was taken
+        // on trust. A record is still rendered to a LINE by every console, file and syslog provider, so a
+        // handle carrying a line break appended a complete fabricated record after this one - same shape,
+        // same channel, whatever severity and outcome the caller wrote into it - and a multi-megabyte handle
+        // produced a multi-megabyte record on demand. LogSafeText escapes and bounds it, and answers the
+        // same "(none)" for an empty value so this record's shape does not change.
         _logger?.LogWarning(
             "Persistence could not {Attempted} for DataWindow handle {DataWindowHandle}: return code "
                 + "{ReturnCode}, database code {SqlDbCode}. Any statement text in the upstream payload is "
                 + "relayed to the caller and deliberately NOT logged.",
             attempted,
-            dataWindowHandle.Length == 0 ? "(none)" : dataWindowHandle,
+            LogSafeText.Render(dataWindowHandle),
             retCode,
             status?.DbError?.Sqldbcode ?? 0L);
 
@@ -2440,9 +2480,10 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// adjudicates each setting on the create call and a rejected setting is the caller's to fix. A
     /// registry at capacity is <c>ResourceExhausted</c>, which is the status a resilience policy is allowed
     /// to retry and which projects to HTTP 429. A refusal by policy is <c>PermissionDenied</c>, which must
-    /// NOT be retried and would be if it were folded into the default. A transaction or handle that is not
-    /// valid is <c>FailedPrecondition</c>, matching what <see cref="BuildUpstreamFailure"/> gives the same
-    /// two codes so that one upstream code cannot reach a caller as two different statuses. An acquisition
+    /// NOT be retried and would be if it were folded into the default. A handle the upstream does not hold
+    /// is <c>NotFound</c> and a transaction it will not accept is <c>FailedPrecondition</c>, each matching
+    /// what <see cref="BuildUpstreamFailure"/> gives that same code so one upstream code cannot reach a
+    /// caller as two different statuses. An acquisition
     /// that reported success and carried no handle is <c>Internal</c>, because that is the upstream breaking
     /// the contract rather than anything the caller or a retry can address. Everything else - a provider
     /// that is down, a handle the server declined to issue - is <c>Unavailable</c>: the operation could not
@@ -2468,13 +2509,17 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
             RetCode.E_BUSY => StatusCode.ResourceExhausted,
             RetCode.E_ACCESS_DENIED => StatusCode.PermissionDenied,
 
-            // A TRANSACTION OR HANDLE THAT IS NOT VALID IS A PRECONDITION, NOT A CAPACITY PROBLEM, and it
-            // is mapped to the SAME status BuildUpstreamFailure gives the same two codes. That agreement is
-            // the point: a caller keys its retry-or-surface policy on the status code, so one upstream code
-            // reaching it as two different statuses depending on which internal helper happened to raise it
-            // would make the policy unwritable. Unavailable invites a retry, and retrying a session whose
-            // descriptor names a transaction that is not valid produces the identical refusal forever.
-            RetCode.E_INVALID_HANDLE or RetCode.E_INVALID_TRANSACTION => StatusCode.FailedPrecondition,
+            // 🔴 THE TWO CODES ARE SPLIT, AND EACH STILL AGREES WITH BuildUpstreamFailure - which is the
+            // property that matters, not that they share one arm. A handle the upstream does not hold is
+            // NotFound, the status the published projection declares for it and the one MapOutcomeToStatus
+            // and the REST in-band map already gave it; a transaction the upstream will not accept is a
+            // precondition on the session and stays FailedPrecondition. A caller keys its retry-or-surface
+            // policy on the status code, so one upstream code reaching it as two different statuses
+            // depending on which internal helper happened to raise it would make the policy unwritable.
+            // Neither arm invites a retry, which is what Unavailable would have done - and retrying an
+            // acquisition whose handle is gone produces the identical refusal forever.
+            RetCode.E_INVALID_HANDLE => StatusCode.NotFound,
+            RetCode.E_INVALID_TRANSACTION => StatusCode.FailedPrecondition,
 
             // AND THE ONE ARM THAT IS ABOUT THE PRODUCER RATHER THAN THE WORK. PersistenceWorkScope raises
             // MissingHandleCode when an acquisition answered SUCCESS and then carried no handle to address -
@@ -2492,7 +2537,7 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                 + "handles: outcome {ReturnCode}, reported as gRPC {StatusCode}. The upstream diagnostic is "
                 + "relayed to the caller and is deliberately not logged here.",
             operation,
-            dataWindowHandle,
+            LogSafeText.Render(dataWindowHandle),
             scope.ReturnCode,
             status);
 
@@ -4120,7 +4165,7 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                     + "literal values because the legacy runs without bind variables when DisableBind is "
                     + "set [ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L128-L129], "
                     + "and the legacy logger performs no redaction at all.",
-                request.DatawindowHandle,
+                LogSafeText.Render(request.DatawindowHandle),
                 outcome,
                 upstreamResponse.Status.DbError.Sqldbcode,
                 upstreamResponse.Status.DbError.Buffer,
@@ -4206,11 +4251,13 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// <remarks>
     /// <para>
     /// <b>THE OUTCOME CODE IS THE STRUCTURAL FAULT'S WHEN THERE IS ONE.</b> A request that named a column
-    /// this DataWindow does not carry is malformed - <c>E_INVALID_ARGUMENT</c> - and that is true however
-    /// many of its VALUES would also have been rejected, because a caller must fix the addressing before
-    /// the values mean anything. With no addressing fault the code is <c>E_INVALID_DATA</c>, which is the
-    /// code the ported reporting coercions answer themselves. Both project to HTTP 400 at the ingress, so
-    /// the choice changes the diagnosis a caller reads rather than the status.
+    /// this DataWindow does not carry, addressed one column by name and another by ordinal, or omitted the
+    /// concurrency baseline of a column on a changed row is MALFORMED - <c>E_INVALID_ARGUMENT</c> - and
+    /// that is true however many of its VALUES would also have been rejected, because a caller must fix
+    /// the shape before the values mean anything. With no structural fault the code is
+    /// <c>E_INVALID_DATA</c>, which is the code the ported reporting coercions answer themselves. Both
+    /// project to HTTP 400 at the ingress, so the choice changes the diagnosis a caller reads rather than
+    /// the status.
     /// </para>
     /// <para>
     /// EVERY COUNT IS ZERO AND NO <c>error</c> IS ATTACHED, because nothing was attempted: no session was
@@ -4224,16 +4271,27 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// statement's interpolated literals. The caller receives the full detail on the response, where they
     /// can read it deliberately.
     /// </para>
+    /// <para>
+    /// 🔴 <b>AND THE NAMES IT DOES RECORD ARE NEUTRALIZED FIRST, because both are chosen by the caller.</b>
+    /// The handle arrives on the request, and a <c>NoSuchColumn</c> failure carries the caller's own column
+    /// name verbatim - so before this, a caller could put a carriage return and a line feed inside a column
+    /// name and SPLIT THIS ONE RECORD INTO TWO, dictating the text of the second and imitating this
+    /// service's own diagnostics (CWE-117). <see cref="LogSafeText.Render(string, int)"/> encodes anything that
+    /// could end, reorder or hide part of a line and bounds the length. The RESPONSE is untouched: the
+    /// caller still receives the column name exactly as it sent it, on a structured field where no
+    /// rendering is involved.
+    /// </para>
     /// </remarks>
     private global::PowerFramework.Contracts.DataServices.V1.UpdateResponse BuildValidationRefusal(
         string dataWindowHandle,
         ImmutableArray<UpdateRowValidationFailure> rejected)
     {
-        bool addressing = rejected.Any(static failure =>
+        bool structural = rejected.Any(static failure =>
             failure.Kind is UpdateRowValidationKind.NoSuchColumn
-                or UpdateRowValidationKind.OrdinalDisagreesWithName);
+                or UpdateRowValidationKind.OrdinalDisagreesWithName
+                or UpdateRowValidationKind.MissingOriginalValue);
 
-        long outcome = addressing ? RetCode.E_INVALID_ARGUMENT : RetCode.E_INVALID_DATA;
+        long outcome = structural ? RetCode.E_INVALID_ARGUMENT : RetCode.E_INVALID_DATA;
 
         global::PowerFramework.Contracts.DataServices.V1.UpdateResponse response = new()
         {
@@ -4267,15 +4325,23 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                 + "no upstream session was opened. The rejected VALUES are deliberately not recorded: on "
                 + "this path they are by definition malformed caller content, and the caller receives the "
                 + "full detail on the response.",
-            dataWindowHandle,
+            LogSafeText.Render(dataWindowHandle),
             outcome,
             rejected.Length,
+            // THE COLUMN NAMES ARE CALLER-SUPPLIED AND THERE ARE MANY OF THEM, which makes this the worst
+            // of the three sites in this file: one refused update carries a name per rejected column, so a
+            // caller controls both the CONTENT of each fragment and HOW MANY are joined. Each name is
+            // escaped and bounded individually rather than the joined result being bounded, so one long name
+            // cannot hide the others; "(positional)" is kept ahead of the rendering because an empty name
+            // means a column addressed by ordinal, which is a different fact from a caller sending nothing.
             string.Join(
                 ", ",
                 rejected.Select(static failure => string.Format(
                     CultureInfo.InvariantCulture,
                     "{0}[#{1}] row {2} {3}",
-                    failure.ColumnName.Length == 0 ? "(positional)" : failure.ColumnName,
+                    failure.ColumnName.Length == 0
+                        ? "(positional)"
+                        : LogSafeText.Render(failure.ColumnName),
                     failure.ColumnId,
                     failure.Row,
                     failure.Kind))));
@@ -4566,7 +4632,8 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                             strictOrdering,
                             reading,
                             _logger,
-                            cancellationToken);
+                            cancellationToken,
+                            _eventChain.MaxPendingNotifications);
                     }
                     else if (!string.Equals(boundSessionId, request.SessionId, StringComparison.Ordinal))
                     {
@@ -4590,7 +4657,19 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                             // arrival order is preserved exactly and nothing is buffered past its turn or
                             // re-sorted: the ordering check itself still runs on the consumer, in arrival
                             // order, so the token arithmetic is unchanged.
-                            dispatcher!.Enqueue(request);
+                            //
+                            // 🔴 AND THE HANDOVER IS BOUNDED, WHICH THE FIRST VERSION OF IT WAS NOT. The
+                            // acceptance is O(1) while a dispatch may be blocked on an answer for as long
+                            // as AnswerTimeout allows, so the ONLY thing that previously bounded the queue
+                            // was the synchronous discipline's promise that a client cannot pipeline. A
+                            // client that declined the promise grew it without limit. The ceiling is
+                            // COUNTED rather than imposed by a bounded channel, because a full channel
+                            // would stall THIS loop - and this loop is what delivers the answer the
+                            // consumer is waiting for, which is the deadlock the handover exists to break.
+                            if (!dispatcher!.TryEnqueue(request))
+                            {
+                                throw BuildPipeliningRefusal(boundSessionId, dispatcher.MaxPending);
+                            }
 
                             break;
 
@@ -4693,12 +4772,29 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// <para>
     /// <b>ORDER IS PRESERVED EXACTLY, AND THAT IS NOT A HAPPY ACCIDENT - IT IS THE CONSTRAINT.</b> AAP
     /// 0.6.1.4 assigns the item-change and validation chain the strictly synchronous pattern, under which
-    /// NOTHING EVER BUFFERS OR RE-SORTS. An unbounded channel with <c>SingleReader</c> and
-    /// <c>SingleWriter</c> is a FIFO: the consumer takes messages in the order the reader wrote them and
-    /// dispatches ONE AT A TIME, awaiting each completely before taking the next. So the sequence of
-    /// dispatches is byte-for-byte the sequence of arrivals, exactly as when the loop dispatched them
-    /// itself. Nothing is held back waiting for a lower ordinal, nothing overtakes, and there is no
-    /// parallelism of any kind.
+    /// NOTHING EVER BUFFERS OR RE-SORTS. A channel with <c>SingleReader</c> and <c>SingleWriter</c> is a
+    /// FIFO: the consumer takes messages in the order the reader wrote them and dispatches ONE AT A TIME,
+    /// awaiting each completely before taking the next. So the sequence of dispatches is byte-for-byte the
+    /// sequence of arrivals, exactly as when the loop dispatched them itself. Nothing is held back waiting
+    /// for a lower ordinal, nothing overtakes, and there is no parallelism of any kind.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>ADMISSION IS CEILINGED, BECAUSE EVERYTHING IN THE QUEUE ARRIVES FROM OUTSIDE.</b> The depth
+    /// ceiling is <see cref="EventChainOptions.MaxPendingNotifications"/> and a notification past it is
+    /// REFUSED with <c>ResourceExhausted</c> - never waited on, and never silently dropped. An unceilinged
+    /// queue in front of a consumer that can block for the whole of
+    /// <see cref="EventChainOptions.AnswerTimeout"/> is server memory an authenticated client sets the size
+    /// of, which is CWE-400 whether the client meant it or not: it needs only to keep sending, or simply to
+    /// stop reading its own responses so the consumer's outbound write stalls. The ceiling changes nothing
+    /// for a conformant client - see <see cref="TryEnqueue"/> for why it sits far above any run one produces.
+    /// </para>
+    /// <para>
+    /// IT IS ENFORCED ON THE WAY IN RATHER THAN BY THE CHANNEL'S OWN CAPACITY, AND THAT IS DELIBERATE. A
+    /// bounded channel's writer either waits or drops when it is full, and both are wrong here: waiting
+    /// re-blocks the read loop, which is the deadlock this type exists to close, and dropping loses a
+    /// notification the client was told nothing about. Counting queued-or-in-flight admissions instead
+    /// keeps the write non-blocking AND makes the refusal explicit and attributable - and it counts the one
+    /// IN FLIGHT too, which a channel's capacity cannot see at all.
     /// </para>
     /// <para>
     /// AND THE TOKEN ARITHMETIC IS UNCHANGED, WHICH IS THE SUBTLE PART. The ordering check
@@ -4749,9 +4845,45 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         private readonly CancellationTokenSource _reading;
         private readonly ILogger? _logger;
         private readonly CancellationToken _cancellationToken;
+        private readonly int _maxPending;
         private readonly Task _consumer;
 
+        /// <summary>
+        /// The lowest ceiling that can never refuse a conforming client.
+        /// </summary>
+        /// <remarks>
+        /// One slot for the notification the conversation is working on, and one for the instant between
+        /// that notification's result being written - at which point the client is entitled to send the
+        /// next - and its slot being released. See
+        /// <see cref="EventChainOptions.MaxPendingNotifications"/>, where the same reasoning is what makes
+        /// 1 an invalid configured value rather than merely a tight one.
+        /// </remarks>
+        private const int MinimumPendingCeiling = 2;
+
+        /// <summary>
+        /// Notifications accepted and not yet dispatched to completion: the queued ones plus the one in
+        /// flight.
+        /// </summary>
+        /// <remarks>
+        /// INTERLOCKED RATHER THAN LOCKED, because it is written from exactly two places on two threads -
+        /// the read loop reserving a slot and the consumer releasing one - and neither needs to observe
+        /// anything else atomically with it. A lock here would be a lock the read loop takes on every
+        /// message for no additional guarantee.
+        /// </remarks>
+        private int _pending;
+
         private ExceptionDispatchInfo? _fault;
+
+        /// <summary>
+        /// Whether <see cref="CompleteAdding"/> has stated that no further notification will arrive.
+        /// </summary>
+        /// <remarks>
+        /// <c>volatile</c> BECAUSE THE SEAL AND THE WRITE NEED NOT BE ON ONE THREAD. In the ordinary flow
+        /// both are the read loop's, but <see cref="DisposeAsync"/> also seals and the abnormal-exit path
+        /// reaches it from a <c>finally</c>; a torn read of this flag would mis-report a full queue as an
+        /// ended exchange, which are different remedies for the client.
+        /// </remarks>
+        private volatile bool _sealed;
 
         /// <summary>Creates the dispatcher and starts its single consumer.</summary>
         /// <param name="conversation">The stream's conversation.</param>
@@ -4764,13 +4896,18 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         /// </param>
         /// <param name="logger">Diagnostics. Never receives buffer values or edit text.</param>
         /// <param name="cancellationToken">The call's own token.</param>
+        /// <param name="maxPending">
+        /// How many notifications may be queued-or-in-flight at once. Bound from
+        /// <c>DataServices:EventChain:MaxPendingNotifications</c> and validated at startup as at least 2.
+        /// </param>
         internal SequentialNotificationDispatcher(
             DataWindowEventConversation conversation,
             DataWindowEventChain chain,
             bool strictOrdering,
             CancellationTokenSource reading,
             ILogger? logger,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            int maxPending)
         {
             _conversation = conversation;
             _chain = chain;
@@ -4778,6 +4915,14 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
             _reading = reading;
             _logger = logger;
             _cancellationToken = cancellationToken;
+
+            // DEFENDED RATHER THAN TRUSTED. Startup validation refuses anything below the smallest
+            // coherent ceiling, but this type is also constructed directly by its own suite, and a zero
+            // would refuse the FIRST notification of every chain - a failure that reads as a client
+            // fault. Two is the floor for the reason EventChainOptions.MaxPendingNotifications records:
+            // one slot for the conversation, one to cover the instant between a result being written and
+            // its slot being released.
+            _maxPending = Math.Max(maxPending, MinimumPendingCeiling);
 
             // STARTED OFF THE READ LOOP'S OWN EXECUTION PATH. Calling ConsumeAsync inline would run its
             // synchronous prologue - and therefore the first dispatch, and therefore the blocking wait -
@@ -4788,19 +4933,88 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         /// <summary>Whether the consumer stopped because a dispatch threw.</summary>
         internal bool HasFault => _fault is not null;
 
-        /// <summary>Queues one notification for dispatch, in arrival order.</summary>
-        /// <param name="request">The inbound message.</param>
+        /// <summary>The ceiling this dispatcher admits notifications up to.</summary>
         /// <remarks>
-        /// UNBOUNDED, SO THE WRITE ALWAYS SUCCEEDS AND THE READ LOOP NEVER BLOCKS. A bounded queue would
-        /// reintroduce the deadlock in a slower form: a full queue would stall the reader, and the reader
-        /// is what delivers the answer the consumer is waiting for. The queue's depth is bounded in
-        /// practice by the client, which under the synchronous discipline cannot pipeline - it must read a
-        /// response to learn its next token.
+        /// Exposed so a refusal can name the ceiling it applied without the read loop restating the
+        /// setting, and so a test can compose an expectation from the value in force rather than from a
+        /// literal that would then have to be kept in step with the default.
         /// </remarks>
-        internal void Enqueue(EventChainRequest request) => _ = _queue.Writer.TryWrite(request);
+        internal int MaxPending => _maxPending;
+
+        /// <summary>Queues one notification for dispatch, in arrival order, if the ceiling admits it.</summary>
+        /// <param name="request">The inbound message.</param>
+        /// <returns>
+        /// <see langword="true"/> when the notification was accepted; <see langword="false"/> when
+        /// <see cref="MaxPending"/> notifications are already queued-or-in-flight, which is the caller's
+        /// signal to refuse the call.
+        /// </returns>
+        /// <remarks>
+        /// <para>
+        /// 🔴 <b>THE QUEUE STAYS UNBOUNDED AND THE WRITE STAYS NON-BLOCKING; THE CEILING IS COUNTED
+        /// INSTEAD.</b> A bounded channel would reintroduce the deadlock in a slower form: a full queue
+        /// stalls the READER, and the reader is the only thing that can deliver the answer the consumer is
+        /// blocked on, so the stall would be permanent for exactly the conversations the handover exists
+        /// to make possible. Reserving a slot with an interlocked increment and REFUSING past the ceiling
+        /// gives the same memory bound with none of that coupling: the decision is taken in constant time,
+        /// nothing waits, and the read loop stays free to answer.
+        /// </para>
+        /// <para>
+        /// WHY A CEILING IS NEEDED AT ALL, given the discipline. The synchronous protocol says a client
+        /// cannot pipeline - it must read a response to learn its next token - and that was previously the
+        /// ONLY thing bounding the depth. It is a promise made by the client, and this server accepted a
+        /// notification in constant time while its consumer could be blocked on one answer for as long as
+        /// <c>DataServices:EventChain:AnswerTimeout</c> permits. An authenticated client that simply
+        /// declined the promise therefore grew this queue without limit. The ceiling makes the bound the
+        /// SERVER's.
+        /// </para>
+        /// <para>
+        /// THE RESERVATION IS TAKEN BEFORE THE WRITE, so the depth cannot exceed the ceiling even
+        /// momentarily, and it is RELEASED WHEN A DISPATCH COMPLETES rather than when a message is taken
+        /// off the queue - so the one in flight, which is the one that may be blocked on an answer, is
+        /// counted. A refusal decrements what it reserved, leaving the count exactly as it found it.
+        /// </para>
+        /// </remarks>
+        internal bool TryEnqueue(EventChainRequest request)
+        {
+            if (Interlocked.Increment(ref _pending) > _maxPending)
+            {
+                _ = Interlocked.Decrement(ref _pending);
+
+                return false;
+            }
+
+            if (!_queue.Writer.TryWrite(request))
+            {
+                // UNREACHABLE FROM THE READ LOOP, which is the only caller: the queue is sealed in the
+                // loop's own `finally`, so no message can arrive after the seal. Handled anyway so the
+                // count cannot drift if that ever stops being true - a leaked reservation would shrink
+                // the ceiling for the rest of the stream.
+                _ = Interlocked.Decrement(ref _pending);
+
+                // THE ONLY WAY AN UNBOUNDED WRITER REFUSES IS A COMPLETED ONE, so the seal is the reason
+                // and the answer states it rather than reporting a message accepted that was in fact
+                // dropped. A caller that somehow reached here after the seal has ended its exchange, not
+                // exhausted a quota, and the two have different remedies.
+                return !_sealed;
+            }
+
+            return true;
+        }
 
         /// <summary>States that no further notification will arrive.</summary>
-        internal void CompleteAdding() => _ = _queue.Writer.TryComplete();
+        /// <remarks>
+        /// IDEMPOTENT, AND CALLED FROM THREE PLACES ON PURPOSE - the read loop's own <c>finally</c>, the
+        /// abnormal-exit <c>finally</c>, and <see cref="DisposeAsync"/> - because each is a path on which
+        /// the stream can end and the consumer must be allowed to finish on all of them. The flag is set
+        /// BEFORE the writer is completed so that a concurrent <see cref="Enqueue"/> can never see a refused
+        /// write without also seeing the reason for it.
+        /// </remarks>
+        internal void CompleteAdding()
+        {
+            _sealed = true;
+
+            _ = _queue.Writer.TryComplete();
+        }
 
         /// <summary>
         /// Waits for every queued dispatch to finish and rethrows the first fault, if any.
@@ -4832,6 +5046,16 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         /// Takes queued notifications one at a time and dispatches each to completion.
         /// </summary>
         /// <returns>A task that completes when the queue is finished or a dispatch has thrown.</returns>
+        /// <remarks>
+        /// THE READ OBSERVES THE CALL'S OWN TOKEN, so a client that disconnects or exceeds its deadline
+        /// stops this consumer at once instead of leaving it parked on a queue nothing will ever write to
+        /// again. The earlier form passed <c>CancellationToken.None</c>, which left the wait unstoppable and
+        /// kept the session, the chain and the five attached services alive until the writer happened to be
+        /// completed by the read loop's <c>finally</c> - a path a hard disconnect does not always reach
+        /// promptly. Cancellation is NOT a fault: it is caught separately below so that
+        /// <see cref="HasFault"/> keeps meaning "a dispatch threw", which is what the read loop's exception
+        /// filter tests.
+        /// </remarks>
         private async Task ConsumeAsync()
         {
             try
@@ -4839,27 +5063,64 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                 // ONE AT A TIME, IN ARRIVAL ORDER. The await is what serializes them: the next message is
                 // not taken until this one's dispatch, its outcome report and its result write are done.
                 await foreach (EventChainRequest request in _queue.Reader
-                    .ReadAllAsync(CancellationToken.None)
+                    .ReadAllAsync(_cancellationToken)
                     .ConfigureAwait(false))
                 {
-                    await DispatchNotificationAsync(
-                            request,
-                            _conversation,
-                            _chain,
-                            _strictOrdering,
-                            _cancellationToken)
-                        .ConfigureAwait(false);
+                    try
+                    {
+                        await DispatchNotificationAsync(
+                                request,
+                                _conversation,
+                                _chain,
+                                _strictOrdering,
+                                _cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        // THE SLOT IS RELEASED WHEN THE DISPATCH IS DONE, NOT WHEN THE MESSAGE IS TAKEN,
+                        // which is what makes the in-flight one - the one that may be blocked on an
+                        // answer - count against the ceiling. In a `finally` so a throwing dispatch
+                        // releases too: the consumer stops either way, but a reservation left behind
+                        // would be a leak in the accounting rather than in the queue.
+                        _ = Interlocked.Decrement(ref _pending);
+                    }
                 }
+            }
+            catch (OperationCanceledException) when (_cancellationToken.IsCancellationRequested)
+            {
+                // ROUTINE, NOT A FAULT: the caller disconnected or its deadline expired. Recorded at Debug
+                // and WITHOUT A STACK, because the stack of a cancellation says only where the wait was and
+                // an operator reading it learns nothing the message does not already state. No fault is
+                // captured, so DrainAsync stays silent and the call's status comes from the cancellation
+                // itself; and the linked read source is not cancelled here because it already observes this
+                // same token.
+                _logger?.LogDebug(
+                    "The DataWindow event chain's notification consumer stopped because the call was "
+                        + "cancelled. Any notification still queued is abandoned undispatched, which is "
+                        + "correct: its result could only travel on the stream that has just gone away.");
             }
             catch (Exception failure)
             {
                 _fault = ExceptionDispatchInfo.Capture(Translate(failure));
 
+                // 🔴 THE EXCEPTION OBJECT USED TO BE ATTACHED, AND THIS CATCH TAKES EVERYTHING. Dispatch
+                // runs the event chain, which reaches the expression engine and the Persistence client, so
+                // the fault arriving here can be an upstream DbError carrying a generated statement, a
+                // caller's expression text, or an arbitrary host fault holding this session's variable
+                // VALUES. Every provider renders an attached exception with ToString(), which prints the
+                // whole message chain and the stack, so none of that was bounded.
+                //
+                // THE TYPE CHAIN IS WHAT REPLACES IT and it is enough to act on: it names which failure
+                // occurred and where it came from, every name in it belongs to this codebase, the framework
+                // or a package, and the caller receives the translated status separately. No message is
+                // read at all - this service holds no redaction policy of its own, and inventing one here
+                // would put the decision in the wrong service.
                 _logger?.LogWarning(
-                    failure,
                     "A DataWindow event dispatch failed, so the event chain stops rather than continuing "
                         + "with a chain whose cross-event state is no longer trustworthy. The failure is "
-                        + "surfaced as this call's status.");
+                        + "surfaced as this call's status. FaultTypes={FaultTypes}",
+                    ExceptionChain.DescribeTypes(failure));
 
                 // A FAULT AND ONLY A FAULT STOPS THE READER. Nothing further will be dispatched, so a
                 // reader still waiting for a message would wait for one that can never be acted on.
@@ -5004,6 +5265,67 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         Severity = Severity.Exclamation,
         RetCode = DataWindowWireProjection.ToWireRetCode(RetCode.E_INVALID_ARGUMENT),
     };
+
+    /// <summary>
+    /// Builds the failure a client that pipelined past the pending-notification ceiling receives.
+    /// </summary>
+    /// <param name="sessionId">
+    /// The session the stream is bound to, for the operator record. Nullable only because the read loop's
+    /// binding is a local that flow analysis cannot prove assigned here; a refusal can only occur after
+    /// the bind, so in practice it is always the bound identifier.
+    /// </param>
+    /// <param name="ceiling">The ceiling that was applied.</param>
+    /// <returns>The failure to throw from the read loop.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>A CALL STATUS RATHER THAN A <c>StructuredError</c> ON THE STREAM, and the split is the one this
+    /// method's two neighbours already draw.</b> An unmatched answer is survivable - nothing was waiting,
+    /// so nothing was corrupted - and travels on the stream. A refused notification is NOT: the only
+    /// alternative to ending the call would be to drop the message, and the client would then believe an
+    /// event was dispatched that never was. The item-change and validation arms read state the preceding
+    /// event wrote [<c>se_cst_dw.sru:L89-L96</c>], so a silent gap in the chain produces a wrong chain
+    /// rather than a short one. Ending the call leaves nothing half-applied, because the refused message
+    /// was never dispatched.
+    /// </para>
+    /// <para>
+    /// <c>ResourceExhausted</c> RATHER THAN <c>FailedPrecondition</c>. The client's state is coherent and
+    /// its next attempt can succeed unchanged if it converses instead of pipelining, which is a quota's
+    /// remedy rather than a precondition's. It is also the status a well-behaved client library already
+    /// treats as "back off", where <c>FailedPrecondition</c> is documented as not retryable until the
+    /// system state is explicitly fixed.
+    /// </para>
+    /// <para>
+    /// THE DETAIL NAMES THE CEILING AND THE SETTING, AND NO CALLER CONTENT. An operator needs to know
+    /// which limit was applied and where to change it; the notification's own body is caller content and
+    /// is not repeated into a status message that every failed-call log will record.
+    /// </para>
+    /// </remarks>
+    private RpcException BuildPipeliningRefusal(string? sessionId, int ceiling)
+    {
+        _logger?.LogWarning(
+            "An event chain on session {SessionId} was refused for pipelining: {Ceiling} notification(s) "
+                + "were already queued or in flight when another arrived. The synchronous discipline "
+                + "admits one outstanding notification - a client must read a response to learn its next "
+                + "token - so this is a client that is not conversing. The ceiling is "
+                + "DataServices:EventChain:MaxPendingNotifications. Nothing was dispatched from the "
+                + "refused message and no notification was dropped.",
+            LogSafeText.Render(sessionId),
+            ceiling);
+
+        return new RpcException(new Status(
+            StatusCode.ResourceExhausted,
+            string.Format(
+                CultureInfo.InvariantCulture,
+                "The event chain already holds {0} notification(s) queued or in flight, which is this "
+                    + "service's ceiling, so a further notification cannot be accepted. The chain is a "
+                    + "SYNCHRONOUS conversation: a client reads the response to one notification - "
+                    + "answering any semantic question it carries - before sending the next, and a client "
+                    + "doing that never holds more than one. Notifications are never dropped to stay "
+                    + "under the ceiling, because a skipped event would leave the chain's cross-event "
+                    + "state describing an event that did not run, so the call is ended instead. The "
+                    + "ceiling is DataServices:EventChain:MaxPendingNotifications.",
+                ceiling)));
+    }
 
     /// <summary>
     /// Checks one inbound notification's ordering, dispatches it through the chain, and answers.

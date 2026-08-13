@@ -1642,6 +1642,131 @@ public sealed class ConflictContractTests(OpenApiContractDocuments documents)
         }
     }
 
+    // ---- The row carrier, whose baseline is the OTHER half of the concurrency predicate ----------
+
+    /// <summary>
+    /// Member-for-member rows pairing the projected <c>DataWindowRow</c> schema against the Protobuf
+    /// message it mirrors, with the JSON spelling on the left and the field name on the right.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>WHY THIS ROSTER IS HERE AND NOT ONLY WITH THE CONFLICT ROWS.</b> <c>ConflictRow</c> is what
+    /// the boundary answers WITH when a write is refused; <c>DataWindowRow</c> is what the caller had to
+    /// send to make the check possible in the first place, and what a retrieval returns for the caller to
+    /// build that send from. Both halves of the predicate therefore have to be pinned, and only one of
+    /// them was: the projected <c>DataWindowRow</c> declared <c>originalValues</c> OPTIONAL and described
+    /// it as normally absent on a retrieved row, so a schema-following caller could legitimately hold no
+    /// baseline at all and a schema-following producer could legitimately send none.
+    /// </para>
+    /// <para>
+    /// AAP 0.6.3.2 ADMITS NO EXEMPTION - the payload must transmit, per row, both the current and the
+    /// original value of every marked column - and the fixture is why: the one updatable DataWindow in the
+    /// repository declares <c>updatewhere=1</c> with <c>updatewhereclause=yes</c> on ALL SIX columns
+    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14</c>], so all six originals go into the
+    /// generated WHERE clause. Absence had two legal readings - "equal to current" and "no baseline
+    /// exists" - and the second one drops the predicate, which is the silent overwrite this whole file
+    /// exists to make impossible.
+    /// </para>
+    /// <para>
+    /// AN EMPTY ARRAY REMAINS LEGAL AND MEANS ONE THING: the row has no prior state, which is an insert.
+    /// The projections format default values precisely so that an empty repeated field still appears, so
+    /// the server side of the guarantee is unconditional and is pinned by
+    /// <c>RestProjectionTests.EveryProjectedRowCarriesItsOriginalBaselineMemberAsync</c>.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>WHAT THIS ROSTER ASSERTS IS PROJECTION AND NOT A <c>required</c> LIST, AND THE DIFFERENCE
+    /// WAS MEASURED RATHER THAN CHOSEN.</b> <c>DataWindowRow</c> travels in a REQUEST as well as a
+    /// response, and the projection binds every request with the STRICT canonical protobuf JSON parser,
+    /// which reads an ABSENT member as its default - so a <c>required</c> list on this shape publishes a
+    /// check nothing performs and makes a validator reject a body the runtime accepts. On three of the
+    /// five members that default is load-bearing rather than incidental: an absent <c>buffer</c> is
+    /// <c>Primary!</c>, which this document's own <c>DwBuffer</c> note records as a state the legacy
+    /// deliberately conflates with "no buffer supplied"; an absent <c>row</c> is 0; an absent
+    /// <c>itemStatus</c> is the zero enumerator.
+    /// </para>
+    /// <para>
+    /// SO THE OBLIGATION IS ASSERTED WHERE IT IS EXPRESSIBLE, IN THREE PLACES INSTEAD OF ONE FALSE ONE:
+    /// the schema's DESCRIPTION states it and names the runtime check;
+    /// <c>Validators/UpdateRowValidator</c> ENFORCES it, conditionally on the row - every column of a
+    /// <c>Delete!</c> row or a <c>DataModified!</c> row in a modifiable buffer needs a baseline, and an
+    /// insert or a <c>NotModified!</c> row needs none, which is why a blanket rule would have refused
+    /// conforming payloads while preventing nothing; and <c>ConflictRow</c>, which travels OUTBOUND ONLY,
+    /// declares every one of its five members required including both value sets. That last one is
+    /// asserted below, because it is the direction in which <c>required</c> is the measured wire truth.
+    /// </para>
+    /// </remarks>
+    public static TheoryData<string, string> ProjectedDataWindowRowMemberRows() => new()
+    {
+        // jsonMemberName, protoFieldName
+        { "buffer", "buffer" },
+        { "row", "row" },
+        { "itemStatus", "item_status" },
+        { "columns", "columns" },
+        { "originalValues", "original_values" },
+    };
+
+    [Theory]
+    [MemberData(nameof(ProjectedDataWindowRowMemberRows))]
+    public void TheProjectedDataWindowRowPublishesEveryMemberIncludingItsOriginalBaseline(
+        string jsonMemberName,
+        string protoFieldName)
+    {
+        IOpenApiSchema schema = Assert.Contains("DataWindowRow", Schemas(documents.Gateway));
+
+        Assert.NotNull(schema.Properties);
+        Assert.Contains(jsonMemberName, schema.Properties);
+
+        // AND THE PROTOBUF SIDE DECLARES THE COUNTERPART, so neither end can drop a member unilaterally.
+        Assert.Equal(protoFieldName, Field("common.v1.DataWindowRow", protoFieldName).Name);
+
+        // THE OUTBOUND MIRROR IS WHERE PRESENCE IS GUARANTEED. `ConflictRow` carries the same five
+        // members and travels only in a response, so `required` there is the measured wire truth rather
+        // than a check nothing performs - see this roster's remarks. Its current-value member is spelled
+        // `currentValues` because on a conflict row that IS the server-side state, so the roster's
+        // `columns` maps onto it.
+        IOpenApiSchema outbound = Assert.Contains("ConflictRow", Schemas(documents.Gateway));
+        string outboundMember = jsonMemberName == "columns" ? "currentValues" : jsonMemberName;
+
+        Assert.NotNull(outbound.Properties);
+        Assert.Contains(outboundMember, outbound.Properties);
+        Assert.NotNull(outbound.Required);
+        Assert.Contains(outboundMember, outbound.Required);
+    }
+
+    [Fact]
+    public void TheProjectedDataWindowRowMirrorsItsProtobufMessageAndAddsNothing()
+    {
+        IOpenApiSchema schema = Assert.Contains("DataWindowRow", Schemas(documents.Gateway));
+        MessageDescriptor message = Message("common.v1.DataWindowRow");
+
+        Assert.NotNull(schema.Properties);
+
+        // SAME MEMBER COUNT BOTH WAYS. The theory above proves every protobuf field is projected; this
+        // proves the projection invented nothing extra - in particular no member that would let a caller
+        // state which columns the concurrency check should consider.
+        Assert.Equal(message.Fields.InDeclarationOrder().Count, schema.Properties.Count);
+
+        // AND NO `required` LIST, WHICH IS ASSERTED RATHER THAN LEFT UNSTATED. This shape travels in a
+        // request, the strict canonical parser reads an absent member as its default, and three of these
+        // five defaults are load-bearing - so a `required` list here would advertise a check nothing
+        // performs. The roster's remarks name the three places the baseline obligation IS asserted.
+        Assert.True(
+            schema.Required is null || schema.Required.Count == 0,
+            "DataWindowRow declares a `required` list. It travels in a REQUEST as well as a response, and "
+                + "the projection's strict canonical parser reads an absent member as its default, so a "
+                + "`required` list here publishes a check nothing performs and makes a validator reject a "
+                + "body the runtime accepts. The baseline obligation belongs in the description, in "
+                + "Validators/UpdateRowValidator, and on the outbound-only ConflictRow.");
+
+        // AND THE DESCRIPTION CARRIES THE OBLIGATION IN WORDS, so its absence from `required` is a
+        // documented decision rather than a member nobody noticed was optional.
+        Assert.NotNull(schema.Description);
+        Assert.Contains("UpdateRowValidator", schema.Description, StringComparison.Ordinal);
+        Assert.Contains("originalValues", schema.Description, StringComparison.Ordinal);
+
+        Assert.False(schema.AdditionalPropertiesAllowed);
+    }
+
     // ---- The negative: no way to make the write proceed anyway -----------------------------------
 
     /// <summary>

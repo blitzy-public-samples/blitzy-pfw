@@ -189,14 +189,6 @@ internal sealed class C04HostFactory : IDataWindowHostFactory
         return host;
     }
 
-    /// <inheritdoc/>
-    /// <remarks>
-    /// ALREADY ISOLATED, so this forwards. <see cref="Create"/> here builds a NEW fixture on every call
-    /// and retains nothing by name, which is the property <c>CreateIsolated</c> requires - unlike the
-    /// production factory, whose <c>Create</c> is retentive for C-03's benefit. Forwarding is therefore a
-    /// statement that this double satisfies the stronger contract, not a shortcut around it.
-    /// </remarks>
-    public DataWindowServiceHost? CreateIsolated(string dataWindowName) => Create(dataWindowName);
 }
 
 // -----------------------------------------------------------------------------------------------------
@@ -1036,6 +1028,17 @@ public sealed class ColumnExpressionServiceContractTests
         // magnitude above the configured backstop, so it cannot be mistaken for the thing under test.
         CalcResponse calc = await CalcRowAsync(h.Service, session, dw, 1L, ctx)
             .WaitAsync(TimeSpan.FromSeconds(5), Ct);
+
+        // ⚠ SAMPLED WHEN IT SETTLES, NOT AT THE INSTANT THE CALCULATION RETURNS ⚠
+        //
+        // The backstop under test is FIFTY MILLISECONDS of wall clock, and the dispatch it races is a
+        // write plus a thread-pool hop. On a loaded machine - ten test hosts of this solution running at
+        // once is exactly that - the backstop can elapse first, so the calculation legitimately returns
+        // BEFORE the request has been handed to the channel. Asserting on `asked` at that instant made
+        // this row fail intermittently for the one reason it is not about. Waiting for the dispatch keeps
+        // every claim the row makes - it must happen, and the value must never be fabricated - while
+        // removing a dependence on which of the two wins a race the product does not order.
+        await WaitUntilAsync(() => asked.Count == 1);
 
         _ = Assert.Single(asked);
 
@@ -2503,19 +2506,45 @@ public sealed class ColumnExpressionServiceContractTests
         };
     }
 
+    /// <summary>Yields until <paramref name="condition"/> holds.</summary>
+    /// <param name="condition">The state every caller here is waiting for a background handler to reach.</param>
+    /// <returns>A task that completes once the condition holds.</returns>
+    /// <remarks>
+    /// <para>
+    /// WHY A WAIT IS NEEDED AT ALL. Every caller is waiting on work a DUPLEX HANDLER does: a channel
+    /// attaching itself to the macro router, a subscription registering with the trace broker or the event
+    /// relay, or a message reaching a stream writer. The handler is already running - the test pushed the
+    /// message that drives it - so what is awaited is a continuation the scheduler has ALREADY been handed,
+    /// not an event that may or may not occur.
+    /// </para>
+    /// <para>
+    /// TOKEN-DRIVEN AND UNBOUNDED, WHICH IS THE POINT. This used to be a bounded retry of up to five hundred
+    /// ten-millisecond delays ending in <c>Assert.Fail</c>, and a bound like that is a timing assumption
+    /// wearing a convenience's clothes: on a loaded agent it expires because a thread was not scheduled
+    /// within five seconds, and the failure then accuses the SERVICE of never attaching the channel. There
+    /// is now no attempt count and no delay - the loop yields until the state appears, and the ONLY thing
+    /// that can end it early is the test's own cancellation token. A state that genuinely never arrives is
+    /// therefore reported by the runner's timeout, which is the separate liveness bound that belongs outside
+    /// the assertion. Nothing here asserts a duration (AAP 0.8.5).
+    /// </para>
+    /// <para>
+    /// NO SIGNAL SEAM IS ADDED TO REACH THIS, deliberately. The three counters callers wait on belong to
+    /// <see cref="MacroInvocationRouter"/>, <see cref="ExpressionTraceBroker"/> and
+    /// <see cref="ColumnExpressionEventRelay"/> - production types on C-04's path. Adding change
+    /// notifications to them for a test's benefit would widen production surface to make a test convenient,
+    /// which is the wrong trade (C-A) and is not what this finding asks for.
+    /// </para>
+    /// </remarks>
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
-        for (int attempt = 0; attempt < 500; attempt++)
+        while (!condition())
         {
-            if (condition())
-            {
-                return;
-            }
+            Ct.ThrowIfCancellationRequested();
 
-            await Task.Delay(10, TestContext.Current.CancellationToken);
+            // Hands the scheduler the continuation carrying the handler's next step. No duration, so
+            // nothing here can expire; a state that never arrives is ended by the runner, not by this loop.
+            await Task.Yield();
         }
-
-        Assert.Fail("The awaited condition never became true.");
     }
 }
 

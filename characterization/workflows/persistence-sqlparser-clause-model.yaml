@@ -624,10 +624,11 @@ sharedVolume:
 
 # The honest state of this workflow, and the only value the schema admits. Nothing here has
 # been run: no paired capture has been taken on either side. The legacy half needs a
-# PowerBuilder toolchain that is not present, and in the environment this definition was
-# authored in Docker was absent and no daemon was available, so the compose bring-up that the
-# capture rule is expressed against could not have been exercised there in any case. Nothing
-# in this file may be read as implying a verified run or a passing comparison.
+# PowerBuilder toolchain that is not present. The compose bring-up the capture rule is
+# expressed against HAS been exercised - orchestration/README.md section 10 is the only place
+# in this repository that reports execution status - but a bring-up is not a capture: it
+# produced no recording under this identifier or any other. Nothing in this file may be read
+# as implying a verified run or a passing comparison.
 executionStatus: specified-not-executed
 
 # Cross-references only. Neither sibling is merged with this one and each pair stays

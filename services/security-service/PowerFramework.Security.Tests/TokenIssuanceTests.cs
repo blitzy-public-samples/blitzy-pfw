@@ -245,7 +245,8 @@ public sealed class TokenIssuanceTests
 
             // DataServices again, this time against Security itself - the one cross-service call that
             // needs a cryptographic scope
-            // [services/dataservices-service/PowerFramework.DataServices/Clients/SecurityClient.cs:L1976].
+            // [services/dataservices-service/PowerFramework.DataServices/Clients/SecurityClient.cs:L2232,
+            //  its CryptoScope constant].
             {
                 "powerframework-dataservices",
                 "powerframework-security",
@@ -1008,17 +1009,15 @@ public sealed class TokenIssuanceTests
     {
         await using SecurityAppFactory factory = new();
 
-        SecurityOptions options = factory.ResolveSecurityOptions();
-        SecurityClientOptions client = options.Clients[0];
-
-        // READ BACK FROM THE HOST rather than restated, so this row asserts against the roster the
-        // composition root actually bound.
-        string audience = client.Audiences[0];
-        string scope = client.Scopes[0];
+        // READ BACK FROM THE HOST rather than restated, so this row asserts against the configuration the
+        // composition root actually bound - the credential from `Security:Clients` and the permission from
+        // the grant matrix, which are two separate declarations and the second of which is the only one
+        // that decides.
+        (string subject, string audience, string scope) = factory.ResolveFirstGrant();
 
         IResult outcome = TokenEndpoints.IssueToken(
-            IssuanceFixture.Body(subject: client.Subject, audience: audience, scopes: [scope]),
-            PresentBasic(client.Subject!, SecurityAppFactory.RosterSecret, certificate: null),
+            IssuanceFixture.Body(subject: subject, audience: audience, scopes: [scope]),
+            PresentBasic(subject, SecurityAppFactory.RosterSecret, certificate: null),
             factory.Services.GetRequiredService<TokenIssuer>(),
             factory.Services.GetRequiredService<ClientCertificateTrust>(),
             factory.Services.GetRequiredService<IssuanceClientRegistry>(),
@@ -1031,7 +1030,7 @@ public sealed class TokenIssuanceTests
 
         JsonWebToken parsed = new(issued.Value.AccessToken);
 
-        Assert.Equal(client.Subject, ReadClaim(parsed, "sub"));
+        Assert.Equal(subject, ReadClaim(parsed, "sub"));
         Assert.Equal(audience, Assert.Single(parsed.Audiences));
         Assert.Equal(scope, ReadClaim(parsed, "scope"));
     }
@@ -1053,17 +1052,17 @@ public sealed class TokenIssuanceTests
     {
         await using SecurityAppFactory factory = new();
 
-        SecurityClientOptions client = factory.ResolveSecurityOptions().Clients[0];
+        (string subject, string audience, string scope) = factory.ResolveFirstGrant();
 
         TokenIssuanceRequestBody body = IssuanceFixture.Body(
-            subject: client.Subject,
-            audience: client.Audiences[0],
-            scopes: [client.Scopes[0]]);
+            subject: subject,
+            audience: audience,
+            scopes: [scope]);
 
         HttpContext[] refused =
         [
             // A registered client, a wrong secret.
-            PresentBasic(client.Subject!, "not-the-configured-secret", certificate: null),
+            PresentBasic(subject, "not-the-configured-secret", certificate: null),
 
             // An unregistered client, presenting the real secret of another.
             PresentBasic("a-client-this-deployment-never-registered", SecurityAppFactory.RosterSecret, certificate: null),
@@ -1133,19 +1132,19 @@ public sealed class TokenIssuanceTests
     {
         await using SecurityAppFactory factory = new();
 
-        SecurityClientOptions client = factory.ResolveSecurityOptions().Clients[0];
+        (string subject, string audience, string scope) = factory.ResolveFirstGrant();
 
         TokenIssuanceRequestBody body = IssuanceFixture.Body(
-            subject: client.Subject,
-            audience: client.Audiences[0],
-            scopes: [client.Scopes[0]]);
+            subject: subject,
+            audience: audience,
+            scopes: [scope]);
 
-        using X509Certificate2 trusted = IssuanceFixture.CreateCallerCertificate(client.Subject!);
+        using X509Certificate2 trusted = IssuanceFixture.CreateCallerCertificate(subject);
 
         // A WRONG secret, alongside a certificate that WOULD have authenticated on its own.
         IResult substituted = TokenEndpoints.IssueToken(
             body,
-            PresentBasic(client.Subject!, "not-the-configured-secret", trusted),
+            PresentBasic(subject, "not-the-configured-secret", trusted),
             factory.Services.GetRequiredService<TokenIssuer>(),
             factory.Services.GetRequiredService<ClientCertificateTrust>(),
             factory.Services.GetRequiredService<IssuanceClientRegistry>(),

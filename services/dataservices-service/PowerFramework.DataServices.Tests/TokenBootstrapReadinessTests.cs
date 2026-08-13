@@ -2,7 +2,7 @@
 //  TOKEN-BOOTSTRAP READINESS - WHAT THIS FILE ASSERTS THAT NOTHING ELSE DOES
 //
 //  Every outward call this service makes carries a bearer token: all four of Persistence's contracts
-//  require one, and so does each of Security's seventeen cryptographic operations. The only way to get
+//  require one, and so does each of Security's eighteen cryptographic operations. The only way to get
 //  one is POST /v1/tokens, which contract C-01 protects with MUTUAL TLS AND NOTHING ELSE - because a
 //  caller cannot present a bearer token in order to obtain its first bearer token.
 //

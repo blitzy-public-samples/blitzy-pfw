@@ -2463,6 +2463,19 @@ public sealed class HealthEndpointsTests
                 ["Jwt:Authority"] = ConfiguredIssuer,
                 ["Jwt:Audience"] = ConfiguredAudience,
                 ["Jwt:RequireHttpsMetadata"] = "true",
+
+                // STARTUP PROVISIONING IS SWITCHED OFF FOR EVERY HOST IN THIS FILE, AND THAT IS WHAT MAKES
+                // THIS FILE'S SUBJECT REACHABLE AT ALL. Switched ON, the startup sequence applies pending
+                // migrations before the pipeline is built, so a host started against an empty or absent
+                // database repairs it and then reports READY - which is correct for an orchestrated
+                // deployment and fatal for a suite whose whole subject is what the probe says about an
+                // unprovisioned or unreachable engine. OFF is the shipped default, so this line pins the
+                // posture rather than changing it; both states also remain genuinely reachable in
+                // production - under this setting, which is the documented posture for a characterization
+                // capture run, and under a volume replaced beneath an already-running container. The
+                // provisioning behaviour itself is asserted by CompositionRootTests against the real graph
+                // and by SchemaProvisionerTests against the step.
+                ["Schema:ApplyMigrationsOnStartup"] = "false",
             };
 
             if (_dataDirectory is not null)

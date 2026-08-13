@@ -64,6 +64,7 @@
 
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
+using PowerFramework.Persistence.Errors;
 using PowerFramework.Persistence.Transactions;
 using PowerFramework.Shared.Kernel;
 
@@ -557,10 +558,18 @@ namespace PowerFramework.Persistence.Data
             {
                 connection.Dispose();
 
+                // 🔴 THE EXCEPTION OBJECT USED TO BE HERE, AND THIS IS THE WORST SITE IN THE SERVICE FOR
+                // IT. A rejected connection string is the one fault whose message QUOTES THE CONNECTION
+                // STRING - which on this service's own URI grammar carries the database path and, when
+                // configured, the password [Data/SqliteConnectionFactory.cs]. Attaching the exception made
+                // every provider render that message, its whole inner chain and the stack, so constraint
+                // C-F was satisfied by the template and defeated by the argument beside it.
                 _logger.LogError(
-                    failure,
                     "The transaction object could not open its SQLite connection because the composed "
-                        + "connection string was rejected.");
+                        + "connection string was rejected. FaultTypes={FaultTypes} "
+                        + "RedactedMessage={RedactedMessage}",
+                    FaultRecord.Types(failure),
+                    FaultRecord.RedactedMessages(failure));
 
                 return SqlState.Failed(RetCode.SQLITE_CANTOPEN, failure.Message);
             }
@@ -1154,13 +1163,17 @@ namespace PowerFramework.Persistence.Data
             }
             catch (SqliteException failure)
             {
+                // The exception object is not attached: the pragma is a generated statement and a
+                // provider fault on one carries the statement in its own message.
                 _logger.LogWarning(
-                    failure,
                     "The SQLite journal mode stayed {JournalModeInForce} instead of the configured "
-                        + "{ConfiguredJournalMode}. {Explanation}",
+                        + "{ConfiguredJournalMode}. {Explanation} FaultTypes={FaultTypes} "
+                        + "RedactedMessage={RedactedMessage}",
                     inForce,
                     configured,
-                    SqliteConnectionFactory.JournalModeNotConvertedText);
+                    SqliteConnectionFactory.JournalModeNotConvertedText,
+                    FaultRecord.Types(failure),
+                    FaultRecord.RedactedMessages(failure));
 
                 return;
             }
@@ -1245,9 +1258,14 @@ namespace PowerFramework.Persistence.Data
                 // the caller's own operation has already SUCCEEDED, so its answer must stand; there the
                 // absent transaction stays visible to the NEXT commit or rollback, which refuses with
                 // NoOpenTransactionText rather than claiming success.
+                // Described rather than attached - see Errors/FaultRecord.cs. A BEGIN that the provider
+                // refuses reports its own statement text, and the redactor is the only route by which any
+                // statement reaches a record in this service.
                 _logger.LogError(
-                    failure_,
-                    "The transaction object could not open an explicit SQLite transaction.");
+                    "The transaction object could not open an explicit SQLite transaction. "
+                        + "FaultTypes={FaultTypes} RedactedMessage={RedactedMessage}",
+                    FaultRecord.Types(failure_),
+                    FaultRecord.RedactedMessages(failure_));
 
                 failure = Failed(failure_, "begin transaction");
 
@@ -1270,9 +1288,11 @@ namespace PowerFramework.Persistence.Data
             catch (SqliteException failure)
             {
                 _logger.LogError(
-                    failure,
                     "The transaction object could not commit its explicit SQLite transaction while "
-                        + "switching to auto-commit, so the accumulated work was not applied.");
+                        + "switching to auto-commit, so the accumulated work was not applied. "
+                        + "FaultTypes={FaultTypes} RedactedMessage={RedactedMessage}",
+                    FaultRecord.Types(failure),
+                    FaultRecord.RedactedMessages(failure));
             }
             finally
             {
@@ -1298,9 +1318,11 @@ namespace PowerFramework.Persistence.Data
                 // An unwind that cannot unwind is logged and swallowed: every caller is already on a
                 // teardown path, and throwing would turn a released connection into a leaked one.
                 _logger.LogWarning(
-                    failure,
                     "The transaction object could not roll back its explicit SQLite transaction while "
-                        + "releasing the connection.");
+                        + "releasing the connection. FaultTypes={FaultTypes} "
+                        + "RedactedMessage={RedactedMessage}",
+                    FaultRecord.Types(failure),
+                    FaultRecord.RedactedMessages(failure));
             }
             finally
             {
@@ -1354,11 +1376,19 @@ namespace PowerFramework.Persistence.Data
                 failure.SqliteErrorCode,
                 failure.SqliteExtendedErrorCode);
 
+            // 🔴 THE HIGHEST-TRAFFIC SITE OF THE SIX, because every connect and every statement fault
+            // in this engine funnels through here. The provider's message is the driver envelope around
+            // its own diagnosis - `SQLite Error 19: '<text>'.` - and on a statement fault the interior is
+            // the statement with its literal values interpolated. The mapped code is published in the
+            // clear because it is already on the wire as DbError.sqldbcode, so preserving it discloses
+            // nothing the caller does not already receive.
             _logger.LogError(
-                failure,
-                "The transaction object's SQLite {Operation} failed with mapped code {ResultCode}.",
+                "The transaction object's SQLite {Operation} failed with mapped code {ResultCode}. "
+                    + "FaultTypes={FaultTypes} RedactedMessage={RedactedMessage}",
                 operation,
-                code);
+                code,
+                FaultRecord.Types(failure),
+                FaultRecord.RedactedMessages(failure));
 
             return SqlState.Failed(code, failure.Message);
         }
@@ -1402,10 +1432,12 @@ namespace PowerFramework.Persistence.Data
             // included in this record - the only route a statement text ever takes to a log is the
             // sanctioned redactor, which the task layer applies.
             _logger.LogError(
-                failure,
                 "The transaction object's SQLite {Operation} was refused by the provider before reaching "
-                    + "the engine, which is the shape an unsupplied statement parameter takes.",
-                operation);
+                    + "the engine, which is the shape an unsupplied statement parameter takes. "
+                    + "FaultTypes={FaultTypes} RedactedMessage={RedactedMessage}",
+                operation,
+                FaultRecord.Types(failure),
+                FaultRecord.RedactedMessages(failure));
 
             return SqlState.Failed(RetCode.SQLITE_MISUSE, failure.Message);
         }

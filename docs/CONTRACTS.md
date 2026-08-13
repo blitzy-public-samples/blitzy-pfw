@@ -57,7 +57,12 @@ itself:
 table below is **derived from the generated artifacts** — the compiled protobuf file descriptors for
 the six gRPC contracts, and the OpenAPI document itself for the two REST ones — rather than written
 from the design notes. An inventory that claims completeness has to be checkable, and a hand-written
-list of a 26-method service is a list that silently falls behind the schema. The register:
+list of a 26-method service is a list that silently falls behind the schema — this document has already
+proved that twice, and in OPPOSITE directions: it carried `26` for C-04 across four derived totals after
+`LoadRows` was added to the schema, and `27` across the same four after `LoadRows` was withdrawn from it.
+Which is why the counts below are regenerated from the descriptors rather than edited by hand. The command that regenerates them is in
+[§16.3](#163-regenerating-the-counts-because-a-hand-maintained-inventory-has-already-drifted-once).
+The register:
 
 | Contract | Surface | Count | Streaming shapes |
 | --- | --- | --- | --- |
@@ -420,6 +425,19 @@ This discharges C-G, and each clause of it is load-bearing:
   `/v1/capabilities` therefore declare `403` alongside `401` in
   [`gateway.v1.yaml`](../shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml), because an
   undeclared response on the ingress is an undocumented surface.
+- **And the requirement is published per operation, because the security scheme cannot express it.**
+  Every operation in `gateway.v1.yaml` carries an `x-required-scope` extension whose value is one of
+  four: `ping`, `capabilities`, `datawindow`, or `none` for the anonymous probe and the eight reserved
+  operations. The extension exists because `bearerAuth` is applied as `bearerAuth: []` throughout and
+  **that empty array says nothing about scope** — OpenAPI defines the security-requirement array as a
+  scope list for `oauth2` and `openIdConnect` schemes only, so for an `http`/`bearer` scheme an empty
+  array is the sole meaningful value. Reading the silence as "no scope required" is a mistake that was
+  made once, in Security's provisioning guidance, and it cost a documented bring-up: the operator
+  granted a placeholder scope, issuance succeeded because the granted set is the *overlap* with the
+  request and a narrowing is a success, and every route the caller then reached answered `403`. The
+  worked grant is caller `pfw-e2e-suite`, audience `powerframework-gateway`, all three scopes —
+  published identically in Security's `appsettings.Development.json`, `orchestration/.env.example` and
+  `orchestration/docker-compose.yml`, and held to the routes' own constants by a coherence test.
 - **The four reserved extension points deliberately require authentication and nothing further.**
   Requiring a capability scope for a route that reaches no capability would invent an entitlement for
   a service this phase must not implement even in metadata (C-D), and the issuance roster grants no
@@ -456,8 +474,9 @@ code rather than hand-written code, on three services rather than one.
 
 **"REST" here names HTTP semantics, not a scheme, and the choice would hold on either.** The schema
 publishes exactly **one** canonical server entry, `https://localhost:5104`, matching the one listener the
-service binds; a local bring-up changes only the host. Exactly one entry rather than two is deliberate: a second entry in the other scheme would
-make both a *published, selectable* base URL for the whole API, and a caller picking the wrong one would
+service binds; a local bring-up changes only the host. Exactly one entry rather than two is deliberate: a
+second entry in the other scheme would make both a *published, selectable* base URL for the whole API,
+and a caller picking the wrong one would
 be following the contract. The contract names the address the repository actually serves, and a deployment
 that serves another republishes it. Two consequences a deployment has to honour:
 
@@ -1069,7 +1088,7 @@ it is stated here rather than left to a client's guess.** It *enforces* the orde
 repairing it. The delivered behaviour:
 
 | Arriving pattern-(a) token | What the service does |
-|---|---|
+| --- | --- |
 | **Above** the ordering mark, successor or not | Dispatched. A **gap is legitimate**: the sequence space is shared with the outbound direction, so the numbers the server consumed are numbers the client never sends |
 | **At or below** the ordering mark | Refused `FAILED_PRECONDITION` — a reversal or a duplicate. The events after that position have already been dispatched, so there is nowhere left to place it. Before this rule both were dispatched silently |
 | Absent (`0`) | Refused, on every discipline |
@@ -1089,6 +1108,25 @@ tokens, i.e. a separate sequence space per direction, which changes the publishe
 
 `DataServices:EventChain:StrictOrdering` governs whether an ordering violation fails the stream or is
 recorded while the message is processed in arrival order. **Neither mode ever reorders or buffers.**
+
+**"It cannot pipeline" above is a statement about a CONFORMING client, and the server does not rely on
+it.** A notification is accepted on the request-stream loop in constant time and handed to a single
+ordered consumer — the handover exists because nine of the 22 events are questions the chain asks back
+and blocks on, and only that loop can read the answer — so a client that simply declines the discipline
+and writes without reading could enqueue without limit while one dispatch waited out
+`DataServices:EventChain:AnswerTimeout`. `DataServices:EventChain:MaxPendingNotifications` is the
+server's own bound on that: it counts the notifications queued-or-in-flight and refuses a further one
+with **`ResourceExhausted`**, naming the ceiling and the setting. It defaults to 64 against the ONE
+outstanding notification the discipline itself admits, and its smallest legal value is 2 — one slot for
+the conversation and one for the instant between a result being written, at which point the client may
+legitimately send the next, and that slot being released.
+
+Two properties of that refusal are contractual rather than incidental. **A notification is never
+dropped to stay under the ceiling**: a skipped event would leave the chain's four cross-event fields
+describing an event that did not run, so the call ends instead and nothing is half-applied. And **the
+queue itself stays unbounded**: the ceiling is counted rather than imposed by a bounded queue, because a
+full queue would stall the read loop, and the read loop is the only thing that can deliver the answer
+the consumer is waiting for — which is the deadlock the handover exists to break.
 
 **Which is why the discipline travels as data rather than as prose.** The assignment in the table
 above is published on the wire as `dataservices.v1.OrderingDiscipline`, whose three members are
@@ -1296,11 +1334,11 @@ the per-arity detail behind it is [§7.9](#79-the-contract-covers-the-source-sur
 | 21 | `SetTrace` | `SetTraceRequest` → `SetTraceResponse` | unary | `of_settrace` [`:L208`]. **Not vetoable** — the asymmetry with `SetEnabled` is deliberate |
 | 22 | `GetServiceState` | `GetServiceStateRequest` → `GetServiceStateResponse` | unary | Exposes the `#Enabled` and `#Trace` state the two setters write [`:L98`, `:L2409`] |
 | 23 | `GetExpressionState` | `GetExpressionStateRequest` → `GetExpressionStateResponse` | unary | **The engine-state snapshot.** Publishes the seven structures of [§7.5](#75-seven-structures-that-are-the-contract) — the expression table, the **reverse dependency index** [`:L44-L48`], the grammar sentinels, and on request the global variable table and the three-part `$` / `$$` bindings. Read-only by design: state is mutated through the typed operations above, never by posting a snapshot back, because an engine restorable from a caller-supplied graph would accept a dependency index inconsistent with the expressions it indexes |
-| 24 | `EventStream` | `EventStreamRequest` → **stream** `ExpressionEvent` | **server streaming** | The three events the engine declares on **itself** [`:L86-L88`] — item-changed, do-item-changed with its `frominput` flag, and var-changed with its `forcecalc` flag. Declaring them without a delivery mechanism would have left them unreachable; a server stream is the delivery mechanism, and it carries a **sequencing token** because these are notifications rather than an ordered chain |
+| 24 | `EventStream` | `EventStreamRequest` → **stream** `EventStreamResponse` | **server streaming** | The three events the engine declares on **itself** [`:L86-L88`] — item-changed, do-item-changed with its `frominput` flag, and var-changed with its `forcecalc` flag. Declaring them without a delivery mechanism would have left them unreachable; a server stream is the delivery mechanism, and it carries a **sequencing token** because these are notifications rather than an ordered chain |
 | 25 | `InvokeMethodChannel` | **stream** `InvokeMethodResponse` → **stream** `InvokeMethodRequest` | **bidirectional streaming** | **Inverted stream 1 — macro invocation.** Note the message names look backwards and are not: DataServices asks its *client* to evaluate a macro, because the legacy expects the **application** to implement the macro switch [`docs/n_cst_dwsvc_columnexp.md:L106`; source at `:L2263`, `:L2287`]. Synchronous within the stream — the calculation cannot proceed without the value ([§7.6](#76-two-inverted-streams-structurally-required)) |
 | 26 | `TraceChannel` | **stream** `TraceChannelRequest` → **stream** `TraceRecord` | **bidirectional streaming** | **Inverted stream 2 — the expression trace**, including the call stack the recursion vector builds [`:L110`, `:L296-L297`, `:L318`, `:L753-L757`, emitted at `:L758`]. Server-initiated and fire-and-forget, so it carries a **sequencing token** rather than strict ordering. Gated on `#Trace` [`:L98`] |
 
-**Twenty-six RPCs cover roughly sixty legacy entry points**, and the collapse is deliberate: what
+**Twenty-seven RPCs cover roughly sixty legacy entry points**, and the collapse is deliberate: what
 varies across a legacy overload group — index versus name addressing, the arity of the recalculate and
 force flags, which of seven scalar types a variable holds — becomes **fields of one request** rather
 than separate RPCs. Preserving one RPC per overload would have produced a contract nobody could
@@ -1583,7 +1621,7 @@ subtly wrong.
 
 ### 7.10 The wire method surface, enumerated
 
-**Twenty-six methods.** The table is derived from the generated file descriptor, so it is what
+**Twenty-seven methods.** The table is derived from the generated file descriptor, so it is what
 `Proto/dataservices.v1.proto` compiles to rather than a summary of intent. Note the relationship to
 §7.9: the legacy's *arities* do not become separate RPCs. A legacy method that exists in four arities
 becomes **one** RPC whose request carries the optional fields those arities differ by, because an
@@ -2636,6 +2674,21 @@ outcome of a slow upstream rather than a hypothetical. And `502`, the one case t
 because it is the case where **no gRPC response arrived at all**: an exhausted retry or an unreachable
 upstream, which is a failure mode decomposition itself creates.
 
+**One legacy code has one status across the whole estate, and `RetCode.E_INVALID_HANDLE` is the one that
+had to be settled to make that true.** A handle naming nothing — an expression session that was never
+opened, a DataWindow handle bound to no chain, an upstream work handle already released — is `NotFound`
+and therefore `404`, on every path that can raise it: DataServices' unary outcome map, both of its
+upstream-failure maps, its streaming-resolution map, and the in-band map its own REST projection applies.
+Three of those five used to answer `FailedPrecondition`, which this table declares no row for, so that arm
+fell to the canonical gRPC mapping and reached the caller as **`400` carrying `E_INVALID_ARGUMENT`** — the
+originating code replaced rather than re-spelled, and a caller told its argument was malformed when what it
+had actually named was gone. A caller's retry-or-surface policy keys on the status, so one code answering
+in two statuses depending on which internal helper happened to raise it is not a cosmetic divergence: it
+makes the policy unwritable. `FailedPrecondition` remains what it always was — an ordering violation under
+strict ordering, an unknown validation session, a transaction the upstream will not accept, and the
+400-class group DataServices' unary outcome map spells that way — and still projects to `400` through the
+canonical mapping.
+
 **Two rows are translated but declared nowhere, each for a checkable reason.** `AlreadyExists` is produced
 by exactly one method in the estate — the macro channel reporting that a channel is already attached — and
 that method is bidirectional and therefore **not projected**, so no REST operation can return it; the
@@ -2682,6 +2735,62 @@ operation marks itself with `x-grpc-streaming: server` so a consumer knows the b
 sequence rather than one message. Omitting them would have left the retrieval third of the triple
 unreachable from outside the cluster, which for the sole ingress is a functional hole rather than a
 documented gap.
+
+**`EventStream`'s projection is a BOUNDED POLL, and that is the one place a projection deliberately does
+not mirror its gRPC twin.** The distinction the paragraph above rests on — a determinate response
+sequence — holds for `Retrieve`, which ends with its final-marked chunk. It does **not** hold for
+`EventStream`, which is a *subscription*: the server ends it only when the client goes away, so
+"the whole sequence" has no meaning and a projection that waited for it never answered at all. The
+projected operation therefore collects for a **finite window** configured on the serving side and answers
+with the records that arrived within it. Three consequences are contract rather than implementation:
+
+- **An empty array is a complete, successful `200`.** It means *no event was emitted during the window*,
+  never *the subscription ended* — there is no status for the latter, because the subscription does not end.
+- **A response is not the whole sequence, so a consumer polls again.** Each element carries its own
+  monotonic `sequence`, which is how a gap between one poll and the next is detected — the same token that
+  detects a gap within one response.
+- **A consumer needing continuous delivery uses the gRPC stream**, which carries no window because it needs
+  none. The projection exists so the capability is reachable over HTTP, not so that HTTP becomes the better
+  transport for it.
+
+The window is a deployment setting and is deliberately **not** published as a number in the contract: it is
+a completeness rule, and no latency budget, throughput target or availability commitment is published
+anywhere in this system ([§14.7](#147-no-service-level-objective-is-asserted-and-none-exists-to-assert)), so a number there
+would read as one. Both the ingress and the service behind it refuse to start on a window that could not
+fire before the request it bounds is abandoned.
+
+**Every projected body is published as a concrete, closed schema — 133 of the contract's 144 schemas,
+covering the complete transitive closure of 118 messages and 15 enums.** Each carries `x-proto-message` or
+`x-proto-enum` naming the descriptor it publishes, `additionalProperties: false`, canonical
+lowerCamelCase member names, the canonical scalar encodings — 64-bit integers as `[integer, string]`
+because the mapping *emits* them as JSON strings, `bytes` as base64 — and a `required` list that states
+what the wire actually carries.
+
+An earlier revision delegated every projected body — 75 of them on today's projection, 36 requests and 39
+responses — to **one open schema** with no members, pointing a consumer at the `x-proto-*` extension to
+find the real message. That was wrong in the one direction that
+matters: the projection binds every request with the **strict** canonical parser, which *rejects* a member
+the target message does not declare and answers `400`. The document therefore promised a permissiveness
+the runtime does not have, and a consumer generating a client from it could not see a single member it was
+required to send — `UpdateResponse.rowsInserted`, `.rowsUpdated`, `.rowsDeleted` and `.identity` were
+invisible, on the one operation whose entire purpose is to report what it changed and what the engine
+assigned to it.
+
+The delegation's stated objection was sound and is **answered rather than overruled**: transcribing the
+shapes by hand would create a second source of truth with nothing keeping the two in step, so the first
+divergence would be silent. The schemas are therefore **generated** from the compiled descriptors, and
+`shared/PowerFramework.Contracts.Tests/GeneratedSchemaFidelityTests.cs` compares every one of the 133
+against its descriptor on every build — member set, JSON name, type, format, repeatedness, map shape,
+closedness, enum spellings, enum numbers and the `required` rule. A divergence is a build failure.
+
+`required` is asymmetric, and the asymmetry is the measured wire truth rather than a compromise. A
+**response-only** shape declares every member *without* explicit protobuf presence, because the projection
+formats default values and the formatter writes such a member whether or not it is set — so it is present
+on every response even holding `0`, `""`, `false` or `[]`. A shape carried in a **request** declares
+nothing required, because the parser reads an absent member as its default: absence and a default-valued
+member are indistinguishable to the operation, so a `required` list there would publish a check nothing
+performs and would make a validator reject a body the runtime accepts. A shape travelling both ways can
+only honour the weaker guarantee, and names the response-side one in its description instead.
 
 ### 12.2 C-10 — Health and readiness
 
@@ -2973,6 +3082,16 @@ What *is* claimed is architectural rather than quantitative: each service is ind
 deployable and independently scalable, which is a property of the acyclic topology of
 [§2.1](#21-the-call-graph-the-contracts-realize) and not of any measurement.
 
+One consequence belongs here rather than only in the orchestration documents, because it is a **contract**
+obligation: four operations return an opaque handle whose state lives in the process that issued it — a
+transaction session, a query task, an update task and a command task on Persistence, plus a validation
+session and an expression session on DataServices. Replicas do not share that state, so a caller talking to a
+replicated service must route every follow-up call carrying a handle back to the replica that issued it. The
+affinity key is always a named field of the request (`SessionHandle.session_id`, `TaskHandle.task_id`,
+`session_id`, `datawindow_handle`), and a replica that never issued the handle refuses it with
+`RetCode.E_INVALID_HANDLE` rather than acting on it. `orchestration/README.md` §6.3.2 carries the operational
+form of the same statement.
+
 ---
 
 ## 15. Rejected alternatives
@@ -3091,6 +3210,54 @@ worth answering first, in the order in which getting them wrong is most expensiv
    key store's population path acceptable?
 8. **Do the four reserved routes read as metadata rather than as implementation**
    ([§13.1](#131-the-compliance-note-stated-so-it-is-auditable-rather-than-argued))?
+
+### 16.3 Regenerating the counts, because a hand-maintained inventory has already drifted once
+
+Every method and route count in this document is a **derived** figure, and a derived figure written by
+hand goes stale silently. This document has drifted on the same four totals TWICE and in opposite
+directions — the register in §3, the §7.1 inventory, the §7.10 wire surface and the §12.1 projection
+arithmetic. It carried `26` for C-04 after `LoadRows` was added to the schema, and `27` after `LoadRows`
+was withdrawn from it, so each drift was four edits wide and invisible to a reader of any one of them.
+Regenerate rather than adjust:
+
+```bash
+# gRPC method counts, per service, straight from the definitions.
+python3 - <<'PY'
+import re, glob
+for path in sorted(glob.glob('shared/PowerFramework.Contracts/Proto/*.proto')):
+    service, counts = None, {}
+    for line in open(path):
+        code = line.split('//')[0]
+        opened = re.match(r'\s*service\s+(\w+)\s*\{', code)
+        if opened:
+            service = opened.group(1)
+            counts[service] = 0
+            continue
+        if service:
+            if re.match(r'\s*rpc\s+\w+\s*\(', code):
+                counts[service] += 1
+            if re.match(r'^\}', code):
+                service = None
+    for name, total in counts.items():
+        print(f'{name}: {total} rpcs   [{path}]')
+PY
+
+# OpenAPI path and operation counts, per document.
+python3 - <<'PY'
+import yaml
+methods = {'get', 'put', 'post', 'delete', 'patch', 'options', 'head', 'trace'}
+for path in ('shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml',
+             'shared/PowerFramework.Contracts/OpenApi/security.v1.yaml'):
+    paths = yaml.safe_load(open(path)).get('paths', {})
+    operations = sum(1 for item in paths.values() for verb in item if verb.lower() in methods)
+    print(f'{path}: {len(paths)} paths, {operations} operations')
+PY
+```
+
+Measured on the tree this revision documents: `DataWindowService` 16, **`ColumnExpressionService` 26**,
+`QueryService` 11, `UpdateService` 5, `CommandService` 6, `TransactionService` 13; `gateway.v1.yaml`
+**46 paths / 50 operations**; `security.v1.yaml` 23 paths / 23 operations. Any disagreement between
+those figures and the tables above is a defect in this document, not in the schema.
 
 ---
 

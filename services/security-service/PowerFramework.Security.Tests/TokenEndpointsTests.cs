@@ -65,7 +65,54 @@ using PowerFramework.Security.Endpoints;
 using PowerFramework.Security.Tokens;
 using PowerFramework.Shared.Kernel;
 
+// ==================================================================================================
+//  THE ONE ASSEMBLY FIXTURE IN THIS PROJECT, AND WHY IT HAS TO BE ONE
+//
+//  `IssuanceFixture` owns a certificate authority for the WHOLE suite - one authority, created once,
+//  so that a certificate it issues is trusted by any host any row builds. Because the trust setting a
+//  deployment supplies is a PATH, the authority's public certificate has to exist as a FILE, which
+//  means the suite creates a per-run directory under the system temporary directory.
+//
+//  Nothing owned by a test class can remove that directory: it outlives every class that uses it by
+//  construction, and a class-level teardown would delete an anchor a later class still points a host
+//  at. Leaving it was the defect - a run that finished left a directory behind, every run left
+//  another, and on a shared agent they accumulate indefinitely. An ASSEMBLY fixture is the exactly
+//  correct scope, and xUnit v3 disposes it after the last test in the assembly has finished whatever
+//  the outcome, which is what makes the cleanup unconditional rather than best-effort.
+//
+//  It carries NO test and NO assertion. Its whole content is a lifetime.
+//
+//  The type name is FULLY QUALIFIED because an assembly-level attribute is resolved before the
+//  file-scoped namespace declaration below takes effect.
+// ==================================================================================================
+[assembly: AssemblyFixture(typeof(PowerFramework.Security.Tests.IssuanceAuthorityLifetime))]
+
 namespace PowerFramework.Security.Tests;
+
+/// <summary>
+/// Releases the suite-wide certificate authority and the per-run directory holding its anchor file,
+/// after the last test in this assembly has run.
+/// </summary>
+/// <remarks>
+/// <para>
+/// UNCONDITIONAL, AND DELIBERATELY NOT DEFENSIVE. A failure to remove the directory is reported as an
+/// assembly cleanup error rather than swallowed: this suite is the one place in the repository that
+/// routinely materialises credential-shaped artifacts on disk, and a cleanup that quietly does nothing
+/// is indistinguishable from one that worked. The anchor file carries the authority's PUBLIC certificate
+/// only - the signing key never leaves the process - so what is being cleaned up is hygiene rather than a
+/// disclosure, and it is still cleaned up.
+/// </para>
+/// <para>
+/// IDEMPOTENT WITHOUT BEING SILENT. The release is a no-op when the authority was never created, because
+/// the whole thing is lazy and a run that touched none of the certificate rows created no directory to
+/// remove. That is a genuine absence rather than a suppressed failure.
+/// </para>
+/// </remarks>
+public sealed class IssuanceAuthorityLifetime : IDisposable
+{
+    /// <inheritdoc />
+    public void Dispose() => IssuanceFixture.ReleaseAuthority();
+}
 
 /// <summary>
 /// The addresses, identities and material every row in this file shares.
@@ -293,6 +340,84 @@ internal static class IssuanceFixture
     }
 
     /// <summary>
+    /// Adds a credential-directory entry for every caller the grant matrix names and the directory does
+    /// not, because a grant naming an uncredentialled caller REFUSES the host.
+    /// </summary>
+    /// <param name="options">The options instance being shaped.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THIS IS A STARTUP INVARIANT AND NOT A CONVENIENCE, which is why it runs unconditionally after
+    /// every shaping delegate.</b> The composition root refuses to start when the matrix grants a caller
+    /// <c>Security:Clients</c> carries no entry for: identity is resolved against that directory on both
+    /// the shared-secret and the client-certificate path, so such a grant can never be exercised by
+    /// anything. A harness row that installs a matrix of its own - and several install a complete
+    /// deployment - would otherwise produce an unstartable host and fail on a configuration rule instead of
+    /// on the issuance behaviour it exists to assert.
+    /// </para>
+    /// <para>
+    /// <b>ADDITIVE, AND IT CANNOT WIDEN WHAT A ROW READS.</b> The directory grants nothing - it names an
+    /// identity and the configuration key its secret is found under - so an entry added here cannot turn a
+    /// refusal into an issuance. Both matrix shapes are read, in the same union the enforcement point
+    /// performs, and comparison is ordinal to match it.
+    /// </para>
+    /// <para>
+    /// <b>A ROW THAT WANTS THE REFUSAL DOES NOT COME THROUGH HERE.</b>
+    /// <c>IssuanceRosterAuthorityTests</c>'s shipped-settings cases boot the real composition root
+    /// on the shipped settings with its own contributed grant, deliberately bypassing this harness, so the
+    /// invariant is asserted rather than merely satisfied.
+    /// </para>
+    /// </remarks>
+    internal static void EnsureEveryGrantedCallerIsCredentialled(SecurityOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        HashSet<string> credentialled = new(StringComparer.Ordinal);
+
+        foreach (SecurityClientOptions registered in options.Clients)
+        {
+            if (!string.IsNullOrWhiteSpace(registered?.Subject))
+            {
+                _ = credentialled.Add(registered.Subject.Trim());
+            }
+        }
+
+        List<string> granted = [];
+
+        void Note(string? caller)
+        {
+            if (!string.IsNullOrWhiteSpace(caller)
+                && !credentialled.Contains(caller.Trim())
+                && !granted.Contains(caller.Trim(), StringComparer.Ordinal))
+            {
+                granted.Add(caller.Trim());
+            }
+        }
+
+        foreach (SecurityCallerOptions caller in options.Callers)
+        {
+            Note(caller?.Identity);
+        }
+
+        foreach (CallerAuthorizationOptions row in options.CallerAuthorizations)
+        {
+            Note(row?.Caller);
+        }
+
+        foreach (string caller in granted)
+        {
+            options.Clients.Add(new SecurityClientOptions
+            {
+                Subject = caller,
+
+                // The same shared key every harness identity authenticates with; the factory emits it, so
+                // it resolves and the entry is one a row could genuinely present a credential for.
+                SecretConfigurationKey = SharedRosterSecretConfigurationKey,
+            });
+        }
+    }
+
+    /// <summary>
     /// Adds an issuance-roster entry for every <see cref="TestCallers"/> identity the roster does not
     /// already name, covering the audience roster as it currently stands.
     /// </summary>
@@ -310,8 +435,9 @@ internal static class IssuanceFixture
     /// reconciliation step does exactly that.
     /// </para>
     /// <para>
-    /// IT IS ADDITIVE AND NEVER REPLACES A DEPLOYMENT ENTRY. The shipped roster names two subjects with
-    /// narrower audience and scope lists than this would install, deliberately, and rows read those lists.
+    /// IT IS ADDITIVE AND NEVER REPLACES A DEPLOYMENT ENTRY. The shipped roster names two subjects, and the
+    /// grants those subjects hold are narrower than the blanket matrix rows this fixture installs for its
+    /// own identities - deliberately, because rows observe the deployed topology.
     /// </para>
     /// </remarks>
     internal static void EnsureTestCallersAreRostered(SecurityOptions options)
@@ -345,18 +471,48 @@ internal static class IssuanceFixture
                 SecretConfigurationKey = SharedRosterSecretConfigurationKey,
             };
 
-            foreach (string audience in options.Audiences)
-            {
-                client.Audiences.Add(audience);
-            }
-
-            foreach (string scope in TestScopes)
-            {
-                client.Scopes.Add(scope);
-            }
-
+            // A SUBJECT AND A SECRET KEY NAME, AND NOTHING ELSE. The credential directory carries no
+            // permission member: what a caller may request is stated once, in the grant matrix
+            // PermitTestCallers installs above. It used to carry an audience list and a scope list here too,
+            // and they were read by nothing - which is exactly the divergence the production settings then
+            // shipped with.
             options.Clients.Add(client);
         }
+    }
+
+    /// <summary>
+    /// The first (audience, scope) pair the grant matrix permits one caller, read from the matrix rather
+    /// than from the credential directory.
+    /// </summary>
+    /// <param name="options">The bound settings.</param>
+    /// <param name="caller">The caller identity to read a grant for.</param>
+    /// <returns>The audience and one scope the matrix permits that caller.</returns>
+    /// <exception cref="ArgumentNullException">An argument is <see langword="null"/>.</exception>
+    /// <exception cref="InvalidOperationException">The matrix grants that caller nothing.</exception>
+    /// <remarks>
+    /// <b>THE MATRIX IS THE ONLY PLACE THIS CAN BE READ FROM, AND THAT IS THE POINT.</b> Rows used to read
+    /// a permitted audience and scope off the caller's <c>Security:Clients</c> entry, which carried lists
+    /// the issuer never consulted - so a row could construct a request the roster advertised and the matrix
+    /// refused, and the assertion would fail for a reason that had nothing to do with its subject. Those
+    /// lists are gone; this reads the surface that decides.
+    /// </remarks>
+    internal static (string Audience, string Scope) FirstGrant(SecurityOptions options, string caller)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(caller);
+
+        foreach ((string granted, string audience, IReadOnlyList<string> scopes) in EffectiveGrants(options))
+        {
+            if (string.Equals(granted, caller, StringComparison.Ordinal) && scopes.Count > 0)
+            {
+                return (audience, scopes[0]);
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"The grant matrix permits caller '{caller}' nothing, so no request it could make would be "
+            + "issued. Grant it through Security:CallerAuthorizations or Security:Callers before reading a "
+            + "permitted pair for it.");
     }
 
     /// <summary>
@@ -479,30 +635,16 @@ internal static class IssuanceFixture
             }
         }
 
-        for (int index = options.Clients.Count - 1; index >= 0; index--)
-        {
-            SecurityClientOptions registered = options.Clients[index];
-
-            if (!Preexisting(preexistingClients, registered))
-            {
-                continue;
-            }
-
-            for (int position = registered.Audiences.Count - 1; position >= 0; position--)
-            {
-                if (!served.Contains(registered.Audiences[position]?.Trim() ?? string.Empty))
-                {
-                    registered.Audiences.RemoveAt(position);
-                }
-            }
-
-            if (registered.Audiences.Count == 0)
-            {
-                options.Clients.RemoveAt(index);
-            }
-        }
-
+        // THE CREDENTIAL DIRECTORY NEEDS NO PRUNING AND MUST NOT BE PRUNED. It used to be, because its
+        // entries carried audience lists that a narrowed roster could make unservable - and those lists are
+        // gone: a directory entry names a subject and a secret key, neither of which references an audience,
+        // so a row that narrows the audience roster can no longer leave one incoherent. Pruning it here
+        // would now only be able to remove a subject a row is about to authenticate as, which is exactly the
+        // failure this reconciliation exists to prevent.
         EnsureTestCallersAreRostered(options);
+
+        // AND ONE STEP THE DIRECTORY DOES STILL NEED, because it is now a HOST-REFUSING invariant.
+        EnsureEveryGrantedCallerIsCredentialled(options);
     }
 
     /// <summary>Reports whether one instance is in a snapshot, by reference.</summary>
@@ -574,6 +716,52 @@ internal static class IssuanceFixture
     /// The path to the PEM file holding this suite's certificate authority, for a host's trust anchor.
     /// </summary>
     internal static string ClientCertificateAuthorityPath => TestAuthority.Value.AnchorPath;
+
+    /// <summary>
+    /// Disposes the suite-wide authority and removes the per-run directory holding its anchor file.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// CALLED ONCE, BY THE ASSEMBLY FIXTURE AT THE TOP OF THIS FILE, and by nothing else. The authority is
+    /// shared by every host every row in this project builds, so the only scope at which it can safely be
+    /// released is the assembly's - which is why this is not an <c>IDisposable</c> on a test class.
+    /// </para>
+    /// <para>
+    /// THE DIRECTORY IS REMOVED, NOT JUST THE FILE. The directory was created for this run and holds
+    /// nothing else, so removing the file alone would leave an empty directory behind on every run - the
+    /// same accumulation, one inode smaller. Recursive removal is therefore correct here and is safe
+    /// because the path is one this fixture composed itself, from the system temporary directory plus a
+    /// fresh identifier.
+    /// </para>
+    /// <para>
+    /// NOT GUARDED WITH A <c>catch</c>. A failure to release is surfaced as an assembly cleanup error,
+    /// because a cleanup that silently does nothing is indistinguishable from one that worked.
+    /// </para>
+    /// </remarks>
+    internal static void ReleaseAuthority()
+    {
+        if (!TestAuthority.IsValueCreated)
+        {
+            // Lazy, and a run that exercised none of the certificate rows created nothing to remove. A
+            // genuine absence rather than a suppressed failure.
+            return;
+        }
+
+        (X509Certificate2 authority, string anchorPath) = TestAuthority.Value;
+
+        authority.Dispose();
+
+        string directory = Path.GetDirectoryName(anchorPath)
+            ?? throw new InvalidOperationException(
+                "The suite's trust-anchor path has no directory component, which cannot happen for a "
+                    + "path this fixture composed, and would mean the release is about to delete "
+                    + "something it did not create.");
+
+        if (Directory.Exists(directory))
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
 
     /// <summary>
     /// Builds a TRUSTED client certificate whose common name is the supplied identity.
@@ -903,21 +1091,17 @@ internal static class IssuanceFixture
         // fixture's, and a row could then pass on a production grant it was not meant to be using.
         options.CallerAuthorizations.Clear();
 
-        // AND THE ISSUANCE ROSTER IS REBUILT, for a reason that is not about authorization at all: the
-        // options validator cross-checks every `Clients` entry's audiences and scopes against the
-        // deployment-wide `Audiences` list, so a roster left over from the settings file refuses to START
-        // any host this fixture narrows. See IssuanceFixture.PermitTestCallers for the same note.
+        // AND THE CREDENTIAL DIRECTORY IS REBUILT WITH IT, for a reason that is not about authorization: the
+        // composition root refuses a host whose matrix grants a caller the directory does not name, because
+        // such a grant can never be exercised. A directory left over from the settings file names two
+        // subjects and this fixture's matrix names three, so rebuilding both together is what keeps the
+        // narrowed host startable. It carries a subject and a secret key name and no permission member -
+        // permissions are the matrix's alone.
         options.Clients.Clear();
 
         foreach (string identity in RosteredIdentities)
         {
             SecurityCallerOptions caller = new() { Identity = identity };
-
-            SecurityClientOptions client = new()
-            {
-                Subject = identity,
-                SecretConfigurationKey = SharedRosterSecretConfigurationKey,
-            };
 
             foreach (string audience in RosteredIdentities)
             {
@@ -929,16 +1113,15 @@ internal static class IssuanceFixture
                 }
 
                 caller.Grants.Add(grant);
-                client.Audiences.Add(audience);
-            }
-
-            foreach (string scope in RosteredScopes)
-            {
-                client.Scopes.Add(scope);
             }
 
             options.Callers.Add(caller);
-            options.Clients.Add(client);
+
+            options.Clients.Add(new SecurityClientOptions
+            {
+                Subject = identity,
+                SecretConfigurationKey = SharedRosterSecretConfigurationKey,
+            });
         }
     }
 

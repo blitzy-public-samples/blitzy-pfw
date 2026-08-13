@@ -151,11 +151,10 @@ namespace PowerFramework.DataServices.Tests;
 /// and this is that registration.
 /// </para>
 /// <para>
-/// BOTH MEMBERS ANSWER THE SAME INSTANCE ON PURPOSE. The production factory is retentive for
-/// <c>Create</c> and isolating for <c>CreateIsolated</c>, and that distinction protects one expression
-/// session's rows from another's. A case using this double opens exactly one session, so collapsing the
-/// two keeps the double honest about what it is: a scripted host, not a second implementation of the
-/// factory's lifetime policy.
+/// EVERY NAME ANSWERS THE SAME INSTANCE ON PURPOSE. The production factory is retentive per data-object
+/// name, and a case using this double opens exactly one session over one name - so answering one instance
+/// keeps the double honest about what it is: a scripted host, not a second implementation of the factory's
+/// lifetime policy.
 /// </para>
 /// </remarks>
 internal sealed class C04WireHostFactory(FakeDataWindowHost host) : IDataWindowHostFactory
@@ -167,15 +166,8 @@ internal sealed class C04WireHostFactory(FakeDataWindowHost host) : IDataWindowH
 
         return host;
     }
-
-    /// <inheritdoc />
-    public DataWindowServiceHost? CreateIsolated(string dataWindowName)
-    {
-        ArgumentNullException.ThrowIfNull(dataWindowName);
-
-        return host;
-    }
 }
+
 
 /// <summary>
 /// A DataWindow service whose <c>OnEnable</c> hook VETOES every change - the only way to reach the veto
@@ -341,7 +333,6 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     [
         "OpenExpressionSession",
         "CloseExpressionSession",
-        "LoadRows",
         "AddExpression",
         "SetExpression",
         "GetExpression",
@@ -429,51 +420,68 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
         Assert.True(response.Enabled);
     }
 
-    /// <summary>Loads one row of numeric cells into a session's DataWindow.</summary>
-    /// <param name="client">The client.</param>
-    /// <param name="session">The session.</param>
-    /// <param name="handle">The session-scoped handle. A registered data-object name is refused here.</param>
-    /// <param name="cells">The columns to populate, by name.</param>
-    /// <returns>A task representing the call.</returns>
+    /// <summary>
+    /// Puts rows into the DataWindow this service's sessions bind, SERVER-SIDE, because no published
+    /// operation does.
+    /// </summary>
+    /// <param name="rows">One entry per row: the columns to populate, by name.</param>
     /// <remarks>
-    /// A session's DataWindow is created EMPTY and rows APPEND, so this is step 3 of the documented call
-    /// order: without it <c>Calc</c> answers <c>E_INVALID_ARGUMENT</c> because row 1 is out of range on an
-    /// empty buffer, and <c>CalcAll</c> answers OK having iterated nothing.
+    /// <para>
+    /// ⚠ THE ABSENCE OF A PUBLISHED ROW LOADER IS THE FROZEN CONTRACT'S SHAPE, NOT A GAP IN THIS SUITE.
+    /// AAP 0.4.3's C-04 inventory carries no row-loading member, C-03 publishes none either, and C-03's
+    /// <c>Retrieve</c> streams its rows TO THE CALLER rather than into a service-side model - in the oracle
+    /// the DataWindow is a control owned by the APPLICATION and filled by the application's own retrieval,
+    /// so the population half sits on the presentation side of the split. Every calculation case below
+    /// still has to evaluate over rows, so the rows are placed where the application would have placed
+    /// them: directly on the host, through the container's own retentive factory, which is the same
+    /// technique <c>EventChainDeadlockTests</c> uses.
+    /// </para>
+    /// <para>
+    /// THE ROWS ARE CLEARED FIRST, and that is load bearing rather than tidy. The production factory
+    /// retains ONE host per data-object name and this suite shares one web host across its whole class, so
+    /// without the reset each case would calculate over its predecessors' rows and the one-based ordinals
+    /// every assertion is written in terms of would drift.
+    /// </para>
     /// </remarks>
-    private static async Task LoadRowAsync(
-        WireClient client,
-        string session,
-        string handle,
-        params (string Column, double Value)[] cells)
+    private void SeedRows(DataServicesTestHostFactory? target, params (string Column, double Value)[][] rows)
     {
-        WireDataWindowRow row = new();
+        DataWindowServiceHost seeded =
+            (target ?? host).Services.GetRequiredService<IDataWindowHostFactory>().Create(Fixture)
+            ?? throw new InvalidOperationException(
+                "The container's DataWindow host factory declined the service fixture name, so no row "
+                    + "could be seeded. The catalogue is the authority for that name.");
 
-        foreach ((string column, double value) in cells)
+        // Backwards, because deleting row N renumbers everything above it.
+        for (long existing = seeded.RowCount(); existing >= 1L; existing--)
         {
-            row.Columns.Add(new WireColumnValue
-            {
-                ColumnName = column,
-                Value = new WireAnyValue { DoubleValue = value },
-            });
+            _ = seeded.DeleteRow(existing);
         }
 
-        LoadRowsRequest request = new() { SessionId = session, DatawindowHandle = handle };
-        request.Rows.Add(row);
+        foreach ((string Column, double Value)[] cells in rows)
+        {
+            // InsertRow(0) is the legacy's own "at the end" spelling and answers the new ordinal.
+            long ordinal = seeded.InsertRow(0L);
 
-        LoadRowsResponse response = await client.LoadRowsAsync(request, cancellationToken: Ct);
+            Assert.True(ordinal > 0L, "the host declined to create a row to calculate over.");
 
-        Assert.Equal(WireRetCode.Ok, response.RetCode);
-        Assert.Equal(1L, response.RowsLoaded);
+            foreach ((string column, double value) in cells)
+            {
+                Assert.Equal(1, seeded.SetItem(ordinal, column, (decimal)value));
+            }
+        }
     }
 
-    /// <summary>Opens, enables and loads one row in the order the contract documents.</summary>
+    /// <summary>Opens and enables a session over a DataWindow carrying one row.</summary>
     /// <param name="client">The client.</param>
     /// <returns>The ready session.</returns>
-    private static async Task<Session> ReadySessionAsync(WireClient client)
+    private async Task<Session> ReadySessionAsync(
+        WireClient client,
+        DataServicesTestHostFactory? target = null)
     {
+        SeedRows(target, [("n1", 10d), ("n2", 5d), ("n3", 1d)]);
+
         Session session = await OpenAsync(client);
         await EnableAsync(client, session.SessionId, session.Handle);
-        await LoadRowAsync(client, session.SessionId, session.Handle, ("n1", 10d), ("n2", 5d), ("n3", 1d));
 
         return session;
     }
@@ -613,9 +621,6 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
                 _ = await client.CloseExpressionSessionAsync(
                     new CloseExpressionSessionRequest(),
                     cancellationToken: Ct);
-                break;
-            case "LoadRows":
-                _ = await client.LoadRowsAsync(new LoadRowsRequest(), cancellationToken: Ct);
                 break;
             case "AddExpression":
                 _ = await client.AddExpressionAsync(new AddExpressionRequest(), cancellationToken: Ct);
@@ -804,7 +809,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
 
         // The count is stated so a reader sees the size of the surface without counting the list, and so
         // that a coincidental one-for-one swap cannot pass unnoticed.
-        Assert.Equal(27, declared.Count);
+        Assert.Equal(26, declared.Count);
     }
 
     /// <summary>
@@ -1139,7 +1144,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task ExpressionAddSetGetRemoveAndRemoveAllCoverEveryLegacyArity()
     {
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         int index = await AddExpressionAsync(client, session.SessionId, session.Handle, "n3", "n1 + n2");
 
@@ -1259,7 +1264,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task AddVariableAcceptsEachOfTheSevenTypedFamilies(VarValue.KindOneofCase arm)
     {
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         AddVariableResponse added = await client.AddVariableAsync(
             new AddVariableRequest
@@ -1320,7 +1325,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task SetVariableAcceptsAllThreeAritiesForEveryTypedFamily(VarValue.KindOneofCase arm)
     {
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         string name = "v_" + arm.ToString();
 
@@ -1382,7 +1387,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task ExpressionVariableAddSetAndGetCoverTheirArities()
     {
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         AddVariableExpressionResponse added = await client.AddVariableExpressionAsync(
             new AddVariableExpressionRequest
@@ -1563,7 +1568,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task RelativeColumnsCoverAllFourShapesForBothKinds(bool inputOnly)
     {
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         int index = await AddExpressionAsync(client, session.SessionId, session.Handle, "n3", "n1 + n2");
 
@@ -1667,7 +1672,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
         bool expectDependentToFire)
     {
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         // n1 gets a constant expression, so calculating it CHANGES its value from the loaded 10 and
         // therefore cascades [:L860-L862]. n2 depends on n1. s1 is the sentinel.
@@ -1751,7 +1756,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
         SetExpressionFlagRequest.Types.Flag flag)
     {
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         int index = await AddExpressionAsync(client, session.SessionId, session.Handle, "n3", "n1 + n2");
 
@@ -1826,7 +1831,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task CalcCoversFourAritiesAndCalcAllAndCalcEmptyCoverBoth()
     {
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         int index = await AddExpressionAsync(client, session.SessionId, session.Handle, "n3", "n1 + n2");
 
@@ -1978,7 +1983,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
             descriptor.GetOptions()!.GetExtension(CommonExtensions.LegacyName));
 
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         int index = await AddExpressionAsync(client, session.SessionId, session.Handle, "n3", "n1 + n2");
 
@@ -2062,7 +2067,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task AnOutOfRangeIndexAndAnUnknownColumnNameAnswerDefinedStatuses()
     {
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         _ = await AddExpressionAsync(client, session.SessionId, session.Handle, "n3", "n1 + n2");
 
@@ -2165,7 +2170,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task SetTraceIsNotVetoableAndItsStateIsPublished()
     {
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         foreach (bool wanted in new[] { true, false, true })
         {
@@ -2428,7 +2433,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task AMixedExpressionCarriesItsTwoReferencesWithTwoDifferentModes()
     {
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         await DefineVariableAsync(client, session, LastMonth, "5");
         await DefineVariableAsync(client, session, ThisMonth, "1");
@@ -2490,7 +2495,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task TheThreePartPayloadCrossesTheBoundaryAndTheGoldenPairHolds()
     {
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         await DefineVariableAsync(client, session, LastMonth, "5");
         await DefineVariableAsync(client, session, ThisMonth, "1");
@@ -2565,7 +2570,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task TheThreeMacroModesAreDistinguishableByTheirFunctionReferenceShape()
     {
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         await DefineVariableAsync(client, session, Precision, "2");
         await DefineVariableAsync(client, session, FormatterName, "'" + FormatPrice + "'");
@@ -2692,7 +2697,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
 
         // AND THE SERVICE KEEPS THEM APART TOO, in the way the legacy does: quoted against bare.
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         await AddTypedVariableAsync(client, session, "asText", text);
         await AddTypedVariableAsync(client, session, "asLong", number);
@@ -2919,7 +2924,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
         Assert.True(channel.IsServerStreaming);
 
         WireClient client = Client();
-        Session session = await MacroSessionAsync(client);
+        Session session = await MacroSessionAsync(client, host);
 
         _ = await AddExpressionAsync(
             client,
@@ -2932,6 +2937,10 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
             client.InvokeMethodChannel(
                 MacroHeaders(session.SessionId, session.Handle),
                 cancellationToken: Ct);
+
+        // The attachment is a SERVER-side event, so it is awaited rather than assumed - see
+        // WaitForAttachedServicerAsync.
+        await WaitForAttachedServicerAsync(host);
 
         Task<CalcResponse> calculating =
             CalcColumnAsync(client, session.SessionId, session.Handle, "n3");
@@ -2970,7 +2979,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task TheDirectFormReachesTheClientWithItsArgumentsEvaluatedAndInOrder()
     {
         WireClient client = Client();
-        Session session = await MacroSessionAsync(client);
+        Session session = await MacroSessionAsync(client, host);
 
         _ = await AddExpressionAsync(
             client,
@@ -2989,6 +2998,10 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
             client.InvokeMethodChannel(
                 MacroHeaders(session.SessionId, session.Handle),
                 cancellationToken: Ct);
+
+        // The attachment is a SERVER-side event, so it is awaited rather than assumed - see
+        // WaitForAttachedServicerAsync.
+        await WaitForAttachedServicerAsync(host);
 
         Task<CalcResponse> calculating =
             CalcColumnAsync(client, session.SessionId, session.Handle, "n3");
@@ -3035,7 +3048,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task TheDynamicFormResolvesItsCalleeFromTheFirstArgumentAndRebasesTheRest()
     {
         WireClient client = Client();
-        Session session = await MacroSessionAsync(client);
+        Session session = await MacroSessionAsync(client, host);
 
         _ = await AddExpressionAsync(
             client,
@@ -3060,6 +3073,10 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
             client.InvokeMethodChannel(
                 MacroHeaders(session.SessionId, session.Handle),
                 cancellationToken: Ct);
+
+        // The attachment is a SERVER-side event, so it is awaited rather than assumed - see
+        // WaitForAttachedServicerAsync.
+        await WaitForAttachedServicerAsync(host);
 
         Task<CalcResponse> calculating =
             CalcColumnAsync(client, session.SessionId, session.Handle, "n3");
@@ -3110,7 +3127,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task TheDocumentedMixedDynamicFormAbortsOnItsUnexpandedArgumentAndIsPreserved()
     {
         WireClient client = Client();
-        Session session = await MacroSessionAsync(client);
+        Session session = await MacroSessionAsync(client, host);
 
         const string Documented = "$$Invoke($" + FormatterName + ", n2, $" + Precision + ")";
 
@@ -3128,6 +3145,10 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
             client.InvokeMethodChannel(
                 MacroHeaders(session.SessionId, session.Handle),
                 cancellationToken: Ct);
+
+        // The attachment is a SERVER-side event, so it is awaited rather than assumed - see
+        // WaitForAttachedServicerAsync.
+        await WaitForAttachedServicerAsync(host);
 
         CalcResponse calculated =
             await CalcColumnAsync(client, session.SessionId, session.Handle, "n3");
@@ -3168,7 +3189,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task AnInvalidAnswerIsRefusedWithTheLegacyMessageAndNeverBecomesAValue(bool unhandled)
     {
         WireClient client = Client();
-        Session session = await MacroSessionAsync(client);
+        Session session = await MacroSessionAsync(client, host);
 
         _ = await AddExpressionAsync(
             client,
@@ -3181,6 +3202,10 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
             client.InvokeMethodChannel(
                 MacroHeaders(session.SessionId, session.Handle),
                 cancellationToken: Ct);
+
+        // The attachment is a SERVER-side event, so it is awaited rather than assumed - see
+        // WaitForAttachedServicerAsync.
+        await WaitForAttachedServicerAsync(host);
 
         Task<CalcResponse> calculating =
             CalcColumnAsync(client, session.SessionId, session.Handle, "n3");
@@ -3247,7 +3272,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
         using DataServicesTestHostFactory own = new();
 
         WireClient client = own.CreateColumnExpressionClient();
-        Session session = await MacroSessionAsync(client);
+        Session session = await MacroSessionAsync(client, own);
 
         _ = await AddExpressionAsync(
             client,
@@ -3260,6 +3285,10 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
             client.InvokeMethodChannel(
                 MacroHeaders(session.SessionId, session.Handle),
                 cancellationToken: Ct);
+
+        // The attachment is a SERVER-side event, so it is awaited rather than assumed - see
+        // WaitForAttachedServicerAsync.
+        await WaitForAttachedServicerAsync(own);
 
         Task<CalcResponse> calculating =
             CalcColumnAsync(client, session.SessionId, session.Handle, "n3");
@@ -3307,7 +3336,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
         using DataServicesTestHostFactory own = new();
 
         WireClient client = own.CreateColumnExpressionClient();
-        Session session = await MacroSessionAsync(client);
+        Session session = await MacroSessionAsync(client, own);
         Metadata headers = MacroHeaders(session.SessionId, session.Handle);
 
         _ = await AddExpressionAsync(
@@ -3320,6 +3349,10 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
         using (AsyncDuplexStreamingCall<InvokeMethodResponse, InvokeMethodRequest> abandoning =
             client.InvokeMethodChannel(headers, cancellationToken: Ct))
         {
+            // The attach happens on the server's schedule, so wait for it before asking a question that
+            // needs a servicer - see WaitForAttachedServicerAsync for what happens without this.
+            await WaitForAttachedServicerAsync(own);
+
             Task<CalcResponse> calculating =
                 CalcColumnAsync(client, session.SessionId, session.Handle, "n3");
 
@@ -3356,6 +3389,8 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
         using AsyncDuplexStreamingCall<InvokeMethodResponse, InvokeMethodRequest> replacement =
             client.InvokeMethodChannel(headers, cancellationToken: Ct);
 
+        await WaitForAttachedServicerAsync(own);
+
         Task<CalcResponse> retried =
             CalcColumnAsync(client, session.SessionId, session.Handle, "n3");
 
@@ -3385,7 +3420,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
         using DataServicesTestHostFactory own = new();
 
         WireClient client = own.CreateColumnExpressionClient();
-        Session session = await MacroSessionAsync(client);
+        Session session = await MacroSessionAsync(client, own);
         Metadata headers = MacroHeaders(session.SessionId, session.Handle);
 
         _ = await AddExpressionAsync(
@@ -3414,6 +3449,10 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
 
         using AsyncDuplexStreamingCall<InvokeMethodResponse, InvokeMethodRequest> servicer =
             client.InvokeMethodChannel(headers, cancellationToken: Ct);
+
+        // The attachment is a SERVER-side event, so it is awaited rather than assumed - see
+        // WaitForAttachedServicerAsync.
+        await WaitForAttachedServicerAsync(own);
 
         Task<CalcResponse> calculating =
             CalcColumnAsync(client, session.SessionId, session.Handle, "n3");
@@ -3449,9 +3488,11 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     /// through the TYPED overloads rather than as value expressions, because the string overload's own
     /// quoting is what makes the callee name resolve to a bare name later.
     /// </remarks>
-    private static async Task<Session> MacroSessionAsync(WireClient client)
+    private async Task<Session> MacroSessionAsync(
+        WireClient client,
+        DataServicesTestHostFactory? target = null)
     {
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, target);
 
         await AddTypedVariableAsync(client, session, Precision, new VarValue { LongValue = 2L });
         await AddTypedVariableAsync(
@@ -3485,19 +3526,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
             },
             Ct);
 
-    /// <summary>Waits until the macro router holds no servicer for any DataWindow.</summary>
-    /// <param name="factory">The host whose router is inspected.</param>
-    /// <returns>A task that completes once the slot is free.</returns>
-    /// <remarks>
-    /// WHY A BARRIER AND NOT A SLEEP, for the same reason the trace subscription needs one. A client's
-    /// <c>CompleteAsync</c> completes when the half-close reaches the transport; the server then ends its
-    /// read loop, unwinds the <c>using</c> that owns the registration and releases the slot - all on the
-    /// server's schedule. Attaching a replacement before that unwinding finishes is refused with
-    /// <c>AlreadyExists</c>, correctly, so the test waits for the state it is about to depend on instead of
-    /// racing it. Spinning on in-process state completes the instant the server catches up and awaits no
-    /// wall-clock delay, and the ceiling turns a genuinely leaked registration into a diagnosis rather than
-    /// a hang.
-    /// </remarks>
+
     private static async Task WaitForFreeServicerSlotAsync(DataServicesTestHostFactory factory)
     {
         MacroInvocationRouter router = factory.Services.GetRequiredService<MacroInvocationRouter>();
@@ -3507,6 +3536,52 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
             Assert.True(
                 attempt < BarrierAttemptCeiling,
                 "An abandoned macro invocation channel never released its servicer slot.");
+
+            await Task.Yield();
+        }
+    }
+
+    /// <summary>
+    /// Waits until the server has REGISTERED a macro servicer, so a calculation started afterwards is
+    /// guaranteed to find one attached.
+    /// </summary>
+    /// <param name="factory">The private host whose router is inspected.</param>
+    /// <returns>A task that completes once one servicer is attached.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE MIRROR OF <see cref="WaitForFreeServicerSlotAsync"/>, AND IT EXISTS BECAUSE OF A MEASURED
+    /// FAILURE RATHER THAN A THEORY. Opening the channel client-side does not mean the server handler has
+    /// run: <c>InvokeMethodChannel</c> attaches from CALL METADATA before it reads the request stream, so
+    /// registration happens on the SERVER'S schedule. A calculation started before that attach lands finds
+    /// no servicer, and the router answers <c>Unhandled</c> rather than queueing the question - the
+    /// deliberate reproduction of an unimplemented <c>OnColumnExpInvokeMethod</c> in-process. The
+    /// calculation then completes with nothing asked, no invocation is ever pushed to the channel, and a
+    /// <c>MoveNext</c> waiting for one blocks until the test's own cancellation deadline fires. That is
+    /// exactly what was observed once under heavy host load: a hundred-second run ending in
+    /// <c>Unavailable / the client aborted the request</c>.
+    /// </para>
+    /// <para>
+    /// SO THE BARRIER IS A CORRECTNESS FIX TO THE TEST, NOT A TOLERANCE. It removes an assumption the
+    /// transport never made; it does not wait "a bit" and hope, and it cannot mask a product fault -
+    /// registration is read from the router's own state, and failing to observe it inside
+    /// <see cref="BarrierAttemptCeiling"/> yields a named assertion rather than a hang.
+    /// </para>
+    /// <para>
+    /// IT MEASURES NO WALL-CLOCK TIME AND ASSERTS NOTHING ABOUT DURATION. The loop yields, it does not
+    /// sleep, and the ceiling is an attempt count rather than a deadline - so no performance objective is
+    /// asserted anywhere in it (AAP 0.8.5).
+    /// </para>
+    /// </remarks>
+    private static async Task WaitForAttachedServicerAsync(DataServicesTestHostFactory factory)
+    {
+        MacroInvocationRouter router = factory.Services.GetRequiredService<MacroInvocationRouter>();
+
+        for (int attempt = 0; router.AttachedCount == 0; attempt++)
+        {
+            Assert.True(
+                attempt < BarrierAttemptCeiling,
+                "A macro invocation channel never attached its servicer, so a calculation started after it "
+                    + "would wait out the macro backstop instead of being asked.");
 
             await Task.Yield();
         }
@@ -3565,7 +3640,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task TheTraceIsSilentByDefaultAndFlowsOnlyOnceTraceIsEnabled()
     {
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         // The shipped default, read back over the wire before anything touches it.
         GetServiceStateResponse fresh = await client.GetServiceStateAsync(
@@ -3629,7 +3704,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task TheCallStackIsTheGreaterThanJoinedFormWithNoTrailingDelimiter()
     {
         WireClient client = Client();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, host);
 
         await SetTraceAsync(client, session, true);
 
@@ -3696,10 +3771,12 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     public async Task TheTraceCarriesTheRowTheExpressionAndItsSequencingToken()
     {
         WireClient client = Client();
+
+        SeedTwoRows();
+
         Session session = await OpenAsync(client);
 
         await EnableAsync(client, session.SessionId, session.Handle);
-        await LoadTwoRowsAsync(client, session);
         await SetTraceAsync(client, session, true);
 
         _ = await AddExpressionAsync(client, session.SessionId, session.Handle, "n3", "n1 + n2");
@@ -3838,7 +3915,7 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
         using DataServicesTestHostFactory own = new();
 
         WireClient client = own.CreateColumnExpressionClient();
-        Session session = await ReadySessionAsync(client);
+        Session session = await ReadySessionAsync(client, own);
 
         await SetTraceAsync(client, session, true);
 
@@ -3926,39 +4003,13 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
         Assert.Equal(WireRetCode.Ok, set.RetCode);
     }
 
-    /// <summary>Loads two rows so a one-based row ordinal can be exercised at two.</summary>
-    /// <param name="client">The client.</param>
-    /// <param name="session">The session.</param>
-    /// <returns>A task representing the call.</returns>
-    private static async Task LoadTwoRowsAsync(WireClient client, Session session)
-    {
-        LoadRowsRequest request = new()
-        {
-            SessionId = session.SessionId,
-            DatawindowHandle = session.Handle,
-        };
-
-        foreach (double first in new[] { 10d, 20d })
-        {
-            WireDataWindowRow row = new();
-
-            foreach ((string column, double value) in new[] { ("n1", first), ("n2", 5d), ("n3", 0d) })
-            {
-                row.Columns.Add(new WireColumnValue
-                {
-                    ColumnName = column,
-                    Value = new WireAnyValue { DoubleValue = value },
-                });
-            }
-
-            request.Rows.Add(row);
-        }
-
-        LoadRowsResponse loaded = await client.LoadRowsAsync(request, cancellationToken: Ct);
-
-        Assert.Equal(WireRetCode.Ok, loaded.RetCode);
-        Assert.Equal(2L, loaded.RowsLoaded);
-    }
+    /// <summary>Seeds two rows so a one-based row ordinal can be exercised at two.</summary>
+    /// <remarks>See <see cref="SeedRows"/> for why the rows are placed server-side.</remarks>
+    private void SeedTwoRows() =>
+        SeedRows(
+            null,
+            [("n1", 10d), ("n2", 5d), ("n3", 0d)],
+            [("n1", 20d), ("n2", 5d), ("n3", 0d)]);
 
 
     // =================================================================================================
@@ -4261,19 +4312,29 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
     }
 
     /// <summary>
-    /// Opens one session holding TWO co-resident DataWindows and loads a row into each.
+    /// Opens one session holding TWO co-resident DataWindows over a DataWindow carrying one row.
     /// </summary>
     /// <param name="client">The client.</param>
-    /// <returns>The session, whose handles are the two DataWindows in registration order.</returns>
+    /// <returns>The session, whose handles are the two registrations in order.</returns>
     /// <remarks>
+    /// <para>
     /// BOTH HANDLES NAME THE SAME DEFINITION, and that is deliberate rather than a shortcut: the oracle's
     /// two DataWindows are two instances of the same transcribed definition
     /// [ws_objects/pfw.tests.pbl.src/dw_test_dwsvc_columnexp.srd], the peer's variable is <c>SUM(n1)</c>
-    /// and only that definition has an <c>n1</c>. The session mints a distinct handle per registration, so
-    /// the two are separate engines over separate row sets despite sharing a name.
+    /// and only that definition has an <c>n1</c>. The session mints a DISTINCT HANDLE per registration, so
+    /// the two are separate ENGINES - separate expression tables, separate variable environments, separate
+    /// calculation caches - which is what the foreign reference below has to cross.
+    /// </para>
+    /// <para>
+    /// THEY SHARE ONE DATAWINDOW, BECAUSE THE HOST FACTORY IS RETENTIVE PER NAME, and for this scenario
+    /// that is immaterial: what a foreign reference resolves is the PEER ENGINE'S variable, and the two
+    /// engines are distinct. See <see cref="SeedRows"/> for why the row is placed server-side.
+    /// </para>
     /// </remarks>
-    private static async Task<Session> CoResidentSessionAsync(WireClient client)
+    private async Task<Session> CoResidentSessionAsync(WireClient client)
     {
+        SeedRows(null, [("n1", 7d), ("n2", 2d), ("n3", 3d)]);
+
         Session session = await OpenAsync(client, Fixture, Fixture);
 
         Assert.Equal(2, session.Handles.Count);
@@ -4282,13 +4343,6 @@ public sealed class ColumnExpressionGrpcServiceTests(DataServicesTestHostFactory
         foreach (string handle in session.Handles)
         {
             await EnableAsync(client, session.SessionId, handle);
-            await LoadRowAsync(
-                client,
-                session.SessionId,
-                handle,
-                ("n1", 7d),
-                ("n2", 2d),
-                ("n3", 3d));
         }
 
         return session;

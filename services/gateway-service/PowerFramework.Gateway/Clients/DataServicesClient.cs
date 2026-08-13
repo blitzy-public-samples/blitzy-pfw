@@ -162,6 +162,7 @@ using Google.Protobuf.Reflection;
 using Grpc.Core;
 using PowerFramework.Contracts.Common.V1;
 using PowerFramework.Contracts.DataServices.V1;
+using PowerFramework.Shared.Diagnostics;
 using PowerFramework.Shared.Kernel;
 
 // THE ONE NAME COLLISION IN THIS FILE, RESOLVED DELIBERATELY RATHER THAN DISCOVERED AS A BUILD BREAK.
@@ -783,7 +784,7 @@ public sealed class DataWindowEventChannel : IAsyncDisposable
             _logger.LogWarning(
                 "DataServices reported a stream-level fault on the event chain for session "
                 + "{SessionId}: severity {Severity}, retCode {RetCode}.",
-                response.SessionId,
+                LogSafeText.Render(response.SessionId),
                 response.Error?.Severity,
                 response.Error?.RetCode);
 
@@ -851,7 +852,7 @@ public sealed class DataWindowEventChannel : IAsyncDisposable
             + "{ObservedSequence} arrived after {LastObservedSequence} under discipline "
             + "{OrderingDiscipline}. Sequence numbers here are for detection only, so the session is "
             + "failed rather than the delivery reordered.",
-            sessionId,
+            LogSafeText.Render(sessionId),
             observed,
             last,
             discipline);
@@ -1062,10 +1063,14 @@ public sealed class ValidationSessionScope : IAsyncDisposable
     /// through <c>await using</c> and does nothing, because this attempt already happened.
     /// </para>
     /// <para>
-    /// RETRY SAFETY: the underlying operation is idempotent by contract, so a caller may retry a failed
+    /// RETRY SAFETY: the underlying operation's END STATE is idempotent, so a caller may retry a failed
     /// close - but it must do so by calling the client's own close operation, not by calling this member
     /// again. A scope records one attempt, deliberately: re-attempting from inside it would let a
-    /// success overwrite a failure a caller has already acted on.
+    /// success overwrite a failure a caller has already acted on. And a retried close answers
+    /// <c>was_open = false</c> with an empty <c>final_state</c> whether or not the first attempt had
+    /// succeeded, so a caller that retries must treat both of those fields as unknown - which is also why
+    /// the operation is not replayed transparently at the transport level
+    /// [<c>Clients/OutboundCallPolicy</c>].
     /// </para>
     /// </remarks>
     public async Task<CloseValidationSessionResponse> CloseAsync(CancellationToken cancellationToken)
@@ -1156,14 +1161,21 @@ public sealed class ValidationSessionScope : IAsyncDisposable
         {
             CloseFailure = exception;
 
+            // THE EXCEPTION IS RETAINED ON THE SCOPE AND DESCRIBED ON THE RECORD, which are different
+            // trust domains. CloseFailure hands the whole fault to the enclosing code, which is inside this
+            // process and entitled to it; the record is retained and shipped, and an RpcException's message
+            // is the UPSTREAM's own status detail - another party's text, arriving on the one path where
+            // that party was already failing. The status code is published in the clear because it is a
+            // fixed enumeration that cannot carry content.
             _logger.LogWarning(
-                exception,
                 "Closing DataServices validation session {SessionId} failed with status {StatusCode}. "
                 + "The session may remain held by the upstream until it expires. This failure is not "
                 + "rethrown, so that it cannot mask whichever fault is unwinding through the enclosing "
-                + "scope; it is recorded on the scope's CloseFailure member instead.",
-                _opened.SessionId,
-                exception.StatusCode);
+                + "scope; it is recorded on the scope's CloseFailure member instead. "
+                + "FaultTypes={FaultTypes}",
+                LogSafeText.Render(_opened.SessionId),
+                exception.StatusCode,
+                ExceptionChain.DescribeTypes(exception));
         }
         catch (OperationCanceledException exception)
         {
@@ -1173,13 +1185,14 @@ public sealed class ValidationSessionScope : IAsyncDisposable
             // is identical: the disposal deadline elapsed, or the underlying call was cancelled by the
             // channel or by the host shutting down.
             _logger.LogWarning(
-                exception,
                 "Closing DataServices validation session {SessionId} did not complete within the "
                 + "{CloseTimeoutSeconds}s disposal bound, or was cancelled by the channel or a host "
                 + "shutdown. The session may remain held by the upstream until it expires. This failure "
-                + "is not rethrown; it is recorded on the scope's CloseFailure member instead.",
-                _opened.SessionId,
-                CloseTimeout.TotalSeconds);
+                + "is not rethrown; it is recorded on the scope's CloseFailure member instead. "
+                + "FaultTypes={FaultTypes}",
+                LogSafeText.Render(_opened.SessionId),
+                CloseTimeout.TotalSeconds,
+                ExceptionChain.DescribeTypes(exception));
         }
     }
 
@@ -1509,8 +1522,17 @@ public sealed class DataServicesClient
     /// <exception cref="RpcException">The call failed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
     /// <remarks>
-    /// RETRY SAFETY: SAFE. Closure is idempotent by contract precisely so that a caller which cannot
-    /// safely repeat a close would otherwise leak a session on any transport hiccup.
+    /// 🔴 RETRY SAFETY: <b>NOT SAFE TO REPLAY TRANSPARENTLY, even though the END STATE is idempotent.</b>
+    /// The two are different properties and only the second held. This response carries
+    /// <c>final_state</c>, captured from the session at the moment it is removed, so a first attempt that
+    /// SUCCEEDED and whose response was lost is followed by a replay that finds nothing and answers
+    /// <c>OK / was_open = false</c> with an EMPTY final state - a response indistinguishable from "there
+    /// was never such a session", in which the outstanding continuation or set re-entrancy guard the real
+    /// answer reported has silently disappeared. The operation is therefore absent from the replay-safe
+    /// roster [<c>Clients/OutboundCallPolicy</c>], and a lost close response surfaces as the transport
+    /// fault it is. A CALLER may still choose to close again - the end state genuinely is idempotent, and
+    /// the idle sweeper releases an unclosed session regardless - but it must then read <c>was_open</c> and
+    /// <c>final_state</c> as unknown rather than as answers.
     /// </remarks>
     public Task<CloseValidationSessionResponse> CloseValidationSessionAsync(
         CloseValidationSessionRequest request,
@@ -1631,7 +1653,7 @@ public sealed class DataServicesClient
                     "DataServices answered Aborted for an update on DataWindow {DataWindowHandle} but "
                     + "no decodable conflict detail accompanied it. The status and trailers are "
                     + "rethrown unchanged rather than being reported as a conflict without its detail.",
-                    request.DatawindowHandle);
+                    LogSafeText.Render(request.DatawindowHandle));
 
                 throw;
             }
@@ -1642,7 +1664,7 @@ public sealed class DataServicesClient
                 + "{RowsMatched} matched; retCode {RetCode}. The conflict is surfaced with its detail "
                 + "so the caller can re-read and rebase or surface it; it is never retried and never "
                 + "overwritten.",
-                request.DatawindowHandle,
+                LogSafeText.Render(request.DatawindowHandle),
                 conflict.Rows.Count,
                 conflict.UpdateTable,
                 conflict.RowsExpected,
@@ -1677,7 +1699,7 @@ public sealed class DataServicesClient
                 "Update on DataWindow {DataWindowHandle} returned retCode {RetCode} (succeeded: "
                 + "{Succeeded}); {RowsInserted} inserted, {RowsUpdated} updated, {RowsDeleted} deleted; "
                 + "{IdentityBlockCount} identity block(s), one per update table.",
-                request.DatawindowHandle,
+                LogSafeText.Render(request.DatawindowHandle),
                 response.RetCode,
                 succeeded,
                 response.RowsInserted,
@@ -1699,7 +1721,7 @@ public sealed class DataServicesClient
                 "Update on DataWindow {DataWindowHandle} reported a non-conflict database failure: "
                 + "sqldbcode {SqlDbCode}, buffer {Buffer}, row {Row}. The statement text is redacted "
                 + "and is not logged.",
-                request.DatawindowHandle,
+                LogSafeText.Render(request.DatawindowHandle),
                 response.Error.Sqldbcode,
                 response.Error.Buffer,
                 response.Error.Row);
@@ -2004,37 +2026,18 @@ public sealed class DataServicesClient
     /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
     /// <exception cref="RpcException">The call failed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
-    /// <remarks>RETRY SAFETY: SAFE - a session that had already gone reports so without that being an error.</remarks>
+    /// <remarks>
+    /// 🔴 RETRY SAFETY: <b>NOT SAFE TO REPLAY TRANSPARENTLY.</b> A session that had already gone reports so
+    /// without that being an error, which makes the END STATE idempotent and not the ANSWER: a replay after
+    /// a lost response flips <c>was_open</c> from true to false, so the caller is told the session was
+    /// already closed by someone else when in fact its own first attempt closed it. Excluded from the
+    /// replay-safe roster for the same reason as its C-03 sibling
+    /// [<c>Clients/OutboundCallPolicy</c>].
+    /// </remarks>
     public Task<CloseExpressionSessionResponse> CloseExpressionSessionAsync(
         CloseExpressionSessionRequest request,
         CancellationToken cancellationToken) =>
         InvokeAsync(_columnExpression.CloseExpressionSessionAsync, request, cancellationToken);
-
-    /// <summary>
-    /// Loads rows into an expression session's DataWindow.
-    /// </summary>
-    /// <param name="request">The session, the session-scoped handle and the rows.</param>
-    /// <param name="cancellationToken">Cancels the call.</param>
-    /// <returns>How many rows were created, the first ordinal, the resulting row count, and a refusal.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="request"/> is <see langword="null"/>.</exception>
-    /// <exception cref="RpcException">The call failed.</exception>
-    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
-    /// <remarks>
-    /// <para>
-    /// THE HANDLE IS THE SESSION-SCOPED ONE, <c>&lt;sessionId&gt;/&lt;ordinal&gt;</c>, not a registered
-    /// data-object name. The retrieve operation on C-03 takes the other form and refuses this one; the two
-    /// spaces are deliberately separate, because two handles opened over one definition are two independent
-    /// DataWindows.
-    /// </para>
-    /// <para>
-    /// RETRY SAFETY: <b>NOT SAFE</b> - rows are APPENDED, so a repeated call creates a second copy of every
-    /// row it carried. It is therefore deliberately absent from the replay-safe path set.
-    /// </para>
-    /// </remarks>
-    public Task<LoadRowsResponse> LoadRowsAsync(
-        LoadRowsRequest request,
-        CancellationToken cancellationToken) =>
-        InvokeAsync(_columnExpression.LoadRowsAsync, request, cancellationToken);
 
     /// <summary>
     /// Binds a new expression to a column.
@@ -2872,11 +2875,15 @@ public sealed class DataServicesClient
         }
         catch (InvalidProtocolBufferException parseFailure)
         {
+            // Described rather than attached, exactly as on the sibling DataServices client. A protobuf
+            // parse failure quotes the bytes and field numbers it choked on, and those bytes come from the
+            // UPSTREAM's trailer.
             _logger.LogWarning(
-                parseFailure,
                 "The conflict trailer on an aborted update could not be parsed as {SupportedPayloadType}. "
-                + "The gRPC failure is surfaced unchanged, with its trailers intact.",
-                SupportedRichErrorPayloadType);
+                + "The gRPC failure is surfaced unchanged, with its trailers intact. "
+                + "FaultTypes={FaultTypes}",
+                SupportedRichErrorPayloadType,
+                ExceptionChain.DescribeTypes(parseFailure));
 
             return null;
         }

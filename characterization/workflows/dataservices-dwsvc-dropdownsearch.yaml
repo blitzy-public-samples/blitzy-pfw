@@ -1182,9 +1182,9 @@ sharedVolume:
 
 # ---- HONEST STATE ------------------------------------------------------------------------------
 #  NOTHING HERE HAS BEEN RUN, AND THE ONLY LEGAL VALUE SAYS SO. No paired capture exists on either
-#  side: the legacy half needs a PowerBuilder toolchain that is not present, and
-#  `characterization/recordings/` does not exist at all - so no recording directory for this identifier
-#  exists either. Nothing in this definition may be read as reporting a parity result; every expected
+#  side: the legacy half needs a PowerBuilder toolchain that is not present, and both halves of
+#  `characterization/recordings/` hold nothing but their own readmes - so no recording directory for this
+#  identifier exists either. Nothing in this definition may be read as reporting a parity result; every expected
 #  expression above was DERIVED BY READING the constructor statement by statement, not observed.
 #
 #  AND THIS COMPOUNDS WITH THE BLOCKED BEHAVIOUR, WHICH IS THE HONEST WAY TO STATE IT. The pinyin

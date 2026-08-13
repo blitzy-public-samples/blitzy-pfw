@@ -25,7 +25,7 @@
 //       "Locale": "en",
 //       "CapabilityFlags": 3847,
 //       "Upstreams": {                              <-- UpstreamAddresses, nested
-//         "DataServices": "https://localhost:5112",  <-- the gRPC endpoint, not the REST one
+//         "DataServices": "https://localhost:5102",  <-- one endpoint carries REST and gRPC
 //         "Security":     "https://localhost:5104"
 //       }
 //     }
@@ -755,9 +755,8 @@ public sealed class GatewayOptions : IValidatableObject
     {
         /// <summary>
         /// The DataServices service's gRPC address. Defaults to the local topology's port
-        /// <b>5112</b> over <b>https</b>, which is that service's HTTP/2 listener - the one the gRPC
-        /// contracts are served on. Its REST surface answers on 5102, and the remarks below record why
-        /// this member names the other endpoint of the same service.
+        /// <b>5102</b> over <b>https</b>, which is the port AAP 0.3.2.2 assigns that service and the one
+        /// TLS endpoint on which it serves BOTH its gRPC contracts and its REST surface.
         /// </summary>
         /// <remarks>
         /// <para>
@@ -774,27 +773,26 @@ public sealed class GatewayOptions : IValidatableObject
         /// <para>
         /// THE PORT IS THE LOAD-BEARING HALF OF THIS VALUE. DataServices serves the C-03 and C-04 gRPC
         /// contracts, which REQUIRE HTTP/2, and the anonymous <c>/health</c> plus <c>/v1/ping</c>, which
-        /// the readiness gate probes with HTTP/1.1 (C-L). DataServices gives each version its own TLS
-        /// endpoint - <c>https://+:5102</c> HTTP/1.1 for the REST surface and <c>https://+:5112</c>
-        /// HTTP/2 prior knowledge for the gRPC contracts - and THIS address, being the call edge, names
-        /// the second. One version per endpoint is a misaddressing guard: a listener that accepts only
-        /// what it is for cannot be reached by the wrong client and answer anyway.
+        /// the readiness gate probes with HTTP/1.1 (C-L). BOTH ARRIVE ON ONE TLS ENDPOINT -
+        /// <c>https://+:5102</c> with <c>Protocols: Http1AndHttp2</c> - where ALPN negotiates the version
+        /// per connection, so this call edge and the readiness observation name the SAME address. That is
+        /// the port AAP 0.3.2.2 assigns, and it is what the compose manifest publishes and the
+        /// end-to-end fixture addresses.
         /// </para>
         /// <para>
-        /// Naming 5102 here therefore fails every RPC on this edge during transport negotiation, before
-        /// the request reaches a method, which surfaces as a transport fault naming no operation - a
-        /// clean, immediate failure, which is the point of the split rather than a cost of it. Merging
-        /// both versions onto one TLS endpoint with ALPN negotiating between them is a supported
-        /// arrangement and needs no code change; it is not the shipped default because a misdirected
-        /// gRPC caller would then get a <c>404</c> from the REST surface instead. One measurement is
-        /// worth recording because it rules the CLEARTEXT variant out on functional grounds too: a
-        /// cleartext endpoint configured for both versions disables HTTP/2 outright and logs that it
-        /// has, and configured for <c>Http2</c> alone answers an HTTP/1.1 <c>GET</c> with <c>400</c>.
-        /// The band the environment fixes is the band it DOCUMENTS - health and ping on 5101-5105 - and
-        /// it documents no gRPC address at all, so 5112 moves nothing it fixes and leaves the reserved
-        /// 5103 DesignSystem slot untouched (C-D). This value and <see cref="GatewayOptions.HealthProbes"/>'s DataServices entry
-        /// consequently name DIFFERENT endpoints of the same service, which is why they were already
-        /// separate members: one is a call edge and the other an observation.
+        /// AN EARLIER REVISION DEFAULTED THIS TO 5112, A SECOND HTTP/2-ONLY LISTENER, and the reasoning
+        /// is worth recording because it was not frivolous: one protocol version per port is a
+        /// misaddressing guard, since a listener that accepts only what it is for cannot be reached by
+        /// the wrong client and answer anyway. What it also did was publish C-03 and C-04 at an address
+        /// the plan does not assign, and the plan's port map is the one every caller, probe, manifest
+        /// and fixture uses. One measurement remains true and still rules the CLEARTEXT variant out on
+        /// functional grounds: a cleartext endpoint configured for both versions disables HTTP/2 outright
+        /// and logs that it has, and configured for <c>Http2</c> alone answers an HTTP/1.1 <c>GET</c>
+        /// with <c>400</c> - which is why the collapsed endpoint must stay TLS. The reserved 5103
+        /// DesignSystem slot is untouched (C-D), and the collapse removes a port from the deployment
+        /// rather than adding one. This value and <see cref="GatewayOptions.HealthProbes"/>'s
+        /// DataServices entry now name the same address, and they remain separate members because one is
+        /// a call edge and the other an observation.
         /// </para>
         /// <para>
         /// <b>THE DEFAULT IS TLS, AND THE DEFAULT IS THE PART THAT MATTERS.</b> A deployment that binds
@@ -805,7 +803,7 @@ public sealed class GatewayOptions : IValidatableObject
         /// </para>
         /// </remarks>
         [Required(AllowEmptyStrings = false)]
-        public string DataServices { get; set; } = "https://localhost:5112";
+        public string DataServices { get; set; } = "https://localhost:5102";
 
         /// <summary>
         /// The Security service's REST address. Defaults to the local topology's port 5104.
@@ -862,13 +860,14 @@ public sealed class GatewayOptions : IValidatableObject
     /// system rather than in a comment on a shared group.
     /// </para>
     /// <para>
-    /// THE PORTS ARE THE PORTS THE ENVIRONMENT DOCUMENTS, WHICH ARE THE HTTP/1.1 ONES. A readiness
-    /// probe is an HTTP/1.1 <c>GET</c>, and Persistence on 5101, DataServices on 5102 and Security on
-    /// 5104 each answer it there. Persistence and DataServices additionally bind a SECOND TLS
-    /// endpoint - 5111 and 5112 - carrying HTTP/2 for their gRPC contracts, one protocol version per
-    /// endpoint. A probe must never name those: an HTTP/1.1
-    /// <c>GET</c> against an HTTP/2-only endpoint answers <c>400</c>, so the readiness verdict would be
-    /// permanently negative and the gate that holds Gateway behind its upstreams would never open.
+    /// THE PORTS ARE THE PORTS THE ENVIRONMENT DOCUMENTS AND AAP 0.3.2.2 ASSIGNS. A readiness probe is
+    /// an HTTP/1.1 <c>GET</c>, and Persistence on 5101, DataServices on 5102 and Security on 5104 each
+    /// answer it there. Each of those is ONE TLS endpoint carrying both protocol versions, so the same
+    /// address that answers this probe also carries that service's gRPC contracts and ALPN chooses
+    /// between them per connection - which is why no probe here names a port outside the documented
+    /// band. An HTTP/1.1 <c>GET</c> against an HTTP/2-ONLY endpoint answers <c>400</c>, so a probe
+    /// pointed at one would report its upstream permanently down and the gate that holds Gateway behind
+    /// its upstreams would never open.
     /// </para>
     /// <para>
     /// All three default to the local topology on the scheme those listeners actually bind. A default
@@ -909,13 +908,13 @@ public sealed class GatewayOptions : IValidatableObject
         /// The DataServices service's REST base address, probed for readiness. Port 5102.
         /// </summary>
         /// <remarks>
-        /// A DIFFERENT endpoint of the same service from the one
-        /// <see cref="UpstreamAddresses.DataServices"/> names, and that is why the two were already
-        /// separate members: this address authorises exactly one anonymous <c>GET /health</c> for the
-        /// C-10 aggregate on the HTTP/1.1 endpoint 5102, while that one carries the C-03 and C-04 call
-        /// edge on the HTTP/2 endpoint 5112. Collapsing them would make an observation
-        /// indistinguishable from an invocation in configuration - and would now also point one of the
-        /// two at a listener that cannot answer it.
+        /// THE SAME ADDRESS <see cref="UpstreamAddresses.DataServices"/> NAMES, AND STILL A SEPARATE
+        /// MEMBER. Both reach the one TLS endpoint on 5102, because that endpoint carries HTTP/1.1 and
+        /// HTTP/2 together; what differs is the AUTHORITY each member grants - this one authorises
+        /// exactly one anonymous <c>GET /health</c> for the C-10 aggregate, while that one carries the
+        /// C-03 and C-04 call edge. Merging them into a single key would make an observation
+        /// indistinguishable from an invocation in configuration, and would let a deployment that
+        /// retargets its call edge silently retarget its readiness verdict with it.
         /// <para>
         /// <b>THE DEFAULT IS TLS, AND THE DEFAULT IS THE PART THAT MATTERS.</b> A deployment that binds
         /// this section supplies its own address; a deployment that forgets to gets THIS value. A
@@ -1189,16 +1188,78 @@ public sealed class GatewayOptions : IValidatableObject
         public TimeSpan? AttemptTimeout { get; set; }
 
         /// <summary>
-        /// How many times a REPLAY-SAFE outbound call is retried after its first attempt fails.
+        /// How many times a REPLAY-SAFE outbound call is retried after its first attempt fails. Zero
+        /// disables retrying entirely; the ceiling is <see cref="MaxRetryAttemptsCeiling"/>.
         /// </summary>
         /// <remarks>
-        /// STATED RATHER THAN INHERITED, and it now governs BOTH retry layers. The value matches the
+        /// <para>
+        /// STATED RATHER THAN INHERITED, and it governs BOTH retry layers. The value matches the
         /// resilience package's default, which is exactly why it is written down: "a bounded number of
         /// retries" is a requirement of this policy, and a requirement that holds only because a
         /// dependency's default happens to satisfy it is not being enforced by anything. It is a count of
         /// RETRIES, not of attempts - the gRPC layer takes attempts and is therefore given one more.
+        /// </para>
+        /// <para>
+        /// 🔴 <b>ZERO GENUINELY DISABLES RETRYING NOW, WHICH IT DID NOT BEFORE.</b> The setting was
+        /// documented as a disable and validated only against being negative, while both layers then
+        /// consumed it unconditionally - and neither layer accepts zero. The resilience package's retry
+        /// strategy declares <c>MaxRetryAttempts</c> in the range one to <see cref="int.MaxValue"/>, so a
+        /// configured zero made the SERVICE FAIL TO START with
+        /// "The field &lt;client&gt;-standard.Retry.MaxRetryAttempts must be between 1 and 2147483647"
+        /// (observed, not inferred); and the gRPC layer's <c>MaxAttempts = retries + 1</c> became one,
+        /// which its own retry policy rejects. So the one value an operator would reach for to turn retry
+        /// off was the one value that could not be deployed. The composition root now BRANCHES on zero:
+        /// no gRPC service configuration and no channel ceiling are installed at all, and the HTTP-layer
+        /// strategy is given the never-retry predicate with
+        /// <see cref="DisabledRetryPlaceholderAttempts"/> as the count the package's range requires.
+        /// </para>
+        /// <para>
+        /// <b>AND THE CEILING IS NOT TIDINESS - THE UNBOUNDED FORM SILENTLY BROKE RETRY.</b>
+        /// <see cref="int.MaxValue"/> was a legal value, and <c>retries + 1</c> then wrapped to
+        /// <see cref="int.MinValue"/> in unchecked arithmetic. The channel and the retry policy ACCEPTED
+        /// that negative count and the pipeline built successfully (observed), so retry was silently
+        /// mis-configured on a service that started and reported itself healthy. Ten is a production-safe
+        /// ceiling rather than a preference: the total request budget bounds how many attempts can occur
+        /// at all - with the shipped two-second base delay growing exponentially, a fourth retry already
+        /// cannot fit a thirty-second budget - so a value beyond it expresses a mistake rather than a
+        /// policy, and it keeps the increment far from the overflow. NO PERFORMANCE CLAIM IS MADE OR
+        /// IMPLIED (AAP 0.8.5); this is a bound on how many times to try, not a target.
+        /// </para>
         /// </remarks>
         public int MaxRetryAttempts { get; set; } = 3;
+
+        /// <summary>The largest accepted value of <see cref="MaxRetryAttempts"/>.</summary>
+        /// <remarks>
+        /// A NAMED CONSTANT BECAUSE THREE PLACES MUST AGREE ON IT: the validator that refuses a larger
+        /// value, the documentation an operator reads, and the boundary tests. A literal repeated in each
+        /// would drift.
+        /// </remarks>
+        internal const int MaxRetryAttemptsCeiling = 10;
+
+        /// <summary>
+        /// The retry count assigned to the HTTP-layer strategy when retrying is DISABLED.
+        /// </summary>
+        /// <remarks>
+        /// A PLACEHOLDER, AND THE PREDICATE IS WHAT ACTUALLY DISABLES. The resilience package's range
+        /// forbids zero, so a disabled pipeline still has to name a legal count; it names the smallest
+        /// one, and its <c>ShouldHandle</c> answers false for everything, so no attempt is ever repeated.
+        /// Naming the constant is what stops a reader from concluding that one retry survives the disable.
+        /// </remarks>
+        internal const int DisabledRetryPlaceholderAttempts = 1;
+
+        /// <summary>Whether the configuration asks for any retrying at all.</summary>
+        internal bool RetriesEnabled => MaxRetryAttempts > 0;
+
+        /// <summary>
+        /// The inclusive ATTEMPT count the gRPC retry policy takes, which is one more than the retry count.
+        /// </summary>
+        /// <returns>The attempt count.</returns>
+        /// <exception cref="OverflowException">
+        /// The retry count is <see cref="int.MaxValue"/>. Unreachable through validated configuration - the
+        /// ceiling refuses it long before - and CHECKED anyway, because the unchecked form's failure mode
+        /// was a silently negative attempt count that every layer accepted.
+        /// </exception>
+        internal int ResolveGrpcAttemptCount() => checked(MaxRetryAttempts + 1);
 
         /// <summary>The delay before the second attempt, from which the backoff grows.</summary>
         /// <remarks>
@@ -1294,11 +1355,18 @@ public sealed class GatewayOptions : IValidatableObject
                     [memberName]);
             }
 
-            if (MaxRetryAttempts < 0)
+            if (MaxRetryAttempts is < 0 or > MaxRetryAttemptsCeiling)
             {
                 yield return new ValidationResult(
                     $"'{configurationKeyPrefix}:{nameof(MaxRetryAttempts)}' is {MaxRetryAttempts}, which "
-                        + "cannot be negative. Zero disables retries; it does not mean unlimited.",
+                        + $"must be between 0 and {MaxRetryAttemptsCeiling} inclusive. Zero disables "
+                        + "retrying entirely - no gRPC service configuration and no channel ceiling are "
+                        + "installed, and the HTTP-layer strategy is given the never-retry predicate - so "
+                        + "it is a supported policy rather than a way to ask for unlimited retries. The "
+                        + "ceiling exists because the value is incremented to an ATTEMPT count for the "
+                        + $"gRPC layer: unbounded, {int.MaxValue} wrapped to a NEGATIVE count that the "
+                        + "channel and its retry policy both accepted, leaving retry silently "
+                        + "mis-configured on a service that started and reported itself healthy.",
                     [memberName]);
             }
 

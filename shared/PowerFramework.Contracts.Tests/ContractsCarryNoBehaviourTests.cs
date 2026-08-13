@@ -2577,6 +2577,27 @@ public sealed class ContractsCarryNoBehaviourTests
         new HashSet<string>(StringComparer.Ordinal) { "Google.Protobuf", "Grpc.Core.Api" };
 
     /// <summary>
+    /// The non-framework assemblies that arrive from the three package references
+    /// <c>PowerFramework.Contracts.csproj</c> declares, beyond the two required runtime assemblies.
+    /// </summary>
+    /// <remarks>
+    /// Permitted rather than required, because whether the OpenAPI object model emits a metadata
+    /// reference at all depends on what the generated and embedded surface touches, and this project
+    /// compiles no source of its own. What matters is that nothing OUTSIDE this set arrives: these four
+    /// names are exactly what <c>Microsoft.AspNetCore.OpenApi</c> and <c>Microsoft.OpenApi</c> bring,
+    /// and any fifth name means a fourth package was added to a project whose contract fixes the count
+    /// at three.
+    /// </remarks>
+    private static readonly IReadOnlySet<string> DeclaredPackageAssemblies =
+        new HashSet<string>(StringComparer.Ordinal)
+        {
+            "Microsoft.AspNetCore.OpenApi",
+            "Microsoft.OpenApi",
+            "Microsoft.AspNetCore.Mvc.Abstractions",
+            "Microsoft.AspNetCore.Mvc.Core",
+        };
+
+    /// <summary>
     /// Assembly-name prefixes that would give the boundary a capability, each paired with the
     /// capability it grants.
     /// </summary>
@@ -2593,12 +2614,21 @@ public sealed class ContractsCarryNoBehaviourTests
     /// what makes the pair of rules both robust and sharp.
     /// </para>
     /// <para>
-    /// The <c>Microsoft.AspNetCore.OpenApi</c> and <c>Microsoft.OpenApi</c> entries are not
-    /// hypothetical. An earlier form of <c>PowerFramework.Contracts.csproj</c> referenced both; its
-    /// current comment records why they were removed and where they went, and one of those reasons was
-    /// that a package declared here arrives in ALL FOUR services - including Persistence, which is
-    /// gRPC-only and produces no OpenAPI document at all. This test is the mechanical guard on that
-    /// documented decision, so it cannot be quietly undone.
+    /// WHAT IS DELIBERATELY ABSENT FROM THIS LIST, AND WHY. <c>Microsoft.AspNetCore.OpenApi</c> and
+    /// <c>Microsoft.OpenApi</c> are two of the three package references
+    /// <c>PowerFramework.Contracts.csproj</c> is required to declare, because this project carries the
+    /// REST half of the published boundary - <c>OpenApi/gateway.v1.yaml</c> and
+    /// <c>OpenApi/security.v1.yaml</c>, the source of truth for C-01, C-02, C-09 and C-10 - and the
+    /// second of the two is the direct reference by which central package management substitutes the
+    /// mandatory <c>Microsoft.OpenApi</c> 2.11.0 pin for the vulnerable 2.0.0 the first pulls
+    /// transitively (AAP 0.5.2). Naming either here would make this test contradict the project file
+    /// it guards. <c>Microsoft.AspNetCore.Mvc.Core</c>, <c>Microsoft.AspNetCore.Mvc.Abstractions</c>
+    /// and <c>System.Text.Json</c> arrive with that pair and are likewise not capabilities this project
+    /// took for itself. So the ASP.NET Core entries below are narrowed from the whole
+    /// <c>Microsoft.AspNetCore</c> prefix to the specific hosting, server, request-handling, routing and
+    /// security assemblies a boundary definition would have no business referencing - which is the
+    /// capability this rule was always aimed at, expressed so that the one legitimate ASP.NET Core
+    /// dependency does not have to be argued about again.
     /// </para>
     /// <para>
     /// Every remaining entry is on AAP 0.5.3's deliberately-excluded list or is assigned by AAP 0.5.1
@@ -2610,12 +2640,15 @@ public sealed class ContractsCarryNoBehaviourTests
         ("System.Net", "network and HTTP"),
         ("System.Security", "cryptography and security primitives"),
         ("System.Data", "database access"),
-        ("System.Text.Json", "JSON serialization, which would compete with the Protobuf and OpenAPI contracts"),
         ("System.Configuration", "configuration reading"),
         ("System.Diagnostics.Process", "process control"),
         ("Microsoft.Extensions", "configuration, options, dependency injection and logging"),
-        ("Microsoft.AspNetCore", "web hosting"),
-        ("Microsoft.OpenApi", "the OpenAPI object model, which belongs to the REST services"),
+        ("Microsoft.AspNetCore.Hosting", "web hosting"),
+        ("Microsoft.AspNetCore.Server", "a web server"),
+        ("Microsoft.AspNetCore.Http", "request and response handling"),
+        ("Microsoft.AspNetCore.Routing", "a route table"),
+        ("Microsoft.AspNetCore.Authentication", "authentication"),
+        ("Microsoft.AspNetCore.Authorization", "authorization"),
         ("Microsoft.Data", "a database driver"),
         ("Microsoft.EntityFrameworkCore", "object-relational mapping"),
         ("Microsoft.IdentityModel", "token minting and validation"),
@@ -2775,6 +2808,16 @@ public sealed class ContractsCarryNoBehaviourTests
                 continue;
             }
 
+            // The two OpenAPI package assemblies the project file declares, plus the two MVC
+            // abstractions Microsoft.AspNetCore.OpenApi brings with it. They are approved by the
+            // project's own three-reference contract rather than tolerated: the boundary carries the
+            // OpenAPI documents as well as the protocol definitions, and the Microsoft.OpenApi
+            // reference is the mechanism that overrides the vulnerable transitive 2.0.0 (AAP 0.5.2).
+            if (DeclaredPackageAssemblies.Contains(name))
+            {
+                continue;
+            }
+
             unexpected.Add(name);
         }
 
@@ -2784,10 +2827,11 @@ public sealed class ContractsCarryNoBehaviourTests
             {ContractsAssemblyName} references {unexpected.Count} unexpected assembly:
             {string.Join(", ", unexpected)}.
 
-            PowerFramework.Contracts.csproj declares exactly ONE package reference, Grpc.AspNetCore,
-            from which Grpc.Tools and Google.Protobuf arrive transitively (AAP 0.5.1). Nothing else is
-            approved for this project. A new name here means a package was added - report which, and add
-            it to the project that needs it instead.
+            PowerFramework.Contracts.csproj declares exactly THREE package references - Grpc.AspNetCore,
+            from which Grpc.Tools and Google.Protobuf arrive transitively (AAP 0.5.1), plus
+            Microsoft.AspNetCore.OpenApi and the mandatory Microsoft.OpenApi pin (AAP 0.5.2). Nothing
+            else is approved for this project. A new name here means a fourth package was added - report
+            which, and add it to the project that needs it instead.
 
             Full reference set observed: {string.Join(", ", references)}.
             """);

@@ -218,11 +218,12 @@ namespace PowerFramework.Persistence.Transactions;
 /// <remarks>
 /// <para>
 /// Modelled as a delegate the caller supplies rather than as a C# <see langword="event"/> or as a
-/// dependency on the shared event broker, deliberately. The legacy construct is a PowerBuilder
-/// user event on the transaction object with at most one implementation, so a single optional
-/// callback is the faithful shape; a multicast <see langword="event"/> would introduce a
-/// subscriber-ordering question the legacy does not have, and routing it through the broker would
-/// make Persistence depend on PowerFramework.Shared.Eventful, which it otherwise does not (C-A).
+/// subscription on the shared event broker, deliberately - and note the choice is on the merits, not
+/// on availability: this service does reference PowerFramework.Shared.Eventful, for the threading
+/// broker the task proxies dispatch through. The legacy construct here is a PowerBuilder user event
+/// on the transaction object with at most one implementation, so a single optional callback is the
+/// faithful shape; a multicast <see langword="event"/> or a broker topic would each introduce a
+/// subscriber-ordering question the legacy does not have.
 /// </para>
 /// <para>
 /// <b>A hook that is not supplied behaves exactly as an unimplemented PowerBuilder event.</b> An

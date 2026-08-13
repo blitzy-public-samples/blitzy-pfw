@@ -31,24 +31,71 @@
  * which converts case 2 into a silent pass and destroys the suite's entire
  * value.
  *
- * So case 3 is detected once, up front, and reported as an explicit SKIP whose
- * reason names what was probed and what to run. A skip is visible in every
- * reporter; a vacuous pass is not.
+ * ⚠ CASE 3 FAILS A FULL ACCEPTANCE RUN. IT USED TO SKIP ONE. ⚠
+ * -----------------------------------------------------------
+ * An earlier form of this module detected case 3 and reported it as an explicit
+ * SKIP, on the reasoning that a skip is visible in every reporter while a vacuous
+ * pass is not. That reasoning is right about skips and wrong about acceptance: a
+ * skipped test is not a passed test, but a RUN whose every HTTP assertion skipped
+ * still exits zero, and an exit code is what a pipeline reads. The one state a
+ * misconfigured acceptance pipeline is in — nothing running — was therefore the
+ * state that reported success. The suite's entire value is cross-service
+ * verification, and a run that verified none of it must not be reportable as
+ * having verified it.
+ *
+ * So there are now two modes and no third, exactly as `token-issuance.ts` already
+ * treats the other precondition this suite has:
+ *
+ * - **A FULL ACCEPTANCE RUN — the default — FAILS.** {@link requireLiveStack}
+ *   throws from `beforeEach`, which fails the test rather than skipping it, and the
+ *   message names what was probed, the bring-up command, and how to ask for a
+ *   partial run instead.
+ * - **A RUN THAT EXPLICITLY ACKNOWLEDGES AN ABSENT STACK** — one environment
+ *   variable, `E2E_ALLOW_ABSENT_STACK`, normally set by `npm run test:partial` —
+ *   **skips the stack-dependent tests with a stated reason**, runs everything else,
+ *   and is labelled `api-partial-no-stack` in every reported line so its result
+ *   cannot be read as an acceptance result.
+ *
+ * The acknowledgement is an opt-in and is deliberately NOT inferred from the stack
+ * being absent. Inferring it is the design that produces the silent partial run.
+ *
+ * A TLS FAULT IS NOT AN ABSENT STACK, AND CONFLATING THEM HID A REAL FINDING
+ * ------------------------------------------------------------------------
+ * The earlier form also swallowed a trust failure into the same `reachable: false`
+ * as a refused connection. Every listener in this estate is `https`, and a Compose
+ * bring-up presents a certificate from a throwaway private authority — so the
+ * single most likely local misconfiguration, the runner not trusting that
+ * authority, was indistinguishable from "no stack" and would have skipped the whole
+ * suite while the stack was up and serving. A suite that hides a deployment finding
+ * is worse than one that has none. The probe below therefore classifies the fault
+ * and quotes the remedy for the class it found, and `ignoreHTTPSErrors` stays
+ * `false` on purpose.
+ *
+ * TWO GATES, ONE DECLARATION OF THE DECISION
+ * -----------------------------------------
+ * `../global-setup.ts` asks the same question ONCE for the whole run and refuses
+ * before any test executes; this module is the per-worker backstop for a service
+ * that dies mid-run. Both read the run mode from `./run-mode`, which is the single
+ * place the variable name and the accepted values are declared, so the two cannot
+ * disagree about what enables the partial mode.
  *
  * WHAT IS AND IS NOT PROVABLE IN THIS CHECKPOINT
  * ---------------------------------------------
- * Stated plainly rather than implied, because overstating it here would
- * mislead every later reader: at the time these specs were authored the
- * repository contains no `orchestration/docker-compose.yml`, no service
- * `Dockerfile`, and no service `Program.cs`. The stack therefore cannot be
- * brought up yet, and these specs have NOT been observed passing against live
- * services. What has been verified is everything that does not need a stack —
- * that the suite type-checks under `tsc --noEmit`, that every spec is
- * discovered by `playwright test --list`, and that the pure-fixture
- * assertions (the capability table, the port map, the mask domains) execute
- * and pass. The HTTP assertions are authored against the published contract
- * in `shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml` and will run
- * the moment a stack exists.
+ * Stated plainly rather than implied, because overstating it here would mislead
+ * every later reader. The bring-up path this module names is real and has been
+ * exercised — `orchestration/README.md` §10 is the single place this repository
+ * reports execution status, and it records all four services reaching Docker health
+ * `healthy` — but that same section records that **this suite has not been run
+ * against a live stack**. What HAS been verified is everything that does not need
+ * one: the suite type-checks under `tsc --noEmit`, every spec is discovered by
+ * `playwright test --list`, and the pure-fixture assertions (the capability table,
+ * the port map, the mask domains) execute and pass. The HTTP assertions are authored
+ * against the published contract in
+ * `shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml`.
+ *
+ * That gap is exactly why the default mode below fails rather than skips: an
+ * unexercised suite is a risk to report, and a suite that reported success without
+ * having run against a stack would be hiding it.
  *
  * DESIGN NOTES
  * ------------
@@ -57,7 +104,10 @@
  *   rather than each issuing their own.
  * - The probe targets Gateway's anonymous `/health`. That is the one endpoint
  *   the contract guarantees needs no credentials (C-10), so a failure to reach
- *   it is unambiguously "no stack" rather than "no token".
+ *   it is never "no token". Whether it is "no stack" or "no trust" is decided by
+ *   classifying the fault rather than by assuming, because the remedies differ.
+ * - A `503` still counts as reachable. It means Gateway is running and reporting
+ *   on its upstreams, which is a contract outcome spec 01 asserts on.
  * - Nothing here throws at import time, and nothing here is evaluated at
  *   import time: module load has no side effect, so `playwright test --list`
  *   stays a pure collection step.
@@ -65,14 +115,24 @@
 
 import {
   request as playwrightRequest,
+  test,
   type APIRequestContext,
+  type TestInfo,
 } from '@playwright/test';
 
+import {
+  ABSENT_STACK_ACKNOWLEDGED,
+  ABSENT_STACK_VARIABLE,
+  ABSENT_STACK_VALUE_UNRECOGNISED,
+  BRING_UP_COMMAND,
+  PARTIAL_RUN_COMMAND,
+} from './run-mode';
 import {
   GATEWAY_BASE_URL,
   HEALTH_PATH,
   gatewayUrl,
 } from './service-endpoints';
+
 
 /**
  * How long the reachability probe waits before concluding "no stack".
@@ -130,6 +190,39 @@ function describeCause(cause: unknown): string {
 }
 
 /**
+ * The certificate-verification failures that mean "the stack is up and this
+ * runner does not trust it".
+ *
+ * Kept here as well as in `../global-setup.ts` because the two run in different
+ * processes and neither may depend on the other's classification having happened
+ * first. Both lists exist for the same reason: a trust fault reported as an
+ * absent stack sends an operator to bring up a stack that is already running.
+ */
+const TRUST_FAULT_TOKENS: readonly string[] = Object.freeze([
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT',
+  'CERT_HAS_EXPIRED',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'self-signed certificate',
+  'self signed certificate',
+  'unable to verify the first certificate',
+  'certificate has expired',
+  'Hostname/IP does not match certificate',
+]);
+
+/**
+ * Whether a described fault is a trust failure rather than an absence.
+ *
+ * @param described the single-line description produced by {@link describeCause}
+ * @returns true when the fault is certificate verification
+ */
+function isTrustFault(described: string): boolean {
+  return TRUST_FAULT_TOKENS.some((token: string) => described.includes(token));
+}
+
+/**
  * Probe Gateway's anonymous health endpoint exactly once per worker.
  *
  * Any answer at all — including an unhealthy `503` — counts as reachable,
@@ -137,7 +230,16 @@ function describeCause(cause: unknown): string {
  * which is a contract outcome the readiness spec is entitled to assert on. Only
  * a transport-level failure counts as absent.
  *
- * @returns the memoised availability result; never rejects
+ * 🔴 IN THE DEFAULT (STRICT) MODE THIS REJECTS RATHER THAN RETURNING
+ * `reachable: false`. A caller that turns the result into `test.skip` therefore
+ * cannot silently skip a run nobody asked to have skipped: the rejection carries
+ * the fault class and its remedy, and the `test.skip` line becomes a no-op that
+ * is only reached in the partial mode. `../global-setup.ts` has already refused
+ * the whole run in that case, so reaching this rejection means a service died
+ * mid-run — which is a failure, not an absence.
+ *
+ * @returns the memoised availability result
+ * @throws Error in the strict mode when the probe faults
  */
 export function probeStackAvailability(): Promise<StackAvailability> {
   cachedProbe ??= (async (): Promise<StackAvailability> => {
@@ -161,15 +263,42 @@ export function probeStackAvailability(): Promise<StackAvailability> {
           `HTTP ${response.status()}.`,
       };
     } catch (cause: unknown) {
+      const described: string = describeCause(cause);
+
+      const remedy: string = isTrustFault(described)
+        ? `The stack appears to be UP and this runner does not trust the ` +
+          `certificate it presents. Trust the issuing authority before running: ` +
+          `for a docker compose bring-up export ` +
+          `NODE_EXTRA_CA_CERTS="$INTERNAL_TLS_CA_PATH", and for a host ` +
+          `dotnet run use dotnet dev-certs https --trust. Node reads that variable ` +
+          `only at process start, so export it BEFORE invoking the runner. ` +
+          `ignoreHTTPSErrors stays false on purpose.`
+        : `Bring the four services up first — from the repository root: ` +
+          `${BRING_UP_COMMAND} — then re-run.`;
+
+      const reason: string =
+        `${gatewayUrl(HEALTH_PATH)} did not answer within ${PROBE_TIMEOUT_MS}ms ` +
+        `(${described}). ${remedy}`;
+
+      // STRICT BY DEFAULT. Throwing rather than reporting an absence is what stops
+      // a caller's `test.skip` from converting an unasked-for absence into a
+      // vacuous pass. The partial mode is opt-in and is named in the message.
+      if (!ABSENT_STACK_ACKNOWLEDGED) {
+        throw new Error(
+          `${reason} This is a FAILURE rather than a skip: the suite verifies a ` +
+            `live four-service topology, and a run that skipped here would exit 0 ` +
+            `having proved nothing. To run only the assertions that need no stack, ` +
+            `ask for it by name: ${PARTIAL_RUN_COMMAND}, which sets ` +
+            `${ABSENT_STACK_VARIABLE}.`,
+        );
+      }
+
       return {
         reachable: false,
         reason:
-          `No live stack: ${gatewayUrl(HEALTH_PATH)} did not answer within ` +
-          `${PROBE_TIMEOUT_MS}ms (${describeCause(cause)}). Bring the four ` +
-          `services up first — from the repository root: ` +
-          `cd orchestration && cp .env.example .env && ` +
-          `docker compose --env-file .env up --build -d — then re-run. ` +
-          `The stack-independent assertions in this suite still ran.`,
+          `No live stack (${ABSENT_STACK_VARIABLE} is set, so this is a skip ` +
+          `rather than a failure): ${reason} The stack-independent assertions in ` +
+          `this suite still ran.`,
       };
     } finally {
       await context?.dispose();
@@ -177,4 +306,76 @@ export function probeStackAvailability(): Promise<StackAvailability> {
   })();
 
   return cachedProbe;
+}
+
+/**
+ * The stack precondition, applied once per test from every spec's `beforeEach`.
+ *
+ * ONE FUNCTION FOR ALL SIX SPECS, and that consolidation is part of the fix rather
+ * than tidying beside it. The probe-and-decide block was written out six times, once
+ * per spec, so the six could disagree about what an absent stack means — and while
+ * the behaviour was a skip that mattered only in degree, now that it is a failure it
+ * is the difference between a spec that gates acceptance and one that does not.
+ *
+ * WHAT EACH BRANCH IS FOR
+ * -----------------------
+ * - `@no-stack`-TAGGED TESTS RETURN IMMEDIATELY. Several specs mix pure-fixture
+ *   assertions in with HTTP ones — the capability table, the port map, the mask
+ *   domains — and those are exactly the part that still holds with nothing running.
+ *   A tag is declarative and machine-read; a title substring would silently stop
+ *   matching the moment somebody reworded a test name.
+ * - AN UNRECOGNISED ACKNOWLEDGEMENT VALUE IS A CONFIGURATION ERROR, checked before
+ *   the probe because it is a mistake in either mode: a value of `ture` would
+ *   otherwise mean "full acceptance run" and produce the failure the author was
+ *   trying to opt out of.
+ * - A REACHABLE STACK RETURNS. Any answer counts, including an unhealthy `503`:
+ *   that means Gateway is running and reporting on its upstreams, which is a
+ *   contract outcome the readiness spec is entitled to assert on.
+ * - AN ABSENT STACK THROWS on a full acceptance run, and skips only on an
+ *   acknowledged partial one.
+ *
+ * @param testInfo the current test's info, read for its tags
+ * @throws Error when the acknowledgement variable carries an unrecognised value, or
+ *         when the stack is absent and the run has not acknowledged that
+ */
+export async function requireLiveStack(testInfo: TestInfo): Promise<void> {
+  if (testInfo.tags.includes('@no-stack')) {
+    return;
+  }
+
+  if (ABSENT_STACK_VALUE_UNRECOGNISED) {
+    throw new Error(
+      `${ABSENT_STACK_VARIABLE} is set to a value this suite does not ` +
+        'recognise. Accepted values are 1 and true, matched case-insensitively. ' +
+        'Unset it for a full acceptance run, or set it to one of those values to ' +
+        'acknowledge a run that tolerates an absent stack. (The configured value ' +
+        'is deliberately not quoted here.)',
+    );
+  }
+
+  const availability: StackAvailability = await probeStackAvailability();
+
+  if (availability.reachable) {
+    return;
+  }
+
+  if (!ABSENT_STACK_ACKNOWLEDGED) {
+    throw new Error(
+      `${availability.reason} A full acceptance run FAILS here rather than ` +
+        'skipping, because this suite exists to verify cross-service workflows ' +
+        'and a run that verified none of them must not exit zero. Bring the ' +
+        'stack up and re-run, or run the acknowledged partial suite instead: ' +
+        `${PARTIAL_RUN_COMMAND} (which sets ${ABSENT_STACK_VARIABLE} and is ` +
+        'labelled api-partial-no-stack in every reported line).',
+    );
+  }
+
+  test.skip(
+    true,
+    `${availability.reason} Skipped rather than failed because this run set ` +
+      `${ABSENT_STACK_VARIABLE} and is therefore a DELIBERATELY PARTIAL run, ` +
+      'not an acceptance run: it exercised no cross-service workflow. Its ' +
+      'reported lines carry the api-partial-no-stack project label for exactly ' +
+      'that reason.',
+  );
 }

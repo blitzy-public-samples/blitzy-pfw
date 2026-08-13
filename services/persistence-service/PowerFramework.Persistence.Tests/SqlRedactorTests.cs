@@ -1389,7 +1389,7 @@ public sealed class SqlRedactorTests
     //
     //  THE LEGACY MEMBER BEING GUARDED is the fifth of nine,
     //      global type transactiondata from structure
-    //          string dbms, servername, database, logid, logpass, dbparm, lock, ... 
+    //          string dbms, servername, database, logid, logpass, dbparm, lock, ...
     //      end type
     //  [ws_objects/pfw.thread.ext.pbl.src/transactiondata.srs:L8], and the requirement on it is
     //  absolute rather than best-effort: logpass is WRITE-ONLY - never echoed in a response, never

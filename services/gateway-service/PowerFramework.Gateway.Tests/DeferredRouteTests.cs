@@ -370,17 +370,6 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
     private const string ConflictUpdateTable = "COMPANY";
 
     /// <summary>
-    /// How long a scripted upstream will wait for the caller-cancellation test before giving up.
-    /// </summary>
-    /// <remarks>
-    /// A BOUND ON FAILURE, NOT A TIMING CLAIM. The cancellation under test is issued only after the double
-    /// has signalled that it was reached, so the cancellation always wins and this value is never
-    /// approached. It exists so that a regression in cancellation propagation fails the test instead of
-    /// hanging the run, and no latency meaning attaches to it.
-    /// </remarks>
-    private static readonly TimeSpan CancellationObservationBound = TimeSpan.FromSeconds(5);
-
-    /// <summary>
     /// The rich-error binding contract C-03's <c>Update</c> declares, read from the generated descriptor.
     /// </summary>
     /// <remarks>
@@ -1218,9 +1207,10 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
         }
 
         // The count is asserted so that a projection removed from the route table cannot make this pass by
-        // finding nothing to check. Forty is the contract's own figure: every unary and every
-        // server-streaming method of C-03 and C-04, and none of the three bidirectional ones.
-        Assert.Equal(40, projected);
+        // finding nothing to check. Thirty-nine is the contract's own figure: fifteen of C-03's sixteen
+        // methods and twenty-four of C-04's twenty-six - every unary and every server-streaming one, and
+        // none of the three bidirectional ones.
+        Assert.Equal(39, projected);
     }
 
     // ==================================================================================================
@@ -1886,9 +1876,20 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
             {
                 reached.TrySetResult();
 
-                // Waits on the token the projection handed down, which is the caller's own connection
-                // lifetime. The bound is a guard against hanging a run, never a timing claim.
-                await Task.Delay(CancellationObservationBound, options.CancellationToken);
+                // STALLS ON THE TOKEN AND ON NOTHING ELSE. The token is the one the projection handed
+                // down, which is the caller's own connection lifetime, so the ONLY thing that can end this
+                // wait is the cancellation the test is about to issue - which is exactly the property under
+                // test.
+                //
+                // AN INFINITE STALL RATHER THAN A FINITE ONE, and the difference is not cosmetic. This used
+                // to wait five seconds, and a finite bound inside the subject is a second, silent exit from
+                // the wait: on a heavily loaded agent the delay could elapse before the cancellation was
+                // observed, the double would return a normal response, and the test would fail while
+                // reporting nothing true about cancellation propagation. With no duration there is nothing
+                // to expire, so the test can only pass by the token being honoured. The liveness bound
+                // belongs to the test runner, which ends a genuinely hung run on its own timeout - a
+                // separate mechanism outside the assertion, which is where it should be (AAP 0.8.5).
+                await Task.Delay(Timeout.InfiniteTimeSpan, options.CancellationToken);
 
                 return new UpdateResponse { RetCode = WireRetCode.Ok };
             });

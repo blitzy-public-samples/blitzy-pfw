@@ -6,7 +6,9 @@
   "license": "BSD-2-Clause",
   "scripts": {
     "test": "playwright test",
+    "test:partial": "E2E_ALLOW_ABSENT_STACK=1 playwright test",
     "test:list": "playwright test --list",
+    "test:partial": "E2E_ALLOW_ABSENT_STACK=1 E2E_ALLOW_MISSING_ISSUANCE_IDENTITY=1 playwright test",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm run test:list",
     "provision:identity": "bash ./scripts/provision-e2e-client-identity.sh"

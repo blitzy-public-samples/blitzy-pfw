@@ -183,12 +183,29 @@
     <ProjectReference Include="..\..\..\shared\PowerFramework.Shared.Containers\PowerFramework.Shared.Containers.csproj" />
 
     <!--
-      Deliberately absent. PowerFramework.Shared.Eventful and PowerFramework.Shared.Localization
-      are not referenced because Persistence consumes neither, and an unused reference is an
-      unused coupling. No peer service project is referenced either: C-A permits the published
-      contracts project as the only cross-service edge in the system, and no behavioural code
-      crosses a service boundary. Nothing in the four paths above reaches outside shared/.
+      EventBroker, VetoResult and EventArgumentContext. Required rather than convenient: AAP 0.4.1
+      assigns the whole of pfw.thread to Persistence in scope, and one of that library's six objects
+      is n_cst_threading_eventful.sru, which derives from n_cst_eventful. That inheritance is one of
+      the two structural facts the AAP cites as proof that n_cst_eventful must live in a shared
+      in-scope library at all, so the derived threading broker cannot be ported here without the
+      base it derives from. Tasks/TaskProxies/ThreadingEventBroker.cs is that port, and it is the
+      dispatcher behind the notification channels in Tasks/TaskProxies/SqlTaskProxyBase.cs.
+      docs/SERVICE_MAPPING.md records object 233 as In scope / Persistence / Ported, and this edge is
+      what makes that record true. Shared.Eventful declares exactly one project edge of its own, to
+      Shared.Kernel, which is already referenced above - so this edge adds no new transitive project to
+      the graph and the graph stays acyclic.
     -->
+    <ProjectReference Include="..\..\..\shared\PowerFramework.Shared.Eventful\PowerFramework.Shared.Eventful.csproj" />
+
+    <!--
+      Deliberately absent. PowerFramework.Shared.Localization is not referenced because Persistence
+      consumes no localized text: the diagnostics this service emits are operator-facing and the
+      legacy strings it reproduces are hardcoded at their own sites, so an unused reference would be
+      an unused coupling. No peer service project is referenced either: C-A permits the published
+      contracts project as the only cross-service edge in the system, and no behavioural code
+      crosses a service boundary. Nothing in the five paths above reaches outside shared/.
+    -->
+    <ProjectReference Include="..\..\..\shared\PowerFramework.Shared.Eventful\PowerFramework.Shared.Eventful.csproj" />
 
   </ItemGroup>
 

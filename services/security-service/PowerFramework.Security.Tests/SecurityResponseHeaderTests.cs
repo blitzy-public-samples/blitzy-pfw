@@ -124,21 +124,21 @@ public sealed class SecurityResponseHeaderTests
         await using SecurityAppFactory factory = new();
 
         SecurityOptions options = factory.ResolveSecurityOptions();
-        SecurityClientOptions client = options.Clients[0];
+
+        // The credential comes from the directory and the PERMISSION from the matrix, because those are
+        // two different declarations - the directory carries no permission at all.
+        (string subject, string audience, string scope) = factory.ResolveFirstGrant();
 
         using HttpClient authenticated = factory.CreateClient();
 
         authenticated.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
             "Basic",
             Convert.ToBase64String(
-                Encoding.UTF8.GetBytes(client.Subject + ":" + SecurityAppFactory.RosterSecret)));
+                Encoding.UTF8.GetBytes(subject + ":" + SecurityAppFactory.RosterSecret)));
 
         using HttpResponseMessage issued = await authenticated.PostAsJsonAsync(
             new Uri(options.TokenEndpointPath, UriKind.Relative),
-            IssuanceFixture.Body(
-                subject: client.Subject,
-                audience: client.Audiences[0],
-                scopes: [client.Scopes[0]]),
+            IssuanceFixture.Body(subject: subject, audience: audience, scopes: [scope]),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, issued.StatusCode);

@@ -5,7 +5,7 @@
 //  ROLE
 //  Security is the only service in this decomposition with an HTTP surface worth exercising from
 //  inside the process that serves it: token issuance, the published key set, the OpenID discovery
-//  metadata, the seventeen cryptographic operations, the anonymous readiness probe and the
+//  metadata, the eighteen cryptographic operations, the anonymous readiness probe and the
 //  authenticated ping route. This file boots that surface through the service's OWN composition root
 //  and hands a sibling test class three things it cannot obtain any other way:
 //
@@ -136,7 +136,6 @@
 // ==================================================================================================
 
 using System.Globalization;
-using System.Runtime.CompilerServices;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 
@@ -207,55 +206,6 @@ namespace PowerFramework.Security.Tests;
 /// out.
 /// </para>
 /// </remarks>
-/// <summary>
-/// Supplies every secret the shipped issuance roster names to the whole test process, once, before any
-/// host is built.
-/// </summary>
-/// <remarks>
-/// <para>
-/// WHY THIS EXISTS AT ALL. The issuance registry resolves each secret the roster names EAGERLY and
-/// refuses to construct when a named configuration key resolves to nothing - the posture that turns a
-/// missing deployment secret into a loud startup failure rather than a caller that mysteriously cannot
-/// authenticate against a service reporting healthy. That posture applies to every host, including the
-/// several independent test hosts in this project, so without a single place to satisfy it each one
-/// would have to remember - and the one that forgot would fail with a startup exception that looks
-/// nothing like the thing it was testing.
-/// </para>
-/// <para>
-/// THROUGH THE PROCESS ENVIRONMENT, WHICH IS EXACTLY HOW A DEPLOYMENT SUPPLIES THEM. The default host
-/// configuration reads environment variables, so every host in this assembly - this factory, the
-/// issuance-specific host, and the cryptographic and authorization hosts - picks these up without
-/// knowing they exist. That is the same route the orchestration secret layer uses in production, so the
-/// test hosts exercise the production resolution path rather than a test-only one.
-/// </para>
-/// <para>
-/// A MODULE INITIALIZER RATHER THAN A FIXTURE, because it must run before the FIRST host is built and no
-/// fixture is guaranteed to. It runs once per process, sets nothing that is not a roster secret, and
-/// leaves any value already present alone - so a continuous-integration agent that injects its own
-/// secrets keeps them.
-/// </para>
-/// <para>
-/// THE VALUES ARE GENERATED PER PROCESS AND NOTHING HERE IS A COMMITTED CREDENTIAL (constraint C-F).
-/// </para>
-/// </remarks>
-internal static class RosterSecretEnvironment
-{
-    /// <summary>
-    /// Sets every roster-secret variable the settings files name, unless it is already set.
-    /// </summary>
-    [ModuleInitializer]
-    internal static void Provision()
-    {
-        foreach (KeyValuePair<string, string?> secret in SecurityAppFactory.RosterSecretOverrides())
-        {
-            if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(secret.Key)))
-            {
-                Environment.SetEnvironmentVariable(secret.Key, secret.Value);
-            }
-        }
-    }
-}
-
 internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
 {
     /// <summary>
@@ -263,13 +213,16 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
     /// </summary>
     /// <remarks>
     /// Chosen because it is the smallest size the minting library will sign an <c>RS256</c> token
-    /// with, so a host built on it exercises the ordinary path rather than a boundary. It also equals
-    /// the DEFAULT floor the options validator applies to the issuer key -
-    /// <see cref="SigningKeyFormats.DefaultMinimumKeySizeBits"/> - which is deliberate: a factory
-    /// generating material below the shipped default would make every host it builds unstartable. That
-    /// floor governs THIS key only; the legacy catalogue's allowance of 1024-bit RSA is preserved where
-    /// it belongs, on the C-02 caller-supplied surface. A test that needs a smaller key asks for one
-    /// through <see cref="CreateSigningKeyMaterial(int)"/> and lowers the floor alongside it.
+    /// with, so a host built on it exercises the ordinary path rather than a boundary. It is also the
+    /// size at and above which the service stops remarking on the modulus -
+    /// <see cref="SecurityOptions.LegacyWeakSigningKeySizeBits"/> - so a host this factory builds starts
+    /// with no weak-key warning in its log, and a case that WANTS that warning has to ask for a shorter
+    /// key deliberately. NO SIZE IS REFUSED ANYWHERE, AND NOTHING HERE NEEDS LOWERING TO USE A SHORT
+    /// KEY: material requested through <see cref="CreateSigningKeyMaterial(int)"/> at 1024 bits starts a
+    /// host just as well, annotated rather than rejected, because AAP 0.6.6.4 keeps that size legal
+    /// across this estate [<c>ws_objects/pfw.shared.pbl.src/enums.sru:L965</c>]. This constant is the one
+    /// place a 2048-bit size is still named as a VALUE, and it belongs here because it is a test's choice
+    /// of an unremarkable size rather than a policy of the service.
     /// </remarks>
     internal const int DefaultSigningKeySizeInBits = 2048;
 
@@ -352,7 +305,7 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
     /// </summary>
     /// <remarks>
     /// <para>
-    /// NO LONGER AN ARBITRARY TOKEN, BECAUSE THE ROUTES NOW READ IT. The cryptographic contract's 17
+    /// NO LONGER AN ARBITRARY TOKEN, BECAUSE THE ROUTES NOW READ IT. The cryptographic contract's 18
     /// operations are gated by a named policy requiring
     /// <see cref="CryptoEndpoints.RequiredScope"/> and the authenticated probe by one requiring
     /// <see cref="PingEndpoints.RequiredScope"/>, so a token carrying neither is authenticated and then
@@ -377,7 +330,7 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
     /// </summary>
     /// <remarks>
     /// <para>
-    /// NO LONGER AN ARBITRARY TOKEN, BECAUSE THE ROUTES NOW READ IT. The cryptographic contract's 17
+    /// NO LONGER AN ARBITRARY TOKEN, BECAUSE THE ROUTES NOW READ IT. The cryptographic contract's 18
     /// operations are gated by a named policy requiring
     /// <see cref="CryptoEndpoints.RequiredScope"/> and the authenticated probe by one requiring
     /// <see cref="PingEndpoints.RequiredScope"/>, so a token carrying neither is authenticated and then
@@ -442,10 +395,31 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
     /// </summary>
     /// <returns>One entry per named key, each carrying <see cref="RosterSecret"/>.</returns>
     /// <remarks>
-    /// EXPOSED SO THE SIBLING ISSUANCE HOST CAN REUSE IT rather than re-deriving the same list. There are
-    /// two test hosts in this project - this factory and the issuance-specific one in
-    /// <c>TokenEndpointsTests.cs</c> - and both must supply these keys or neither starts, so one
-    /// declaration of them is the only shape in which the two cannot drift.
+    /// <para>
+    /// EXPOSED SO EVERY HOST IN THIS ASSEMBLY CAN REUSE IT rather than re-deriving the same list. Five
+    /// independent <see cref="WebApplicationFactory{TEntryPoint}"/> subclasses boot this service's
+    /// composition root in this project - this factory, the issuance host in
+    /// <c>TokenEndpointsTests.cs</c>, the readiness host in <c>HealthEndpointsTests.cs</c>, the trust
+    /// anchor host in <c>ClientCertificateAnchorAdoptionTests.cs</c> and the reporting host in
+    /// <c>IssuanceRosterAuthorityTests.cs</c> - and EVERY ONE of them must supply these keys or it does
+    /// not start, so one declaration of them is the only shape in which the five cannot drift.
+    /// </para>
+    /// <para>
+    /// EACH HOST MERGES THIS INTO ITS OWN IN-MEMORY CONFIGURATION, AND THAT IS THE CONTRACT. An earlier
+    /// form of this file satisfied all five at once from a <c>[ModuleInitializer]</c> that wrote the three
+    /// keys into the PROCESS ENVIRONMENT and never restored them. It worked, and it was wrong in two ways
+    /// that matter for a test suite. It mutated state shared by every test class in the assembly, so a
+    /// host that believed it was reading its own configuration was in fact reading a value some other
+    /// class's initializer had installed, and a row asserting a REFUSAL for a missing secret could not
+    /// state that the secret was missing. And it silently adopted, or silently displaced, whatever the
+    /// host machine already had under those names, which makes a local run and a continuous-integration
+    /// run two different experiments. In-memory configuration is the same ingress a deployment uses - the
+    /// options pipeline - so nothing about the production resolution path is bypassed by supplying it per
+    /// host; the only thing that changes is that the value cannot escape the host that asked for it.
+    /// </para>
+    /// <para>
+    /// THE VALUES ARE GENERATED PER PROCESS AND NOTHING HERE IS A COMMITTED CREDENTIAL (constraint C-F).
+    /// </para>
     /// </remarks>
     internal static Dictionary<string, string?> RosterSecretOverrides()
     {
@@ -909,6 +883,178 @@ internal sealed class SecurityAppFactory : WebApplicationFactory<Program>
     /// </remarks>
     internal SecurityOptions ResolveSecurityOptions() =>
         Services.GetRequiredService<IOptions<SecurityOptions>>().Value;
+
+    /// <summary>
+    /// Resolves the audiences this host's grant matrix permits one caller to request, in declaration
+    /// order.
+    /// </summary>
+    /// <param name="subject">The caller identity to read grants for.</param>
+    /// <returns>
+    /// The permitted audiences, or an empty list when the matrix grants that caller nothing.
+    /// </returns>
+    /// <exception cref="ArgumentException"><paramref name="subject"/> is absent.</exception>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE MATRIX IS THE ONLY PLACE A PERMISSION IS DECLARED, WHICH IS WHY THIS HELPER EXISTS.</b>
+    /// Tests used to read <c>Security:Clients[n]:Audiences</c> and <c>:Scopes</c> for "an audience this
+    /// caller may address" and "a scope it may hold". Those lists described permissions without deciding
+    /// them - every issuance decision is taken against the matrix folded from <c>Security:Callers</c> and
+    /// <c>Security:CallerAuthorizations</c> - and they are gone. Reading the matrix is therefore not a
+    /// substitution of convenience: it is reading the surface that actually decides, which is what a
+    /// setup step needs if the row is to reach the behaviour it exists to assert.
+    /// </para>
+    /// <para>
+    /// BOTH SHAPES ARE FOLDED, in the same order the issuer folds them - nested first, flat added on top -
+    /// so a host configured either way is read correctly. Ordinal comparison and declaration order, both
+    /// matching the enforcement point, so the first entry is the deterministic choice rather than an
+    /// arbitrary one.
+    /// </para>
+    /// </remarks>
+    internal IReadOnlyList<string> ResolveGrantedAudiences(string subject)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(subject);
+
+        SecurityOptions configured = ResolveSecurityOptions();
+        List<string> audiences = [];
+
+        void Add(string? audience)
+        {
+            if (!string.IsNullOrWhiteSpace(audience) && !audiences.Contains(audience.Trim(), StringComparer.Ordinal))
+            {
+                audiences.Add(audience.Trim());
+            }
+        }
+
+        foreach (SecurityCallerOptions caller in configured.Callers)
+        {
+            if (caller is null || !string.Equals(caller.Identity?.Trim(), subject, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            foreach (SecurityCallerGrantOptions grant in caller.Grants)
+            {
+                Add(grant?.Audience);
+            }
+        }
+
+        foreach (CallerAuthorizationOptions row in configured.CallerAuthorizations)
+        {
+            if (row is not null && string.Equals(row.Caller?.Trim(), subject, StringComparison.Ordinal))
+            {
+                Add(row.Audience);
+            }
+        }
+
+        return audiences;
+    }
+
+    /// <summary>
+    /// Resolves the scopes this host's grant matrix permits one caller to request for one audience.
+    /// </summary>
+    /// <param name="subject">The caller identity to read grants for.</param>
+    /// <param name="audience">The audience the grant addresses.</param>
+    /// <returns>
+    /// The permitted scopes, or an empty list when the matrix grants that caller-audience pair nothing.
+    /// </returns>
+    /// <exception cref="ArgumentException">Either argument is absent.</exception>
+    /// <remarks>
+    /// The union of both shapes for that pair, because the issuer unions them too: a flat row for a pair
+    /// the nested shape also mentions is additive rather than a replacement. See
+    /// <see cref="ResolveGrantedAudiences"/> for why the matrix rather than the credential directory is
+    /// the surface read.
+    /// </remarks>
+    internal IReadOnlyList<string> ResolveGrantedScopes(string subject, string audience)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(subject);
+        ArgumentException.ThrowIfNullOrWhiteSpace(audience);
+
+        SecurityOptions configured = ResolveSecurityOptions();
+        List<string> scopes = [];
+
+        void AddAll(IList<string> declared)
+        {
+            foreach (string scope in declared)
+            {
+                if (!string.IsNullOrWhiteSpace(scope) && !scopes.Contains(scope.Trim(), StringComparer.Ordinal))
+                {
+                    scopes.Add(scope.Trim());
+                }
+            }
+        }
+
+        foreach (SecurityCallerOptions caller in configured.Callers)
+        {
+            if (caller is null || !string.Equals(caller.Identity?.Trim(), subject, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            foreach (SecurityCallerGrantOptions grant in caller.Grants)
+            {
+                if (grant is not null && string.Equals(grant.Audience?.Trim(), audience, StringComparison.Ordinal))
+                {
+                    AddAll(grant.Scopes);
+                }
+            }
+        }
+
+        foreach (CallerAuthorizationOptions row in configured.CallerAuthorizations)
+        {
+            if (row is not null
+                && string.Equals(row.Caller?.Trim(), subject, StringComparison.Ordinal)
+                && string.Equals(row.Audience?.Trim(), audience, StringComparison.Ordinal))
+            {
+                AddAll(row.Scopes);
+            }
+        }
+
+        return scopes;
+    }
+
+    /// <summary>
+    /// Resolves the first caller-audience-scope triple this host's grant matrix permits, for a row that
+    /// needs "some credential this host will actually mint".
+    /// </summary>
+    /// <returns>The caller identity, the audience it may address and one scope it may hold.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// This host's matrix grants nothing, so no mintable triple exists.
+    /// </exception>
+    /// <remarks>
+    /// The FIRST credential-directory subject the matrix grants something, and that grant's first audience
+    /// and first scope - deterministic rather than arbitrary. It raises rather than returning an empty
+    /// triple because an absent grant is a fault in the test host's own configuration and not a result to
+    /// inspect; the message names the keys to correct and echoes no configured value.
+    /// </remarks>
+    internal (string Subject, string Audience, string Scope) ResolveFirstGrant()
+    {
+        foreach (SecurityClientOptions client in ResolveSecurityOptions().Clients)
+        {
+            if (client is null || string.IsNullOrWhiteSpace(client.Subject))
+            {
+                continue;
+            }
+
+            string subject = client.Subject.Trim();
+
+            foreach (string audience in ResolveGrantedAudiences(subject))
+            {
+                IReadOnlyList<string> scopes = ResolveGrantedScopes(subject, audience);
+
+                if (scopes.Count > 0)
+                {
+                    return (subject, audience, scopes[0]);
+                }
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"This host's grant matrix - '{SecurityOptions.SectionName}:Callers' folded with "
+            + $"'{SecurityOptions.SectionName}:{nameof(SecurityOptions.CallerAuthorizations)}' - grants no "
+            + $"caller from '{SecurityOptions.SectionName}:Clients' any audience with any scope, so no "
+            + "token can be minted for any credential this host declares. Add a grant before the host "
+            + "starts. This message echoes no configured value.");
+    }
 
     /// <summary>
     /// Resolves the single audience identity this host accepts on an inbound token.

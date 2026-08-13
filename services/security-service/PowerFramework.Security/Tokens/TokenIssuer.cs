@@ -861,9 +861,8 @@ public static class ScopeClaim
 }
 
 /// <summary>
-/// One resolved issuance-roster entry: a caller identity, the audiences and scopes it may ask for, and
-/// - held privately and reachable only through a fixed-time comparison - the secret it authenticates
-/// with.
+/// One resolved issuance-roster entry: a caller identity and - held privately and reachable only through
+/// a fixed-time comparison - the secret it authenticates with.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -873,9 +872,20 @@ public static class ScopeClaim
 /// the same reason: a value that cannot be read cannot be logged by accident.
 /// </para>
 /// <para>
-/// THE PERMITTED SETS ARE FROZEN AT CONSTRUCTION, so the permissions enforced for a caller cannot be
-/// altered after the options validator approved them. They are exposed as read-only sets so a caller -
-/// in practice a test, or a diagnostic - can assert on them without being able to add to them.
+/// 🔴 IT CARRIES NO PERMISSION SET, AND ITS ABSENCE IS THE FIX RATHER THAN AN OMISSION. This type used to
+/// publish <c>PermittedAudiences</c> and <c>PermittedScopes</c>, frozen from
+/// <c>Security:Clients[n]:Audiences</c> and <c>:Scopes</c> - and NOTHING CONSULTED THEM. The issuance
+/// decision is taken by <see cref="TokenIssuer.Issue"/> against the deployment-wide audience roster and
+/// the grant matrix folded from <c>Security:Callers</c> and <c>Security:CallerAuthorizations</c>, which is
+/// the single enforcement point. Two surfaces describing one decision is how the shipped configuration
+/// came to advertise permissions the matrix withholds, and how an operator could edit an authorization
+/// list and change nothing at all (CWE-16, CWE-863). The dead surface is removed rather than enforced:
+/// enforcing it would create a second gate able to refuse what the matrix grants, which is the divided
+/// authority the fold below rejects in terms.
+/// </para>
+/// <para>
+/// SO THIS TYPE IS THE CREDENTIAL DIRECTORY ENTRY. It answers who may authenticate at the issuance edge
+/// and under which secret; what that identity may then REQUEST is the matrix's answer and nowhere else's.
 /// </para>
 /// </remarks>
 public sealed class RegisteredIssuanceClient
@@ -884,35 +894,21 @@ public sealed class RegisteredIssuanceClient
     private readonly byte[]? _secret;
 
     /// <summary>
-    /// Binds one resolved roster entry.
+    /// Binds one resolved credential-directory entry.
     /// </summary>
     /// <param name="subject">The caller identity.</param>
-    /// <param name="permittedAudiences">The audiences this caller may request. Frozen by the caller.</param>
-    /// <param name="permittedScopes">The scopes this caller may request. Frozen by the caller.</param>
     /// <param name="secret">
     /// The UTF-8 encoded shared secret, or <see langword="null"/> for a caller that authenticates by
     /// client certificate only.
     /// </param>
-    internal RegisteredIssuanceClient(
-        string subject,
-        FrozenSet<string> permittedAudiences,
-        FrozenSet<string> permittedScopes,
-        byte[]? secret)
+    internal RegisteredIssuanceClient(string subject, byte[]? secret)
     {
         Subject = subject;
-        PermittedAudiences = permittedAudiences;
-        PermittedScopes = permittedScopes;
         _secret = secret;
     }
 
     /// <summary>The caller identity: the credential identity and the token subject both.</summary>
     public string Subject { get; }
-
-    /// <summary>The closed set of audiences this caller may request a token for.</summary>
-    public IReadOnlySet<string> PermittedAudiences { get; }
-
-    /// <summary>The closed set of scopes this caller may request.</summary>
-    public IReadOnlySet<string> PermittedScopes { get; }
 
     /// <summary>
     /// Whether this caller has a shared secret configured, and can therefore be authenticated by the
@@ -1048,18 +1044,14 @@ public sealed class IssuanceClientRegistry
 
             byte[]? secret = ResolveSecret(declared, index, configuration);
 
-            RegisteredIssuanceClient client = new(
-                declared.Subject,
-                declared.Audiences.ToFrozenSet(StringComparer.Ordinal),
-                declared.Scopes.ToFrozenSet(StringComparer.Ordinal),
-                secret);
+            RegisteredIssuanceClient client = new(declared.Subject, secret);
 
             if (!resolved.TryAdd(declared.Subject, client))
             {
                 throw new InvalidOperationException(
                     $"Configuration key '{ClientsKey}[{index.ToString(CultureInfo.InvariantCulture)}]" +
                     ":Subject' repeats a subject an earlier entry already declares. The roster is keyed " +
-                    "by subject, so one of the two permission sets would not be the one enforced. This " +
+                    "by subject, so one of the two secrets would not be the one compared against. This " +
                     "message does not echo the configured value.");
             }
         }
@@ -2559,223 +2551,212 @@ internal static partial class TokenIssuerLog
 }
 
 /// <summary>
-/// Reports where the issuance roster's ADVERTISED permissions and the grant matrix's EFFECTIVE ones
-/// disagree.
+/// Keeps the issuance permission model singular: refuses a host that carries a SECOND representation of it,
+/// and reports a grant no identity can reach.
 /// </summary>
 /// <remarks>
 /// <para>
-/// 🔴 <b>TWO SURFACES DESCRIBE ONE CALLER'S PERMISSIONS AND ONLY ONE OF THEM DECIDES ANYTHING.</b>
-/// <c>Security:Clients[n]:Audiences</c> and <c>:Scopes</c> are bound, frozen onto
-/// <see cref="RegisteredIssuanceClient"/> as <c>PermittedAudiences</c> and <c>PermittedScopes</c> — and then
-/// never consulted: the issuance decision is taken entirely against the matrix folded from
-/// <c>Security:Callers</c> and <c>Security:CallerAuthorizations</c>, which is deliberately the single
-/// enforcement point. The shipped settings already diverge - one client advertises an audience the matrix
-/// does not grant, and another advertises three - so an operator reading the roster would conclude a caller
-/// may address audiences it will in fact be refused for.
+/// 🔴 <b>ONE AUTHORITATIVE PERMISSION MODEL, AND THIS TYPE IS WHAT KEEPS IT THE ONLY ONE.</b> The
+/// issuance decision is taken entirely against the deployment-wide audience roster and the grant matrix
+/// folded from <c>Security:Callers</c> and <c>Security:CallerAuthorizations</c> [see <c>Issue</c> and
+/// <c>RequireCallerRoster</c>]. There is deliberately no second surface: the retired
+/// <c>Security:Clients[n]:Audiences</c> and <c>:Scopes</c> lists were bound, frozen onto the resolved
+/// roster entry and then consulted by nothing, so they described a decision they did not take - which is
+/// how the shipped settings came to advertise audiences and scopes the matrix withholds, and how an
+/// operator could edit an authorization list and change nothing (CWE-16, CWE-863). They are REMOVED, not
+/// enforced: enforcing them would create a second gate able to refuse what the matrix grants, which is the
+/// divided authority the folding comment above rejects in terms.
 /// </para>
 /// <para>
-/// <b>REPORTED, NOT ENFORCED, AND NOT A REFUSAL TO START.</b> Enforcing the advertised lists would create a
-/// SECOND permission gate that could refuse what the matrix grants, which is exactly the divided authority
-/// the folding comment above rejects; and refusing to start on a divergence would make the shipped
-/// configuration unstartable, turning a documentation defect into an outage. So the host reports it once, at
-/// startup, naming the keys and the identifiers - all of which are already written in a settings file, none
-/// of which is a credential - and states plainly which surface decides.
+/// <b>THEIR REAPPEARANCE REFUSES THE HOST, because a binder silently drops what no property matches.</b> A
+/// deployment carrying <c>Security:Clients[n]:Audiences</c> forward from an older settings file would look
+/// configured and do nothing - the original defect in a new dress, and invisible from the bound instance
+/// because the value never reaches it. <see cref="Require"/> therefore reads the configuration ROOT for
+/// those two key paths and refuses to start when either is present, naming the key and the matrix that
+/// replaced it. That is the whole fatal contract: a duplicated representation of the permission model is a
+/// startup failure, never a warning the host then ignores.
 /// </para>
 /// <para>
-/// <b>BOTH DIRECTIONS ARE REPORTED, because each is a different mistake.</b> An advertised permission the
-/// matrix withholds is a roster that overstates what a caller can do. A grant whose caller appears on NO
-/// credential roster entry is the opposite: a permission nobody can ever exercise, because no caller can
-/// authenticate under that subject in the first place.
+/// <b>THE ROSTER/MATRIX CROSS-REFERENCE IS A DIFFERENT QUESTION AND IS REPORTED, NOT REFUSED - AND THE
+/// REASON IS THE CERTIFICATE ARM.</b> <c>Security:Clients</c> answers who may authenticate BY SHARED
+/// SECRET; the matrix answers what an authenticated identity may request. Those are two questions, so
+/// neither shadows the other, and a matrix grant naming a caller no credential entry names is NOT a
+/// duplicated permission: it is usually a caller that authenticates by client certificate, whose identity
+/// <c>TokenEndpoints.ResolvePresentedIdentity</c> takes from the certificate's common name WITHOUT
+/// consulting this roster at all. Refusing that would make a deployment shape the token endpoint fully
+/// supports - and that <c>SecurityOptions</c> documents, in the entry whose secret-key name is deliberately
+/// optional - unstartable, turning a diagnostic into an outage. So <see cref="Describe"/> states it and the
+/// composition root logs it at <c>Warning</c>, which is the severity it held before this checkpoint and the
+/// severity it earns: worth an operator's attention, never worth refusing a working topology over.
+/// </para>
+/// <para>
+/// NO MESSAGE ECHOES A CREDENTIAL. Every identifier a message names - a caller subject, a configuration
+/// key path - is already written in a settings file in plain text; the secret values are named only by the
+/// configuration key they arrive under, and never read here.
 /// </para>
 /// </remarks>
-internal static class IssuanceRosterCoherence
+internal static class IssuanceRosterAuthority
 {
+    /// <summary>The retired per-client permission members, refused by name if they reappear.</summary>
+    /// <remarks>
+    /// Spelled as configuration-key SEGMENTS rather than full paths, because the element index between the
+    /// collection and the member is a deployment's own and cannot be enumerated ahead of time.
+    /// </remarks>
+    private static readonly string[] RetiredClientPermissionMembers = ["Audiences", "Scopes"];
+
     /// <summary>
-    /// Describes every divergence between the advertised roster and the effective grant matrix.
+    /// Refuses the host when a retired per-client permission key is still present in configuration.
+    /// </summary>
+    /// <param name="security">The bound options, for the roster length to probe.</param>
+    /// <param name="configuration">
+    /// The configuration root, read ONLY to detect the retired keys by path. No value is read.
+    /// </param>
+    /// <exception cref="ArgumentNullException">Either argument is <see langword="null"/>.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// A retired key is present, so the deployment carries a second representation of the permission model.
+    /// The message names EVERY offending key at once, so an operator fixes them in one pass rather than
+    /// discovering them one restart at a time.
+    /// </exception>
+    /// <remarks>
+    /// THIS IS THE FATAL HALF AND ITS SCOPE IS DELIBERATELY NARROW: a duplicated representation of the
+    /// permission model, and nothing else. <see cref="Describe"/>'s subject - a grant no shared-secret
+    /// identity can reach - is a legitimate certificate-authenticated posture and is reported instead, for
+    /// the reason set out on this type.
+    /// </remarks>
+    internal static void Require(SecurityOptions security, IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(security);
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        IReadOnlyList<string> failures = DescribeRetiredKeys(security, configuration);
+
+        if (failures.Count == 0)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            "Refusing to start: the issuance configuration states per-caller permissions in a second, "
+            + "retired place that nothing reads. " + string.Join(" ", failures));
+    }
+
+    /// <summary>
+    /// Describes every grant no shared-secret credential entry can reach.
     /// </summary>
     /// <param name="security">The bound options to inspect.</param>
-    /// <returns>
-    /// One message per divergence, in roster order, or an empty list when the two surfaces agree.
-    /// </returns>
+    /// <returns>One message per unreachable grant, in caller order, or an empty list.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="security"/> is <see langword="null"/>.</exception>
     /// <remarks>
+    /// <para>
     /// PURE, SO IT IS TESTABLE WITHOUT A HOST, and stated as a list rather than logged here so the caller
-    /// owns the level and the category. Comparison is ORDINAL throughout, matching how the issuer compares an
-    /// identity, an audience and a scope everywhere else - a case-insensitive comparison here would report
-    /// agreement where the enforcement point sees none.
+    /// owns the level and the category.
+    /// </para>
+    /// <para>
+    /// COMPARISON IS ORDINAL AND THE CREDENTIAL SUBJECT IS COMPARED UNTRIMMED, because that is exactly how
+    /// the enforcement point compares them: <c>IssuanceClientRegistry</c> keys the roster on the entry's
+    /// <c>Subject</c> verbatim under <see cref="StringComparer.Ordinal"/> - the options type documents that
+    /// a subject is neither trimmed nor repaired, since it reaches the token's subject claim as authored -
+    /// while the matrix is keyed on the trimmed identity. An earlier revision trimmed both sides and so
+    /// reported agreement where authentication sees none, which is the one reading this diagnostic must
+    /// never produce.
+    /// </para>
     /// </remarks>
     internal static IReadOnlyList<string> Describe(SecurityOptions security)
     {
         ArgumentNullException.ThrowIfNull(security);
 
-        Dictionary<string, Dictionary<string, HashSet<string>>> matrix = Fold(security);
-        List<string> divergences = [];
-
-        foreach (SecurityClientOptions client in security.Clients)
-        {
-            if (client is null || string.IsNullOrWhiteSpace(client.Subject))
-            {
-                continue;
-            }
-
-            string subject = client.Subject.Trim();
-
-            _ = matrix.TryGetValue(subject, out Dictionary<string, HashSet<string>>? grants);
-
-            List<string> unGrantedAudiences =
-            [
-                .. client.Audiences
-                    .Where(static audience => !string.IsNullOrWhiteSpace(audience))
-                    .Select(static audience => audience.Trim())
-                    .Where(audience => grants is null || !grants.ContainsKey(audience))
-                    .Distinct(StringComparer.Ordinal)
-                    .Order(StringComparer.Ordinal)
-            ];
-
-            HashSet<string> grantedScopes = new(StringComparer.Ordinal);
-
-            if (grants is not null)
-            {
-                foreach (HashSet<string> scopes in grants.Values)
-                {
-                    grantedScopes.UnionWith(scopes);
-                }
-            }
-
-            List<string> unGrantedScopes =
-            [
-                .. client.Scopes
-                    .Where(static scope => !string.IsNullOrWhiteSpace(scope))
-                    .Select(static scope => scope.Trim())
-                    .Where(scope => !grantedScopes.Contains(scope))
-                    .Distinct(StringComparer.Ordinal)
-                    .Order(StringComparer.Ordinal)
-            ];
-
-            if (unGrantedAudiences.Count > 0)
-            {
-                divergences.Add(
-                    $"'{SecurityOptions.SectionName}:Clients' advertises audience(s) "
-                    + $"[{string.Join(", ", unGrantedAudiences)}] for caller '{subject}' that the grant "
-                    + "matrix does not grant. The matrix - "
-                    + $"'{SecurityOptions.SectionName}:Callers' folded with "
-                    + $"'{SecurityOptions.SectionName}:{nameof(SecurityOptions.CallerAuthorizations)}' - is "
-                    + "the sole authority, so a request for one of those audiences is refused; the "
-                    + "advertised list is documentation and is never enforced.");
-            }
-
-            if (unGrantedScopes.Count > 0)
-            {
-                divergences.Add(
-                    $"'{SecurityOptions.SectionName}:Clients' advertises scope(s) "
-                    + $"[{string.Join(", ", unGrantedScopes)}] for caller '{subject}' that no grant for "
-                    + "that caller includes. A request carrying only those scopes is refused, and one "
-                    + "carrying them alongside granted scopes is minted with the granted subset only.");
-            }
-        }
-
         HashSet<string> credentialled =
         [
             .. security.Clients
                 .Where(static client => client is not null && !string.IsNullOrWhiteSpace(client.Subject))
-                .Select(static client => client.Subject.Trim())
+                .Select(static client => client.Subject)
         ];
 
-        foreach (string caller in matrix.Keys.Order(StringComparer.Ordinal))
+        List<string> failures = [];
+
+        foreach (string caller in MatrixCallers(security))
         {
             if (credentialled.Contains(caller))
             {
                 continue;
             }
 
-            divergences.Add(
+            failures.Add(
                 $"The grant matrix grants caller '{caller}' but "
                 + $"'{SecurityOptions.SectionName}:Clients' carries no entry for it, so no request can "
-                + "authenticate under that subject and the grant is unreachable. Add a credential-roster "
+                + "authenticate under that subject BY SHARED SECRET and the grant is unreachable that way. "
+                + "This is expected when the caller authenticates by client certificate, whose identity is "
+                + "read from the certificate rather than from this roster. Otherwise add a credential-roster "
                 + "entry, or remove the grant so the matrix states only permissions that can be exercised.");
         }
 
-        return divergences;
+        return failures;
     }
 
     /// <summary>
-    /// Folds the nested caller roster and the flat authorization rows into one caller-to-audience-to-scope
-    /// matrix.
+    /// Describes every retired per-client permission key still present in configuration.
     /// </summary>
-    /// <param name="security">The bound options to fold.</param>
-    /// <returns>The folded matrix.</returns>
+    /// <param name="security">The bound options, for the roster length to probe.</param>
+    /// <param name="configuration">The configuration root. Only key EXISTENCE is read.</param>
+    /// <returns>One message per retired key found, or an empty list.</returns>
     /// <remarks>
-    /// THE SAME FOLD THE ENFORCEMENT POINT PERFORMS, AND DELIBERATELY THE SAME SHAPE: nested grants first,
-    /// then the flat rows added on top, because a row for a pair the nested surface does not mention is
-    /// additive [see RequireCallerRoster]. It does NOT reproduce that method's refusals - a contradiction, a
-    /// duplicate or a blank identity all stop the host there, long before this diagnostic runs - so this fold
-    /// only has to be faithful about what is granted, never about what is refused.
+    /// THE ROSTER LENGTH BOUNDS THE PROBE, PLUS ONE. A retired member on an element BEYOND the last bound
+    /// entry cannot exist, because an element with no recognised member binds nothing and shortens the
+    /// collection - so probing one past the end is what catches the case where the retired members were the
+    /// ONLY members an element carried.
     /// </remarks>
-    private static Dictionary<string, Dictionary<string, HashSet<string>>> Fold(SecurityOptions security)
+    private static IReadOnlyList<string> DescribeRetiredKeys(
+        SecurityOptions security,
+        IConfiguration configuration)
     {
-        Dictionary<string, Dictionary<string, HashSet<string>>> matrix = new(StringComparer.Ordinal);
+        List<string> failures = [];
 
-        foreach (SecurityCallerOptions caller in security.Callers)
+        for (int index = 0; index <= security.Clients.Count; index++)
         {
-            if (caller is null || string.IsNullOrWhiteSpace(caller.Identity))
-            {
-                continue;
-            }
+            string element = string.Create(
+                CultureInfo.InvariantCulture,
+                $"{SecurityOptions.SectionName}:Clients:{index}");
 
-            Dictionary<string, HashSet<string>> grants = Grants(matrix, caller.Identity.Trim());
-
-            foreach (SecurityCallerGrantOptions grant in caller.Grants)
+            foreach (string member in RetiredClientPermissionMembers)
             {
-                if (grant is null || string.IsNullOrWhiteSpace(grant.Audience))
+                if (!configuration.GetSection($"{element}:{member}").Exists())
                 {
                     continue;
                 }
 
-                Scopes(grants, grant.Audience.Trim()).UnionWith(NonBlank(grant.Scopes));
+                failures.Add(
+                    $"Configuration key '{element}:{member}' is retired and is read by nothing. Per-caller "
+                    + "permissions are stated once, in "
+                    + $"'{SecurityOptions.SectionName}:{nameof(SecurityOptions.CallerAuthorizations)}' or "
+                    + $"'{SecurityOptions.SectionName}:Callers', which is the sole authority the issuer "
+                    + "consults. Leaving the key in place would advertise a permission that has no effect, "
+                    + "which is the defect its removal fixed. Delete it and state the permission in the "
+                    + "matrix.");
             }
         }
 
-        foreach (CallerAuthorizationOptions row in security.CallerAuthorizations)
-        {
-            if (row is null
-                || string.IsNullOrWhiteSpace(row.Caller)
-                || string.IsNullOrWhiteSpace(row.Audience))
-            {
-                continue;
-            }
-
-            Scopes(Grants(matrix, row.Caller.Trim()), row.Audience.Trim()).UnionWith(NonBlank(row.Scopes));
-        }
-
-        return matrix;
-
-        static Dictionary<string, HashSet<string>> Grants(
-            Dictionary<string, Dictionary<string, HashSet<string>>> matrix,
-            string caller)
-        {
-            if (!matrix.TryGetValue(caller, out Dictionary<string, HashSet<string>>? grants))
-            {
-                grants = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
-                matrix[caller] = grants;
-            }
-
-            return grants;
-        }
-
-        static HashSet<string> Scopes(Dictionary<string, HashSet<string>> grants, string audience)
-        {
-            if (!grants.TryGetValue(audience, out HashSet<string>? scopes))
-            {
-                scopes = new HashSet<string>(StringComparer.Ordinal);
-                grants[audience] = scopes;
-            }
-
-            return scopes;
-        }
-
-        static IEnumerable<string> NonBlank(IList<string> values) =>
-            values
-                .Where(static value => !string.IsNullOrWhiteSpace(value))
-                .Select(static value => value.Trim());
+        return failures;
     }
+
+    /// <summary>
+    /// Every caller identity the grant matrix mentions, from both configuration shapes, in order.
+    /// </summary>
+    /// <param name="security">The bound options.</param>
+    /// <returns>The distinct trimmed identities, ordered so a message list is deterministic.</returns>
+    /// <remarks>
+    /// ONLY THE IDENTITIES ARE NEEDED, NOT THE FOLD. This check asks which subjects the matrix mentions,
+    /// which is answerable from the two shapes directly - so it deliberately does NOT reimplement the fold
+    /// the enforcement point performs. A second fold is a second thing to keep in agreement, and keeping two
+    /// descriptions of one decision in agreement is the problem this whole type exists to close.
+    /// </remarks>
+    private static IEnumerable<string> MatrixCallers(SecurityOptions security) =>
+        security.Callers
+            .Where(static caller => caller is not null && !string.IsNullOrWhiteSpace(caller.Identity))
+            .Select(static caller => caller.Identity.Trim())
+            .Concat(
+                security.CallerAuthorizations
+                    .Where(static row => row is not null && !string.IsNullOrWhiteSpace(row.Caller))
+                    .Select(static row => row.Caller.Trim()))
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal);
 }

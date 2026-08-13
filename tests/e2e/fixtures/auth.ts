@@ -692,9 +692,10 @@ function callerAuthenticationHint(status: number): string {
       `${preamble} Neither is configured for this suite, so nothing was` +
       ' presented and a 401 is the specified answer rather than a defect.' +
       ' Configure the Basic credential — that is the path the documented' +
-      ' cleartext bring-up uses, and the endpoint table names its two' +
-      ' variables — or, against a deployment that terminates TLS at Security,' +
-      ' the client-certificate settings. A spec that needs a token skips itself' +
+      ' bring-up uses because it needs no certificate provisioning, and the' +
+      ' endpoint table names its two variables — or the client-certificate' +
+      ' settings, which the documented bring-up also supports since every' +
+      ' listener here terminates TLS. A spec that needs a token skips itself' +
       ' until one of them is set.'
     );
   }

@@ -36,10 +36,10 @@
 //      processing kind is crosstab or composite. Those tests are named so that their unit-level
 //      status is evident and cannot be mistaken for characterization coverage.
 //    * NO CHARACTERIZATION COVERAGE IS CLAIMED OR IMPLIED for anything in this file.
-//    * This is the same posture the migration plan takes elsewhere: it declines to claim a verified
-//      container bring-up because no Docker daemon was available where it was authored, and it
-//      requires reporting a limitation rather than approximating past it. A documented limitation is
-//      the correct deliverable here; a confident-sounding claim is not.
+//    * This is the same posture the migration plan takes elsewhere: it reports a limitation rather
+//      than approximating past it, and it keeps evidence claims in ONE place - orchestration/README.md
+//      section 10 - so no source file has to guess at what was run. A documented limitation is the
+//      correct deliverable here; a confident-sounding claim is not.
 //
 //  ==============================================================================================
 //  WHICH ARM OF THE SELECTOR THIS FILE IS
@@ -1571,12 +1571,13 @@ internal static class FullStateCodec
     /// row's status selects nothing and an unmodified row travels with the rest.
     /// </para>
     /// <para>
-    /// AN ORIGINAL IS EMITTED ONLY WHEN IT DIFFERS FROM THE CURRENT VALUE, which the contract defines as
-    /// the encoding of "unchanged since the last baseline": the carrier answers the current value when no
-    /// original was captured, so the two statements are the same one. This replaces the old format's
-    /// present/absent flag byte with FIELD PRESENCE, which says the same thing in the published shape.
-    /// Blob comparison is BY VALUE, because the carrier hands out defensive copies and reference equality
-    /// would emit an original for every blob column whether or not it changed.
+    /// AN ORIGINAL IS EMITTED FOR EVERY COLUMN THE ROW CARRIES, agreeing with the current value or not. An
+    /// earlier form emitted one only where it DIFFERED and the contract defined the omission as "unchanged
+    /// since the last baseline"; AAP 0.6.3.2 leaves no room for that, and it read worst of all here, on an
+    /// image that claims to be the WHOLE of the carrier's state while carrying no baseline for any column of
+    /// a freshly retrieved row. The value emitted is the one the carrier CAPTURED at its last baseline,
+    /// which for a <c>blob</c> is a content snapshot rather than an alias - the carrier hands out defensive
+    /// copies, so it must be read from the baseline store and never from the live array.
     /// </para>
     /// </remarks>
     private static bool TryProjectRow(
@@ -1625,11 +1626,12 @@ internal static class FullStateCodec
 
             object? original = carrierRow.GetOriginalValue(columnNumber);
 
-            if (ValuesMatch(current, original))
-            {
-                continue;
-            }
-
+            // 🔴 ONE ORIGINAL FOR EVERY COLUMN PROJECTED, on the same terms as the changeset codec's own
+            // projection - and it matters MORE here, because a full-state image claims to be the whole of
+            // the carrier's state. An earlier form skipped a column whose original equalled its current
+            // value, which meant a freshly retrieved image carried no baseline for any column and a
+            // consumer had to reconstruct the `updatewhere=1` predicate from an absence. AAP 0.6.3.2
+            // admits no exemption: both values, per row, for every marked column.
             if (!CarrierValue.TryToWire(original, out AnyValue? originalValue))
             {
                 return false;
@@ -1646,22 +1648,6 @@ internal static class FullStateCodec
         projected = built;
 
         return true;
-    }
-
-    /// <summary>
-    /// Whether two carrier values are the same value, comparing a <c>blob</c> by content.
-    /// </summary>
-    /// <param name="left">One value.</param>
-    /// <param name="right">The other.</param>
-    /// <returns><see langword="true"/> when they are equal.</returns>
-    private static bool ValuesMatch(object? left, object? right)
-    {
-        if (left is byte[] leftBlob && right is byte[] rightBlob)
-        {
-            return leftBlob.AsSpan().SequenceEqual(rightBlob);
-        }
-
-        return Equals(left, right);
     }
 
     /// <summary>
@@ -1766,6 +1752,16 @@ internal static class FullStateCodec
                 return false;
             }
 
+            // THE STATED ORIGINAL, OR THE CURRENT VALUE WHERE NONE WAS STATED - and that substitution is
+            // EXACT rather than a guess, because of who produces a full-state image. This codec serves
+            // the TRANSFER path only [Tasks/TaskProxies/SqlQueryTaskProxy - SetFullState], never the
+            // update path [Tasks/SqlUpdateCarrier.SetChanges takes a CHANGESET], and the producer is
+            // TryProjectRow in this same file, which emits an original only where it DIFFERS from the
+            // current value. Absence is therefore a positive statement of equality here, not a missing
+            // field. The sibling changeset codec makes the same reading conditional on its caller
+            // [Buffers/ChangesetCodec.cs - CarrierBaselineTrust], because it has a second caller that IS
+            // untrusted; this one does not, and acquiring one would be the point at which the same mode
+            // has to be threaded through here.
             columns.Add((
                 columnNumber,
                 columnStatus,

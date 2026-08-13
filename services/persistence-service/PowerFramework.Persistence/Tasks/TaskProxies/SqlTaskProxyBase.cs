@@ -58,11 +58,13 @@
 //  CONSTRAINTS. There are NO user rules for this project: review_rules returns exactly one line
 //  saying so, and nothing is invented, inferred or back-filled in their place. The binding set is
 //  the enterprise baseline plus the named non-rule constraints, and the ruling FOR THIS FILE is:
-//    C-A/C-I  Only the four project edges the .csproj already declares are used. Nothing here
-//             references a peer service, PowerFramework.Shared.Eventful or
-//             PowerFramework.Shared.Localization, and no package is added. That prohibition is
-//             precisely what forces the LOCAL delegate notification surface below instead of
-//             importing the framework broker.
+//    C-A/C-I  Only the five project edges the .csproj declares are used. Nothing here references a
+//             peer service or PowerFramework.Shared.Localization, and no package is added.
+//             PowerFramework.Shared.Eventful IS one of those five and IS used: AAP 0.4.1 assigns the
+//             whole of ws_objects/pfw.thread.pbl.src to Persistence in scope, one of its six objects
+//             is n_cst_threading_eventful.sru, and that object derives from n_cst_eventful - so the
+//             notification surface below is a delegate-shaped ADAPTER over the shared broker rather
+//             than a second implementation of it. See ThreadingEventBroker.cs beside this file.
 //    C-B      Six legacy behaviours that look like defects are reproduced and annotated at the point
 //             of reproduction, never corrected: the bare last-error-wins assignment [:L44]; the
 //             never-cleared has-transaction-data flag [:L116]; the OPPOSITE orderings of the two
@@ -122,7 +124,7 @@ using RetCode = PowerFramework.Shared.Kernel.RetCode;
 // which is how SqlTaskBase and ISqlTaskProxy resolve without a using directive.
 namespace PowerFramework.Persistence.Tasks.TaskProxies;
 
-#region Execution group, channel names and veto codes - legacy VALUES under PascalCase spellings
+#region Execution group and channel names - legacy VALUES under PascalCase spellings
 
 /// <summary>
 /// The task execution group - the legacy <c>#Group</c> property
@@ -206,31 +208,18 @@ internal static class TaskEventName
     internal const string Error = "error";
 }
 
-/// <summary>
-/// The broker's TRI-VALUED veto codes
-/// [<c>ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L111-L112</c>].
-/// </summary>
-/// <remarks>
-/// <b>Never flattened to a boolean.</b> Prevent-once and prevent-deep are genuinely different
-/// outcomes - the first is discarded once it has been consumed while the second survives the whole
-/// nesting depth [<c>n_cst_eventful.sru:L954-L958</c>] - so collapsing them would silently convert a
-/// deep prevention into a shallow one. Continue is the third state and is the absence of both.
-/// </remarks>
-internal static class TaskVeto
-{
-    /// <summary>No veto is pending - the third state, and the value the legacy clears to [<c>n_cst_eventful.sru:L957</c>].</summary>
-    internal const long Continue = 0L;
-
-    /// <summary>Prevent the current dispatch only - <c>PREVENT_ONCE = 1</c> [<c>n_cst_eventful.sru:L111</c>].</summary>
-    internal const long PreventOnce = 1L;
-
-    /// <summary>Prevent for the whole nesting depth - <c>PREVENT_DEEP = 2</c> [<c>n_cst_eventful.sru:L112</c>].</summary>
-    internal const long PreventDeep = 2L;
-}
+// The TRI-VALUED veto codes are NOT restated here. They are
+// PowerFramework.Shared.Eventful.VetoResult - Continue = 0, PreventOnce = 1, PreventDeep = 2 - the
+// port of n_cst_eventful.sru:L111-L112, and that enum is the single authority for the alphabet across
+// the whole repository. A local restatement of the same three numerals would be a second authority
+// that can drift, which is exactly the duplication this folder's notification surface was rewritten
+// to remove. Never flatten the three to a boolean: a prevent-once is consumed by the dispatch that
+// raised it while a prevent-deep survives the whole nesting depth [n_cst_eventful.sru:L954-L958], so
+// collapsing them would silently convert a deep prevention into a shallow one.
 
 #endregion
 
-#region The LOCAL notification surface - why the framework broker is not imported
+#region The notification surface - the shared broker, specialized for threading and adapted to delegates
 
 /// <summary>
 /// A subscriber to one of the four per-reason channels - the shape of an <c>of_On</c> subscription to
@@ -308,21 +297,32 @@ internal delegate long? TaskCommonNotificationHandler(
     string text);
 
 /// <summary>
-/// The caller-side notification dispatcher - the local stand-in for the framework broker
+/// The caller-side notification surface - the delegate-shaped adapter over the framework broker
 /// <c>_Eventful</c> [<c>ws_objects/pfw.thread.pbl.src/n_cst_threading_task.sru:L119</c>, of type
 /// <c>ws_objects/pfw.thread.pbl.src/n_cst_threading_eventful.sru</c>].
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>WHY THIS EXISTS RATHER THAN A REFERENCE TO THE PORTED BROKER (C-A, C-I, C-K).</b> The framework
-/// broker is ported, in <c>shared/PowerFramework.Shared.Eventful</c> - and Persistence deliberately
-/// does NOT reference that project. The service's <c>.csproj</c> declares exactly four project edges
-/// and states in terms that Eventful and Localization are absent because Persistence consumes
-/// neither and an unused reference is an unused coupling. Adding one to obtain a notification surface
-/// would widen the service's dependency graph for a surface used by three files, which is the
-/// coupling C-A exists to prevent, so the surface is re-expressed with local delegates instead. The
-/// full broker is not reimplemented either: what is modelled is the narrow slice this folder's
-/// notify path genuinely reaches, and nothing more.
+/// <b>THE BROKER IS THE DISPATCHER. This type only adapts its shape (C-A, C-I, C-K).</b> The framework
+/// broker is ported in <c>shared/PowerFramework.Shared.Eventful</c>, its threading specialization is
+/// ported in <see cref="ThreadingEventBroker"/> beside this file, and Persistence references the shared
+/// project. AAP 0.4.1 requires exactly that: the whole of <c>ws_objects/pfw.thread.pbl.src</c> is
+/// assigned to Persistence in scope, one of its six objects IS
+/// <c>n_cst_threading_eventful.sru</c>, and that object's inheritance from <c>n_cst_eventful</c> is one
+/// of the two structural facts the AAP cites as proof that the base belongs in a shared in-scope
+/// library. So the ordered subscription table, the priority and prepend insert, the capture filter, the
+/// tri-valued veto and its unwind, the dispatch-depth accounting, the handled latch, the
+/// default-return-value substitution, the argument injection and the exception decoration are all the
+/// broker's, and NONE of them is restated here.
+/// </para>
+/// <para>
+/// <b>What is left, and why it is adaptation rather than duplication.</b> Two things. First, the broker
+/// subscribes an OBJECT and a handler-member NAME, resolving the member reflectively
+/// [<c>n_cst_eventful.sru:L398-L403</c>], while this folder's published surface subscribes a .NET
+/// delegate; so each subscription is wrapped in a tiny object whose one member forwards to the
+/// delegate. Second, <see cref="Off(string?, TaskNotificationHandler?)"/> has to find the wrapper that
+/// carries a given delegate, which needs a delegate-to-wrapper index. That index is an identity map,
+/// not a dispatch table: nothing reads it to decide who runs, in what order, or whether to stop.
 /// </para>
 /// <para>
 /// <b>Not thread-safe by design, and that is the oracle's own contract.</b> This type is
@@ -334,14 +334,80 @@ internal delegate long? TaskCommonNotificationHandler(
 /// </remarks>
 internal sealed class TaskNotificationDispatcher
 {
-    private readonly List<TaskCommonNotificationHandler> _commonSubscribers = [];
-    private readonly Dictionary<string, List<TaskNotificationHandler>> _subscribers =
-        new(StringComparer.Ordinal);
-    private readonly List<Exception> _capturedExceptions = [];
+    /// <summary>
+    /// The member name every subscription wrapper publishes for the broker to resolve.
+    /// </summary>
+    /// <remarks>
+    /// The broker's second <c>of_On</c> argument pair is an object and the NAME of a member on it
+    /// [<c>n_cst_eventful.sru:L296</c>], resolved case-insensitively and stored lower-cased
+    /// [<c>:L336, :L398-L403</c>]. One constant rather than a literal at each call site, because the
+    /// same name has to appear on the subscribe and the unsubscribe paths and a divergence between them
+    /// would leave a subscription that cannot be removed.
+    /// </remarks>
+    private const string WrapperHandlerName = "Invoke";
 
     /// <summary>
-    /// Whether the dispatcher suppresses its own pre-dispatch guards - the broker's <c>#Silent</c>
-    /// property [<c>ws_objects/pfw.thread.pbl.src/n_cst_threading_eventful.sru:L24</c>].
+    /// The <c>"."</c> that separates a subscription's name from its lifetime namespace
+    /// [<c>n_cst_eventful.sru:L96</c>, <c>SYMBOL_NS</c>].
+    /// </summary>
+    private const char SubscriptionNamespaceSeparator = '.';
+
+    /// <summary>
+    /// The filter the threading layer removes with - every name, in any namespace except
+    /// <c>persistent</c> [<c>n_cst_threading_task.sru:L385, :L391</c>].
+    /// </summary>
+    /// <remarks>
+    /// <b>One symbol is the entire difference between this and "remove everything".</b> The broker's
+    /// own parameterless <c>of_off()</c> passes the EMPTY filter and removes every subscription
+    /// [<c>n_cst_eventful.sru:L228-L230</c>]; the threading layer passes this one, whose <c>^</c>
+    /// negates the namespace and so spares the persistent subscriptions. Reproduced verbatim rather
+    /// than simplified to the empty filter, even though this surface creates no persistent
+    /// subscription, because the simplification would be indistinguishable from the bug.
+    /// </remarks>
+    private const string NonPersistentNamespaceFilter = ".^persistent";
+
+    /// <summary>The broker that actually dispatches - the port of <c>_Eventful</c>.</summary>
+    private readonly ThreadingEventBroker _broker = new();
+
+    /// <summary>
+    /// The delegate-to-wrapper index, keyed by channel name and ordered by subscription.
+    /// </summary>
+    /// <remarks>
+    /// An identity map, NOT a dispatch table. Its only readers are the removal members, which need to
+    /// find the wrapper carrying a caller's delegate, and the channel-key tests that reproduce the
+    /// legacy removal codes. Dispatch never consults it.
+    /// </remarks>
+    private readonly Dictionary<string, List<ChannelSubscription>> _wrappers =
+        new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Initializes the surface against the object the broker injects as every handler's leading
+    /// argument and the signals its hooks read.
+    /// </summary>
+    /// <param name="source">
+    /// The task raising notifications - the oracle's <c>_source</c>, which
+    /// <c>n_cst_threading_task.sru:L197</c> initialises with <c>this</c>.
+    /// </param>
+    /// <param name="signals">The three synchronization signals the broker's hooks read and raise.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="source"/> or <paramref name="signals"/> is <see langword="null"/>. Fail-fast on a
+    /// structural fault is the legacy posture and is preserved: a broker with no source would inject a
+    /// null leading argument into every subscriber.
+    /// </exception>
+    internal TaskNotificationDispatcher(SqlTaskProxyBase source, IThreadingBrokerSignals signals)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(signals);
+
+        // [n_cst_threading_task.sru:L195-L197] Create the broker, then raise its init event with the
+        // source and the three handles. The refusal code cannot fire here, because both arguments were
+        // just null-checked; it is discarded rather than tested for exactly that reason.
+        _ = _broker.Initialize(source, signals);
+    }
+
+    /// <summary>
+    /// Whether the broker suppresses its own guards - the broker's <c>#Silent</c> property
+    /// [<c>ws_objects/pfw.thread.pbl.src/n_cst_threading_eventful.sru:L24</c>].
     /// </summary>
     /// <value>
     /// <see langword="true"/> while a caller is managing the guards itself. The notify path saves,
@@ -349,51 +415,51 @@ internal sealed class TaskNotificationDispatcher
     /// [<c>n_cst_threading_task.sru:L328-L329, :L363</c>].
     /// </value>
     /// <remarks>
+    /// A pass-through to <see cref="ThreadingEventBroker.Silent"/>, which documents what silence
+    /// actually suppresses and the measured finding that the non-silent branch of the two triggering
+    /// hooks is unreachable through the proxy's own publication path.
+    /// </remarks>
+    internal bool Silent
+    {
+        get => _broker.Silent;
+        set => _broker.Silent = value;
+    }
+
+    /// <summary>
+    /// The dispatch nesting depth this surface currently has open.
+    /// </summary>
+    /// <remarks>
     /// <para>
-    /// <b>What it actually suppresses, read from the oracle rather than assumed.</b> When the broker is
-    /// silent it skips the cancellation pre-veto in its prepare handler [<c>:L48-L53</c>] and returns
-    /// immediately from both its triggering and triggered handlers [<c>:L60, :L68</c>], which is where
-    /// the non-silent path raises and clears the synchronization signal [<c>:L63, :L70</c>].
-    /// So silence means: apply no cancellation veto of your own, and do not touch the sync signal.
+    /// <b>This is the PUMP-TURN BOUNDARY, and that is why it is counted here rather than read off the
+    /// broker.</b> The broker's own <c>_nDeep</c> is <c>private:</c> in the oracle
+    /// [<c>n_cst_eventful.sru:L77</c> sits under the <c>private:</c> label at <c>:L70</c>], so the
+    /// port keeps it private too and a derived broker cannot read it. What this surface genuinely needs
+    /// is the moment its OUTERMOST dispatch closes: the broker defers a removal made during a dispatch
+    /// to a queued compaction rather than rewriting a table that active levels hold cursors into
+    /// [<c>:L1054-L1059, :L1081-L1087</c>], and in PowerBuilder the Win32 message pump turns that
+    /// queue. A headless service has no pump, so AAP 0.4.5.4 makes the turn explicit - and the only
+    /// safe place to turn it is where no dispatch of this surface is in flight.
     /// </para>
     /// <para>
-    /// <b>A MEASURED FINDING, recorded rather than coded around.</b> On the caller side the broker is
-    /// triggered from exactly one place - <c>_of_sendnotify</c> - and that function sets this flag
-    /// true for its entire body [<c>:L329</c>]. The non-silent branch is therefore UNREACHABLE from
-    /// this type in production, which is why the sync-signal management the non-silent branch would
-    /// perform is deliberately NOT implemented here: writing it would be dead code, and the signal is
-    /// instead raised and cleared by the notification RAISER, which is where the oracle raises and
-    /// clears it too [<c>:L291, :L295</c>]. The cancellation pre-veto IS implemented, because a direct
-    /// caller can still reach it.
+    /// It is therefore this surface's count of its own open dispatches, which equals the broker's
+    /// depth for every dispatch reached through here, and it is <b>not</b> an authority on the broker's
+    /// state. <see cref="Prevent(bool)"/> does not consult it: the broker refuses a veto raised outside
+    /// a dispatch from its own depth [<c>:L1293</c>], which is the authority.
     /// </para>
     /// </remarks>
-    internal bool Silent { get; set; }
-
-    /// <summary>
-    /// The veto currently pending - the broker's <c>_nPrevent</c>
-    /// [<c>ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L85</c>], one of the three
-    /// <see cref="TaskVeto"/> values.
-    /// </summary>
-    internal long PendingVeto { get; private set; }
-
-    /// <summary>
-    /// The dispatch nesting depth - the broker's <c>_nDeep</c>, which is what makes
-    /// <see cref="Prevent(bool)"/> legal at all
-    /// [<c>ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L77</c>], guarding
-    /// <see cref="Prevent(bool)"/> at <c>:L1293</c>.
-    /// </summary>
     internal int Depth { get; private set; }
 
     /// <summary>
-    /// Exceptions thrown by subscribers and captured rather than propagated - the broker's own
-    /// exception-capture posture [<c>n_cst_eventful.sru:L871-L872, :L960</c>].
+    /// Faults thrown by subscribers and absorbed rather than propagated, in order.
     /// </summary>
     /// <remarks>
-    /// A misbehaving subscriber must not abort a database notification, because the legacy broker
-    /// captures rather than propagates. This is NOT the fail-fast path: a structural fault in the
-    /// proxy itself still terminates, and only a THIRD PARTY's fault is absorbed here.
+    /// A pass-through to <see cref="ThreadingEventBroker.AbsorbedFaults"/>. Read
+    /// <see cref="ThreadingEventBroker.OnException"/> before assuming what lands here: the threading
+    /// broker absorbs a fault only when the task is free - the state the notification fan-out
+    /// establishes around itself - and otherwise lets the base rethrow it. A fault that propagates is
+    /// therefore NOT recorded here, because it is its own diagnostic.
     /// </remarks>
-    internal IReadOnlyList<Exception> CapturedExceptions => _capturedExceptions;
+    internal IReadOnlyList<Exception> CapturedExceptions => _broker.AbsorbedFaults;
 
     /// <summary>
     /// Subscribes to one of the four per-reason channels - <c>of_On(name, object, evtName)</c>
@@ -402,9 +468,18 @@ internal sealed class TaskNotificationDispatcher
     /// <param name="name">A <see cref="TaskEventName"/> channel name.</param>
     /// <param name="handler">The subscriber.</param>
     /// <returns>
-    /// <see cref="RetCode.OK"/> on success, or <see cref="RetCode.E_INVALID_ARGUMENT"/> when the
-    /// channel name is absent or the handler is <see langword="null"/>.
+    /// <see cref="RetCode.OK"/> on success, <see cref="RetCode.E_INVALID_ARGUMENT"/> when the channel
+    /// name is absent or the handler is <see langword="null"/>, or whatever the broker answered when it
+    /// refused the subscription.
     /// </returns>
+    /// <remarks>
+    /// The argument refusal is tested here rather than left to the broker because the broker's own
+    /// refusal is expressed against a topic string and a handler NAME, and this surface's second
+    /// argument is a delegate that has no name to be empty. The broker's remaining codes -
+    /// <c>E_INVALID_OBJECT</c> for a null target and <c>E_EVENT_NOT_FOUND</c> for an unresolvable
+    /// member - are unreachable through this path by construction, and are surfaced unchanged rather
+    /// than mapped in case they ever become reachable.
+    /// </remarks>
     internal long On(string? name, TaskNotificationHandler? handler)
     {
         if (string.IsNullOrEmpty(name) || handler is null)
@@ -412,14 +487,7 @@ internal sealed class TaskNotificationDispatcher
             return RetCode.E_INVALID_ARGUMENT;
         }
 
-        if (!_subscribers.TryGetValue(name, out List<TaskNotificationHandler>? channel))
-        {
-            channel = [];
-            _subscribers[name] = channel;
-        }
-
-        channel.Add(handler);
-        return RetCode.OK;
+        return Register(name, new PerReasonSubscription(handler));
     }
 
     /// <summary>
@@ -428,8 +496,8 @@ internal sealed class TaskNotificationDispatcher
     /// </summary>
     /// <param name="handler">The subscriber.</param>
     /// <returns>
-    /// <see cref="RetCode.OK"/> on success, or <see cref="RetCode.E_INVALID_ARGUMENT"/> when the
-    /// handler is <see langword="null"/>.
+    /// <see cref="RetCode.OK"/> on success, <see cref="RetCode.E_INVALID_ARGUMENT"/> when the handler
+    /// is <see langword="null"/>, or whatever the broker answered when it refused the subscription.
     /// </returns>
     internal long OnCommon(TaskCommonNotificationHandler? handler)
     {
@@ -438,8 +506,7 @@ internal sealed class TaskNotificationDispatcher
             return RetCode.E_INVALID_ARGUMENT;
         }
 
-        _commonSubscribers.Add(handler);
-        return RetCode.OK;
+        return Register(TaskEventName.CommonNotify, new CommonSubscription(handler));
     }
 
     /// <summary>
@@ -449,11 +516,34 @@ internal sealed class TaskNotificationDispatcher
     /// <param name="name">The channel name.</param>
     /// <param name="handler">The subscriber to remove.</param>
     /// <returns>
-    /// <see cref="RetCode.OK"/> when a subscriber was removed, or <see cref="RetCode.FAILED"/> when
-    /// nothing matched. The legacy's seven <c>of_Off</c> arities exist to select subscribers by name,
-    /// by object, by event or by any combination; only the combinations this folder reaches are
-    /// modelled, and no speculative arity is added.
+    /// <see cref="RetCode.E_INVALID_ARGUMENT"/> when either argument is absent; otherwise
+    /// <see cref="RetCode.OK"/>, <b>whether or not anything matched</b>. The legacy's seven
+    /// <c>of_Off</c> arities exist to select subscribers by name, by object, by event or by any
+    /// combination; only the combinations this folder reaches are published, and no speculative arity
+    /// is added.
     /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The channel KEY survives its last subscriber, and that is behaviour rather than untidiness.</b>
+    /// Removing the handler leaves the key present with an empty list, so
+    /// <see cref="Off(string?)"/> still answers <see cref="RetCode.OK"/> for that channel afterwards
+    /// while <see cref="IsSubscribed"/> answers <see langword="false"/>. Those are genuinely different
+    /// questions: one asks whether the channel was ever opened, the other whether anything is listening
+    /// on it now.
+    /// </para>
+    /// <para>
+    /// <b>"MATCHED NOTHING" IS NOT A FAILURE HERE, BECAUSE IT IS NOT ONE IN THE ORACLE (C-B).</b> The
+    /// legacy removal engine answers <see cref="RetCode.OK"/> unconditionally - its only failure is an
+    /// invalid filter [<c>ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1021-L1023,
+    /// :L1089</c>] - so it does not distinguish "removed something" from "matched nothing", and neither
+    /// does this. An earlier revision of this surface DID distinguish them, from its own index, on the
+    /// reasoning that a more informative answer costs nothing. It costs the one thing this refactor may
+    /// not spend: the answer is observable through the published contract, so a caller written against
+    /// the oracle's algebra would read a removal that matched nothing as a failure that never happened.
+    /// The index is still maintained - <see cref="IsSubscribed"/> is how a caller asks whether anything
+    /// is listening - it simply no longer changes the return code.
+    /// </para>
+    /// </remarks>
     internal long Off(string? name, TaskNotificationHandler? handler)
     {
         if (string.IsNullOrEmpty(name) || handler is null)
@@ -461,20 +551,61 @@ internal sealed class TaskNotificationDispatcher
             return RetCode.E_INVALID_ARGUMENT;
         }
 
-        return _subscribers.TryGetValue(name, out List<TaskNotificationHandler>? channel)
-            && channel.Remove(handler)
-                ? RetCode.OK
-                : RetCode.FAILED;
+        // A CHANNEL THIS SURFACE NEVER OPENED IS THE "MATCHED NOTHING" CASE, AND IT ANSWERS OK.
+        if (!_wrappers.TryGetValue(name, out List<ChannelSubscription>? channel))
+        {
+            return RetCode.OK;
+        }
+
+        for (int index = 0; index < channel.Count; index++)
+        {
+            ChannelSubscription candidate = channel[index];
+            if (!candidate.Wraps(handler))
+            {
+                continue;
+            }
+
+            channel.RemoveAt(index);
+
+            // [n_cst_eventful.sru:L1045-L1050] the three-part filter - name, target identity and
+            // handler member name - selects exactly this wrapper and no other, because every wrapper is
+            // a distinct object.
+            _ = _broker.Unsubscribe(name, candidate, WrapperHandlerName);
+
+            return RetCode.OK;
+        }
+
+        // The channel exists but carries no wrapper over this delegate. Still OK - see the remarks.
+        return RetCode.OK;
     }
 
     /// <summary>
     /// Removes every subscriber from one channel - the <c>of_Off(name)</c> arity
-    /// [<c>n_cst_threading_task.sru:L148, :L388</c>].
+    /// [<c>n_cst_threading_task.sru:L148, :L387-L392</c>].
     /// </summary>
     /// <param name="name">The channel name.</param>
     /// <returns>
-    /// <see cref="RetCode.OK"/> when the channel existed, otherwise <see cref="RetCode.FAILED"/>.
+    /// <see cref="RetCode.E_INVALID_ARGUMENT"/> when the name is absent; otherwise
+    /// <see cref="RetCode.OK"/>, whether or not the channel had ever been opened.
     /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The lifetime namespace is the oracle's own, and it is honoured rather than dropped.</b> The
+    /// threading layer's one-argument <c>of_Off</c> appends <c>".^persistent"</c> to a name that
+    /// carries no <c>"."</c> [<c>n_cst_threading_task.sru:L388-L392</c>], which under the broker's
+    /// filter grammar means "this name, in any namespace EXCEPT persistent". The pass-through branch
+    /// for a name that already carries a <c>"."</c> is unreachable from here, because none of the five
+    /// channel names contains one, and it is reproduced anyway so the two branches stay legible
+    /// together. Every subscription this surface makes is namespace-less and therefore not persistent,
+    /// so the filter removes all of them - which is why the local index can be cleared unconditionally
+    /// alongside it.
+    /// </para>
+    /// <para>
+    /// The unconditional <see cref="RetCode.OK"/> is the oracle's own answer, for the reason recorded on
+    /// <see cref="Off(string?, TaskNotificationHandler?)"/>: the legacy engine answers OK whether or not
+    /// the filter matched anything [<c>n_cst_eventful.sru:L1089</c>].
+    /// </para>
+    /// </remarks>
     internal long Off(string? name)
     {
         if (string.IsNullOrEmpty(name))
@@ -482,23 +613,30 @@ internal sealed class TaskNotificationDispatcher
             return RetCode.E_INVALID_ARGUMENT;
         }
 
-        return _subscribers.Remove(name) ? RetCode.OK : RetCode.FAILED;
+        // [:L388-L392] if Pos(name,".") > 0 then of_Off(name) else of_Off(name + ".^persistent")
+        _ = _broker.Unsubscribe(
+            name.Contains(SubscriptionNamespaceSeparator, StringComparison.Ordinal)
+                ? name
+                : name + NonPersistentNamespaceFilter);
+
+        // The index is cleared for its own sake; whether a key was present does not change the answer.
+        _ = _wrappers.Remove(name);
+
+        return RetCode.OK;
     }
 
     /// <summary>
     /// Removes every subscriber from every channel - the no-argument <c>of_Off()</c> arity, which in
-    /// the oracle clears the <c>.^persistent</c> namespace [<c>n_cst_threading_task.sru:L147, :L385</c>].
+    /// the oracle clears everything outside the <c>.^persistent</c> namespace
+    /// [<c>n_cst_threading_task.sru:L147, :L385</c>].
     /// </summary>
     /// <returns><see cref="RetCode.OK"/> always, matching the oracle's unconditional result.</returns>
-    /// <remarks>
-    /// The legacy's lifetime-namespace suffix is a decomposed field on the ported broker's own
-    /// subscription topic rather than a substring here, so the whole-dispatcher clear is the faithful
-    /// local expression: this dispatcher holds one lifetime's subscriptions and no other.
-    /// </remarks>
     internal long OffAll()
     {
-        _subscribers.Clear();
-        _commonSubscribers.Clear();
+        // [:L385] of_Off(".^persistent") - every name, in any namespace except persistent.
+        _ = _broker.Unsubscribe(NonPersistentNamespaceFilter);
+
+        _wrappers.Clear();
         return RetCode.OK;
     }
 
@@ -509,190 +647,276 @@ internal sealed class TaskNotificationDispatcher
     /// </summary>
     /// <param name="name">The channel name.</param>
     /// <returns><see langword="true"/> when at least one subscriber is registered.</returns>
-    internal bool IsSubscribed(string? name)
-    {
-        if (string.IsNullOrEmpty(name))
-        {
-            return false;
-        }
-
-        if (string.Equals(name, TaskEventName.CommonNotify, StringComparison.Ordinal))
-        {
-            return _commonSubscribers.Count > 0;
-        }
-
-        return _subscribers.TryGetValue(name, out List<TaskNotificationHandler>? channel)
-            && channel.Count > 0;
-    }
+    /// <remarks>
+    /// Answered by the broker rather than from the local index, so there is one authority. Read
+    /// <c>EventBroker.IsSubscribed</c>'s own remarks before relying on it as more than a fast
+    /// conservative pre-test: it reproduces a legacy quirk whereby the scan skips the first and last
+    /// table slots, which the lexical-bound short-circuits above it cover for every table this surface
+    /// can produce.
+    /// </remarks>
+    internal bool IsSubscribed(string? name) =>
+        !string.IsNullOrEmpty(name) && _broker.IsSubscribed(name);
 
     /// <summary>
     /// Records a veto - <c>of_Prevent(deep)</c>
-    /// [<c>ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1276-L1300</c>, body at <c>:L1293-L1299</c>].
+    /// [<c>ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1276-L1300</c>].
     /// </summary>
     /// <param name="deep">
-    /// <see langword="true"/> for <see cref="TaskVeto.PreventDeep"/>, <see langword="false"/> for
-    /// <see cref="TaskVeto.PreventOnce"/> [<c>:L1294-L1298</c>].
+    /// <see langword="true"/> for <c>VetoResult.PreventDeep</c>, <see langword="false"/> for
+    /// <c>VetoResult.PreventOnce</c> [<c>:L1294-L1298</c>].
     /// </param>
     /// <returns>
     /// <see cref="RetCode.OK"/>, or <see cref="RetCode.FAILED"/> when no dispatch is in progress -
-    /// the oracle's own <c>if _nDeep &lt;= 0 then return RetCode.FAILED</c> guard [<c>:L1293</c>].
-    /// A veto outside a dispatch has nothing to prevent, so it is refused rather than remembered.
+    /// the broker's own <c>if _nDeep &lt;= 0 then return RetCode.FAILED</c> guard [<c>:L1293</c>]. A
+    /// veto outside a dispatch has nothing to prevent, so it is refused rather than remembered.
     /// </returns>
-    internal long Prevent(bool deep)
-    {
-        // [n_cst_eventful.sru:L1293]
-        if (Depth <= 0)
-        {
-            return RetCode.FAILED;
-        }
-
-        // [:L1294-L1298]
-        PendingVeto = deep ? TaskVeto.PreventDeep : TaskVeto.PreventOnce;
-
-        // [:L1299]
-        return RetCode.OK;
-    }
+    internal long Prevent(bool deep) => _broker.Prevent(deep);
 
     /// <summary>
     /// Records a shallow veto - the no-argument <c>of_Prevent()</c>, which the oracle defines as
     /// <c>return of_Prevent(false)</c> [<c>n_cst_eventful.sru:L1302</c>].
     /// </summary>
     /// <returns>Whatever <see cref="Prevent(bool)"/> returns for a shallow veto.</returns>
-    internal long Prevent() => Prevent(false);
+    internal long Prevent() => _broker.Prevent();
 
     /// <summary>
     /// Dispatches to the catch-all channel [<c>n_cst_threading_task.sru:L332</c>].
     /// </summary>
-    /// <param name="source">The task raising the notification.</param>
     /// <param name="reason">The <c>Enums.TNR_*</c> reason.</param>
     /// <param name="wparam">The first numeric argument.</param>
     /// <param name="lparam">The second numeric argument.</param>
     /// <param name="text">The string argument.</param>
     /// <returns>
-    /// The LAST subscriber's answer, or <see langword="null"/> when none answered - which is the
-    /// oracle's own last-writer-wins accumulation into a single <c>rtCode</c> local.
+    /// The last invoked subscriber's answer, or the broker's established default of <c>0</c> when none
+    /// produced one. See <see cref="Trigger"/> for why that is never <see langword="null"/>.
     /// </returns>
-    internal long? TriggerCommon(
-        SqlTaskProxyBase source,
-        long reason,
-        long wparam,
-        long lparam,
-        string text) =>
-        Dispatch(_commonSubscribers, source, handler => handler(source, reason, wparam, lparam, text));
+    /// <remarks>
+    /// The source object is NOT a parameter: the broker injects it into every subscriber's leading slot
+    /// from the value this surface was constructed with
+    /// [<c>n_cst_threading_eventful.sru:L55-L56</c>]. Passing it again per dispatch would create a
+    /// second source of truth that could disagree with the injected one.
+    /// </remarks>
+    internal long? TriggerCommon(long reason, long wparam, long lparam, string text) =>
+        Dispatch(TaskEventName.CommonNotify, [reason, wparam, lparam, text]);
 
     /// <summary>
     /// Dispatches to one of the four per-reason channels
     /// [<c>n_cst_threading_task.sru:L337-L356</c>].
     /// </summary>
-    /// <param name="source">The task raising the notification.</param>
     /// <param name="name">The channel name.</param>
     /// <param name="wparam">The first numeric argument.</param>
     /// <param name="lparam">The second numeric argument.</param>
     /// <param name="text">The string argument.</param>
     /// <returns>
-    /// The LAST subscriber's answer, or <see langword="null"/> when the channel has no subscriber -
-    /// which is precisely the <c>SetNull(nVal)</c> state the caller tests for at <c>:L357</c>.
+    /// The last invoked subscriber's answer, or the broker's established default of <c>0</c>.
     /// </returns>
-    internal long? Trigger(
-        SqlTaskProxyBase source,
-        string? name,
-        long wparam,
-        long lparam,
-        string text)
+    /// <remarks>
+    /// <para>
+    /// <b>ZERO, NOT NULL, AND THAT IS THE ORACLE'S ANSWER.</b> The threading broker's constructor calls
+    /// <c>of_SetDefaultReturnValue(0)</c> [<c>n_cst_threading_eventful.sru:L76</c>], and the base
+    /// substitutes the established default for any non-posted dispatch that produced no value
+    /// [<c>n_cst_eventful.sru:L966-L970</c>]. So an unsubscribed channel, a channel whose subscribers
+    /// all declined to answer, and a dispatch stopped by the cancellation pre-veto all answer <c>0</c>.
+    /// The return type stays nullable because <see cref="SqlTaskProxyBase.SendNotify"/>'s own
+    /// <c>nVal</c> local genuinely holds null when no reason arm runs at all [<c>:L336</c>] - which is
+    /// a different fact from a dispatch answering nothing.
+    /// </para>
+    /// <para>
+    /// A null or empty channel name dispatches nothing and answers the same default, which is the
+    /// broker's <c>if name = "" then return aDefRetVal</c> [<c>n_cst_eventful.sru:L793</c>]. PowerScript
+    /// models the argument as an always-present possibly-empty string, so null and empty arrive at one
+    /// outcome.
+    /// </para>
+    /// <para>
+    /// <b>ON A THREADING CHANNEL, ANSWERING IS A CLAIM. Read this before writing a subscriber.</b>
+    /// Because the established default is <c>0</c> rather than null, the broker's handled test lands on
+    /// its third arm - a value EQUAL to the default is not handled, a value different from it is
+    /// [<c>:L912-L917</c>] - and its capture filter then stops offering the event to ordinary
+    /// unhandled-only subscriptions [<c>:L831-L833</c>]. So the FIRST subscriber to answer anything other
+    /// than <c>0</c> claims the event and every remaining ordinary subscriber on that channel is
+    /// skipped, while a subscriber that answers <c>0</c> or declines leaves it unclaimed and the rest
+    /// run. That is one line of the oracle's constructor [<c>n_cst_threading_eventful.sru:L76</c>]
+    /// deciding the whole channel's dispatch contract, and it is why the notification path's own
+    /// suppression gate tests the VALUE rather than the subscription
+    /// [<c>n_cst_threading_task.sru:L335</c>].
+    /// </para>
+    /// </remarks>
+    internal long? Trigger(string? name, long wparam, long lparam, string text) =>
+        Dispatch(name, [wparam, lparam, text]);
+
+    /// <summary>
+    /// Subscribes one wrapper and indexes it - the shared half of <see cref="On"/> and
+    /// <see cref="OnCommon"/>.
+    /// </summary>
+    /// <param name="name">The channel name, already known non-empty.</param>
+    /// <param name="subscription">The wrapper to subscribe.</param>
+    /// <returns>The broker's code, or <see cref="RetCode.OK"/>.</returns>
+    /// <remarks>
+    /// The index entry is added only after the broker accepted the subscription, so a refusal cannot
+    /// leave an orphan that <see cref="Off(string?, TaskNotificationHandler?)"/> would claim to have
+    /// removed.
+    /// </remarks>
+    private long Register(string name, ChannelSubscription subscription)
     {
-        if (string.IsNullOrEmpty(name)
-            || !_subscribers.TryGetValue(name, out List<TaskNotificationHandler>? channel))
+        // [n_cst_eventful.sru:L296] of_On(name, object, evtName) - the topic carries no ordering symbol,
+        // no priority prefix and no namespace, so every subscription lands at normal priority, at the
+        // TAIL of its equal-priority run [:L419], and outside the persistent namespace. That is what
+        // makes subscription order the dispatch order, which is the contract the notify path relies on.
+        long code = _broker.Subscribe(name, subscription, WrapperHandlerName);
+        if (code != RetCode.OK)
         {
-            return null;
+            return code;
         }
 
-        return Dispatch(channel, source, handler => handler(source, wparam, lparam, text));
+        if (!_wrappers.TryGetValue(name, out List<ChannelSubscription>? channel))
+        {
+            channel = [];
+            _wrappers[name] = channel;
+        }
+
+        channel.Add(subscription);
+        return RetCode.OK;
     }
 
     /// <summary>
-    /// The one dispatch loop both channels share - depth accounting, the cancellation pre-veto, the
-    /// veto short-circuit, subscriber invocation and exception capture.
+    /// Runs one dispatch through the broker and turns the pump afterwards when it was the outermost
+    /// one.
     /// </summary>
-    /// <typeparam name="THandler">The channel's delegate type.</typeparam>
-    /// <param name="channel">The channel's subscribers.</param>
-    /// <param name="source">The task raising the notification.</param>
-    /// <param name="invoke">Invokes one subscriber with the channel's argument subset.</param>
-    /// <returns>The last answer produced, or <see langword="null"/> when none was.</returns>
-    private long? Dispatch<THandler>(
-        List<THandler> channel,
-        SqlTaskProxyBase source,
-        Func<THandler, long?> invoke)
-        where THandler : Delegate
+    /// <param name="name">The channel name; null and empty both dispatch nothing.</param>
+    /// <param name="payload">The trigger's own arguments, which the broker copies in after the
+    /// injected source.</param>
+    /// <returns>The dispatch's answer.</returns>
+    /// <remarks>
+    /// <para>
+    /// The depth is raised around the broker call rather than only after it, because a subscriber may
+    /// dispatch again from inside its handler and the pump must not be turned while that outer dispatch
+    /// is still in flight - a queued compaction no-ops above depth zero
+    /// [<c>n_cst_eventful.sru:L580</c>], so draining it there would consume the owed work without
+    /// doing it.
+    /// </para>
+    /// <para>
+    /// The depth is restored in a <see langword="finally"/> so that a fault the threading broker lets
+    /// propagate cannot leave this surface permanently believing a dispatch is open. The pump turn is
+    /// deliberately NOT in that <see langword="finally"/>: a propagating fault is already unwinding,
+    /// and running queued work on the way out would interleave it with the exception's own handling.
+    /// </para>
+    /// </remarks>
+    private long? Dispatch(string? name, object?[] payload)
     {
-        if (channel.Count == 0)
-        {
-            return null;
-        }
-
-        long? result = null;
-
-        // The depth is raised BEFORE the cancellation pre-veto below, and for two reasons that are both
-        // the oracle's. First, Prevent() is legal only at a depth above zero
-        // [n_cst_eventful.sru:L1293], and the oracle's pre-veto runs inside its broker's own prepare
-        // hook - which is by definition already inside a trigger. Second, a SHALLOW veto must be
-        // CONSUMED by the dispatch that raised it [:L954-L958]; keeping the pre-veto inside this
-        // try/finally is what consumes it, and hoisting it outside would leak the veto into the NEXT
-        // dispatch and silently suppress a subscriber that should have run.
         Depth++;
+        object? answer;
         try
         {
-            // The cancellation pre-veto, which SILENCE SUPPRESSES
-            // [n_cst_threading_eventful.sru:L48-L53]. When it fires the oracle records a veto and
-            // answers 1, and it answers that BEFORE any subscriber runs.
-            if (!Silent && source.IsCancelled())
-            {
-                _ = Prevent();
-                return TaskVeto.PreventOnce;
-            }
-
-            // A snapshot, because a subscriber may legitimately unsubscribe itself or another during
-            // dispatch and the oracle's own collection walk tolerates that [n_cst_eventful.sru:L147, :L576, called at :L962-L963].
-            foreach (THandler handler in channel.ToArray())
-            {
-                // The veto short-circuit. A deep veto stops the remaining subscribers outright; a
-                // shallow one is consumed by the dispatch it was raised in
-                // [n_cst_eventful.sru:L954-L958].
-                if (PendingVeto != TaskVeto.Continue)
-                {
-                    break;
-                }
-
-                try
-                {
-                    long? answer = invoke(handler);
-                    if (answer is not null)
-                    {
-                        result = answer;
-                    }
-                }
-                catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException)
-                {
-                    // CAPTURED, NOT PROPAGATED, which is the broker's posture and not leniency of
-                    // ours [n_cst_eventful.sru:L871-L872]. A third party's fault must not abort a
-                    // database notification; a fault in this proxy itself still terminates.
-                    _capturedExceptions.Add(ex);
-                }
-            }
+            answer = _broker.Trigger(name ?? string.Empty, payload);
         }
         finally
         {
             Depth--;
-
-            // The shallow veto is discarded once its dispatch completes; the deep veto survives while
-            // any dispatch is still open, and is cleared only when the outermost one closes
-            // [n_cst_eventful.sru:L956-L957].
-            if (PendingVeto == TaskVeto.PreventOnce || Depth == 0)
-            {
-                PendingVeto = TaskVeto.Continue;
-            }
         }
 
-        return result;
+        if (Depth == 0 && _broker.PendingPostedContinuationCount > 0)
+        {
+            // The pump turn. See this member's remarks and Depth's.
+            _ = _broker.DrainPostedContinuations();
+        }
+
+        // The established default is a boxed long, and every wrapper returns a nullable long, so this
+        // unbox succeeds for every value the broker can produce here. `as` rather than a cast so an
+        // unexpected shape reads as "nobody answered" instead of raising inside a notification.
+        return answer as long?;
+    }
+
+    /// <summary>
+    /// One subscription, as the broker sees it: an object carrying a member the broker resolves by
+    /// name.
+    /// </summary>
+    /// <remarks>
+    /// The base exists for the removal path, which has to ask a wrapper whether it carries a given
+    /// delegate without knowing which of the two channel shapes it is. It carries no dispatch
+    /// behaviour: the derived types' forwarding members are reached by the broker's own reflection and
+    /// never through this type.
+    /// </remarks>
+    private abstract class ChannelSubscription
+    {
+        /// <summary>
+        /// Whether this wrapper carries a given delegate.
+        /// </summary>
+        /// <param name="handler">The delegate a caller is trying to remove.</param>
+        /// <returns><see langword="true"/> when this wrapper forwards to it.</returns>
+        /// <remarks>
+        /// Delegate equality, which for two conversions of the same method group over the same target
+        /// compares equal - so a caller removes what it subscribed even when it did not keep the
+        /// instance it passed.
+        /// </remarks>
+        internal abstract bool Wraps(Delegate handler);
+    }
+
+    /// <summary>
+    /// A per-reason subscription - the wrapper the broker invokes for
+    /// <see cref="TaskEventName.Start"/>, <see cref="TaskEventName.Stop"/>,
+    /// <see cref="TaskEventName.Notify"/> and <see cref="TaskEventName.Error"/>.
+    /// </summary>
+    /// <param name="handler">The delegate to forward to.</param>
+    private sealed class PerReasonSubscription(TaskNotificationHandler handler) : ChannelSubscription
+    {
+        /// <inheritdoc/>
+        internal override bool Wraps(Delegate other) => handler.Equals(other);
+
+        /// <summary>
+        /// The member the broker resolves and invokes - four declared arguments, of which the broker's
+        /// prepare hook fills the first with the source and the trigger's payload fills the rest.
+        /// </summary>
+        /// <param name="source">The task raising the notification, injected at
+        /// <c>n_cst_threading_eventful.sru:L55</c>.</param>
+        /// <param name="wparam">The first numeric argument.</param>
+        /// <param name="lparam">The second numeric argument.</param>
+        /// <param name="text">The string argument.</param>
+        /// <returns>
+        /// The subscriber's answer, or <see langword="null"/> when it declined - which the broker reads
+        /// as "not handled" [<c>n_cst_eventful.sru:L909</c>] and then substitutes the established
+        /// default for at the end of the dispatch.
+        /// </returns>
+        /// <remarks>
+        /// Reached only by the broker's reflection [<c>n_cst_eventful.sru:L398-L403, :L866</c>], which
+        /// is why it is private: nothing in this service may call a subscriber directly and bypass the
+        /// veto, the capture filter and the exception hook.
+        /// </remarks>
+        private long? Invoke(SqlTaskProxyBase source, long wparam, long lparam, string text) =>
+            handler(source, wparam, lparam, text);
+    }
+
+    /// <summary>
+    /// A catch-all subscription - the wrapper the broker invokes for
+    /// <see cref="TaskEventName.CommonNotify"/>.
+    /// </summary>
+    /// <param name="handler">The delegate to forward to.</param>
+    private sealed class CommonSubscription(TaskCommonNotificationHandler handler) : ChannelSubscription
+    {
+        /// <inheritdoc/>
+        internal override bool Wraps(Delegate other) => handler.Equals(other);
+
+        /// <summary>
+        /// The member the broker resolves and invokes - five declared arguments, one more than the
+        /// per-reason shape because this channel receives the reason as well
+        /// [<c>n_cst_threading_task.sru:L71-L78</c>].
+        /// </summary>
+        /// <param name="source">The task raising the notification, injected by the prepare hook.</param>
+        /// <param name="reason">The <c>Enums.TNR_*</c> reason [<c>:L73</c>].</param>
+        /// <param name="wparam">The first numeric argument.</param>
+        /// <param name="lparam">The second numeric argument.</param>
+        /// <param name="text">The string argument.</param>
+        /// <returns>
+        /// The subscriber's answer, or <see langword="null"/> when it declined. A non-zero answer here
+        /// SUPPRESSES the per-reason channels entirely, which is the gate at <c>:L335</c> and is this
+        /// channel's real power.
+        /// </returns>
+        private long? Invoke(
+            SqlTaskProxyBase source,
+            long reason,
+            long wparam,
+            long lparam,
+            string text) =>
+            handler(source, reason, wparam, lparam, text);
     }
 }
 
@@ -1181,10 +1405,63 @@ internal abstract class SqlTaskProxyBase : ISqlTaskProxy, IDisposable
         Clock = timeProvider;
         ExecutionGroup = executionGroup;
 
+        // [n_cst_threading_task.sru:L195-L197] `_Eventful = Create n_cst_threading_eventful` followed
+        // immediately by `_Eventful.Event OnInit(this,_hEvtCancelled,_hEvtSync,...)`. The source is
+        // `this`, exactly as the oracle passes it, which is what the broker's prepare hook injects as
+        // every subscriber's leading argument. Constructed here rather than as a property initialiser
+        // precisely because it needs both `this` and the substrate, and the substrate has only just
+        // been accepted.
+        Notifications = new TaskNotificationDispatcher(this, new HostBrokerSignals(host));
+
         // `DBERRORDATA _lastDBError` [:L17] - PowerBuilder initialises an unassigned structure to its
         // cleared state, which is what DbErrorData.Empty reproduces. Stated rather than relied upon,
         // because the whole point of the latch is that "no error yet" is distinguishable.
         LastDbError = DbErrorData.Empty;
+    }
+
+    /// <summary>
+    /// The threading broker's three signals, answered from the substrate seam - the .NET stand-in for
+    /// the three raw Win32 handles <c>n_cst_threading_task.sru:L197</c> hands the broker.
+    /// </summary>
+    /// <param name="host">The substrate seam that owns the signals.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the cancellation term is the COMPOSITE predicate and not the raw signal.</b> The oracle's
+    /// broker polls <c>_hEvtCancelled</c> directly [<c>n_cst_threading_eventful.sru:L49, :L61</c>],
+    /// while <see cref="ISqlTaskProxyHost.IsCancelled"/> is the substrate's <c>of_iscancelled</c> - the
+    /// latched-exit-code term OR the signal term [<c>n_cst_threading_task.sru:L318-L319</c>]. The two
+    /// differ only by that first term, and the exit code is latched to
+    /// <see cref="RetCode.CANCELLED"/> only by a cancellation, which has already set the signal and
+    /// which nothing ever lowers. So the composite is the same predicate with one term that cannot be
+    /// true on its own, and reading it keeps this service with ONE cancellation authority instead of
+    /// two that could disagree.
+    /// </para>
+    /// <para>
+    /// A separate private type rather than <see cref="SqlTaskProxyBase"/> implementing the interface
+    /// itself: the signals are the SUBSTRATE's, not the proxy's, and publishing six more members on
+    /// every derived proxy to satisfy the broker would put a cancellation raiser on the public surface
+    /// of every SQL task proxy in this folder.
+    /// </para>
+    /// </remarks>
+    private sealed class HostBrokerSignals(ISqlTaskProxyHost host) : IThreadingBrokerSignals
+    {
+        /// <inheritdoc/>
+        public bool IsCancelled => host.IsCancelled;
+
+        /// <inheritdoc/>
+        public bool IsSyncSignalSet => host.IsSyncSignalSet;
+
+        /// <inheritdoc/>
+        public void RaiseSyncSignal() => host.RaiseSyncSignal();
+
+        /// <inheritdoc/>
+        public void ClearSyncSignal() => host.ClearSyncSignal();
+
+        /// <inheritdoc/>
+        public void RaiseCancellation() => _ = host.Cancel();
+
+        /// <inheritdoc/>
+        public void RaiseException() => _ = host.Cancel();
     }
 
     #region Caller-side state [:L15-L23]
@@ -1227,15 +1504,17 @@ internal abstract class SqlTaskProxyBase : ISqlTaskProxy, IDisposable
     public TaskExecutionGroup ExecutionGroup { get; }
 
     /// <summary>
-    /// The local notification surface - the stand-in for the framework broker <c>_Eventful</c>
-    /// [<c>ws_objects/pfw.thread.pbl.src/n_cst_threading_task.sru:L119</c>].
+    /// The notification surface - the port of the framework broker instance <c>_Eventful</c>
+    /// [<c>ws_objects/pfw.thread.pbl.src/n_cst_threading_task.sru:L119</c>], created and initialised at
+    /// <c>:L195-L197</c>.
     /// </summary>
     /// <remarks>
     /// Exposed to derived proxies so they can subscribe, unsubscribe and dispatch without reaching
-    /// around this type. See <see cref="TaskNotificationDispatcher"/> for why the ported framework
-    /// broker is deliberately not referenced (C-A).
+    /// around this type. Dispatch is the shared broker's, specialized for threading by
+    /// <see cref="ThreadingEventBroker"/>; see <see cref="TaskNotificationDispatcher"/> for what this
+    /// surface adapts and what it deliberately does not restate.
     /// </remarks>
-    protected TaskNotificationDispatcher Notifications { get; } = new();
+    protected TaskNotificationDispatcher Notifications { get; }
 
     /// <summary>
     /// The latched database error - the port of <c>DBERRORDATA _lastDBError</c>
@@ -2442,6 +2721,18 @@ internal abstract class SqlTaskProxyBase : ISqlTaskProxy, IDisposable
     /// <see cref="TaskNotificationDispatcher.Silent"/> for what it suppresses and for the measured finding
     /// that the non-silent branch is unreachable from this type.
     /// </para>
+    /// <para>
+    /// <b>A SUBSCRIBER'S FAULT IS NOT ALWAYS ABSORBED, and this member does not catch.</b> The threading
+    /// broker cancels the task and raises the exception signal for every subscriber fault, then absorbs
+    /// the fault only when the task is currently free - the state <see cref="RaiseNotify"/> establishes
+    /// around itself by raising the sync signal - and otherwise lets the base rethrow it
+    /// [<c>ws_objects/pfw.thread.pbl.src/n_cst_threading_eventful.sru:L79-L88</c>]. The oracle's
+    /// <c>_of_sendnotify</c> has no <c>catch</c> either, so a propagating fault leaves this member and
+    /// reaches whoever published the notification. The silence restore is in a
+    /// <see langword="finally"/> so that path cannot leave the surface permanently silent, and the
+    /// captured-fault log runs only on the absorbing path because on the other one the exception is its
+    /// own diagnostic.
+    /// </para>
     /// </remarks>
     protected long? SendNotify(long reason, long wparam, long lparam, string text)
     {
@@ -2449,7 +2740,7 @@ internal abstract class SqlTaskProxyBase : ISqlTaskProxy, IDisposable
         bool wasSilent = Notifications.Silent;
         Notifications.Silent = true;
 
-        // C-F-safe diagnostics: remember where this dispatch's captured faults begin so only NEW ones are
+        // C-F-safe diagnostics: remember where this dispatch's absorbed faults begin so only NEW ones are
         // logged. Nothing logged below carries a statement or a credential.
         int capturedBefore = Notifications.CapturedExceptions.Count;
 
@@ -2462,7 +2753,7 @@ internal abstract class SqlTaskProxyBase : ISqlTaskProxy, IDisposable
             // [:L331-L333] the catch-all channel, and only when something is subscribed to it.
             if (Notifications.IsSubscribed(TaskEventName.CommonNotify))
             {
-                rtCode = Notifications.TriggerCommon(this, reason, wparam, lparam, text);
+                rtCode = Notifications.TriggerCommon(reason, wparam, lparam, text);
             }
 
             // [:L335] a non-zero, non-null catch-all answer SUPPRESSES the per-reason channels.
@@ -2478,7 +2769,7 @@ internal abstract class SqlTaskProxyBase : ISqlTaskProxy, IDisposable
                     // [:L339-L341] fires only when NOT cancelled, and takes no arguments.
                     if (!IsCancelled())
                     {
-                        nVal = Notifications.Trigger(this, TaskEventName.Start, 0L, 0L, string.Empty);
+                        nVal = Notifications.Trigger(TaskEventName.Start, 0L, 0L, string.Empty);
                     }
                 }
                 else if (reason == Enums.TNR_STOP)
@@ -2486,15 +2777,15 @@ internal abstract class SqlTaskProxyBase : ISqlTaskProxy, IDisposable
                     // [:L343-L347] THE ONLY ARM THAT FIRES WHEN CANCELLED, substituting CANCELLED for the
                     // caller's exit code [:L344] instead of staying silent.
                     nVal = IsCancelled()
-                        ? Notifications.Trigger(this, TaskEventName.Stop, RetCode.CANCELLED, 0L, text)
-                        : Notifications.Trigger(this, TaskEventName.Stop, wparam, 0L, text);
+                        ? Notifications.Trigger(TaskEventName.Stop, RetCode.CANCELLED, 0L, text)
+                        : Notifications.Trigger(TaskEventName.Stop, wparam, 0L, text);
                 }
                 else if (reason == Enums.TNR_NOTIFY)
                 {
                     // [:L349-L351] the only arm that carries the second numeric argument.
                     if (!IsCancelled())
                     {
-                        nVal = Notifications.Trigger(this, TaskEventName.Notify, wparam, lparam, text);
+                        nVal = Notifications.Trigger(TaskEventName.Notify, wparam, lparam, text);
                     }
                 }
                 else if (reason == Enums.TNR_ERROR)
@@ -2502,7 +2793,7 @@ internal abstract class SqlTaskProxyBase : ISqlTaskProxy, IDisposable
                     // [:L353-L355] carries the code and the text, and no second numeric argument.
                     if (!IsCancelled())
                     {
-                        nVal = Notifications.Trigger(this, TaskEventName.Error, wparam, 0L, text);
+                        nVal = Notifications.Trigger(TaskEventName.Error, wparam, 0L, text);
                     }
                 }
 
@@ -2663,15 +2954,18 @@ internal abstract class SqlTaskProxyBase : ISqlTaskProxy, IDisposable
     /// [<c>ws_objects/pfw.thread.pbl.src/n_cst_threading_task.sru:L611</c>].
     /// </summary>
     /// <param name="deep">
-    /// <see langword="true"/> for <see cref="TaskVeto.PreventDeep"/>, <see langword="false"/> for
-    /// <see cref="TaskVeto.PreventOnce"/>.
+    /// <see langword="true"/> for <c>VetoResult.PreventDeep</c>, <see langword="false"/> for
+    /// <c>VetoResult.PreventOnce</c>.
     /// </param>
     /// <returns>
     /// <see cref="RetCode.OK"/>, or <see cref="RetCode.FAILED"/> when no dispatch is in progress.
     /// </returns>
     /// <remarks>
-    /// <b>NO BUSY GUARD (C-B).</b> The veto is TRI-VALUED and is never flattened to a boolean result - see
-    /// <see cref="TaskVeto"/> for why prevent-once and prevent-deep are genuinely different outcomes.
+    /// <b>NO BUSY GUARD (C-B).</b> The veto is TRI-VALUED and is never flattened to a boolean result: a
+    /// prevent-once is consumed by the dispatch that raised it while a prevent-deep survives the whole
+    /// nesting depth [<c>ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L954-L958</c>], so
+    /// collapsing them would silently convert a deep prevention into a shallow one. The alphabet is
+    /// <c>PowerFramework.Shared.Eventful.VetoResult</c> and is not restated in this service.
     /// </remarks>
     public long PreventEvent(bool deep) => Notifications.Prevent(deep);
 
@@ -2797,10 +3091,18 @@ internal abstract class SqlTaskProxyBase : ISqlTaskProxy, IDisposable
     /// The capture count observed before the fan-out began, so that only NEW faults are logged.
     /// </param>
     /// <remarks>
-    /// <b>C-F-safe by construction.</b> A subscriber fault carries no statement text and no credential, and
-    /// nothing else about the notification is written. The dispatcher captures rather than propagates
-    /// because the legacy broker does, so without this the fault would be silent - captured and never
-    /// surfaced - which is worse than either alternative.
+    /// <para>
+    /// <b>C-F-SAFE BY CONSTRUCTION WAS AN ASSUMPTION ABOUT SUBSCRIBERS, AND IT IS NO LONGER RELIED ON.</b>
+    /// A subscriber is code registered against this proxy's notification broker, so its message is whatever
+    /// that code chose - and on this service the code near a notification is the SQL task layer, whose
+    /// faults carry generated statements. The fault is therefore DESCRIBED rather than attached: attaching
+    /// it made every provider render its whole message chain and stack, so the claim above governed the
+    /// template and not the record. See <c>Errors/FaultRecord.cs</c>.
+    /// </para>
+    /// <para>
+    /// The dispatcher captures rather than propagates because the legacy broker does, so without this the
+    /// fault would be silent - captured and never surfaced - which is worse than either alternative.
+    /// </para>
     /// </remarks>
     private void LogCapturedNotificationFaults(int firstIndex)
     {
@@ -2809,9 +3111,11 @@ internal abstract class SqlTaskProxyBase : ISqlTaskProxy, IDisposable
         for (int index = firstIndex; index < captured.Count; index++)
         {
             _logger.LogError(
-                captured[index],
-                "A notification subscriber on the {TaskType} task proxy threw and was captured rather than propagated.",
-                TaskType);
+                "A notification subscriber on the {TaskType} task proxy threw and was captured rather than "
+                    + "propagated. FaultTypes={FaultTypes} RedactedMessage={RedactedMessage}",
+                TaskType,
+                FaultRecord.Types(captured[index]),
+                FaultRecord.RedactedMessages(captured[index]));
         }
     }
 

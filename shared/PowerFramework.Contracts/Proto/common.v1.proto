@@ -1012,17 +1012,26 @@ message DataWindowRow {
 
   // The ORIGINAL values of the columns marked for the concurrency comparison.
   //
-  // POPULATED ON THE UPDATE PATH AND NORMALLY EMPTY ON RETRIEVE. It is declared on this message
-  // rather than on a separate update-only row type because a row is one thing whichever direction it
-  // travels, and a second row shape would drift. ConflictDetail below records why both values must be
-  // able to travel: the one updatable DataWindow in the repository declares `updatewhere=1` and marks
-  // ALL SIX columns `updatewhereclause=yes`, so the generated WHERE clause carries the key column
-  // PLUS THE ORIGINAL VALUE OF EVERY UPDATEABLE COLUMN. A payload carrying only current values could
-  // not express what the failed statement compared.
+  // POPULATED IN BOTH DIRECTIONS, AND ON A RETRIEVED ROW ITS ENTRIES EQUAL THE CURRENT ONES. It is
+  // declared on this message rather than on a separate update-only row type because a row is one thing
+  // whichever direction it travels, and a second row shape would drift. ConflictDetail below records
+  // why both values must travel: the one updatable DataWindow in the repository declares
+  // `updatewhere=1` and marks ALL SIX columns `updatewhereclause=yes`, so the generated WHERE clause
+  // carries the key column PLUS THE ORIGINAL VALUE OF EVERY UPDATEABLE COLUMN. A payload carrying only
+  // current values could not express what the failed statement compared.
   //
-  // A COLUMN WHOSE ORIGINAL EQUALS ITS CURRENT MAY BE OMITTED HERE, and a consumer must read an
-  // omission as "unchanged since the last baseline" rather than as "no original exists": the carrier
-  // answers the current value when no original was captured, so the two statements are the same one.
+  // ONE ENTRY PER COLUMN THIS ROW CARRIES, WITH NO OMIT-WHEN-EQUAL ALLOWANCE. An earlier revision let a
+  // producer skip a column whose original equalled its current value and required the consumer to read
+  // the omission as "unchanged since the last baseline". That is an inference the carrier codecs can
+  // make about their own payloads and a consumer of this CONTRACT cannot be asked to: it left a freshly
+  // retrieved row carrying no baseline for any column, so the caller that has to build the concurrency
+  // predicate had to reconstruct it from an absence - and reading the absence the other legal way, as
+  // "no baseline exists", drops the predicate and silently overwrites. AAP 0.6.3.2 states the rule
+  // without an exemption: per row, both the current and the original value of every marked column.
+  //
+  // AN EMPTY LIST THEREFORE MEANS EXACTLY ONE THING: the row has NO PRIOR STATE. That is an
+  // insert-shaped row, which has nothing to compare against and whose generated statement carries no
+  // WHERE clause at all.
   repeated ColumnValue original_values = 5;
 }
 

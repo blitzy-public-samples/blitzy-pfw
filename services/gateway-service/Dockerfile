@@ -90,11 +90,21 @@
 # --------------------------------------------------------------------------------------------------
 # STAGE 1 - BUILD
 #
-# mcr.microsoft.com/dotnet/sdk:10.0 is matched to global.json, which pins SDK 10.0.302 with
-# rollForward: latestFeature. Measured on this tag: DOTNET_SDK_VERSION=10.0.302 - the pinned version
-# exactly, so the pin is satisfied without a rollForward hop.
+# THE BUILD IMAGE IS PINNED TO A PATCH REVISION, NOT TO THE 10.0 FAMILY TAG, AND THE DIFFERENCE IS A
+# SECURITY PROPERTY RATHER THAN A STYLE ONE. `mcr.microsoft.com/dotnet/sdk:10.0.400` is the SDK of the
+# 2026-08-11 security release of the 10.0 channel (runtime 10.0.11, ten CVEs fixed against 10.0.10).
+# An earlier revision used the family tag `sdk:10.0` on the reasoning that a rebuild would then pick a
+# security patch up by itself. IT DOES NOT: a family tag that is already present locally is reused as
+# it stands, so a builder holding a pre-patch `10.0` layer rebuilds on the vulnerable base and reports
+# success. A patch revision cannot go stale silently - advancing it is a diff a reviewer sees - and CI
+# additionally builds with `pull: true` so the reviewed digest is fetched rather than assumed
+# (CWE-1104).
+#
+# Measured on this tag: DOTNET_SDK_VERSION=10.0.400 and `dotnet --version` = 10.0.400. global.json
+# pins SDK 10.0.303 with rollForward: latestFeature, and 10.0.400 satisfies that pin by rolling
+# forward one feature band within 10.0 - both are the same 10.0.11 platform release.
 # --------------------------------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0.400 AS build
 
 WORKDIR /src
 
@@ -160,14 +170,18 @@ RUN dotnet publish services/gateway-service/PowerFramework.Gateway/PowerFramewor
 # --------------------------------------------------------------------------------------------------
 # STAGE 2 - RUNTIME (the one and only final image)
 #
-# mcr.microsoft.com/dotnet/aspnet:10.0, matched to the Microsoft.AspNetCore.App runtime this refactor
-# builds against. Measured on this tag: ASPNET_VERSION=10.0.10 and DOTNET_VERSION=10.0.10.
+# THE RUNTIME IMAGE IS PINNED TO A PATCH REVISION FOR THE SAME REASON THE BUILD IMAGE IS.
+# `mcr.microsoft.com/dotnet/aspnet:10.0.11` is the runtime of the 2026-08-11 security release, matched
+# to the Microsoft.AspNetCore.App version this refactor builds against and to the six platform package
+# pins in Directory.Packages.props. Measured on this tag: ASPNET_VERSION=10.0.11 and
+# DOTNET_VERSION=10.0.11 with APP_UID=1654 backed by a real `app` account, on Ubuntu 24.04 LTS, and it
+# ships NEITHER curl NOR wget.
 #
 # NOT the sdk image, which carries a compiler, a package cache and a shell toolchain that a running
 # service has no use for. NOT the non-ASP.NET `runtime` image either: Gateway is an ASP.NET Core
 # service and would fail to start without the shared framework this image provides.
 # --------------------------------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
+FROM mcr.microsoft.com/dotnet/aspnet:10.0.11 AS final
 
 WORKDIR /app
 
@@ -192,8 +206,8 @@ COPY --from=build /app/publish ./
 # PORT and the probe shape rather than the transport - and the 5101-5105 band is retained with Gateway
 # keeping its documented port:
 #
-#     5101  Persistence     REST /health and /v1/ping;  5111 carries its gRPC contracts
-#     5102  DataServices    REST /health, /v1/ping and the REST projection;  5112 carries its gRPC
+#     5101  Persistence     REST /health and /v1/ping AND its gRPC contracts, on one endpoint
+#     5102  DataServices    REST /health, /v1/ping, the REST projection AND its gRPC contracts
 #     5103  RESERVED - deliberately unallocated so the obvious Phase 2 slot stays visible, rather
 #           than reassigned to one of the four services this phase builds. Nothing is provisioned
 #           for it here: no stage, no variable and no build input.

@@ -1186,6 +1186,33 @@ public sealed class HeadlessDataWindowHost : DataWindowServiceHost
         return target.Count;
     }
 
+    /// <summary>Empties all three buffers and the selection - the fixture-arrangement seam.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>INTERNAL, AND DELIBERATELY NOT PART OF THE HOST CONTRACT.</b> No published operation on C-03 or
+    /// C-04 clears a DataWindow, and none is being added: the ported surface has no such member, and the
+    /// legacy's own <c>Reset</c> is documented as the wrong instrument for clearing data because it breaks
+    /// changeset application [<c>n_cst_thread_task_sqlquery.sru:L176</c>]. This exists so that a suite
+    /// arranging a DataWindow can state the row set it means to test over rather than inheriting whatever
+    /// a previous arrangement left in a host that is RETAINED per data-object name.
+    /// </para>
+    /// <para>
+    /// ROW IDENTITY IS NOT REWOUND. <c>_nextRowId</c> keeps counting, so an identity handed out before a
+    /// clear is never handed out again - which is what keeps <c>GetRowFromRowID</c> honest about a row that
+    /// no longer exists instead of resolving it to a different one.
+    /// </para>
+    /// </remarks>
+    internal void ClearRows()
+    {
+        foreach (List<HeadlessRow> buffer in _buffers.Values)
+        {
+            buffer.Clear();
+        }
+
+        _selected.Clear();
+        _currentRow = 0L;
+    }
+
     /// <summary>Reads one item's ORIGINAL value, which is what an update predicate is built from.</summary>
     /// <param name="row">The ONE-BASED row ordinal.</param>
     /// <param name="columnNumber">The ONE-BASED column ordinal.</param>

@@ -29,17 +29,23 @@
 //
 //  THE CLASSIFICATION RULE, DELIBERATELY CONSERVATIVE. A transport replay is INVISIBLE to the caller:
 //  it happens below the client member, so the caller cannot observe it, compensate for it, or decline
-//  it. Two families are admitted -
+//  it. EXACTLY ONE family is admitted - a pure READ, whose repetition changes nothing and is
+//  unobservable - and everything else is attempted exactly once.
 //
-//      (i)  a pure READ, whose repetition changes nothing and is unobservable; and
-//      (ii) an idempotent TEARDOWN - a task release - whose repetition is not merely harmless but
-//           useful, because a leaked server-held task is exactly what a lost release response
-//           produces, and Persistence bounds those tasks with a quota that a leak consumes.
+//  🔴 A SECOND FAMILY USED TO BE ADMITTED AND HAS BEEN WITHDRAWN: the "idempotent teardown", meaning a
+//  task release. The reasoning was that a lost release response leaks a server-held task against
+//  Persistence's quota, so repeating the release is useful rather than merely harmless. The premise was
+//  false. The published contract freezes the opposite - "Releasing an already-released handle is
+//  E_INVALID_HANDLE, not a silent success" - and all three upstream implementations enforce it, so a
+//  replay after a lost response reports a FAILURE for a release that had in fact succeeded. Making
+//  release idempotent instead would have been a contract change made to accommodate a retry policy,
+//  and it would cost the answer that lets two concurrent releases be resolved. See
+//  BuildReplaySafePaths for the full record.
 //
-//  - and everything else is attempted exactly once. Note what this excludes that a naive reading
-//  would admit: the clause setters. SetWhereClause and SetOrderByClause carry a MODIFICATION STYLE,
-//  and a setter carrying the append style applied twice appends twice, so the second attempt of a
-//  "failed" call silently produces a different statement.
+//  Note also what the rule excludes that a naive reading would admit: the clause setters.
+//  SetWhereClause and SetOrderByClause carry a MODIFICATION STYLE, and a setter carrying the append
+//  style applied twice appends twice, so the second attempt of a "failed" call silently produces a
+//  different statement.
 //
 //  NO DURATION HERE IS A LATENCY TARGET, AND NONE IS INVENTED. AAP 0.8.5 forbids asserting a
 //  performance objective, because the repository publishes no SLA, latency budget or throughput
@@ -281,20 +287,38 @@ internal static class OutboundCallPolicy
     /// class initialization would fail with a <see cref="NullReferenceException"/> at the first outbound
     /// call. Keep them here.
     /// </para>
+    /// <para>
+    /// 🔴 <b>THE ADMISSION TEST IS THAT A REPLAY GIVES THE CALLER THE SAME ANSWER, NOT MERELY THAT IT
+    /// LEAVES THE SERVER IN THE SAME STATE.</b> Only pure reads satisfy it. An operation that CONSUMES
+    /// something the server was holding - a task registration, a pending commit - answers differently the
+    /// second time even where the end state is identical, and the caller has no way to tell that second
+    /// answer apart from a genuine one. See <see cref="BuildReplaySafePaths"/> for the four operations
+    /// that were admitted on the weaker test and are not any more.
+    /// </para>
     /// </remarks>
-    private static readonly string[] ReplaySafeQueryMethods = ["ReleaseQueryTask", "Count"];
+    private static readonly string[] ReplaySafeQueryMethods = ["Count"];
 
-    /// <summary>The replay-safe methods of C-06, by name on its descriptor.</summary>
-    private static readonly string[] ReplaySafeUpdateMethods = ["ReleaseUpdateTask"];
+    /// <summary>
+    /// The replay-safe methods of C-06. EMPTY, and that is a statement rather than an omission - see
+    /// <see cref="BuildReplaySafePaths"/> for why the task release is not among them.
+    /// </summary>
+    private static readonly string[] ReplaySafeUpdateMethods = [];
 
-    /// <summary>The replay-safe methods of C-07, by name on its descriptor.</summary>
-    private static readonly string[] ReplaySafeCommandMethods = ["ReleaseCommandTask"];
+    /// <summary>
+    /// The replay-safe methods of C-07. EMPTY, on the same terms as
+    /// <see cref="ReplaySafeUpdateMethods"/>.
+    /// </summary>
+    private static readonly string[] ReplaySafeCommandMethods = [];
 
     /// <summary>The replay-safe methods of C-08, by name on its descriptor.</summary>
+    /// <remarks>
+    /// Five pure reads. <c>AutoCommit</c> was here and is not any more: it COMMITS or ROLLS BACK
+    /// [<c>Grpc/TransactionService.AutoCommit</c>], which is the plainest possible non-idempotent
+    /// operation and was admitted only because its name reads like a settings query.
+    /// </remarks>
     private static readonly string[] ReplaySafeTransactionMethods =
     [
         "GetTransactionData",
-        "AutoCommit",
         "IsConnected",
         "GetDatabaseType",
         "GetSessionState",
@@ -589,25 +613,45 @@ internal static class OutboundCallPolicy
     /// </exception>
     /// <remarks>
     /// <para>
-    /// THE C-05 ENTRIES. The count, which is a read, and the task release, which
-    /// <c>PersistenceClient.ReleaseQueryTaskAsync</c> documents as reporting an already-released task
-    /// rather than failing on it - so a replay after a lost response releases nothing twice and prevents
-    /// a task from being orphaned against the registry's quota. <c>CreateQueryTask</c> is absent for the
-    /// mirror-image reason: a replayed create SUCCEEDS and leaves a second server-held task nobody holds
-    /// a handle to.
+    /// THE C-05 ENTRY IS <c>Count</c> AND NOTHING ELSE, because it is a read.
+    /// <c>CreateQueryTask</c> is absent for the obvious reason: a replayed create SUCCEEDS and leaves a
+    /// second server-held task nobody holds a handle to.
     /// </para>
     /// <para>
-    /// THE C-06 AND C-07 ENTRIES are each just the release, for the same reason. <c>Update</c> and
-    /// <c>Exec</c> are absent because neither is idempotent and both document themselves as unsafe to
-    /// replay blindly - a changeset re-sent after an unknown outcome may apply twice, and a statement may
-    /// be neither idempotent nor transactional, the native autocommit mode having deliberately run
-    /// outside a transaction.
+    /// 🔴 <b>THE THREE TASK RELEASES ARE ABSENT, AND THEY USED TO BE HERE ON A PREMISE THE CONTRACT
+    /// CONTRADICTS.</b> They were admitted because a release of an already-released handle was believed to
+    /// report success, so a replay after a lost response would cost nothing and would stop a task being
+    /// orphaned against the registry's quota. The published contract says the opposite and says it as a
+    /// frozen rule - "Releasing an already-released handle is <c>E_INVALID_HANDLE</c>, not a silent
+    /// success" [<c>docs/CONTRACTS.md</c>, C-05 method table] - and all three upstream implementations
+    /// enforce it: the removal from the handle registry is what decides the outcome, so the second caller
+    /// is told the handle is unknown [<c>Persistence/Grpc/QueryService.cs</c>,
+    /// <c>UpdateService.cs</c>, <c>CommandService.cs</c>]. A replay therefore turns a release that HAD
+    /// SUCCEEDED into a reported failure: the first attempt released the task, its response was lost in
+    /// transit, and the retry answers <c>E_INVALID_HANDLE</c> - a spurious failure on a cleanup path,
+    /// which is the shape that gets read as a leak and investigated as one.
+    /// </para>
+    /// <para>
+    /// The alternative was to make release idempotent, and it is the wrong one: the answer distinguishing
+    /// "this call released it" from "it was already gone" is what makes two concurrent releases resolvable,
+    /// and softening it would be a contract change to accommodate a retry policy. So the policy changes
+    /// instead, and a lost release response is resolved by the caller's own cleanup path rather than by a
+    /// blind replay.
+    /// </para>
+    /// <para>
+    /// <b>C-06 AND C-07 THEREFORE CONTRIBUTE NOTHING AT ALL</b>, at either layer. <c>Update</c> and
+    /// <c>Exec</c> were already absent because neither is idempotent and both document themselves as
+    /// unsafe to replay blindly - a changeset re-sent after an unknown outcome may apply twice, and a
+    /// statement may be neither idempotent nor transactional, the native autocommit mode having
+    /// deliberately run outside a transaction - and with their releases gone the two contracts have no
+    /// replay-safe operation left. An empty roster is a statement of that, not an oversight.
     /// </para>
     /// <para>
     /// THE C-08 ENTRIES are six reads. <c>BeginSession</c> is absent because each success begins a
-    /// SEPARATE reference-counted session that must be ended; <c>EndSession</c> is absent for the
-    /// opposite and sharper reason - the legacy pool is REFERENCE COUNTED, so unlike a task release a
-    /// repeated end DECREMENTS twice and can tear down a session another borrower still holds.
+    /// SEPARATE reference-counted session that must be ended; <c>EndSession</c> is absent for a sharper
+    /// reason still - the legacy pool is REFERENCE COUNTED, so a repeated end DECREMENTS twice and can
+    /// tear down a session another borrower still holds, which is worse than the spurious failure a
+    /// replayed task release produces.
     /// <c>Commit</c> is absent because a commit whose outcome is unknown must be resolved by reading
     /// state, never by committing again; <c>Rollback</c>, <c>ClearState</c>, <c>SetBroken</c> and
     /// <c>SetAutoCommit</c> are absent because they mutate session state and gain nothing from a replay.

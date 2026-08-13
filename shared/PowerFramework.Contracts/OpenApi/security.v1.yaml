@@ -5,12 +5,23 @@
 #    C-01  security.v1.TokenService    POST /v1/tokens
 #                                      GET  /.well-known/jwks.json
 #                                      GET  /.well-known/openid-configuration
-#    C-02  security.v1.CryptoService   17 operations under /v1/crypto/**, covering ALL 63 of the
-#                                      legacy surface's cryptographic overloads. An earlier revision of
-#                                      this header said 15, from a superseded accounting that declined
-#                                      to project the three HashFile overloads; both are projected, at
-#                                      /v1/crypto/hash-file and /v1/crypto/hmac-file, so the count is
-#                                      17. Verify by counting operationId occurrences, never prose.
+#    C-02  security.v1.CryptoService   18 operations under /v1/crypto/**. SEVENTEEN of them are POST
+#                                      and between them project ALL 63 of the legacy surface's
+#                                      cryptographic overloads; the EIGHTEENTH is
+#                                      DELETE /v1/crypto/rsa/keys/{keyRef}, which is AUTHORED and
+#                                      projects no legacy overload - the legacy had no key store, so
+#                                      it had nothing to release. Two earlier revisions of this header
+#                                      were wrong in two different ways: one said 15, from a
+#                                      superseded accounting that declined to project the three
+#                                      HashFile overloads (both are projected, at /v1/crypto/hash-file
+#                                      and /v1/crypto/hmac-file); the other said 17, conflating the
+#                                      projection count with the published count. Keep the two
+#                                      numbers apart: 63 overloads onto 17 POST operations, 18
+#                                      operations published. Verify by counting operationId
+#                                      occurrences, never prose - and note the count is now asserted
+#                                      against this document by PowerFramework.DataServices.Tests'
+#                                      CryptoContractClientCoherenceTests, so a nineteenth operation
+#                                      fails a test rather than quietly outrunning this header.
 #    C-10  Health and readiness        GET  /health   (anonymous by design)
 #                                      GET  /v1/ping  (token required, 401 without one)
 #
@@ -438,9 +449,10 @@ tags:
   - name: CryptoService
     x-contract-id: C-02
     description: >-
-      Contract C-02. The cryptographic surface of the legacy framework, republished as 17
-      stateless operations that together cover ALL 63 of its cryptographic overloads
-      [ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L11-L73].
+      Contract C-02. The cryptographic surface of the legacy framework, republished as 18
+      stateless operations. SEVENTEEN of them together cover ALL 63 of its cryptographic overloads
+      [ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L11-L73]; the EIGHTEENTH releases a private key this
+      service retained, and covers no legacy overload because the legacy retains nothing to release.
       Two of the 17 - file hashing, keyed and unkeyed - take an opaque server-resolved `fileRef`
       in place of the legacy filename, so the capability is reachable without a caller-supplied
       path ever crossing the boundary. Every operation is a plain
@@ -849,9 +861,11 @@ paths:
 
   # ================================================================================================
   #  C-02 - security.v1.CryptoService
-  #  17 operations covering ALL 63 of the legacy surface's cryptographic overloads. Every one
-  #  requires a token (inherited from the document-level requirement) and every one returns the
-  #  single ProblemDetails shape on every non-2xx.
+  #  18 operations: 17 POST projections covering ALL 63 of the legacy surface's cryptographic
+  #  overloads, plus one AUTHORED operation - DELETE /v1/crypto/rsa/keys/{keyRef} - which releases a
+  #  generated key and projects no legacy overload, because the legacy had no key store to release
+  #  from. Every one of the 18 requires a token (inherited from the document-level requirement) and
+  #  every one returns the single ProblemDetails shape on every non-2xx.
   #
   #  THE FILE-HASHING PAIR TAKES A REFERENCE, NEVER A PATH: /v1/crypto/hash-file and
   #  /v1/crypto/hmac-file project the three legacy HashFile overloads through an opaque
@@ -863,11 +877,27 @@ paths:
   #  keyRef in the position the legacy took key bytes; where the legacy took an initialization
   #  vector, the wire takes an ivRef resolved the same way.
   #
-  #  ALL SEVENTEEN ARE POST, INCLUDING THE ONES THAT LOOK LIKE READS. That is deliberate. A GET with
-  #  the payload in the query string would place plaintext, ciphertext and digests into request
-  #  lines, and therefore into access logs, proxy caches and browser history - none of which the
-  #  in-process legacy had. These operations are also not idempotent in any useful sense: the three
-  #  random generators return a different result per call by definition.
+  #  ALL SEVENTEEN PROJECTIONS ARE POST, INCLUDING THE ONES THAT LOOK LIKE READS. That is deliberate.
+  #  A GET with the payload in the query string would place plaintext, ciphertext and digests into
+  #  request lines, and therefore into access logs, proxy caches and browser history - none of which
+  #  the in-process legacy had. These operations are also not idempotent in any useful sense: the
+  #  three random generators return a different result per call by definition.
+  #
+  #  THE EIGHTEENTH IS THE EXCEPTION AND IT IS A DELETE, which is why the count of POST operations and
+  #  the count of published operations are different numbers. Releasing a generated key is a genuine
+  #  deletion of a named server-side resource, addressed by that resource's own identifier in the path
+  #  rather than by a payload, and it answers 204 with no body - the one shape in this contract that
+  #  neither takes a request body nor declares a 400 or a 500.
+  #
+  #  NINE OF THE EIGHTEEN TAKE A keyRef: eight carry one in the request body (hmac, hmac-file, both
+  #  symmetric operations and all four RSA operations that consume a key) and the release operation
+  #  takes one as a path parameter. POST /v1/crypto/rsa/keys is not among them - it RETURNS a keyRef
+  #  rather than resolving one - which is exactly why it alone among the RSA operations declares no 404.
+  #
+  #  TEN DECLARE A 404, WHICH IS A DIFFERENT TEN AND WORTH KEEPING APART FROM THE NINE. Reference
+  #  resolution is what makes a 404 reachable, not KEY resolution, so the nine above plus hash-file -
+  #  which resolves an opaque fileRef through the same allow-listed store discipline - declare one, and
+  #  the remaining eight, which resolve nothing at all, do not.
   # ================================================================================================
 
   /v1/crypto/hash:

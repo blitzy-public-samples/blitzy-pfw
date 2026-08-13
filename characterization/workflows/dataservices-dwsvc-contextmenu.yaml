@@ -1550,8 +1550,9 @@ sharedVolume:
 
 # ---- HONEST STATE --------------------------------------------------------------------------------
 #  NOTHING HERE HAS BEEN RUN, AND THE ONLY LEGAL VALUE SAYS SO. No paired capture exists on either
-#  side: the legacy half needs a PowerBuilder toolchain that is not present, `characterization/recordings/`
-#  does not exist at all, and so no recording directory exists for this identifier. Nothing in this
+#  side. `characterization/recordings/` IS present - both halves exist and carry their own readmes - but
+#  neither holds a recording for this identifier, and the blocker is one-sided: the legacy half needs a
+#  PowerBuilder toolchain that is not present. Nothing in this
 #  definition may be read as reporting a parity result, and the schema's single-member enumeration is
 #  what makes that structural rather than a matter of trust.
 executionStatus: specified-not-executed

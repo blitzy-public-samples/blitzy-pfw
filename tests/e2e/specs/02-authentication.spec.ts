@@ -109,9 +109,6 @@
  * any artifact this run produces.**
  */
 
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-
 import { expect, test } from '@playwright/test';
 
 import {
@@ -131,55 +128,36 @@ import {
   requireServiceToken,
 } from '../fixtures/token-issuance';
 
-import { probeStackAvailability } from '../fixtures/live-stack';
+import { requireLiveStack } from '../fixtures/live-stack';
+
+import {
+  JSON_MEDIA_TYPE,
+  PING_AUTHENTICATED,
+  PING_RESPONSE,
+  PROBLEM_JSON_MEDIA_TYPE,
+  GATEWAY_SERVICE_TOKEN,
+  assertFullUri,
+  assertMediaType,
+  assertMembers,
+  describeShapeForFailure,
+  readRepositoryText,
+} from '../fixtures/contract-shape';
 
 /**
- * Walk upwards from this file until the repository root is found.
+ * THE REPOSITORY READERS MOVED, and both callers here now share them.
  *
- * The root is identified by the solution file rather than by `.git`, because a
- * worktree or a submodule checkout does not always carry a `.git` DIRECTORY, and
- * because the solution is the artifact the coherence assertion below is actually
- * reasoning about — the same tree that holds the service and its contract.
+ * `repositoryRoot()` and `readRepositoryText()` used to be declared in this file
+ * and nowhere else. They are now in `fixtures/contract-shape.ts` beside the
+ * contract-shape assertions that need them, because the readiness spec's
+ * anti-drift guard reads the published Gateway contract for exactly the same
+ * reason this spec reads the published Security contract — and two copies of a
+ * repository-root walk is one copy too many.
  *
- * @returns the absolute repository-root path
- * @throws when no root is found above this file, which would mean the suite is
- *   running from somewhere it was never installed
+ * The confinement discipline is unchanged and is the caller's to keep: this suite
+ * is READ-ONLY against the repository and must never reach the read-only
+ * behavioural-oracle assets (C-C). The paths read below are the published Security
+ * contract and two service settings files; none is inside `ws_objects/`.
  */
-function repositoryRoot(): string {
-  let candidate = __dirname;
-
-  for (;;) {
-    if (existsSync(join(candidate, 'PowerFramework.slnx'))) {
-      return candidate;
-    }
-
-    const parent = dirname(candidate);
-
-    if (parent === candidate) {
-      throw new Error(
-        'No repository root carrying PowerFramework.slnx was found above ' +
-          'this spec. The coherence assertion cannot read the published ' +
-          'contract or the service settings without it.',
-      );
-    }
-
-    candidate = parent;
-  }
-}
-
-/**
- * Read a repository file as text.
- *
- * Deliberately confined to the two paths the coherence assertion names: this
- * suite is READ-ONLY against the repository and must never reach the read-only
- * behavioural-oracle assets (C-C). Neither path below is inside `ws_objects/`.
- *
- * @param relativePath repository-root-relative path
- * @returns the file contents
- */
-function readRepositoryText(relativePath: string): string {
-  return readFileSync(join(repositoryRoot(), relativePath), 'utf8');
-}
 
 /**
  * The one member of a JSON Web Key Set this spec reads.
@@ -246,22 +224,23 @@ test.describe('Authentication (constraint C-G)', () => {
   // The probe is memoised per worker, so this costs one request per worker and
   // not one per test.
   //
-  // TESTS TAGGED `@no-stack` ARE EXEMPT, and the tag is why this is a tag rather
-  // than a title match: several specs mix pure-fixture assertions in with HTTP
-  // ones, those assertions are exactly the part that still holds with nothing
-  // running, and skipping them would throw away the only coverage available
-  // before a bring-up. A tag is declarative and machine-read; a title substring
-  // would silently start skipping the moment someone reworded a test name, and
-  // two stack-free tests in this suite never carried the wording at all.
+  // ⚠ AN ABSENT STACK NOW FAILS A FULL ACCEPTANCE RUN RATHER THAN SKIPPING IT.
+  // This hook used to probe and then skip, which left the one state a
+  // misconfigured pipeline is in - nothing running - as the state that exited
+  // zero. `requireLiveStack` fails instead unless the run has explicitly
+  // acknowledged an absent stack with E2E_ALLOW_ABSENT_STACK, in which case it
+  // skips with a stated reason and the run is labelled api-partial-no-stack in
+  // every reported line so its result cannot be read as an acceptance result.
+  //
+  // THE DECISION LIVES IN ONE PLACE FOR ALL SIX SPECS. It was written out six
+  // times, once per spec, so the six could disagree about what an absent stack
+  // means - which mattered little while the answer was a skip and matters a great
+  // deal now that it gates acceptance. Tests tagged `@no-stack` are still exempt,
+  // and the tag is still why this is a tag rather than a title match; that
+  // reasoning now lives with the function.
   // ---------------------------------------------------------------------------
   test.beforeEach(async ({}, testInfo) => {
-    if (testInfo.tags.includes('@no-stack')) {
-      return;
-    }
-
-    const availability = await probeStackAvailability();
-
-    test.skip(!availability.reachable, availability.reason);
+    await requireLiveStack(testInfo);
   });
 
   // Deliberately NOT `mode: 'serial'`. These four assertions share no state, in
@@ -309,19 +288,34 @@ test.describe('Authentication (constraint C-G)', () => {
     // shape is not invented here, it is quoted. Worse, the omission MASKED A REAL DEFECT: the
     // service advertised that body and returned an empty one, because neither diagnostics
     // middleware was installed, and this was the assertion positioned to catch it.
-    expect(
-      response.headers()['content-type'] ?? '',
-      'the published Unauthorized response declares application/problem+json as its only content ' +
-        'type, so a refusal carrying anything else — or carrying nothing — contradicts the ' +
-        'document a caller was handed',
-    ).toContain('application/problem+json');
+    // EXACTLY the problem media type, parameters and all. This was
+    // `toContain('application/problem+json')`, which a `text/html` page mentioning
+    // the string would have satisfied and which said nothing about an unexpected
+    // media-type parameter. `assertMediaType` compares the type/subtype for
+    // equality and permits only `charset=utf-8` beside it.
+    assertMediaType(
+      response.headers()['content-type'],
+      PROBLEM_JSON_MEDIA_TYPE,
+      `Gateway ${PING_PATH} refusal`,
+    );
 
-    const problem: unknown = await response.json();
+    const problemText: string = await response.text();
+    let problem: unknown;
+
+    try {
+      problem = JSON.parse(problemText) as unknown;
+    } catch {
+      throw new Error(
+        `Gateway answered ${PING_PATH} with an unparseable refusal body while declaring ` +
+          `${PROBLEM_JSON_MEDIA_TYPE}. ${describeShapeForFailure(problemText)}.`,
+      );
+    }
 
     expect(
-      problem,
-      'the refusal body must be a JSON object matching the published ProblemDetails schema',
-    ).toBeInstanceOf(Object);
+      typeof problem === 'object' && problem !== null && !Array.isArray(problem),
+      'the refusal body must be a JSON object matching the published ProblemDetails schema. ' +
+        `${describeShapeForFailure(problemText)}.`,
+    ).toBe(true);
 
     // The status is read back out of the BODY as well as off the response line. A document that
     // disagreed with its own status would be worse than no document: a caller branching on the
@@ -383,6 +377,40 @@ test.describe('Authentication (constraint C-G)', () => {
         'the audience Gateway accepts. A 403 would mean the credential was ' +
         'valid but the granted scope set was insufficient.',
     ).toBe(200);
+
+    // THE ACCEPTED RESPONSE'S SHAPE, WHICH WAS PREVIOUSLY UNASSERTED ALTOGETHER.
+    // A 200 alone establishes that the credential was accepted and nothing about
+    // what the endpoint answered, so `PingResponse` could have drifted to any
+    // shape at all without this suite noticing. Its two constants make the
+    // assertion sharp: `service` is `const: gateway`, so a body forwarded from
+    // an upstream cannot pass as Gateway's own, and `authenticated` is
+    // `const: true`, so the endpoint cannot answer 200 while reporting that it
+    // did not authenticate the caller — which is exactly the confusion an
+    // always-200 placeholder would produce.
+    assertMediaType(
+      response.headers()['content-type'],
+      JSON_MEDIA_TYPE,
+      `Gateway ${PING_PATH}`,
+    );
+
+    const ping: Record<string, unknown> = assertMembers(
+      (await response.json()) as unknown,
+      PING_RESPONSE,
+      `Gateway ${PING_PATH} response`,
+    );
+
+    expect(
+      ping['service'],
+      `the ping response must identify its service as '${GATEWAY_SERVICE_TOKEN}', which the ` +
+        'published schema pins as a single constant',
+    ).toBe(GATEWAY_SERVICE_TOKEN);
+
+    expect(
+      ping['authenticated'],
+      `the ping response must report authenticated as ${String(PING_AUTHENTICATED)}. The endpoint ` +
+        'exists to prove a credential was required and accepted, so a 200 that reported otherwise ' +
+        'would contradict the status it just returned.',
+    ).toBe(PING_AUTHENTICATED);
   });
 
   test('Security publishes its verification material anonymously', async ({
@@ -408,6 +436,12 @@ test.describe('Authentication (constraint C-G)', () => {
         'circular dependency described above: no peer could validate anything, ' +
         'and the token topology would be inert.',
     ).toBe(200);
+
+    assertMediaType(
+      response.headers()['content-type'],
+      JSON_MEDIA_TYPE,
+      `Security ${JWKS_PATH}`,
+    );
 
     const document = (await response.json()) as JsonWebKeySetDocument;
     const keys: unknown = document.keys;
@@ -477,6 +511,12 @@ test.describe('Authentication (constraint C-G)', () => {
         'it before it has any credential to present',
     ).toBe(200);
 
+    assertMediaType(
+      response.headers()['content-type'],
+      JSON_MEDIA_TYPE,
+      `Security ${OIDC_DISCOVERY_PATH}`,
+    );
+
     const document = (await response.json()) as ProviderMetadataDocument;
     const jwksUri: unknown = document.jwks_uri;
 
@@ -489,17 +529,31 @@ test.describe('Authentication (constraint C-G)', () => {
         'separate services.',
     ).toBe('string');
 
-    // The path is resolved from the imported constant rather than written out
-    // again, so the key set has exactly one spelling in this suite and the two
-    // assertions cannot drift apart.
-    expect(
-      typeof jwksUri === 'string' && jwksUri.endsWith(JWKS_PATH),
-      `the advertised jwks_uri must end with ${JWKS_PATH}, so that the ` +
-        'document a consumer self-configures from points at the key set this ' +
-        'suite just proved is anonymously reachable. The advertised value is ' +
-        'deliberately not rendered in this message: it is read from a response ' +
-        'and no value read from Security is placed in a log line.',
-    ).toBe(true);
+    // THE FULL URI, NOT A SUFFIX. This assertion used to be
+    // `jwksUri.endsWith(JWKS_PATH)`, which accepted the key set on ANY ORIGIN:
+    // a document advertising `https://somewhere-else.example/.well-known/jwks.json`
+    // satisfied it completely. That is precisely the drift that matters here,
+    // because a consumer's stock bearer handler fetches whatever this member
+    // says and then trusts the keys it finds — so an advertised origin nobody
+    // verified is an unverified trust anchor for three services.
+    //
+    // The expected value is COMPOSED from this suite's own configuration rather
+    // than written out, so the key set still has exactly one spelling here and
+    // the two assertions cannot drift apart. `assertFullUri` compares through
+    // `URL`, so an equivalent spelling — a default port written out, a trailing
+    // slash — is not reported as a mismatch while a different origin or path
+    // still is, and it additionally refuses a query or fragment.
+    //
+    // The advertised value IS named in the failure message, and that is a
+    // deliberate exception to this file's no-response-values rule with a stated
+    // reason: a URI is the one thing here that is not a credential, it is
+    // published anonymously to every caller by design, and a mismatch is
+    // undiagnosable without seeing what was advertised.
+    assertFullUri(
+      jwksUri,
+      `${SECURITY_BASE_URL}${JWKS_PATH}`,
+      "the discovery document's 'jwks_uri'",
+    );
 
     // The rest of the document is deliberately unasserted. The issuer
     // identifier, the advertised algorithm list and the remaining informational

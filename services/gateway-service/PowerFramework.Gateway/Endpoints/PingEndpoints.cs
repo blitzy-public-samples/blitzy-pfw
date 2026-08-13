@@ -250,17 +250,6 @@ public static class PingEndpoints
     internal const string RequiredScope = "ping";
 
     /// <summary>
-    /// The authorization policy name carrying <see cref="RequiredScope"/>, so that the route and the
-    /// registration cannot drift apart.
-    /// </summary>
-    /// <remarks>
-    /// Composed from <see cref="RequiredScope"/> rather than written out, and prefixed with the service
-    /// name so that a policy name is never ambiguous in a log line that carries policies from more than
-    /// one service.
-    /// </remarks>
-    internal const string ScopePolicyName = "gateway:scope:" + RequiredScope;
-
-    /// <summary>
     /// The contract's <c>operationId</c>. Also the endpoint name, which is what the OpenAPI document
     /// generator projects into <c>operationId</c>.
     /// </summary>

@@ -228,17 +228,6 @@ public static class CapabilityEndpoints
     internal const string RequiredScope = "capabilities";
 
     /// <summary>
-    /// The authorization policy name carrying <see cref="RequiredScope"/>, so that the route and the
-    /// registration cannot drift apart.
-    /// </summary>
-    /// <remarks>
-    /// Composed from <see cref="RequiredScope"/> rather than written out, and prefixed with the service
-    /// name so that a policy name is never ambiguous in a log line that carries policies from more than
-    /// one service.
-    /// </remarks>
-    internal const string ScopePolicyName = "gateway:scope:" + RequiredScope;
-
-    /// <summary>
     /// The published operation identifier, <c>getCapabilities</c>
     /// [<c>gateway.v1.yaml:L448</c>].
     /// </summary>

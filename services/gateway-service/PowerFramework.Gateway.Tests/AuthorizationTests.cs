@@ -117,6 +117,8 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization.Infrastructure;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -1713,6 +1715,124 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
     }
 
     /// <summary>
+    /// The external-caller grant the roster artifacts publish reaches EVERY scope-gated Gateway surface
+    /// with a single token, so an operator who copies it can actually call this ingress.
+    /// </summary>
+    /// <param name="method">The method to send.</param>
+    /// <param name="route">The route to send it to.</param>
+    /// <param name="requiredScope">The scope the route requires; carried, along with the other two.</param>
+    /// <remarks>
+    /// <para>
+    /// THIS IS THE GRANT AN OPERATOR IS TOLD TO COPY, AND THE ONLY TEST THAT EXERCISES IT AS ONE TOKEN.
+    /// The theories above vary one scope at a time, which proves each policy reads the right claim but
+    /// says nothing about the grant a deployment actually provisions. That grant is caller
+    /// <c>pfw-e2e-suite</c>, audience <c>powerframework-gateway</c>, scopes <c>ping</c>,
+    /// <c>capabilities</c> and <c>datawindow</c> - published identically in Security's
+    /// <c>appsettings.Development.json</c>, in <c>orchestration/.env.example</c> and in
+    /// <c>orchestration/docker-compose.yml</c>. If the roster and this ingress ever disagreed, every
+    /// documented bring-up would authenticate and then be refused, which is exactly the failure this
+    /// asserts cannot happen.
+    /// </para>
+    /// <para>
+    /// ASSERTED AS "NOT 401 AND NOT 403" for the reason given on
+    /// <see cref="ACredentialCarryingTheRequiredScopePassesAuthorization"/>: what follows authorization
+    /// differs per route in this fixture, and demanding 200 would assert the upstream substitution
+    /// instead of the entitlement.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(ScopedIngressBoundaries))]
+    public async Task TheDocumentedExternalCallerGrantReachesEveryScopeGatedSurface(
+        string method,
+        string route,
+        string requiredScope)
+    {
+        // THE THREE NAMES ARE READ FROM THE ROUTES, NOT RESTATED, so a rename cannot leave this test
+        // passing against a grant nobody could provision.
+        string[] documentedGrant =
+        [
+            PingEndpoints.RequiredScope,
+            CapabilityEndpoints.RequiredScope,
+            DataServicesProxyEndpoints.RequiredScope,
+        ];
+
+        Assert.Contains(requiredScope, documentedGrant, StringComparer.Ordinal);
+
+        using HttpClient client = host.CreateAnonymousClient();
+        using HttpRequestMessage request = new(new HttpMethod(method), new Uri(route, UriKind.Relative));
+
+        request.Headers.Authorization = new AuthenticationHeaderValue(
+            GatewayTestHostFixture.BearerScheme,
+            host.IssueTokenWithScopes(documentedGrant));
+
+        using HttpResponseMessage response = await client.SendAsync(
+            request,
+            TestContext.Current.CancellationToken);
+
+        Assert.NotEqual(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.NotEqual(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    /// <summary>
+    /// A grant carrying a single placeholder scope authenticates and is then refused on every scope-gated
+    /// surface - which is why the provisioning guidance may not offer one.
+    /// </summary>
+    /// <param name="method">The method to send.</param>
+    /// <param name="route">The route to send it to.</param>
+    /// <param name="requiredScope">The scope the route requires, which a placeholder is not.</param>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THIS PINS A CORRECTED PIECE OF DOCUMENTATION, WHICH IS WHY IT IS WORTH A TEST OF ITS OWN.
+    /// Security's base <c>appsettings.json</c> used to tell an operator opening this ingress that "the
+    /// scope list on that grant may be anything the deployment finds useful for its own auditing,
+    /// INCLUDING a single placeholder, because the gateway itself requires no scope". Following it
+    /// produced a token that MINTED SUCCESSFULLY and was then refused 403 on every route it could reach -
+    /// the worst shape of configuration defect, because nothing refuses at provisioning time and the
+    /// symptom appears only at the boundary.
+    /// </para>
+    /// <para>
+    /// A placeholder is not a near miss either: the check is an exact ordinal comparison over the
+    /// space-delimited claim, with no prefix match and no wildcard, so no arbitrary string can
+    /// accidentally satisfy it. The refusal is 403 rather than 401 because the credential was ACCEPTED -
+    /// re-presenting it would not help - which is the distinction the published contract says the two
+    /// statuses exist to draw.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(ScopedIngressBoundaries))]
+    public async Task APlaceholderScopeGrantIsRefusedOnEveryScopeGatedSurface(
+        string method,
+        string route,
+        string requiredScope)
+    {
+        const string Placeholder = "placeholder";
+
+        // The premise: the placeholder is not one of the three real names. If a scope were ever literally
+        // named "placeholder" this test would be asserting the opposite of what it says.
+        // Enumerated rather than passed as the set, because a FrozenSet satisfies both the ISet and the
+        // IReadOnlySet overload and the call is ambiguous.
+        Assert.DoesNotContain(
+            Placeholder,
+            ScopeAuthorizationExtensions.RegisteredScopes.AsEnumerable(),
+            StringComparer.Ordinal);
+        Assert.NotEqual(Placeholder, requiredScope);
+
+        using HttpClient client = host.CreateAnonymousClient();
+        using HttpRequestMessage request = new(new HttpMethod(method), new Uri(route, UriKind.Relative));
+
+        request.Headers.Authorization = new AuthenticationHeaderValue(
+            GatewayTestHostFixture.BearerScheme,
+            host.IssueTokenWithScopes([Placeholder]));
+
+        using HttpResponseMessage response = await client.SendAsync(
+            request,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.DoesNotContain(ChallengeHeader, response.Headers.Select(static header => header.Key));
+    }
+
+    /// <summary>
     /// A credential carrying a scope the route does not require is refused too - the scopes are distinct
     /// per capability rather than one interchangeable "authenticated" grant.
     /// </summary>
@@ -1910,25 +2030,65 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
     }
 
     /// <summary>
-    /// Each protected route's policy name is composed from the scope it requires, so the two cannot be
-    /// registered against different spellings.
+    /// Each protected route's scope IS the name of a policy the composition root registered, so a route
+    /// can never require a policy that does not exist.
     /// </summary>
     /// <remarks>
-    /// The composition root registers policies BY THESE NAMES. A policy registered under a name no route
-    /// requires would enforce nothing while looking correct in review, and the tests above would still
-    /// pass if the route and the registration had drifted apart only in the name - so the relationship
-    /// itself is asserted here.
+    /// <para>
+    /// THIS ASSERTS THE RELATIONSHIP, NOT A NAMING FORMULA, and the difference is what the test is for.
+    /// A policy registered under a name no route requires enforces nothing while looking correct in
+    /// review, and the tests above would still pass if a route and its registration had drifted apart
+    /// only in the name - so the registration is resolved from the built host BY THE NAME THE ROUTE
+    /// PASSES rather than recomputed from a convention.
+    /// </para>
+    /// <para>
+    /// 🔴 THE EARLIER SHAPE OF THIS TEST COULD NOT HAVE CAUGHT THE DEFECT IT WAS WRITTEN FOR. It
+    /// asserted that a <c>ScopePolicyName</c> constant equalled <c>"gateway:scope:" + RequiredScope</c> -
+    /// a string-concatenation tautology that held while THREE POLICIES REGISTERED UNDER THOSE VERY NAMES
+    /// were required by no route at all, because the endpoints pass <c>GatewayScopes.*</c> instead. The
+    /// dead policies, the constants and their duplicate scope predicate are gone; this asserts the
+    /// surviving relationship against the container.
+    /// </para>
     /// </remarks>
     [Fact]
-    public void EveryScopePolicyNameIsComposedFromTheScopeItRequires()
+    public async Task EveryProtectedRouteRequiresAPolicyTheCompositionRootRegistered()
     {
-        Assert.Equal("gateway:scope:" + PingEndpoints.RequiredScope, PingEndpoints.ScopePolicyName);
+        IAuthorizationPolicyProvider policies = host.Services
+            .GetRequiredService<IAuthorizationPolicyProvider>();
+
+        foreach (string scope in (string[])
+            [
+                PingEndpoints.RequiredScope,
+                CapabilityEndpoints.RequiredScope,
+                DataServicesProxyEndpoints.RequiredScope,
+            ])
+        {
+            AuthorizationPolicy? policy = await policies.GetPolicyAsync(scope);
+
+            Assert.NotNull(policy);
+
+            // AND IT DEMANDS AUTHENTICATION AS WELL AS THE SCOPE. A named policy REPLACES the fallback
+            // for the endpoint that names it, so a scope policy that omitted authentication would make
+            // its route the only one in the service not demanding a credential - and would refuse the
+            // credential-less caller with 403 rather than the 401 the contract publishes.
+            Assert.Contains(policy.Requirements, static requirement =>
+                requirement is DenyAnonymousAuthorizationRequirement);
+
+            Assert.Contains(policy.Requirements, static requirement =>
+                requirement is ScopeRequirement);
+        }
+
+        // EVERY REGISTERED SCOPE IS REQUIRED BY A ROUTE, AND THE CONVERSE. The loop above catches a route
+        // naming an unregistered policy; this catches a registered policy no route requires, which is the
+        // half that enforces nothing.
         Assert.Equal(
-            "gateway:scope:" + CapabilityEndpoints.RequiredScope,
-            CapabilityEndpoints.ScopePolicyName);
-        Assert.Equal(
-            "gateway:scope:" + DataServicesProxyEndpoints.RequiredScope,
-            DataServicesProxyEndpoints.ScopePolicyName);
+            ScopeAuthorizationExtensions.RegisteredScopes.Order(StringComparer.Ordinal),
+            new[]
+            {
+                PingEndpoints.RequiredScope,
+                CapabilityEndpoints.RequiredScope,
+                DataServicesProxyEndpoints.RequiredScope,
+            }.Order(StringComparer.Ordinal));
 
         // THREE DISTINCT SCOPES, NOT ONE REUSED. Three routes sharing a scope would be a single
         // entitlement wearing three names, which is what the parameterless form already was.
@@ -4232,6 +4392,75 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
         Assert.True(
             operatorChannel.Recorded(expectedLevel),
             $"Finalization returned {finalizeResult} but nothing was recorded at {expectedLevel}.");
+    }
+
+    /// <summary>
+    /// A shutdown whose token is ALREADY CANCELLED still discharges the finalization it owes, exactly
+    /// once, and a second call changes nothing.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE BRANCH NO OTHER ROW REACHES, AND IT IS THE HALF OF THE PAIRING REQUIREMENT MOST LIKELY TO BE
+    /// "TIDIED" AWAY. Every other finalization row here hands <c>StoppedAsync</c> a live token, so all of
+    /// them would keep passing if somebody added the cancellation observation that a reader of the six
+    /// <c>IHostedLifecycleService</c> hooks would expect to find - and the pairing
+    /// <c>docs/README.md:L15</c> mandates would then be silently owed forever on every shutdown a host
+    /// cancels, which is precisely the shutdown a host under time pressure performs.
+    /// </para>
+    /// <para>
+    /// WHY IGNORING THE TOKEN IS CORRECT HERE AND WRONG ON THE WAY IN. The asymmetry is deliberate and is
+    /// stated on the production member itself. <c>StartingAsync</c> observes cancellation BEFORE it claims
+    /// the lifecycle state, so an abandoned startup acquires no obligation at all. <c>StoppedAsync</c>
+    /// observes nothing, because by the time it runs the obligation already EXISTS: an initialization
+    /// succeeded, the framework holds resources, and there is no re-finalize to retry with. A cancelled
+    /// shutdown token means "finish quickly", not "skip the release".
+    /// </para>
+    /// <para>
+    /// THREE PROPERTIES, AND THE THIRD IS WHAT MAKES THE FIRST TWO WORTH ASSERTING. No exception escapes -
+    /// not even the <see cref="OperationCanceledException"/> that observing the token would produce, which
+    /// is the shape a regression would take. The boundary is called exactly once and the instance reports
+    /// itself finalized. And a SECOND call after the first is inert: the transition is decided by the same
+    /// interlocked compare-and-exchange that performs it, so a host that stops twice cannot finalize twice
+    /// - the second call finds the state already moved and returns without touching the boundary.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task FinalizationIsPerformedEvenWhenTheShutdownTokenIsAlreadyCancelled()
+    {
+        RecordingFrameworkRuntime runtime = new();
+
+        FrameworkInitializer initializer =
+            CreateInitializer(runtime, out EnabledRecordingLogger<FrameworkInitializer> operatorChannel);
+
+        // A SUCCESSFUL START, so a finalization is genuinely owed. The "nothing owed" case is covered by
+        // AnAlreadyCancelledStartupAcquiresNoFinalizationObligation and is a different branch.
+        await initializer.StartingAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(initializer.IsInitialized);
+
+        using CancellationTokenSource cancelled = new();
+        await cancelled.CancelAsync();
+
+        // NO THROW. Asserted by NOT wrapping the call: an escaping OperationCanceledException would fail
+        // the test at this line, which is the clearest possible report of the regression.
+        await initializer.StoppedAsync(cancelled.Token);
+
+        Assert.True(initializer.IsFinalized);
+        Assert.Equal(1, runtime.Calls.Count(static call => call == "Finalize()"));
+
+        // The outcome was reported on the operator channel like any other, so a cancelled shutdown is not
+        // a silent one.
+        Assert.True(
+            operatorChannel.Recorded(LogLevel.Information),
+            "A finalization performed under an already-cancelled shutdown token recorded nothing at "
+                + "Information, so an operator reading the log could not tell the pairing was discharged.");
+
+        // IDEMPOTENT, and still with a cancelled token. The second call must neither throw nor reach the
+        // boundary a second time.
+        await initializer.StoppedAsync(cancelled.Token);
+
+        Assert.True(initializer.IsFinalized);
+        Assert.Equal(1, runtime.Calls.Count(static call => call == "Finalize()"));
     }
 
     /// <summary>

@@ -39,6 +39,11 @@ using PowerFramework.Gateway.Clients;
 using PowerFramework.Gateway.Configuration;
 using Xunit;
 
+// THE PROTOBUF SERVICE DESCRIPTOR, ALIASED FOR THE SAME REASON THE POLICY ALIASES IT:
+// Microsoft.Extensions.DependencyInjection declares a ServiceDescriptor too, and both
+// namespaces are in scope here [Clients/OutboundCallPolicy uses the identical alias].
+using ContractDescriptor = Google.Protobuf.Reflection.ServiceDescriptor;
+
 namespace PowerFramework.Gateway.Tests;
 
 /// <summary>
@@ -123,10 +128,14 @@ public sealed class OutboundCallPolicyTests
     /// could not tell a deliberate exclusion from a forgotten one.
     /// </para>
     /// <para>
-    /// The rows worth reading twice: <c>CloseValidationSession</c> is admitted while
-    /// <c>OpenValidationSession</c> is not, because a replayed close is idempotent by contract - which
-    /// is exactly what stops a lost close response from leaking a session - while a replayed open
-    /// SUCCEEDS and leaves a second session behind. <c>ApplyContextMenuModel</c> is excluded even though
+    /// 🔴 The rows worth reading twice: BOTH SESSION CLOSES ARE EXCLUDED, and they used to be admitted on
+    /// the reading that a replayed close is idempotent. The END STATE is; the ANSWER is not. A close is
+    /// destructive of the information its own response carries - <c>CloseValidationSession</c> answers
+    /// <c>was_open</c> plus the session's <c>final_state</c>, captured immediately before the session is
+    /// removed - so a replay after a first attempt that SUCCEEDED and lost its response answers
+    /// <c>OK / was_open = false</c> with an empty final state, which the caller cannot tell apart from
+    /// "there was never such a session". Every <c>Open*</c> stays excluded for the separate reason that a
+    /// replayed open SUCCEEDS and leaves a second session behind. <c>ApplyContextMenuModel</c> is excluded even though
     /// its sibling applies are admitted, because whether it replaces or extends is a property of the
     /// REQUEST and a message handler cannot read the request body. And the <c>Set*</c> and <c>Calc*</c>
     /// families are excluded because a recalculation can invoke macros back across the inverted
@@ -140,11 +149,39 @@ public sealed class OutboundCallPolicyTests
         {
             TheoryData<string, bool> data = [];
 
+            foreach ((string path, bool replaySafe) in AdmittedOperations)
+            {
+                data.Add(path, replaySafe);
+            }
+
+            return data;
+        }
+    }
+
+    /// <summary>
+    /// Every classified operation as a plain list, so the theory above and the exhaustiveness guard below
+    /// read the SAME declaration.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 IT IS A LIST RATHER THAN THE THEORY DATA ITSELF BECAUSE THE TABLE'S CLAIM NEEDED ENFORCING. The
+    /// theory documents itself as covering "the whole surface, not the interesting parts", and nothing
+    /// checked that: a method added to a contract was neither classified by the policy nor asserted here, so
+    /// it inherited "attempted exactly once" silently - which is the safe default but leaves a deliberate
+    /// exclusion indistinguishable from a forgotten one, the exact confusion this table exists to remove.
+    /// <c>TheAdmissionTableCoversEveryMethodOfEveryContractItClassifies</c> reads this list and compares it
+    /// to the descriptors.
+    /// </remarks>
+    private static IReadOnlyList<(string Path, bool ReplaySafe)> AdmittedOperations
+    {
+        get
+        {
+            List<(string Path, bool ReplaySafe)> data = [];
+
             string dataWindow = DataWindowService.Descriptor.FullName;
 
             Add(dataWindow, "Retrieve", replaySafe: false);
             Add(dataWindow, "OpenValidationSession", replaySafe: false);
-            Add(dataWindow, "CloseValidationSession", replaySafe: true);
+            Add(dataWindow, "CloseValidationSession", replaySafe: false);
             Add(dataWindow, "EventChain", replaySafe: false);
             Add(dataWindow, "Update", replaySafe: false);
             Add(dataWindow, "GetEventGate", replaySafe: true);
@@ -162,7 +199,14 @@ public sealed class OutboundCallPolicyTests
             string columnExpression = ColumnExpressionService.Descriptor.FullName;
 
             Add(columnExpression, "OpenExpressionSession", replaySafe: false);
-            Add(columnExpression, "CloseExpressionSession", replaySafe: true);
+            Add(columnExpression, "CloseExpressionSession", replaySafe: false);
+
+            // A `LoadRows` ROW USED TO SIT HERE AND IS DELIBERATELY NOT REINSTATED. The exhaustiveness
+            // guard below found the table missing it while the schema declared it, so it was added; the
+            // schema has since withdrawn the method, and the same guard is what would fail on a row for a
+            // method no descriptor declares. The pairing is the point: this table is checked against the
+            // descriptor in both directions, so neither a new method nor a withdrawn one can leave it
+            // silently wrong.
             Add(columnExpression, "AddExpression", replaySafe: false);
             Add(columnExpression, "SetExpression", replaySafe: false);
             Add(columnExpression, "GetExpression", replaySafe: true);
@@ -191,7 +235,7 @@ public sealed class OutboundCallPolicyTests
             return data;
 
             void Add(string contract, string method, bool replaySafe) =>
-                data.Add(string.Concat("/", contract, "/", method), replaySafe);
+                data.Add((string.Concat("/", contract, "/", method), replaySafe));
         }
     }
 
@@ -427,6 +471,54 @@ public sealed class OutboundCallPolicyTests
     }
 
     /// <summary>
+    /// 🔴 The admission table covers EVERY method of every contract it classifies - no method is
+    /// unclassified and none is classified twice.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE TABLE CLAIMED THE WHOLE SURFACE AND NOTHING CHECKED THE CLAIM.</b> An operation nobody
+    /// classifies inherits "attempted exactly once", which is the safe default and a silent one: a method
+    /// added to the C-03 and C-04 contract set was neither admitted by the policy nor refused by it on the
+    /// record, so a deliberate exclusion and a forgotten one looked identical. That is precisely the
+    /// distinction the table was written to make, so the claim is now enforced against the descriptors.
+    /// </para>
+    /// <para>
+    /// STREAMING METHODS ARE INCLUDED IN THE COMPARISON. They can never be replay-safe - the policy's own
+    /// builder refuses to classify one - but they must still APPEAR here as excluded, because a reader
+    /// checking whether an operation is retried should find every operation.
+    /// </para>
+    /// <para>
+    /// SET EQUALITY IN BOTH DIRECTIONS, so a table row naming a method the contract no longer declares fails
+    /// as loudly as a method the table forgot. The duplicate check is separate because set equality would
+    /// hide a path listed twice with two different verdicts.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheAdmissionTableCoversEveryMethodOfEveryContractItClassifies()
+    {
+        ContractDescriptor[] contracts =
+            [
+                DataWindowService.Descriptor,
+                ColumnExpressionService.Descriptor,
+            ];
+
+        string[] declared =
+        [
+            .. contracts
+                .SelectMany(contract => contract.Methods.Select(
+                    method => string.Concat("/", contract.FullName, "/", method.Name)))
+                .Order(StringComparer.Ordinal),
+        ];
+
+        string[] classified = [.. AdmittedOperations.Select(row => row.Path).Order(StringComparer.Ordinal)];
+
+        Assert.Equal(declared, classified);
+
+        // NO PATH TWICE, which set equality above would not catch.
+        Assert.Equal(classified.Length, classified.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    /// <summary>
     /// A URI the predicate cannot classify is refused rather than allowed to throw.
     /// </summary>
     /// <remarks>
@@ -474,8 +566,9 @@ public sealed class OutboundCallPolicyTests
     /// </remarks>
     [Fact]
     public void The_classification_table_resolves_against_the_shipped_contracts() =>
-        // 11 gRPC operations across the two contracts plus 13 Security crypto paths.
-        Assert.Equal(24, OutboundCallPolicy.Verify());
+        // 9 gRPC operations across the two contracts - five C-03 reads and four C-04 reads - plus 13
+        // Security crypto paths. It was 11 while the two session closes were admitted.
+        Assert.Equal(22, OutboundCallPolicy.Verify());
 
     // ==============================================================================================
     //  2. THE DEADLINE
@@ -887,15 +980,15 @@ public sealed class OutboundCallPolicyTests
             named.OrderBy(name => name, StringComparer.Ordinal));
 
         // AND THE EXCLUSIONS ARE NAMED, because "equal to whatever the predicate says" would still pass if
-        // both layers admitted an update. These four are the ones a replay actually damages: two apply
-        // rows or append them, one opens a session that must be closed, and one is a streamed read that
-        // cannot be replayed at all.
+        // both layers admitted an update. These four are the ones a replay actually damages: one applies
+        // rows, one opens a session that must be closed, one appends a binding to a column so a replay
+        // registers it twice, and one is a streamed read that cannot be replayed at all.
         foreach (string excluded in (string[])
             [
                 $"{DataWindowService.Descriptor.FullName}/Update",
                 $"{DataWindowService.Descriptor.FullName}/Retrieve",
                 $"{DataWindowService.Descriptor.FullName}/OpenValidationSession",
-                $"{ColumnExpressionService.Descriptor.FullName}/LoadRows",
+                $"{ColumnExpressionService.Descriptor.FullName}/AddExpression",
             ])
         {
             Assert.DoesNotContain(excluded, named);
@@ -1035,6 +1128,123 @@ public sealed class OutboundCallPolicyTests
                 Assert.Equal(configured.RetryBaseDelay, policy.InitialBackoff);
             }
         }
+    }
+
+    /// <summary>
+    /// A configured retry count of zero starts the host, installs NO gRPC retry configuration, and leaves
+    /// every HTTP-layer pipeline unable to retry anything.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE DISABLE USED TO BE UNDEPLOYABLE, WHICH IS WHY THE FIRST ASSERTION IS THAT THE HOST
+    /// STARTS AT ALL.</b> Zero was documented as disabling retries and validated only against being
+    /// negative, while both retry layers consumed it unconditionally. The resilience package declares its
+    /// retry strategy's count in the range one to <see cref="int.MaxValue"/>, so resolving a client threw
+    /// "The field &lt;client&gt;-standard.Retry.MaxRetryAttempts must be between 1 and 2147483647" for all
+    /// three named pipelines at once - and the gRPC layer's <c>MaxAttempts = retries + 1</c> became one,
+    /// which its own retry policy rejects. Creating the client here is the whole of that first claim: on
+    /// the old build this line was the failure.
+    /// </para>
+    /// <para>
+    /// <b>AND "DISABLED" IS ASSERTED AS AN ABSENCE AT ONE LAYER AND A PREDICATE AT THE OTHER</b>, because
+    /// that is what the two layers permit. The gRPC layer can simply not be configured, so the channel
+    /// carries NO service configuration and NO ceiling - the absence of a policy rather than a policy that
+    /// does nothing. The HTTP layer cannot express a zero count, so it names the smallest legal one and its
+    /// predicate refuses everything; asserting the predicate rather than the number is what distinguishes
+    /// a real disable from a single surviving retry.
+    /// </para>
+    /// </remarks>
+    /// <returns>A task representing the assertions.</returns>
+    [Fact]
+    public async Task A_zero_retry_count_disables_retrying_at_both_layers()
+    {
+        using GatewayTestHostFixture fixture = new();
+
+        fixture.AdditionalSettings[$"{GatewayOptions.SectionName}:Outbound:MaxRetryAttempts"] = "0";
+
+        // THE HOST STARTS. On the build this row was written against, resolving a client threw here.
+        using HttpClient started = fixture.CreateAnonymousClient();
+
+        GatewayOptions.OutboundCallOptions configured = fixture.Services
+            .GetRequiredService<IOptions<GatewayOptions>>()
+            .Value
+            .Outbound;
+
+        Assert.Equal(0, configured.MaxRetryAttempts);
+        Assert.False(configured.RetriesEnabled);
+
+        IOptionsMonitor<GrpcClientFactoryOptions> grpcOptions =
+            fixture.Services.GetRequiredService<IOptionsMonitor<GrpcClientFactoryOptions>>();
+
+        foreach (string clientName in (string[])
+            ["DataWindowServiceClient", "ColumnExpressionServiceClient"])
+        {
+            GrpcChannelOptions channelOptions = new();
+
+            foreach (Action<GrpcChannelOptions> configure in
+                grpcOptions.Get(clientName).ChannelOptionsActions)
+            {
+                configure(channelOptions);
+            }
+
+            // NO RETRY POLICY AT ALL - not a policy configured to attempt once.
+            Assert.Null(channelOptions.ServiceConfig);
+
+            // AND THE CEILING IS LEFT EXACTLY WHERE AN UNCONFIGURED CHANNEL HAS IT, which is asserted
+            // against a fresh instance rather than against `null`: GrpcChannelOptions ships a non-null
+            // default for this member, so `null` would be a claim about the library rather than about this
+            // composition root. With no service configuration there is no retry policy for a ceiling to
+            // bound, so leaving it alone is the correct non-action.
+            Assert.Equal(new GrpcChannelOptions().MaxRetryAttempts, channelOptions.MaxRetryAttempts);
+        }
+
+        IOptionsMonitor<HttpStandardResilienceOptions> resilienceOptions =
+            fixture.Services.GetRequiredService<IOptionsMonitor<HttpStandardResilienceOptions>>();
+
+        foreach (string clientName in (string[])
+            ["DataWindowServiceClient", "ColumnExpressionServiceClient", SecurityClient.HttpClientName])
+        {
+            HttpStandardResilienceOptions installed = resilienceOptions.Get($"{clientName}-standard");
+
+            // A LEGAL COUNT, BECAUSE THE PACKAGE'S RANGE FORBIDS ZERO - and the predicate is what disables.
+            Assert.Equal(
+                GatewayOptions.OutboundCallOptions.DisabledRetryPlaceholderAttempts,
+                installed.Retry.MaxRetryAttempts);
+
+            // A GET is the method that IS retried when retrying is enabled, so refusing it proves the
+            // disable is not merely the method-scoped restriction the other rows in this file cover.
+            Assert.False(await WouldRetryAsync(installed, HttpMethod.Get, StatusCode.Unavailable));
+            Assert.False(await WouldRetryAsync(installed, HttpMethod.Post, StatusCode.Unavailable));
+        }
+    }
+
+    /// <summary>
+    /// Asks one installed pipeline's retry predicate whether it would replay an attempt.
+    /// </summary>
+    /// <param name="installed">The pipeline options the composition root produced.</param>
+    /// <param name="method">The request method to present.</param>
+    /// <param name="status">The gRPC status to present in trailers.</param>
+    /// <returns>What the predicate answered.</returns>
+    /// <remarks>
+    /// THE REQUEST IS PRESENTED THE WAY THE PIPELINE PRESENTS IT - on the resilience context - because
+    /// the predicate classifies by request path and would otherwise see nothing to classify. A safe path
+    /// is used so that a false answer can only come from the disable and not from the path roster.
+    /// </remarks>
+    private static async ValueTask<bool> WouldRetryAsync(
+        HttpStandardResilienceOptions installed,
+        HttpMethod method,
+        StatusCode status)
+    {
+        ResilienceContext context =
+            ResilienceContextPool.Shared.Get(TestContext.Current.CancellationToken);
+
+        context.SetRequestMessage(new HttpRequestMessage(method, new Uri("https://upstream" + SafePath)));
+
+        return await installed.Retry.ShouldHandle(
+            new RetryPredicateArguments<HttpResponseMessage>(
+                context,
+                Outcome.FromResult(TrailersOnly(status)),
+                0));
     }
 
     /// <summary>

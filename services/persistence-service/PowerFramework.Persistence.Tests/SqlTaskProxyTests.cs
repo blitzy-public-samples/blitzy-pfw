@@ -76,10 +76,12 @@
 //         opposite orderings of the two clears [:L64 versus :L164], and the notify-code collision at
 //         the value 1 across two per-class namespaces [sqlquery:L28 versus sqlupdate:L32]. A case
 //         here fails if any of them is "fixed".
-//    C-D  Nothing for any deferred service, and no PowerFramework.Shared.Eventful dependency. That
-//         library exists for DataServices, not here, which is why the notification surface under
-//         test is LOCAL .NET delegates rather than the framework broker. Asserted as a documented
-//         negative rather than assumed.
+//    C-D  Nothing for any deferred service. PowerFramework.Shared.Eventful is NOT a deferred-service
+//         library: AAP 0.4.1 assigns the whole of ws_objects/pfw.thread.pbl.src to Persistence in
+//         scope, one of its six objects is n_cst_threading_eventful.sru, and that object derives from
+//         n_cst_eventful - so the shared broker is in-scope infrastructure this service consumes, and
+//         the notification surface under test is a delegate-shaped ADAPTER over it. The edge and the
+//         derivation are both asserted rather than assumed.
 //    C-E  No fabricated database. No case here opens a connection, names a SQL Server or Oracle
 //         target, or provisions a schema. The worker, the pool activator and the result carrier are
 //         all doubles, and the two that must never be reached say so by throwing.
@@ -117,6 +119,7 @@ using PowerFramework.Persistence.Tasks;
 using PowerFramework.Persistence.Tasks.TaskProxies;
 using PowerFramework.Persistence.Transactions;
 using PowerFramework.Shared.Diagnostics;
+using PowerFramework.Shared.Eventful;
 
 namespace PowerFramework.Persistence.Tests;
 
@@ -1347,53 +1350,92 @@ public sealed class SqlTaskProxyTests
     }
 
     // ==============================================================================================
-    //  REGION 4b - THE NOTIFICATION AND LIFECYCLE SURFACE IS LOCAL DELEGATES, NOT AN EVENT BROKER
+    //  REGION 4b - THE NOTIFICATION SURFACE IS THE SHARED BROKER, SPECIALIZED AND ADAPTED
     //  --------------------------------------------------------------------------------------------
-    //  C-D. The legacy notification surface is the framework's own event broker, n_cst_eventful, and
-    //  the refactor plan assigns that object to a SHARED library which DataServices consumes and
-    //  Persistence does not [AAP 0.4.1, pfw.utility.invoker]. Persistence therefore reproduces the
-    //  broker's OBSERVABLE behaviour - named channels, a catch-all channel, a tri-valued veto,
-    //  captured rather than propagated subscriber faults - with plain .NET delegates declared in this
-    //  service. The negative is asserted rather than assumed, because "we did not add that reference"
-    //  is exactly the kind of claim that quietly stops being true.
+    //  AAP 0.4.1. The legacy notification surface is the framework's own event broker, n_cst_eventful,
+    //  ported to shared/PowerFramework.Shared.Eventful - and the AAP cites this service's own
+    //  n_cst_threading_eventful deriving from it as one of the two structural facts proving the base
+    //  belongs in a shared in-scope library. ws_objects/pfw.thread.pbl.src holds exactly six objects
+    //  and ALL SIX are assigned to Persistence, that derived broker among them, so this service owns
+    //  the threading specialization and consumes the shared base. The cases below assert the edge, the
+    //  derivation, and the broker-backed behaviour the delegate surface adapts: named channels, a
+    //  catch-all channel that can suppress them, a tri-valued veto that is never flattened, subscriber
+    //  ordering, the injected source argument, the established zero default return value, and the
+    //  cancel-then-absorb-or-propagate fault posture the threading override actually implements.
     // ==============================================================================================
 
     /// <summary>
-    /// The notification surface is local .NET delegates declared in this service, and no type from the
-    /// shared event-broker library is referenced anywhere in it.
+    /// The notification surface dispatches through the shared event broker: the assembly edge exists,
+    /// the threading specialization derives from the shared broker, and the delegate types are local.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// C-D, stated as a DOCUMENTED NEGATIVE. A reference to the broker library would not even compile
-    /// here - this project declares four project edges and that is not one of them - so the assertion
-    /// is a guard against the edge being ADDED rather than against a call being made. The check reads
-    /// the compiled assembly's own reference list, which is the fact rather than a restatement of the
-    /// project file.
+    /// Asserted rather than assumed, in both directions. The POSITIVE half reads the compiled
+    /// assembly's own reference list - the fact, rather than a restatement of the project file - and
+    /// the type hierarchy, which is what makes the specialization a specialization rather than a
+    /// look-alike. Without the derivation the four overridden hooks would be dead code and the
+    /// dispatch would be someone else's.
     /// </para>
     /// <para>
-    /// The positive half matters just as much: the two handler types are ordinary multicast delegates
-    /// declared in the Persistence assembly, so a subscriber is a method rather than an object
-    /// implementing a framework interface, and no dynamic dispatch is involved.
+    /// The delegate half still matters: the two handler types are ordinary multicast delegates
+    /// declared in the Persistence assembly, so a SUBSCRIBER is a plain method and a caller never has
+    /// to implement a framework interface. That is the whole of what the adapter adds, and it is why
+    /// the shared broker's object-plus-member-name subscription model is not exposed here.
+    /// </para>
+    /// <para>
+    /// The C-A negatives are kept: no peer service is referenced, and the veto alphabet is the shared
+    /// enum rather than a local restatement of the same three numerals.
     /// </para>
     /// </remarks>
     [Fact]
-    public void TheNotificationSurfaceIsLocalDelegatesAndNoEventBrokerTypeIsReferenced()
+    public void TheNotificationSurfaceDispatchesThroughTheSharedEventBroker()
     {
         Assembly persistence = typeof(SqlTaskProxyBase).Assembly;
 
-        // POSITIVE: both handler types are local multicast delegates.
+        // POSITIVE: the edge to the shared broker library exists.
+        string[] referenced = [.. persistence.GetReferencedAssemblies().Select(name => name.Name ?? string.Empty)];
+        Assert.Contains("PowerFramework.Shared.Eventful", referenced, StringComparer.Ordinal);
+
+        // POSITIVE: the threading specialization is declared HERE and derives from the SHARED broker.
+        Type? specialization = persistence.GetType(
+            "PowerFramework.Persistence.Tasks.TaskProxies.ThreadingEventBroker",
+            throwOnError: false);
+
+        Assert.NotNull(specialization);
+        Assert.Same(persistence, specialization.Assembly);
+        Assert.True(specialization.IsSubclassOf(typeof(EventBroker)));
+        Assert.Same(typeof(EventBroker), specialization.BaseType);
+        Assert.Same(typeof(EventBroker).Assembly, typeof(VetoResult).Assembly);
+
+        // POSITIVE: all four of the oracle's overridden hooks are genuinely overridden here, not
+        // inherited. A hook declared on the base but not overridden would silently disable the
+        // cancellation pre-veto, the sync-signal bracket or the fault posture.
+        foreach (string hook in (string[])["OnPrepare", "OnTriggering", "OnTriggered", "OnException"])
+        {
+            MethodInfo? method = specialization.GetMethod(
+                hook,
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+
+            Assert.NotNull(method);
+            Assert.True(method.IsVirtual);
+            Assert.NotSame(specialization, method.GetBaseDefinition().DeclaringType);
+        }
+
+        // The delegate half: both handler types are local multicast delegates.
         Assert.Same(persistence, typeof(TaskNotificationHandler).Assembly);
         Assert.Same(persistence, typeof(TaskCommonNotificationHandler).Assembly);
         Assert.True(typeof(TaskNotificationHandler).IsSubclassOf(typeof(MulticastDelegate)));
         Assert.True(typeof(TaskCommonNotificationHandler).IsSubclassOf(typeof(MulticastDelegate)));
 
-        // NEGATIVE: no edge to the shared broker library, and none to any peer service either (C-A).
-        string[] referenced = [.. persistence.GetReferencedAssemblies().Select(name => name.Name ?? string.Empty)];
-
-        Assert.DoesNotContain("PowerFramework.Shared.Eventful", referenced, StringComparer.Ordinal);
+        // NEGATIVE (C-A): no edge to any peer service.
         Assert.DoesNotContain("PowerFramework.Gateway", referenced, StringComparer.Ordinal);
         Assert.DoesNotContain("PowerFramework.DataServices", referenced, StringComparer.Ordinal);
         Assert.DoesNotContain("PowerFramework.Security", referenced, StringComparer.Ordinal);
+
+        // NEGATIVE (no duplicated alphabet): the veto codes are not restated in this service.
+        Assert.Null(persistence.GetType(
+            "PowerFramework.Persistence.Tasks.TaskProxies.TaskVeto",
+            throwOnError: false));
     }
 
     /// <summary>
@@ -1500,17 +1542,36 @@ public sealed class SqlTaskProxyTests
     }
 
     /// <summary>
-    /// A subscriber's fault is CAPTURED rather than propagated, and the remaining subscribers still
-    /// run.
+    /// A subscriber's fault CANCELS THE TASK, stops the dispatch, and is absorbed only while the task
+    /// is free - otherwise it propagates.
     /// </summary>
     /// <remarks>
-    /// The broker's posture, not leniency of the port's [<c>n_cst_eventful.sru:L871-L872</c>]. A third
-    /// party's fault must not abort a database notification, so the fault is recorded and dispatch
-    /// continues. It is recorded rather than swallowed precisely so it can be logged - the base logs
-    /// every newly captured fault at the end of each dispatch.
+    /// <para>
+    /// C-B, and the arm a reader is most likely to guess wrongly. The threading broker's
+    /// <c>onexception</c> raises the cancellation signal and the exception signal UNCONDITIONALLY
+    /// [<c>ws_objects/pfw.thread.pbl.src/n_cst_threading_eventful.sru:L79-L80</c>], and only then does
+    /// one test decide the dispatch's fate [<c>:L82-L87</c>]. When the synchronization signal is set -
+    /// which by the polarity at <c>n_cst_threading_task.sru:L306</c> means the task is currently FREE,
+    /// the state the notify publication path establishes around itself at <c>:L291</c> - the oracle
+    /// shows a modal dialog and answers <c>1</c>, which makes the base LEAVE the dispatch loop without
+    /// rethrowing [<c>ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L890-L891</c>]. When it
+    /// is clear the hook answers <c>0</c> and the base rethrows [<c>:L902</c>].
+    /// </para>
+    /// <para>
+    /// <b>So "the remaining subscribers still run" is NOT this broker's behaviour, and asserting it
+    /// would be asserting a defect.</b> The base offers a continue-with-the-next-subscriber answer
+    /// [<c>:L892-L894</c>] and the threading specialization never returns it. Both arms are asserted
+    /// here, because an implementation that absorbed everything and an implementation that propagated
+    /// everything would each pass a test covering only one.
+    /// </para>
+    /// <para>
+    /// The dialog becomes a recorded fault (AAP 0.3.4), which is what the base logs at the end of each
+    /// dispatch. A PROPAGATED fault is deliberately not recorded there: the exception itself is the
+    /// diagnostic, and recording it as well would double-report it.
+    /// </para>
     /// </remarks>
     [Fact]
-    public void ASubscriberFaultIsCapturedRatherThanPropagatedAndDispatchContinues()
+    public void ASubscriberFaultCancelsTheTaskAndIsAbsorbedOnlyWhileTheTaskIsFree()
     {
         using Harness harness = new();
 
@@ -1527,12 +1588,47 @@ public sealed class SqlTaskProxyTests
                 return 4L;
             });
 
-        // No exception reaches here, and the second subscriber's answer is the dispatch's answer.
-        Assert.Equal(4L, harness.Proxy.Send(Enums.TNR_NOTIFY, 1L, 2L, Sentinel));
-        Assert.Equal(1, survivorCalls);
+        // ABSORBED: the publication path raises the sync signal around the fan-out, so the task reads
+        // as free and the hook prevents instead of rethrowing.
+        Assert.Equal(0, harness.Host.CancelCalls);
+        Assert.Equal(0L, harness.Proxy.Notify(1L, 2L, Sentinel));
 
-        Exception captured = Assert.Single(harness.Proxy.Channels.CapturedExceptions);
-        _ = Assert.IsType<InvalidTimeZoneException>(captured);
+        // The dispatch STOPPED at the fault - the later subscriber did not run - and the answer is the
+        // established default rather than the survivor's value, because no subscriber produced one.
+        Assert.Equal(0, survivorCalls);
+
+        // The fault cancelled the task, through BOTH signals the oracle raises.
+        Assert.Equal(2, harness.Host.CancelCalls);
+        Assert.True(harness.Host.IsCancelled);
+
+        Exception absorbed = Assert.Single(harness.Proxy.Channels.CapturedExceptions);
+        _ = Assert.IsType<InvalidTimeZoneException>(absorbed);
+        Assert.Equal(Sentinel, absorbed.Message);
+
+        // PROPAGATED: dispatched with the sync signal clear - which is what SendNotify does when it is
+        // reached outside the publication path - the same fault leaves the dispatch.
+        using Harness propagating = new();
+
+        _ = propagating.Proxy.Channels.On(
+            TaskEventName.Notify,
+            (source, wparam, lparam, text) => throw new InvalidTimeZoneException(Sentinel));
+
+        Assert.False(propagating.Host.IsSyncSignalSet);
+
+        InvalidTimeZoneException escaped = Assert.Throws<InvalidTimeZoneException>(
+            () => propagating.Proxy.Send(Enums.TNR_NOTIFY, 1L, 2L, Sentinel));
+
+        Assert.Equal(Sentinel, escaped.Message);
+
+        // Cancelled all the same, and NOT recorded - the exception is its own diagnostic.
+        Assert.True(propagating.Host.IsCancelled);
+        Assert.Empty(propagating.Proxy.Channels.CapturedExceptions);
+
+        // The base decorated it on the way out, which is how a caller learns which subscription faulted
+        // without the broker having to log anything itself [n_cst_eventful.sru:L883-L886].
+        string? decorated = EventBroker.GetDispatchExceptionText(escaped);
+        Assert.NotNull(decorated);
+        Assert.Contains(TaskEventName.Notify, decorated, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -1558,15 +1654,23 @@ public sealed class SqlTaskProxyTests
     {
         using Harness harness = new();
 
-        Assert.Equal(0L, TaskVeto.Continue);
-        Assert.Equal(1L, TaskVeto.PreventOnce);
-        Assert.Equal(2L, TaskVeto.PreventDeep);
+        // The alphabet lives in the SHARED broker library and is not restated in this service, so the
+        // three numerals are asserted against that enum. A local copy is what would drift.
+        Assert.Equal(0L, (long)VetoResult.Continue);
+        Assert.Equal(1L, (long)VetoResult.PreventOnce);
+        Assert.Equal(2L, (long)VetoResult.PreventDeep);
+        Assert.Equal(3, Enum.GetValues<VetoResult>().Length);
 
+        int vetoingSubscriberCalls = 0;
         int laterSubscriberCalls = 0;
 
         _ = harness.Proxy.Channels.On(
             TaskEventName.Notify,
-            (source, wparam, lparam, text) => harness.Proxy.PreventEvent());
+            (source, wparam, lparam, text) =>
+            {
+                vetoingSubscriberCalls++;
+                return harness.Proxy.PreventEvent();
+            });
         _ = harness.Proxy.Channels.On(
             TaskEventName.Notify,
             (source, wparam, lparam, text) =>
@@ -1577,23 +1681,78 @@ public sealed class SqlTaskProxyTests
 
         _ = harness.Proxy.Send(Enums.TNR_NOTIFY, 1L, 2L, Sentinel);
 
-        // The later subscriber was stopped by the veto, and the veto was then CONSUMED.
+        // The later subscriber was stopped by the veto raised ahead of it.
+        Assert.Equal(1, vetoingSubscriberCalls);
         Assert.Equal(0, laterSubscriberCalls);
-        Assert.Equal(TaskVeto.Continue, harness.Proxy.Channels.PendingVeto);
 
-        // So the very next dispatch is not suppressed - which is what "consumed" means.
+        // CONSUMED, asserted behaviourally rather than by peeking at the broker's state - which is
+        // private in the oracle [n_cst_eventful.sru:L86 under the private label at :L70] and therefore
+        // private in the port. The proof that nothing leaked is that the NEXT dispatch runs at all: a
+        // veto surviving its own dispatch would have suppressed the first subscriber too.
         _ = harness.Proxy.Send(Enums.TNR_NOTIFY, 1L, 2L, Sentinel);
+        Assert.Equal(2, vetoingSubscriberCalls);
         Assert.Equal(0, laterSubscriberCalls);
+
+        // A DEEP veto is a different outcome, and this is where flattening the alphabet would show.
+        // It stops the enclosing dispatch too, so the outer channel's later subscriber never runs.
+        using Harness deep = new();
+
+        int outerLaterCalls = 0;
+        int innerLaterCalls = 0;
+
+        _ = deep.Proxy.Channels.On(
+            TaskEventName.Start,
+            (source, wparam, lparam, text) =>
+            {
+                // A NESTED dispatch, from inside a handler, whose own subscriber vetoes DEEPLY.
+                _ = deep.Proxy.Channels.Trigger(TaskEventName.Notify, 0L, 0L, string.Empty);
+                return null;
+            });
+        _ = deep.Proxy.Channels.On(
+            TaskEventName.Start,
+            (source, wparam, lparam, text) =>
+            {
+                outerLaterCalls++;
+                return null;
+            });
+        _ = deep.Proxy.Channels.On(
+            TaskEventName.Notify,
+            (source, wparam, lparam, text) => deep.Proxy.PreventEvent(deep: true));
+        _ = deep.Proxy.Channels.On(
+            TaskEventName.Notify,
+            (source, wparam, lparam, text) =>
+            {
+                innerLaterCalls++;
+                return null;
+            });
+
+        _ = deep.Proxy.Send(Enums.TNR_START, 0L, 0L, string.Empty);
+
+        Assert.Equal(0, innerLaterCalls);
+        Assert.Equal(0, outerLaterCalls);
+
+        // And it is cleared once the OUTERMOST dispatch closes [:L956-L957], so the next one runs.
+        _ = deep.Proxy.Send(Enums.TNR_START, 0L, 0L, string.Empty);
+        Assert.Equal(0, innerLaterCalls);
+        Assert.Equal(0, outerLaterCalls);
+
+        // Proved by removing the deep veto: the same table then reaches both later subscribers, which
+        // is what shows the two zeroes above were the veto and not a wiring mistake.
+        _ = deep.Proxy.Channels.Off(TaskEventName.Notify);
+        _ = deep.Proxy.Send(Enums.TNR_START, 0L, 0L, string.Empty);
+        Assert.Equal(1, outerLaterCalls);
     }
 
     /// <summary>
-    /// Both prevent members are refused outside a dispatch, because the depth is zero there.
+    /// Both prevent members are refused outside a dispatch, and the refusal leaves nothing behind.
     /// </summary>
     /// <remarks>
-    /// <c>if Depth &lt;= 0 then return RetCode.FAILED</c> [<c>n_cst_eventful.sru:L1293</c>]. A veto
+    /// <c>if _nDeep &lt;= 0 then return RetCode.FAILED</c> [<c>n_cst_eventful.sru:L1293</c>]. A veto
     /// outside a dispatch has nothing to veto, and answering a failure rather than recording a pending
     /// veto is what stops it leaking into the NEXT dispatch and suppressing a subscriber that should
-    /// have run.
+    /// have run. The refusal is the observable; "nothing was recorded" is asserted by dispatching
+    /// afterwards and seeing the subscriber run, because the broker's veto state is private in the
+    /// oracle and therefore private in the port.
     /// </remarks>
     [Fact]
     public void BothPreventMembersAreRefusedOutsideADispatch()
@@ -1605,19 +1764,45 @@ public sealed class SqlTaskProxyTests
         Assert.Equal(RetCode.FAILED, harness.Proxy.PreventEvent());
         Assert.Equal(RetCode.FAILED, harness.Proxy.PreventEvent(deep: true));
 
-        Assert.Equal(TaskVeto.Continue, harness.Proxy.Channels.PendingVeto);
+        int subscriberCalls = 0;
+        _ = harness.Proxy.Channels.On(
+            TaskEventName.Notify,
+            (source, wparam, lparam, text) =>
+            {
+                subscriberCalls++;
+                return null;
+            });
+
+        _ = harness.Proxy.Send(Enums.TNR_NOTIFY, 1L, 2L, Sentinel);
+
+        Assert.Equal(1, subscriberCalls);
+        Assert.Equal(0, harness.Proxy.Channels.Depth);
     }
 
     /// <summary>
-    /// The subscription members answer the legacy codes, and the two removal arities differ.
+    /// The subscription members answer the legacy codes, and a removal answers OK whether or not it
+    /// matched anything.
     /// </summary>
     /// <remarks>
-    /// A refused argument answers the invalid-argument code; a removal that matched answers OK and one
-    /// that did not answers the plain failure. The one-argument removal drops a whole channel while the
-    /// two-argument form drops a single handler, which is why both exist.
+    /// <para>
+    /// A refused argument answers the invalid-argument code. <b>A REMOVAL ANSWERS OK UNCONDITIONALLY,
+    /// INCLUDING WHEN IT MATCHED NOTHING</b> - the oracle's modify engine ends
+    /// <c>return RetCode.OK</c> with no matched-count test anywhere above it
+    /// [<c>n_cst_eventful.sru:L1089</c>], and its only non-OK exit is the malformed-filter screen for a
+    /// <c>^</c>-prefixed empty name [<c>:L1020-L1022</c>]. Answering a failure for "nothing matched"
+    /// would be an invented result, and it is the result this service used to give: the local broker
+    /// re-implementation returned FAILED there, which is one of the four measured drifts that adopting
+    /// the shared broker removes.
+    /// </para>
+    /// <para>
+    /// The two arities still differ in EFFECT, which is why both exist and why both are exercised: the
+    /// two-argument form drops a single handler and leaves the channel present but empty, and the
+    /// one-argument form drops the channel. They no longer differ in return code, because the oracle
+    /// never did.
+    /// </para>
     /// </remarks>
     [Fact]
-    public void TheSubscriptionMembersAnswerTheLegacyCodesAndTheTwoRemovalAritiesDiffer()
+    public void TheSubscriptionMembersAnswerTheLegacyCodesAndARemovalAlwaysAnswersOk()
     {
         using Harness harness = new();
 
@@ -1634,9 +1819,12 @@ public sealed class SqlTaskProxyTests
         Assert.Equal(RetCode.E_INVALID_ARGUMENT, harness.Proxy.Channels.Off(null, first));
         Assert.Equal(RetCode.E_INVALID_ARGUMENT, harness.Proxy.Channels.Off(null));
 
-        // A removal that matched nothing is a plain failure, not an invalid argument.
-        Assert.Equal(RetCode.FAILED, harness.Proxy.Channels.Off(TaskEventName.Notify, first));
-        Assert.Equal(RetCode.FAILED, harness.Proxy.Channels.Off(TaskEventName.Notify));
+        // A removal that matched NOTHING still answers OK - _of_modify has no matched-count test.
+        Assert.Equal(RetCode.OK, harness.Proxy.Channels.Off(TaskEventName.Notify, first));
+        Assert.Equal(RetCode.OK, harness.Proxy.Channels.Off(TaskEventName.Notify));
+
+        // And it changed nothing, which is the half a return code cannot state.
+        Assert.False(harness.Proxy.Channels.IsSubscribed(TaskEventName.Notify));
 
         // Two handlers on one channel: the two-argument removal takes one, the one-argument form takes
         // the channel.
@@ -1666,67 +1854,105 @@ public sealed class SqlTaskProxyTests
     }
 
     /// <summary>
-    /// A dispatch over a channel that survived its last handler's removal answers NULL rather than
-    /// zero.
+    /// A dispatch that produced no value answers the broker's ESTABLISHED DEFAULT of zero, not null.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// NULL AND ZERO ARE DIFFERENT ANSWERS, and the distinction is load bearing rather than stylistic.
-    /// Null means "nothing ran"; zero means "something ran and answered zero". The catch-all
-    /// suppression gate tests for zero OR null [<c>n_cst_threading_task.sru:L335</c>] and the
-    /// per-reason overwrite tests for NOT null [<c>:L357-L359</c>], so collapsing null into zero would
-    /// let an unsubscribed channel overwrite a catch-all subscriber's answer.
+    /// <b>The threading broker's constructor establishes that default</b> -
+    /// <c>of_SetDefaultReturnValue(0)</c>
+    /// [<c>ws_objects/pfw.thread.pbl.src/n_cst_threading_eventful.sru:L76</c>], with a null alternative
+    /// deliberately left commented out two lines above it - and the base substitutes it for any
+    /// non-posted dispatch whose last invocation produced nothing
+    /// [<c>ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L966-L970</c>]. So an unsubscribed
+    /// channel, a channel whose subscribers all declined, and an empty channel name all answer
+    /// <c>0</c>.
     /// </para>
     /// <para>
-    /// Two routes reach that answer and both are asserted: a channel that is PRESENT BUT EMPTY, which
-    /// is what the two-argument removal leaves behind when it takes a channel's last handler, and a
-    /// name that was never registered at all.
+    /// <b>Where null still matters, and it is one line further out.</b> The notification path's own
+    /// <c>nVal</c> local starts null [<c>n_cst_threading_task.sru:L336</c>] and stays null when no
+    /// reason arm runs at all, which is why the overwrite test is <c>Not IsNull(nVal)</c>
+    /// [<c>:L357-L359</c>]. "No arm ran" and "a dispatch answered nothing" are genuinely different
+    /// facts, and only the first is null - which is exactly why the surface's return type is nullable
+    /// while the dispatch itself never produces one.
+    /// </para>
+    /// <para>
+    /// Three routes to the default are asserted: a channel that is PRESENT BUT EMPTY, which is what the
+    /// two-argument removal leaves behind when it takes a channel's last handler; a name that was never
+    /// registered; and the empty name, which the base answers without dispatching at all
+    /// [<c>n_cst_eventful.sru:L793</c>].
     /// </para>
     /// </remarks>
     [Fact]
-    public void ADispatchOverAnEmptyOrUnknownChannelAnswersNullRatherThanZero()
+    public void ADispatchThatProducedNoValueAnswersTheEstablishedDefaultOfZero()
     {
         using Harness harness = new();
 
         TaskNotificationHandler only = (source, wparam, lparam, text) => 9L;
 
         Assert.Equal(RetCode.OK, harness.Proxy.Channels.On(TaskEventName.Notify, only));
+
+        // The subscriber's own answer, so the default below is distinguishable from "nothing changed".
+        Assert.Equal(9L, harness.Proxy.Channels.Trigger(TaskEventName.Notify, 1L, 2L, Sentinel));
+
         Assert.Equal(RetCode.OK, harness.Proxy.Channels.Off(TaskEventName.Notify, only));
 
-        // PRESENT BUT EMPTY: only the handler was removed, so the channel itself survives.
+        // PRESENT BUT EMPTY: only the handler was removed, so the channel key itself survives - which
+        // Off(name) still answering OK below proves - yet nothing is subscribed to dispatch to.
         Assert.False(harness.Proxy.Channels.IsSubscribed(TaskEventName.Notify));
-        Assert.Null(harness.Proxy.Channels.Trigger(harness.Proxy, TaskEventName.Notify, 1L, 2L, Sentinel));
+        Assert.Equal(0L, harness.Proxy.Channels.Trigger(TaskEventName.Notify, 1L, 2L, Sentinel));
+        Assert.Equal(RetCode.OK, harness.Proxy.Channels.Off(TaskEventName.Notify));
 
-        // NEVER REGISTERED: the same answer by a different route.
-        Assert.Null(harness.Proxy.Channels.Trigger(harness.Proxy, "never-registered", 1L, 2L, Sentinel));
-        Assert.Null(harness.Proxy.Channels.Trigger(harness.Proxy, null, 1L, 2L, Sentinel));
+        // NEVER REGISTERED, and the EMPTY NAME: the same answer by two further routes.
+        Assert.Equal(0L, harness.Proxy.Channels.Trigger("never-registered", 1L, 2L, Sentinel));
+        Assert.Equal(0L, harness.Proxy.Channels.Trigger(null, 1L, 2L, Sentinel));
+        Assert.Equal(0L, harness.Proxy.Channels.Trigger(string.Empty, 1L, 2L, Sentinel));
+
+        // A SUBSCRIBER THAT DECLINED reaches the same default, which is the substitution rather than
+        // the "nothing ran" path - and is why the two cannot be told apart from the answer alone.
+        _ = harness.Proxy.Channels.On(TaskEventName.Notify, (source, wparam, lparam, text) => null);
+        Assert.Equal(0L, harness.Proxy.Channels.Trigger(TaskEventName.Notify, 1L, 2L, Sentinel));
+
+        // And a subscriber that DID answer is carried through unchanged.
+        _ = harness.Proxy.Channels.On(TaskEventName.Notify, (source, wparam, lparam, text) => 9L);
+        Assert.Equal(9L, harness.Proxy.Channels.Trigger(TaskEventName.Notify, 1L, 2L, Sentinel));
     }
 
     /// <summary>
-    /// The cancellation pre-veto fires BEFORE any subscriber runs, and silence suppresses it.
+    /// A dispatch opening on an already-cancelled task runs no subscriber and answers the established
+    /// default, and silence suppresses the screen entirely.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// When a dispatch opens on a cancelled task the broker records a veto and answers the shallow one
-    /// BEFORE any subscriber runs [<c>n_cst_threading_eventful.sru:L48-L53</c>]. SILENCE SUPPRESSES IT,
-    /// and that is the reason the notification path forces silence for its whole body
-    /// [<c>n_cst_threading_task.sru:L328-L329</c>]: the reason-level cancellation screens live there
-    /// instead, one per reason [<c>:L339</c>, <c>:L349</c>, <c>:L353</c>], and running both would veto
-    /// the stop notification that a cancellation is precisely what needs to publish.
+    /// <b>TWO CANCELLATION SCREENS EXIST AND THIS CASE EXERCISES THE FIRST ONE.</b> The broker's
+    /// <c>ontriggering</c> hook fires ONCE, on the first matching subscriber, and answers prevented
+    /// when the task is already cancelled [<c>n_cst_threading_eventful.sru:L60-L66</c>]; the base then
+    /// leaves the dispatch loop [<c>n_cst_eventful.sru:L840-L842</c>] without any subscriber having
+    /// run. Its sibling <c>onprepare</c> fires per subscriber and screens a cancellation that arrives
+    /// MID-dispatch [<c>:L48-L53</c>] - a different case, asserted by
+    /// <see cref="ACancellationArrivingMidDispatchStopsTheLaterSubscribers"/>.
     /// </para>
     /// <para>
-    /// Reachable only by dispatching DIRECTLY on the local delegate surface, because the proxy's own
-    /// publication path always silences first. That is why the dispatcher is a type in its own right
+    /// Reachable only by dispatching DIRECTLY on the delegate surface, because the proxy's own
+    /// publication path always silences first. That is why the surface is a type in its own right
     /// rather than a private detail of the proxy: its behaviour is assertable independently of the one
     /// caller that happens to silence it.
     /// </para>
     /// <para>
+    /// <b>The DISPATCH answers zero, not one.</b> The <c>return 1</c> at <c>:L51</c> is the PREPARE
+    /// HOOK's answer - a prevention the base reads with <c>IsPrevented</c> to skip that subscriber
+    /// [<c>ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L609-L610</c>] - and it is not the
+    /// dispatch's return value. The dispatch produced no value, so it answers the established default
+    /// of zero [<c>:L966-L970</c>]. Reading the hook's code as the dispatch's answer is the specific
+    /// confusion this assertion pins down.
+    /// </para>
+    /// <para>
     /// The shallow veto is then CONSUMED by the dispatch that raised it, so the following dispatch is
-    /// not suppressed - asserted, because a leaked veto would silently swallow the next notification.
+    /// not suppressed - asserted behaviourally, because a leaked veto would silently swallow the next
+    /// notification.
     /// </para>
     /// </remarks>
     [Fact]
-    public void TheCancellationPreVetoFiresBeforeAnySubscriberUnlessTheDispatcherIsSilent()
+    public void ADispatchOpeningOnACancelledTaskRunsNothingAndAnswersTheEstablishedDefault()
     {
         using Harness harness = new();
 
@@ -1742,22 +1968,406 @@ public sealed class SqlTaskProxyTests
 
         harness.Host.IsCancelled = true;
 
-        // NOT SILENT: the pre-veto answers the shallow veto and no subscriber runs.
+        // NOT SILENT: the pre-veto fires, no subscriber runs, and the dispatch answers the default.
         Assert.False(harness.Proxy.Channels.Silent);
-        Assert.Equal(
-            TaskVeto.PreventOnce,
-            harness.Proxy.Channels.Trigger(harness.Proxy, TaskEventName.Notify, 1L, 2L, Sentinel));
+        Assert.Equal(0L, harness.Proxy.Channels.Trigger(TaskEventName.Notify, 1L, 2L, Sentinel));
         Assert.Equal(0, subscriberCalls);
 
-        // CONSUMED by its own dispatch, so nothing leaks into the next one.
-        Assert.Equal(TaskVeto.Continue, harness.Proxy.Channels.PendingVeto);
+        // CONSUMED by its own dispatch: the very next one is refused by the pre-veto again rather than
+        // by a leaked veto, which the silent dispatch below proves by running the subscriber.
+        Assert.Equal(0L, harness.Proxy.Channels.Trigger(TaskEventName.Notify, 1L, 2L, Sentinel));
+        Assert.Equal(0, subscriberCalls);
 
-        // SILENT: the pre-veto is suppressed and the subscriber runs even though the task is cancelled.
+        // SILENT: the screen is suppressed and the subscriber runs even though the task is cancelled.
         harness.Proxy.Channels.Silent = true;
         Assert.Equal(
             7L,
-            harness.Proxy.Channels.Trigger(harness.Proxy, TaskEventName.Notify, 1L, 2L, Sentinel));
+            harness.Proxy.Channels.Trigger(TaskEventName.Notify, 1L, 2L, Sentinel));
         Assert.Equal(1, subscriberCalls);
+    }
+
+    /// <summary>
+    /// Subscription order IS dispatch order, and the source every subscriber receives is the proxy the
+    /// broker was initialised with rather than anything a caller passed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Both halves are the shared broker's, and both would be silently lost by a look-alike.</b> A
+    /// topic carrying no ordering symbol and no priority prefix appends at the TAIL of its
+    /// equal-priority run - the whole difference between prepend and append being <c>&lt;=</c> against
+    /// <c>&lt;</c> [<c>ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L417</c> against
+    /// <c>:L419</c>] - so three subscriptions dispatch in the order they were made. And the leading
+    /// argument is INJECTED by the threading specialization's prepare hook from the object it was
+    /// initialised with [<c>ws_objects/pfw.thread.pbl.src/n_cst_threading_eventful.sru:L55-L56</c>,
+    /// initialised at <c>n_cst_threading_task.sru:L197</c> with <c>this</c>], which is why the dispatch
+    /// members take no source parameter at all: a per-dispatch source would be a second authority that
+    /// could disagree with the injected one.
+    /// </para>
+    /// <para>
+    /// The payload lands in the slots AFTER the injected one [<c>n_cst_eventful.sru:L613-L615</c>], so
+    /// the numeric and string arguments are asserted as well - a hook that forgot to report its
+    /// consumed count would shift every one of them by a slot and nothing else would say so.
+    /// </para>
+    /// <para>
+    /// The subscribers here all DECLINE to answer, and that is load bearing rather than incidental. See
+    /// <see cref="TheFirstSubscriberToAnswerOtherThanZeroHandlesTheEventAndSuppressesTheRest"/> for the
+    /// rule that makes it so, and note that a case written with answering subscribers would measure the
+    /// handled latch instead of the order and would pass with the order reversed.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void SubscriptionOrderIsDispatchOrderAndTheSourceArgumentIsInjected()
+    {
+        using Harness harness = new();
+
+        List<string> order = [];
+        List<SqlTaskProxyBase> sources = [];
+        List<(long Wparam, long Lparam, string Text)> payloads = [];
+
+        for (int ordinal = 1; ordinal <= 3; ordinal++)
+        {
+            string label = $"subscriber-{ordinal}";
+
+            _ = harness.Proxy.Channels.On(
+                TaskEventName.Notify,
+                (source, wparam, lparam, text) =>
+                {
+                    order.Add(label);
+                    sources.Add(source);
+                    payloads.Add((wparam, lparam, text));
+                    return null;
+                });
+        }
+
+        // Nothing answered, so the dispatch answers the established default.
+        Assert.Equal(0L, harness.Proxy.Channels.Trigger(TaskEventName.Notify, 11L, 22L, Sentinel));
+
+        Assert.Equal(["subscriber-1", "subscriber-2", "subscriber-3"], order);
+        Assert.All(sources, source => Assert.Same(harness.Proxy, source));
+        Assert.All(payloads, payload => Assert.Equal((11L, 22L, Sentinel), payload));
+
+        // The catch-all channel carries one extra leading argument, and the injection still lands ahead
+        // of it rather than displacing it [n_cst_threading_task.sru:L71-L78].
+        SqlTaskProxyBase? commonSource = null;
+        long observedReason = 0L;
+
+        _ = harness.Proxy.Channels.OnCommon(
+            (source, reason, wparam, lparam, text) =>
+            {
+                commonSource = source;
+                observedReason = reason;
+                return null;
+            });
+
+        _ = harness.Proxy.Channels.TriggerCommon(Enums.TNR_ERROR, 33L, 44L, Sentinel);
+
+        Assert.Same(harness.Proxy, commonSource);
+        Assert.Equal(Enums.TNR_ERROR, observedReason);
+    }
+
+    /// <summary>
+    /// The first subscriber to answer anything other than zero HANDLES the event, and every remaining
+    /// ordinary subscriber on that channel is then skipped.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the dispatch contract that one line in the threading broker's constructor
+    /// establishes, and it is the single most surprising consequence of adopting the shared broker
+    /// faithfully.</b> <c>of_SetDefaultReturnValue(0)</c>
+    /// [<c>ws_objects/pfw.thread.pbl.src/n_cst_threading_eventful.sru:L76</c>] installs a non-null
+    /// established default, which moves the handled test onto its third arm: a value EQUAL to the
+    /// default is not handled, a value different from it is
+    /// [<c>ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L912-L917</c>]. The capture filter
+    /// then stops offering the event to subscriptions whose capture mode no longer matches the
+    /// dispatch's handled state [<c>:L831-L833</c>], and an ordinary subscription - no <c>%</c> and no
+    /// <c>*</c> in its topic - is an unhandled-only one.
+    /// </para>
+    /// <para>
+    /// <b>So on a threading channel, answering is a claim and not just a reply.</b> Three outcomes are
+    /// asserted because they are three different behaviours that a single-case test would conflate: a
+    /// subscriber that DECLINES leaves the event unclaimed and the rest run; a subscriber that answers
+    /// ZERO also leaves it unclaimed, because zero IS the default; and a subscriber that answers
+    /// anything else claims it and the rest are skipped. An implementation that ignored the handled
+    /// latch would pass the first two and fail the third, which is exactly the shape of the local
+    /// stand-in this surface replaced.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheFirstSubscriberToAnswerOtherThanZeroHandlesTheEventAndSuppressesTheRest()
+    {
+        // DECLINED: nothing is claimed, so every subscriber runs.
+        Assert.Equal((2, 0L), DispatchWithLeadingAnswer(null));
+
+        // ZERO: equal to the established default, so still not claimed and both still run.
+        Assert.Equal((2, 0L), DispatchWithLeadingAnswer(0L));
+
+        // ANYTHING ELSE: claimed by the first subscriber, and the second never runs.
+        Assert.Equal((1, 5L), DispatchWithLeadingAnswer(5L));
+        Assert.Equal((1, -1L), DispatchWithLeadingAnswer(-1L));
+    }
+
+    /// <summary>
+    /// Dispatches one notification to two ordinary subscribers, the first of which answers a given
+    /// value, and reports how many of them ran together with the dispatch's answer.
+    /// </summary>
+    /// <param name="leadingAnswer">
+    /// What the first subscriber answers. <see langword="null"/> declines.
+    /// </param>
+    /// <returns>The number of subscribers that ran, and the dispatch's answer.</returns>
+    private static (int Ran, long? Answer) DispatchWithLeadingAnswer(long? leadingAnswer)
+    {
+        using Harness harness = new();
+
+        int ran = 0;
+
+        _ = harness.Proxy.Channels.On(
+            TaskEventName.Notify,
+            (source, wparam, lparam, text) =>
+            {
+                ran++;
+                return leadingAnswer;
+            });
+
+        _ = harness.Proxy.Channels.On(
+            TaskEventName.Notify,
+            (source, wparam, lparam, text) =>
+            {
+                ran++;
+                return null;
+            });
+
+        long? answer = harness.Proxy.Channels.Trigger(TaskEventName.Notify, 1L, 2L, Sentinel);
+        return (ran, answer);
+    }
+
+    /// <summary>
+    /// A subscription made from inside a dispatch takes effect only on the NEXT dispatch, and a removal
+    /// made from inside one takes effect immediately.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Both are the shared broker's documented rules and both are inherited rather than restated. The
+    /// dispatch loop captures its upper bound once at entry, so a table that grew mid-dispatch is not
+    /// noticed until the next one [<c>n_cst_eventful.sru:L820</c>, documented at
+    /// <c>ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L237</c>]. A removal is the mirror image: it
+    /// cannot rewrite a table that active levels hold cursors into, so it TOMBSTONES the entry, which
+    /// the loop then skips [<c>:L829</c>], and leaves a compaction owed [<c>:L1054-L1059</c>].
+    /// </para>
+    /// <para>
+    /// <b>The compaction is what makes this a bounded-state case and not only an ordering one.</b>
+    /// PowerBuilder posts it to the Win32 message queue [<c>:L1083</c>]; a headless service has no
+    /// message pump, so the turn is explicit and happens when the outermost dispatch of the surface
+    /// closes. Without it a service that unsubscribed from inside a handler would accumulate tombstones
+    /// for the life of the process.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ASubscriptionMadeDuringADispatchTakesEffectNextTimeAndARemovalTakesEffectAtOnce()
+    {
+        using Harness harness = new();
+
+        int lateSubscriberCalls = 0;
+        int firstSubscriberCalls = 0;
+        int removedSubscriberCalls = 0;
+        long? removalCode = null;
+
+        TaskNotificationHandler removed = (source, wparam, lparam, text) =>
+        {
+            removedSubscriberCalls++;
+            return null;
+        };
+
+        // NOTHING IS ASSERTED FROM INSIDE A HANDLER anywhere in this file, and here is the reason: a
+        // non-silent dispatch raises the sync signal, so the threading broker's exception hook ABSORBS
+        // whatever a handler throws - and an absorbed assertion failure is a test that passes while
+        // proving nothing. Outcomes are recorded into locals and asserted after the dispatch returns.
+        _ = harness.Proxy.Channels.On(
+            TaskEventName.Notify,
+            (source, wparam, lparam, text) =>
+            {
+                firstSubscriberCalls++;
+
+                if (firstSubscriberCalls == 1)
+                {
+                    // Added from INSIDE the dispatch: not noticed until the next one.
+                    _ = harness.Proxy.Channels.On(
+                        TaskEventName.Notify,
+                        (innerSource, innerWparam, innerLparam, innerText) =>
+                        {
+                            lateSubscriberCalls++;
+                            return null;
+                        });
+
+                    // Removed from INSIDE the dispatch: skipped by THIS dispatch already.
+                    removalCode = harness.Proxy.Channels.Off(TaskEventName.Notify, removed);
+                }
+
+                return null;
+            });
+
+        _ = harness.Proxy.Channels.On(TaskEventName.Notify, removed);
+
+        _ = harness.Proxy.Channels.Trigger(TaskEventName.Notify, 1L, 2L, Sentinel);
+
+        Assert.Equal(RetCode.OK, removalCode);
+        Assert.Equal(1, firstSubscriberCalls);
+        Assert.Equal(0, removedSubscriberCalls);
+        Assert.Equal(0, lateSubscriberCalls);
+
+        // The next dispatch sees the late subscriber, and still not the removed one.
+        _ = harness.Proxy.Channels.Trigger(TaskEventName.Notify, 1L, 2L, Sentinel);
+
+        Assert.Equal(2, firstSubscriberCalls);
+        Assert.Equal(1, lateSubscriberCalls);
+        Assert.Equal(0, removedSubscriberCalls);
+    }
+
+    /// <summary>
+    /// The whole-surface removal genuinely empties the broker, not just the local index.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The threading layer's parameterless removal passes the filter <c>".^persistent"</c>
+    /// [<c>ws_objects/pfw.thread.pbl.src/n_cst_threading_task.sru:L385</c>], which decodes to "every
+    /// name, in any namespace except persistent"
+    /// [<c>ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1000-L1023</c>] - one symbol away
+    /// from the broker's own parameterless removal, which passes the EMPTY filter and removes
+    /// everything [<c>:L228-L230</c>]. Every subscription this surface makes is namespace-less and so
+    /// not persistent, which is what makes the two coincide here.
+    /// </para>
+    /// <para>
+    /// <b>Asserted by DISPATCHING afterwards rather than by reading a count.</b> A removal that cleared
+    /// the local index while leaving the broker's table populated would satisfy every count-based
+    /// assertion and still deliver every notification, which is precisely the failure this case exists
+    /// to catch.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheWholeSurfaceRemovalEmptiesTheBrokerAndNotOnlyTheLocalIndex()
+    {
+        using Harness harness = new();
+
+        int perReasonCalls = 0;
+        int commonCalls = 0;
+
+        foreach (string channel in NotificationChannels)
+        {
+            _ = harness.Proxy.Channels.On(
+                channel,
+                (source, wparam, lparam, text) =>
+                {
+                    perReasonCalls++;
+                    return null;
+                });
+        }
+
+        _ = harness.Proxy.Channels.OnCommon(
+            (source, reason, wparam, lparam, text) =>
+            {
+                commonCalls++;
+                return null;
+            });
+
+        // Every one of the five channels is subscribed at once, which is also the table shape that
+        // exercises EventBroker.IsSubscribed's preserved first-and-last-slot quirk on real data.
+        Assert.All(NotificationChannels, channel => Assert.True(harness.Proxy.Channels.IsSubscribed(channel)));
+        Assert.True(harness.Proxy.Channels.IsSubscribed(TaskEventName.CommonNotify));
+
+        Assert.Equal(RetCode.OK, harness.Proxy.Channels.OffAll());
+
+        Assert.All(NotificationChannels, channel => Assert.False(harness.Proxy.Channels.IsSubscribed(channel)));
+        Assert.False(harness.Proxy.Channels.IsSubscribed(TaskEventName.CommonNotify));
+
+        // THE REAL ASSERTION: dispatch every channel and see that nothing runs.
+        foreach (string channel in NotificationChannels)
+        {
+            Assert.Equal(0L, harness.Proxy.Channels.Trigger(channel, 1L, 2L, Sentinel));
+        }
+
+        Assert.Equal(0L, harness.Proxy.Channels.TriggerCommon(Enums.TNR_NOTIFY, 1L, 2L, Sentinel));
+
+        Assert.Equal(0, perReasonCalls);
+        Assert.Equal(0, commonCalls);
+
+        // And a single-channel removal is the same statement one scope smaller.
+        _ = harness.Proxy.Channels.On(
+            TaskEventName.Notify,
+            (source, wparam, lparam, text) =>
+            {
+                perReasonCalls++;
+                return null;
+            });
+
+        Assert.Equal(RetCode.OK, harness.Proxy.Channels.Off(TaskEventName.Notify));
+        Assert.Equal(0L, harness.Proxy.Channels.Trigger(TaskEventName.Notify, 1L, 2L, Sentinel));
+        Assert.Equal(0, perReasonCalls);
+    }
+
+    /// <summary>
+    /// A non-silent dispatch brackets itself with the synchronization signal, and a silent one does
+    /// not touch it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The threading specialization's two triggering hooks are the whole of this: the first raises the
+    /// signal for a non-posted dispatch [<c>ws_objects/pfw.thread.pbl.src/n_cst_threading_eventful.sru:L62-L64</c>]
+    /// and the second lowers it [<c>:L69-L71</c>], and both return immediately when silent
+    /// [<c>:L60, :L68</c>]. By the polarity at <c>n_cst_threading_task.sru:L306</c> the signal being set
+    /// means the task reads as NOT BUSY, which is what makes a mutator legal from inside a subscriber.
+    /// </para>
+    /// <para>
+    /// <b>The pair is symmetric or the guard is permanently wrong.</b> The base fires both hooks under
+    /// the same "was anything dispatched" latch and fires the second from its outer
+    /// <see langword="finally"/> [<c>n_cst_eventful.sru:L942-L946</c>], so a raise cannot be left
+    /// standing - asserted here on the fault path as well as the clean one, because that is the path
+    /// where a hand-rolled bracket leaks.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ANonSilentDispatchBracketsItselfWithTheSyncSignalAndASilentOneDoesNot()
+    {
+        using Harness harness = new();
+
+        bool? signalInsideNonSilent = null;
+
+        _ = harness.Proxy.Channels.On(
+            TaskEventName.Notify,
+            (source, wparam, lparam, text) =>
+            {
+                signalInsideNonSilent = harness.Host.IsSyncSignalSet;
+                return null;
+            });
+
+        Assert.False(harness.Proxy.Channels.Silent);
+        Assert.False(harness.Host.IsSyncSignalSet);
+
+        _ = harness.Proxy.Channels.Trigger(TaskEventName.Notify, 1L, 2L, Sentinel);
+
+        Assert.True(signalInsideNonSilent);
+        Assert.False(harness.Host.IsSyncSignalSet);
+
+        // SILENT: neither hook touches the signal, which is why the publication path can raise it
+        // itself around the whole fan-out without the broker fighting it.
+        harness.Proxy.Channels.Silent = true;
+        signalInsideNonSilent = null;
+        harness.Host.IsSyncSignalSet = true;
+
+        _ = harness.Proxy.Channels.Trigger(TaskEventName.Notify, 1L, 2L, Sentinel);
+
+        Assert.True(signalInsideNonSilent);
+        Assert.True(harness.Host.IsSyncSignalSet);
+
+        // THE FAULT PATH: the bracket still closes, because the base lowers it from a finally. The
+        // signal is set here, so the threading hook absorbs the fault rather than rethrowing.
+        using Harness faulting = new();
+
+        _ = faulting.Proxy.Channels.On(
+            TaskEventName.Notify,
+            (source, wparam, lparam, text) => throw new InvalidTimeZoneException(Sentinel));
+
+        Assert.Equal(0L, faulting.Proxy.Channels.Trigger(TaskEventName.Notify, 1L, 2L, Sentinel));
+        Assert.False(faulting.Host.IsSyncSignalSet);
+        _ = Assert.Single(faulting.Proxy.Channels.CapturedExceptions);
     }
 
     /// <summary>
@@ -3871,7 +4481,10 @@ public sealed class SqlTaskProxyTests
         }
 
         /// <inheritdoc/>
-        public long TryApply(DataWindowBufferStore target, CarrierState? state)
+        public long TryApply(
+            DataWindowBufferStore target,
+            CarrierState? state,
+            CarrierBaselineTrust baselineTrust)
         {
             Targets.Add(target);
             return DataWindowBufferStore.DataStoreSuccess;

@@ -31,10 +31,11 @@ machine-checkable shape every definition validates against.
 
 The load-bearing content of this document is the [workflow roster](#workflow-roster). Its `workflowId`
 column publishes the **fifteen pairing keys** that name the per-workflow directories on *both* sides of
-`characterization/recordings/`. **That subtree does not exist yet and carries no identifiers of its own**,
-so this table is the only thing in the repository that can name it: a directory under
-`characterization/recordings/legacy/` or `characterization/recordings/dotnet/` whose name is not in that
-column has no definition behind it and no counterpart to be compared with.
+`characterization/recordings/`. **Both recording roots exist and hold nothing but their own readmes — not one
+per-workflow directory has been created on either side**, so this table is the only thing in the repository
+that can name them: a directory under `characterization/recordings/legacy/` or
+`characterization/recordings/dotnet/` whose name is not in that column has no definition behind it and no
+counterpart to be compared with.
 
 ## Scope and precedence
 
@@ -258,9 +259,25 @@ roster of behaviours a pair is expected to demonstrate.
 
 ### C-C — the legacy tree is read-only, and it is the oracle
 
-A definition cites every fixture by **full repository-root-relative locator** into `ws_objects/**` — the
-schema's `path` pattern rejects an absolute path, a `./` prefix, any `..` segment, backslashes and
-whitespace, so a citation resolves to exactly one file from the repository root on any platform.
+A definition cites every fixture by **full repository-root-relative locator** into `ws_objects/**`, so a
+citation resolves to exactly one file from the repository root on any platform.
+
+**The `path` pattern is a containment control, and it rejects every form that could name a file outside the
+checkout**: a POSIX-absolute path, a UNC path, any leading dot including a `./` prefix, any `..` segment
+anywhere, a backslash, whitespace, a leading `~` a shell would expand to a home directory, and **any colon**
+— which is what rules out the Windows drive-absolute and drive-relative forms `C:/Windows/System32/…` and
+`C:…`, and the NTFS alternate-data-stream syntax `file.srd:stream`. An earlier revision of the pattern
+rejected the POSIX forms and **accepted the drive-absolute one**, which read as protection while providing
+none on the platform the oracle itself runs on. A colon has no legitimate use in any path in this
+repository, so the exclusion costs nothing; **non-ASCII characters are legitimate and are accepted**,
+because one cited specification is `docs/PB多线程绕坑提示.md`.
+
+> **A pattern cannot see the filesystem, so a consumer owes two further steps and neither is optional.**
+> Resolve the value against the repository root, **canonicalize** the result — following symbolic links,
+> because a link inside the checkout can point anywhere — and then **verify the canonical path is still
+> beneath the canonical repository root**, refusing it with a named error when it is not. No consumer may
+> substitute a string check on the raw value for those two steps: the pattern narrows what can be written
+> down, and only canonicalization can decide what a written path actually reaches.
 
 No fixture is edited, moved, renamed, reformatted or re-encoded, and **no copy of one is vendored into this
 tree**: a vendored copy is a second master that can drift from the oracle without anybody noticing. The
@@ -405,8 +422,9 @@ to its oracle while conforming to the grammar.
 
 Nothing is broken by the divergence today, and that is worth being precise about rather than reassuring
 about. The hook is a **conditionally skipped** matrix whose activation predicate requires an ordinary file
-under `characterization/recordings/legacy/<workflowId>/`, and `characterization/recordings/` does not exist,
-so the constant currently resolves to a path nothing reads. **The constant is reconciled to the roster
+under `characterization/recordings/legacy/<workflowId>/`, and no such directory exists on either side — both
+recording roots hold nothing but their own readmes — so the constant currently resolves to a path nothing
+reads. **The constant is reconciled to the roster
 identifier in the same reviewed change that lands the first legacy recording** — the change that would
 activate the matrix is the change that must agree with the roster, and reconciling it earlier would edit a
 skipped assertion without a recording to verify the edit against.
@@ -566,13 +584,16 @@ enum is a deliberate act, taken only in the same reviewed change that lands the 
 
 Stated without softening:
 
-- **Docker was not installed and no daemon was available** in the environment this store was authored in, so
-  the Compose bring-up that the shared-volume capture rule is expressed against could not have been exercised
-  there in any case. No health gate is claimed as passed.
+- **The Compose bring-up the shared-volume capture rule is expressed against *has* been exercised — and a
+  bring-up is not a capture.** It is reported gate by gate in
+  [`../../orchestration/README.md` §10](../../orchestration/README.md#10-what-has-and-has-not-been-exercised),
+  the only execution-status statement in this repository, which this folder defers to rather than restating.
+  What that run established is the volume seam a pair needs; it produced no recording, and no comparison may
+  be claimed from it.
 - **The legacy half of the oracle has not been run**, which needs a PowerBuilder toolchain that is not
   present. This is exactly what keeps the pinyin risk live rather than theoretical.
-- **`characterization/recordings/` does not exist**, so there is no master, no candidate and no comparison —
-  and no parity result is claimed anywhere in this folder.
+- **Both halves of `characterization/recordings/` hold nothing but their own readmes**, so there is no
+  master, no candidate and no comparison — and no parity result is claimed anywhere in this folder.
 - **A passing service test is not a substitute for a capture.** An in-process test host mounts no volume, so
   it cannot be the target half of a pair however thorough it is; the capture rule is expressed against a
   Docker volume.

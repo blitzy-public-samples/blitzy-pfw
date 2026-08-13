@@ -46,6 +46,7 @@ using Microsoft.IdentityModel.Tokens;
 using PowerFramework.Persistence.Concurrency;
 using PowerFramework.Persistence.Authorization;
 using PowerFramework.Persistence.Configuration;
+using PowerFramework.Persistence.Data;
 using PowerFramework.Persistence.Grpc;
 using PowerFramework.Persistence.Runtime;
 using PowerFramework.Persistence.Sql.Paging;
@@ -253,9 +254,10 @@ public sealed class CompositionRootTests
         // Deliberately still the REAL storage check rather than a stub: the property under test is that
         // the DEPLOYED composition answers an anonymous readiness request with 200 and an uncredentialled
         // ping with 401, and substituting the check would move the assertion off that composition.
-        await CompositionHost.ProvisionSchemaAsync(TestContext.Current.CancellationToken);
-
         using CompositionHost host = CompositionHost.Create();
+
+        await host.ProvisionSchemaAsync(TestContext.Current.CancellationToken);
+
         using HttpClient client = host.CreateClient();
 
         using HttpResponseMessage readiness = await client.GetAsync(
@@ -1147,6 +1149,252 @@ public sealed class CompositionRootTests
         }
     }
 
+    /// <summary>
+    /// The startup sequence provisions a fresh volume, so a first start converges without an operator.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE ROW THAT MAKES THE ONE-COMMAND BRING-UP TRUE. The readiness probe reports the storage engine's
+    /// real state, so before this behaviour existed a brand-new <c>persistence-db</c> volume answered
+    /// <c>/health</c> with 503 for ever and the health-conditioned Compose chain held DataServices and
+    /// Gateway behind a Persistence that could never become ready. The provisioning step is what closes
+    /// that, and it has to happen AFTER the gate has proven the directory writable and BEFORE the pipeline
+    /// is built - the position <c>Program.cs</c> runs it in and the order this row reproduces.
+    /// </para>
+    /// <para>
+    /// IT DRIVES THE STEP OUT OF THE REAL GRAPH RATHER THAN CONSTRUCTING IT, which is this row's whole
+    /// contribution over the provisioner's own suite. That suite builds the type directly and needs no
+    /// host, so nothing in it would notice the registration being dropped from
+    /// <c>AddPersistenceStorage</c> or the composition root ceasing to run it - and either would restore
+    /// the never-ready volume this row exists to rule out.
+    /// </para>
+    /// <para>
+    /// BOTH TABLES ARE ASSERTED, because the readiness probe requires both: the application table is what
+    /// a query needs, and the migration history is what makes the database a migrated one rather than a
+    /// hand-built lookalike the next migration would fail against.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task TheStartupSequenceProvisionsTheSchemaOnAFreshVolumeBeforeAnythingIsServed()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"pfw-provision-{Guid.NewGuid():n}");
+
+        try
+        {
+            using ServiceProvider provider = BuildRuntimeGraphProvider(
+                directory,
+                omitEngine: false,
+                applyMigrationsOnStartup: true);
+
+            provider.ValidatePersistenceStructuralPreconditions();
+
+            await provider
+                .GetRequiredService<SchemaProvisioner>()
+                .ProvisionAsync(TestContext.Current.CancellationToken);
+
+            Assert.True(File.Exists(Path.Combine(directory, "test.db")));
+            Assert.True(TableExists(directory, "COMPANY"));
+            Assert.True(TableExists(directory, "__EFMigrationsHistory"));
+        }
+        finally
+        {
+            DeleteDirectory(directory);
+        }
+    }
+
+    /// <summary>
+    /// Provisioning twice is a no-op the second time, and it never touches a row that is already there.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE ASSERTION THE PAIRED-CAPTURE RULE DEPENDS ON. For one workflow identifier the legacy-side and
+    /// target-side recordings must be taken against the SAME volume state, with the volume neither
+    /// recreated nor reseeded between them - so a restart between the two halves must be observationally
+    /// invisible. Writing a row, restarting the whole startup sequence, and finding the row byte-identical
+    /// is what proves it: an <c>EnsureCreated</c>, a drop-and-recreate or a seed would each fail this row
+    /// loudly.
+    /// </para>
+    /// <para>
+    /// The migration history count is asserted too, because a re-applied migration would be a second row
+    /// there even if the data survived.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ProvisioningTwiceLeavesTheDatabaseAndItsRowsExactlyAsTheyWere()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"pfw-provision-{Guid.NewGuid():n}");
+
+        try
+        {
+            using (ServiceProvider first = BuildRuntimeGraphProvider(
+                directory,
+                omitEngine: false,
+                applyMigrationsOnStartup: true))
+            {
+                first.ValidatePersistenceStructuralPreconditions();
+
+                await first
+                    .GetRequiredService<SchemaProvisioner>()
+                    .ProvisionAsync(TestContext.Current.CancellationToken);
+            }
+
+            long historyAfterFirstStart = ScalarLong(directory, "SELECT COUNT(*) FROM __EFMigrationsHistory");
+
+            Assert.Equal(1, historyAfterFirstStart);
+
+            Execute(
+                directory,
+                "INSERT INTO COMPANY (NAME, AGE, ADDRESS, SALARY, BIRTH) "
+                + "VALUES ('a-row-a-capture-depends-on', 41, 'an-address', 1234.5, '1985-03-04')");
+
+            using (ServiceProvider second = BuildRuntimeGraphProvider(
+                directory,
+                omitEngine: false,
+                applyMigrationsOnStartup: true))
+            {
+                second.ValidatePersistenceStructuralPreconditions();
+
+                await second
+                    .GetRequiredService<SchemaProvisioner>()
+                    .ProvisionAsync(TestContext.Current.CancellationToken);
+            }
+
+            // THE ROW SURVIVED, WHICH IS THE POINT. Nothing was dropped, recreated or reseeded.
+            Assert.Equal(1, ScalarLong(directory, "SELECT COUNT(*) FROM COMPANY"));
+            Assert.Equal(
+                "a-row-a-capture-depends-on",
+                ScalarText(directory, "SELECT NAME FROM COMPANY"));
+
+            // AND NO MIGRATION WAS RE-APPLIED.
+            Assert.Equal(
+                historyAfterFirstStart,
+                ScalarLong(directory, "SELECT COUNT(*) FROM __EFMigrationsHistory"));
+        }
+        finally
+        {
+            DeleteDirectory(directory);
+        }
+    }
+
+    /// <summary>
+    /// With the switch off the startup sequence issues no schema statement, and creates no database file.
+    /// </summary>
+    /// <remarks>
+    /// THE POSTURE A CHARACTERIZATION CAPTURE RUN NEEDS, AND THE SHIPPED DEFAULT. A capture must be able to
+    /// state that nothing but the workflow under characterization touched the volume, so the switch has to
+    /// mean what it says: with it off the gate still validates and still proves the directory writable, the
+    /// provisioning step performs no file operation whatsoever, and the database file is not created - the
+    /// readiness probe then reports not-ready and provisioning is the operator's, exactly as
+    /// <c>docs/BUILD.md</c> §5.6 describes. The empty-directory assertion covers BOTH steps: the gate's own
+    /// writability probe is deleted again, and the provisioner leaves not even its lock file behind.
+    /// </remarks>
+    [Fact]
+    public async Task ProvisioningSwitchedOffIssuesNoSchemaStatementAndCreatesNoDatabase()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"pfw-provision-{Guid.NewGuid():n}");
+
+        try
+        {
+            using ServiceProvider provider = BuildRuntimeGraphProvider(
+                directory,
+                omitEngine: false,
+                applyMigrationsOnStartup: false);
+
+            provider.ValidatePersistenceStructuralPreconditions();
+
+            await provider
+                .GetRequiredService<SchemaProvisioner>()
+                .ProvisionAsync(TestContext.Current.CancellationToken);
+
+            Assert.True(Directory.Exists(directory));
+
+            // NOT MERELY "no COMPANY table" - no file whatsoever, and no probe debris either.
+            Assert.Empty(Directory.GetFileSystemEntries(directory));
+        }
+        finally
+        {
+            DeleteDirectory(directory);
+        }
+    }
+
+    /// <summary>
+    /// Reports whether one table exists in the database under a data directory.
+    /// </summary>
+    /// <param name="dataDirectory">The directory holding <c>test.db</c>.</param>
+    /// <param name="tableName">The table to look for.</param>
+    /// <returns><see langword="true"/> when the table is present.</returns>
+    /// <remarks>
+    /// Opened READ-ONLY, so a case that asserts a table's ABSENCE cannot create the very file it is
+    /// checking for as a side effect of checking.
+    /// </remarks>
+    private static bool TableExists(string dataDirectory, string tableName) =>
+        ScalarLong(
+            dataDirectory,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '" + tableName + "'") == 1;
+
+    /// <summary>Reads one integer from the database under a data directory.</summary>
+    /// <param name="dataDirectory">The directory holding <c>test.db</c>.</param>
+    /// <param name="sql">The statement to read one value from.</param>
+    /// <returns>The value.</returns>
+    private static long ScalarLong(string dataDirectory, string sql)
+    {
+        using SqliteConnection connection = OpenForInspection(dataDirectory);
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = sql;
+
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>Reads one string from the database under a data directory.</summary>
+    /// <param name="dataDirectory">The directory holding <c>test.db</c>.</param>
+    /// <param name="sql">The statement to read one value from.</param>
+    /// <returns>The value.</returns>
+    private static string ScalarText(string dataDirectory, string sql)
+    {
+        using SqliteConnection connection = OpenForInspection(dataDirectory);
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = sql;
+
+        return Convert.ToString(command.ExecuteScalar(), CultureInfo.InvariantCulture) ?? string.Empty;
+    }
+
+    /// <summary>Executes one statement against the database under a data directory.</summary>
+    /// <param name="dataDirectory">The directory holding <c>test.db</c>.</param>
+    /// <param name="sql">The statement to execute.</param>
+    private static void Execute(string dataDirectory, string sql)
+    {
+        SqliteConnectionStringBuilder writable = new()
+        {
+            DataSource = Path.Combine(dataDirectory, "test.db"),
+            Mode = SqliteOpenMode.ReadWrite,
+        };
+
+        using SqliteConnection connection = new(writable.ConnectionString);
+        connection.Open();
+
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = sql;
+
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>Opens the database under a data directory read-only.</summary>
+    /// <param name="dataDirectory">The directory holding <c>test.db</c>.</param>
+    /// <returns>An open connection.</returns>
+    private static SqliteConnection OpenForInspection(string dataDirectory)
+    {
+        SqliteConnectionStringBuilder builder = new()
+        {
+            DataSource = Path.Combine(dataDirectory, "test.db"),
+            Mode = SqliteOpenMode.ReadOnly,
+        };
+
+        SqliteConnection connection = new(builder.ConnectionString);
+        connection.Open();
+
+        return connection;
+    }
+
     // ==============================================================================================
     //  5. THE PROVISIONED SEAMS AND THE NEGATIVES THAT REMAIN REACHABLE
     // ==============================================================================================
@@ -1858,7 +2106,10 @@ public sealed class CompositionRootTests
     /// realistic fault - a seam whose constructor rejects its configuration - and the gate must catch it
     /// either way.
     /// </remarks>
-    private static ServiceProvider BuildRuntimeGraphProvider(string dataDirectory, bool omitEngine)
+    private static ServiceProvider BuildRuntimeGraphProvider(
+        string dataDirectory,
+        bool omitEngine,
+        bool applyMigrationsOnStartup = false)
     {
         ServiceCollection services = new();
 
@@ -1875,6 +2126,14 @@ public sealed class CompositionRootTests
         {
             options.Sqlite.DataDirectory = dataDirectory;
             options.Sqlite.DatabaseFileName = "test.db";
+
+            // OFF UNLESS A CASE ASKS FOR IT, WHICH IS ALSO THE SHIPPED DEFAULT. The directory cases in
+            // section 4 assert that the gate leaves the storage directory exactly as it found it, which is
+            // an assertion about the WRITABILITY PROBE and its debris; provisioning legitimately creates a
+            // database file there, so a case that wants it must say so. The orchestrated posture - the
+            // switch ON - is exercised by the provisioning cases, which pass true.
+            options.Schema.ApplyMigrationsOnStartup = applyMigrationsOnStartup;
+
             options.Jwt.Authority = TrustedIssuer;
             options.Jwt.Audience = TrustedAudience;
 
@@ -2525,15 +2784,37 @@ internal sealed class CompositionHost : WebApplicationFactory<Program>
         new(settings);
 
     /// <summary>
-    /// The data directory every host in this file is configured with.
+    /// The data directory THIS host is configured with, unique to this instance.
     /// </summary>
     /// <remarks>
-    /// Named once and read by both the host and the readiness case, so the two cannot drift. Fixed
-    /// rather than per-instance because these cases boot many hosts and none of them writes: the only
-    /// case that needs a database provisions this directory itself.
+    /// <para>
+    /// PER INSTANCE, AND THAT REPLACED A FIXED NAME. Every host in this file used to be configured with
+    /// one constant path under the system temporary directory, which produced three failures that have
+    /// nothing to do with the composition root. Residue from an earlier run made a host observe a
+    /// database it did not create - and because readiness VERIFIES THE SCHEMA, a run could pass on a
+    /// schema a previous run had left behind rather than on one it provisioned itself. Two concurrent
+    /// runs of this suite on one agent, which is routine under a parallel batch, shared a directory and a
+    /// SQLite file. And the readiness case's own provisioning was observable by every other case in the
+    /// file. A fresh identifier per host removes all three by construction.
+    /// </para>
+    /// <para>
+    /// NOTHING NEEDS TO PRE-CREATE IT. The service creates its own data directory during startup
+    /// [<c>Program.cs:L1658</c>, <c>Data/SqliteConnectionFactory.cs:L2644</c>], which is the one
+    /// filesystem mutation it permits itself, so a host pointed at a path that does not yet exist is the
+    /// ORDINARY case rather than a fault - and it is the case a deployment on fresh storage presents.
+    /// The rows that assert a data-directory FAULT compose their own paths and are unaffected.
+    /// </para>
+    /// <para>
+    /// It is read by <see cref="ConfigureWebHost(IWebHostBuilder)"/> and by
+    /// <see cref="ProvisionSchemaAsync(CancellationToken)"/>, and by nothing else, so the setting the
+    /// host receives and the directory the schema is provisioned into cannot drift. An earlier form of
+    /// this file spelled the path a SECOND time inside <c>ConfigureWebHost</c>, which is exactly the
+    /// drift its own comment claimed to prevent.
+    /// </para>
     /// </remarks>
-    internal static string DataDirectory { get; } =
-        Path.Combine(Path.GetTempPath(), "pfw-composition-root");
+    internal string DataDirectory { get; } = Path.Combine(
+        Path.GetTempPath(),
+        string.Create(CultureInfo.InvariantCulture, $"pfw-composition-root-{Guid.NewGuid():n}"));
 
     /// <summary>
     /// Provisions the real schema in <see cref="DataDirectory"/> by applying the real migrations.
@@ -2544,10 +2825,11 @@ internal sealed class CompositionHost : WebApplicationFactory<Program>
     /// Needed because the readiness probe verifies the schema and not merely that the engine answers,
     /// so a service with no database is correctly NOT ready. Applying the real migrations - rather
     /// than hand-written DDL or <c>EnsureCreated</c> - is what makes this case assert that the
-    /// deployed provisioning path satisfies the deployed readiness check. Idempotent, so repeated runs
-    /// against the shared directory are safe.
+    /// deployed provisioning path satisfies the deployed readiness check. An INSTANCE method, because
+    /// the directory it provisions is this host's own: a case now provisions the schema the host it is
+    /// about to start will read, rather than a shared one every other case could also observe.
     /// </remarks>
-    internal static async Task ProvisionSchemaAsync(CancellationToken cancellationToken)
+    internal async Task ProvisionSchemaAsync(CancellationToken cancellationToken)
     {
         _ = Directory.CreateDirectory(DataDirectory);
 
@@ -2573,6 +2855,43 @@ internal sealed class CompositionHost : WebApplicationFactory<Program>
         await using PowerFrameworkDbContext context = new(options);
 
         await context.Database.MigrateAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Disposes the host and then removes this instance's data directory.
+    /// </summary>
+    /// <param name="disposing">Whether managed state is being released.</param>
+    /// <remarks>
+    /// <para>
+    /// UNCONDITIONAL, WHICH IS THE HALF THAT MATTERS. Every case in this file creates its host with
+    /// <c>using</c>, so this runs whether the case passed or failed - and it is the failure path that used
+    /// to leave a directory, and a SQLite database, behind for the next run to find.
+    /// </para>
+    /// <para>
+    /// ORDER IS LOAD-BEARING: the base disposal is what stops the host and closes the engine's handle on
+    /// <c>test.db</c>, so it has to complete before the directory can be removed. Deleting first would
+    /// race the shutdown.
+    /// </para>
+    /// <para>
+    /// NOT WRAPPED IN A <c>catch</c>. The directory is one this instance composed and owns exclusively, so
+    /// a failure to remove it is a real condition worth surfacing rather than a nuisance worth hiding - a
+    /// suppressed teardown is indistinguishable from one that worked, which is how residue accumulates
+    /// unnoticed in the first place.
+    /// </para>
+    /// </remarks>
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+
+        if (!disposing)
+        {
+            return;
+        }
+
+        if (Directory.Exists(DataDirectory))
+        {
+            Directory.Delete(DataDirectory, recursive: true);
+        }
     }
 
     /// <summary>
@@ -2672,9 +2991,10 @@ internal sealed class CompositionHost : WebApplicationFactory<Program>
         // the positive rows still exercise a caller the service accepts rather than one it rejects for
         // a reason they were not written to assert.
         builder.UseSetting("Jwt:PermittedCallers:0", TokenSubject);
-        builder.UseSetting(
-            "Sqlite:DataDirectory",
-            Path.Combine(Path.GetTempPath(), "pfw-composition-root"));
+
+        // THIS HOST'S OWN DIRECTORY, read from the one property that names it. See DataDirectory for why
+        // it is per instance and why this line must not spell the path a second time.
+        builder.UseSetting("Sqlite:DataDirectory", DataDirectory);
 
         // LAST, so a case can override any setting above it. Empty for every host created through the
         // parameterless factory method, which is all but a handful of them.

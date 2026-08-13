@@ -38,6 +38,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PowerFramework.Persistence.Configuration;
+using PowerFramework.Persistence.Errors;
 
 namespace PowerFramework.Persistence.Transactions;
 
@@ -117,12 +118,19 @@ internal sealed class TransactionPoolIdleSweeper : BackgroundService
         }
         catch (Exception exception)
         {
-            // See this file's header: a maintenance sweep must not take the host down. NUMERIC AND FIXED
-            // TEXT ONLY on the message, with the exception object on the operator channel where it
-            // belongs - the pool's own diagnostics are already redacted at their source.
+            // See this file's header: a maintenance sweep must not take the host down.
+            //
+            // 🔴 "THE EXCEPTION OBJECT ON THE OPERATOR CHANNEL WHERE IT BELONGS" WAS THE DEFECT, and the
+            // reasoning beside it - that the pool's own diagnostics are redacted at their source - was true
+            // of the pool's SqlState channel and irrelevant to an exception that ESCAPES it. OnIdle disposes
+            // retained transactions, so a rollback the provider refuses arrives here as a SqliteException
+            // whose message carries its own statement; an attached exception is rendered in full by every
+            // provider. The fault is described instead - see Errors/FaultRecord.cs.
             _logger.LogError(
-                exception,
-                "An idle sweep of the transaction pool failed; the next scheduled sweep will still run.");
+                "An idle sweep of the transaction pool failed; the next scheduled sweep will still run. "
+                    + "FaultTypes={FaultTypes} RedactedMessage={RedactedMessage}",
+                FaultRecord.Types(exception),
+                FaultRecord.RedactedMessages(exception));
         }
     }
 

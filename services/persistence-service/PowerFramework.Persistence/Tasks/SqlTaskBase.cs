@@ -86,10 +86,13 @@
 //  (AAP §0.7.2) plus the twelve named non-rule constraints C-A..C-L (AAP §0.7.3). Their application
 //  to THIS file:
 //
-//  C-A  Only the four permitted shared projects (Contracts, Shared.Kernel, Shared.Diagnostics,
-//       Shared.Containers) plus siblings in this service. NOT Shared.Eventful, NOT
-//       Shared.Localization, and never a peer service. No PackageReference is added: central
-//       package management is in force and nothing beyond the BCL and those four is needed.
+//  C-A  Only the shared projects this service references (Contracts, Shared.Kernel,
+//       Shared.Diagnostics, Shared.Containers, Shared.Eventful) plus siblings in this service. THIS
+//       FILE uses the first four and NOT Shared.Eventful: the notification surface that consumes the
+//       shared broker is the CALLER-side half of the pair, in Tasks/TaskProxies/, and the worker half
+//       here publishes no notification channel at all. NOT Shared.Localization, and never a peer
+//       service. No PackageReference is added: central package management is in force and nothing
+//       beyond the BCL and those projects is needed.
 //  C-B  Preserved legacy defects, each reproduced verbatim AND annotated where it is reproduced:
 //         * the SetFilter-where-SetSort-was-intended cache-hit defect      [:L546]
 //         * the NESTED DBParm parse - never a flat conjunction             [:L127-L132]

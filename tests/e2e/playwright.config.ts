@@ -68,6 +68,7 @@ import { join } from 'node:path';
 
 import { defineConfig } from '@playwright/test';
 
+import { PROJECT_LABEL } from './fixtures/run-mode';
 import { SECURITY_CLIENT_CERTIFICATE } from './fixtures/service-endpoints';
 
 /**
@@ -87,26 +88,31 @@ const SPEC_DIRECTORY = './specs';
  *
  * WHY AN EXPLICIT INVENTORY RATHER THAN A DIRECTORY SWEEP
  * ------------------------------------------------------
- * `specs/` also holds six earlier, superseded, unnumbered files — the generation
- * these six replaced. They are kept on disk deliberately, but a bare `testDir`
- * sweep had been collecting them too, so the documented `npm test` was running
- * twelve files rather than six. That is not a cosmetic difference:
+ * An earlier generation of six superseded, unnumbered specs once sat in `specs/`
+ * alongside these, and a bare `testDir` sweep collected all twelve — so the
+ * documented `npm test` ran twelve files while every report described six. That
+ * was not a cosmetic difference: the two generations both wrote `COMPANY` rows in
+ * the one `persistence-db` volume, so the row state an optimistic-concurrency
+ * assertion depends on was being changed by files nobody had reviewed for that
+ * purpose and the `409` became a function of execution order; every pass, fail and
+ * skip count covered twice the files the report named; and the two generations
+ * disagreed about missing-stack behaviour with nothing selecting which answer was
+ * authoritative.
  *
- * - **Shared mutable state.** The superseded workflow and concurrency files write
- *   `COMPANY` rows in the same single `persistence-db` volume as specs 05 and 06.
- *   With both generations executing, the row state an optimistic-concurrency
- *   assertion depends on is being changed by files nobody reviewed for that
- *   purpose, so the `409` becomes a function of execution order.
- * - **Unreviewable totals.** Pass, fail and skip counts covered twice as many
- *   files as the report described, so no summary line meant what it appeared to.
- * - **A silent second oracle.** The superseded files probe for a live stack and
- *   skip when it is absent; the numbered six fail instead. Mixed together, an
- *   absent stack produced a confusing partial result rather than one clear
- *   answer.
+ * **Those six superseded files have since been removed from the tree**, which is
+ * why the inventory check below is now EXACT IN BOTH DIRECTIONS rather than
+ * one-sided. While they were present, an unenumerated file in `specs/` had to be
+ * tolerated — failing on their presence would have forbidden keeping them — and
+ * that tolerance was the gap: any `.spec.ts` dropped into the directory was
+ * silently excluded from the run with nothing reporting it. With the directory
+ * holding exactly the reviewed six, an unenumerated file is unambiguously either a
+ * spec somebody forgot to enumerate or one that has not been reviewed, and both are
+ * findings.
  *
  * Adding a spec is therefore a deliberate two-part act: create the file **and**
  * add it here. That is the intended friction — a file that appears in `specs/`
- * without review does not silently join the run.
+ * without review does not silently join the run, and now it does not silently stay
+ * out of it either.
  */
 const SUITE_SPECS: readonly string[] = Object.freeze([
   '01-health-readiness.spec.ts',
@@ -118,23 +124,39 @@ const SUITE_SPECS: readonly string[] = Object.freeze([
 ]);
 
 /**
- * Proves the enumerated inventory is exactly what is on disk before the run.
+ * Proves the enumerated inventory is EXACTLY what is on disk before the run.
  *
- * TWO DIRECTIONS, AND BOTH MATTER. Constraining discovery with a name list makes
- * one new failure mode possible: a file that is renamed, moved or deleted simply
- * stops being discovered, and the run then reports green over five specs while
- * appearing to have covered six. So the check is bidirectional.
+ * TWO DIRECTIONS, AND BOTH ARE REAL NOW. Constraining discovery with a name list
+ * creates two symmetrical failure modes, and the check is one comparison that
+ * catches both:
  *
- * - **Every enumerated file must exist.** A missing one is a hard error naming
- *   the file, rather than a silently smaller run.
- * - **The count must match.** Asserted explicitly, because "six names, six
- *   files" is the one statement a reader of a summary line needs and cannot
- *   otherwise verify.
+ * - **An enumerated file that is not on disk.** Renamed, moved or deleted, it
+ *   simply stops being discovered, and the run then reports green over five specs
+ *   while appearing to have covered six.
+ * - **A spec on disk that is not enumerated.** It never runs, and nothing says so.
+ *   A new spec added without touching this file is indistinguishable from one that
+ *   ran and passed.
  *
- * The reverse direction — an *un*enumerated file in `specs/` — is deliberately
- * **not** an error. The six superseded files live there on purpose, and failing
- * on their presence would forbid keeping them. Their exclusion is exactly what
- * this inventory achieves.
+ * ⚠ WHAT THIS REPLACED, BECAUSE THE OLD SHAPE COULD NOT FAIL. The second direction
+ * used to be deliberately tolerated, on the correct reasoning that the six
+ * superseded unnumbered specs were then still on disk and failing on their presence
+ * would have forbidden keeping them. What stood in for it was a count check —
+ * `expected.length !== SUITE_SPECS.length` — and that comparison was a TAUTOLOGY:
+ * the sole caller passes `SUITE_SPECS` as `expected`, so it compared the list's
+ * length with its own and could not fail for any input whatsoever. It read as the
+ * count assertion its own comment described and asserted nothing at all. The
+ * superseded files have since been removed, so an exact set comparison is now both
+ * possible and correct, and it subsumes the count: two sets that are equal have
+ * equal size.
+ *
+ * SORTED AND COMPARED AS TEXT, so the diagnostic can print both sides. Directory
+ * order is filesystem-dependent and the enumeration is written in numbered order;
+ * sorting both makes the comparison total and the message stable across platforms.
+ *
+ * ONLY `*.spec.ts` PARTICIPATES. `specs/` may legitimately acquire a shared helper
+ * or a readme, and neither is a spec: demanding that every file in the directory be
+ * enumerated would forbid a `.md` note while catching nothing a spec-suffix filter
+ * misses, because the runner only ever collects `.spec.ts`.
  *
  * Runs at config load, synchronously, reading one directory. That matches this
  * file's existing posture: a structural fault stops the run immediately rather
@@ -144,8 +166,9 @@ const SUITE_SPECS: readonly string[] = Object.freeze([
  *
  * @param directory the spec directory, relative to this file
  * @param expected the enumerated inventory
- * @returns the same inventory, once proven to match the directory
- * @throws Error when an enumerated file is absent, or the directory cannot be read
+ * @returns the same inventory, once proven to match the directory exactly
+ * @throws Error when the directory cannot be read, or its `*.spec.ts` set differs
+ *         from the enumeration in either direction
  */
 function assertSuiteInventory(
   directory: string,
@@ -165,25 +188,35 @@ function assertSuiteInventory(
     );
   }
 
-  const missing: readonly string[] = expected.filter(
-    (candidate: string) => !present.includes(candidate),
+  const onDisk: readonly string[] = [...present]
+    .filter((candidate: string) => candidate.endsWith('.spec.ts'))
+    .sort();
+  const enumerated: readonly string[] = [...expected].sort();
+
+  const missing: readonly string[] = enumerated.filter(
+    (candidate: string) => !onDisk.includes(candidate),
+  );
+  const unexpected: readonly string[] = onDisk.filter(
+    (candidate: string) => !enumerated.includes(candidate),
   );
 
-  if (missing.length > 0) {
+  if (missing.length > 0 || unexpected.length > 0) {
     throw new Error(
-      `The suite inventory in playwright.config.ts names ${expected.length} ` +
-        `spec files, and ${missing.length} of them are not present in ` +
-        `"${directory}": ${missing.join(', ')}. A renamed or deleted spec must ` +
-        'be updated here as well, because otherwise the run would quietly ' +
-        'cover fewer files while still reporting a pass.',
-    );
-  }
-
-  if (expected.length !== SUITE_SPECS.length) {
-    throw new Error(
-      `The suite inventory resolved to ${expected.length} files, not ` +
-        `${SUITE_SPECS.length}. The count is asserted because it is the one ` +
-        'property a reader of the summary line cannot otherwise verify.',
+      `The suite inventory in playwright.config.ts and the contents of ` +
+        `"${directory}" disagree, so the run is stopped rather than executing ` +
+        'a set of files nobody has described.\n' +
+        `  enumerated (${String(enumerated.length)}): ${enumerated.join(', ')}\n` +
+        `  on disk (${String(onDisk.length)}): ${onDisk.join(', ')}\n` +
+        (missing.length > 0
+          ? `  enumerated but absent: ${missing.join(', ')} — a renamed or ` +
+            'deleted spec must be updated here as well, because otherwise the ' +
+            'run would quietly cover fewer files while still reporting a pass.\n'
+          : '') +
+        (unexpected.length > 0
+          ? `  present but not enumerated: ${unexpected.join(', ')} — add it ` +
+            'here once reviewed, or remove it; a spec that is silently excluded ' +
+            'from every run is indistinguishable from one that passed.\n'
+          : ''),
     );
   }
 
@@ -321,6 +354,34 @@ function assertUsableBaseUrl(candidate: string): string {
 }
 
 export default defineConfig({
+  // ⚠ FAIL-CLOSED GLOBAL SETUP. THE SUITE REFUSES AN ABSENT TOPOLOGY ⚠
+  //
+  // 🔴 THE DEFAULT USED TO BE BACKWARDS, AND THAT IS WHAT THIS LINE FIXES. Every
+  // spec began by probing Gateway and calling `test.skip` when the probe did not
+  // answer, so a plain `npx playwright test` - the command the environment's setup
+  // instructions document - exited 0 with every live assertion skipped. A green
+  // run proved nothing about the four services it exists to verify.
+  //
+  // It was worse than merely permissive. The probe converted a TLS fault into the
+  // same "unreachable" as a refused connection, and every listener in this estate
+  // is `https` presenting a certificate from a throwaway private authority - so
+  // the single most likely local misconfiguration, an untrusted authority, SKIPPED
+  // THE WHOLE SUITE while the stack was up and serving, masking a real deployment
+  // finding rather than reporting it.
+  //
+  // `./global-setup.ts` now probes all four services' anonymous /health once,
+  // BEFORE any test runs, and throws when the topology is incomplete - naming the
+  // offending service, classifying the fault as unreachable / untrusted / stalled,
+  // and quoting the remedy for that class. A `503` is NOT a fault: it means the
+  // service is running and reporting on itself, which spec 01 asserts on.
+  //
+  // Skipping is still available and is now OPT-IN BY NAME:
+  //     E2E_ALLOW_ABSENT_STACK=1 npx playwright test
+  // An environment variable rather than a config flag, deliberately: the decision
+  // belongs to whoever runs the command, and a checked-in flag would grant it to
+  // everybody including CI - which is the state this replaces.
+  globalSetup: './global-setup.ts',
+
   // C-C, read-only legacy boundary. Discovery is confined to this directory's
   // own `specs/` folder. The three sibling directories under `tests/` hold
   // read-only behavioural-oracle assets, and the runner must be structurally
@@ -336,16 +397,18 @@ export default defineConfig({
   // hazard a glob here would create is reaching OUTSIDE `tests/e2e/`, and a list
   // of six leaf filenames cannot.
   //
-  // Naming the files is what it buys: `specs/` also holds the six superseded
-  // unnumbered specs, which a sweep collected as well, so the documented
-  // `npm test` had been running twelve files and mutating shared COMPANY state
-  // from two generations at once. See SUITE_SPECS above for the full reasoning
-  // and for why the superseded files stay on disk.
+  // Naming the files is what it buys: a sweep once collected an earlier
+  // generation of six superseded unnumbered specs as well, so the documented
+  // `npm test` ran twelve files and mutated shared COMPANY state from two
+  // generations at once. Those files have since been removed. See SUITE_SPECS
+  // above for the full reasoning and for why the inventory check is now exact in
+  // both directions rather than one-sided.
   //
-  // The inventory is verified against the directory before the run, so a rename
-  // stops the run instead of quietly shrinking it. Spread into a fresh mutable
-  // array because that is the shape `testMatch` declares; the source list stays
-  // frozen, so the runner receives a copy and cannot reach the inventory itself.
+  // The inventory is verified against the directory before the run, so a renamed
+  // spec stops the run instead of quietly shrinking it AND an unenumerated one
+  // stops it instead of quietly never running. Spread into a fresh mutable array
+  // because that is the shape `testMatch` declares; the source list stays frozen,
+  // so the runner receives a copy and cannot reach the inventory itself.
   testMatch: [...assertSuiteInventory(SPEC_DIRECTORY, SUITE_SPECS)],
 
   // NOTE ON DISCOVERY, WHICH IS DECLARED EXACTLY ONCE ABOVE.
@@ -354,14 +417,13 @@ export default defineConfig({
   // Both narrow collection to the same six numbered files and both are resolved
   // relative to `testDir`, so neither can reach outside `specs/`. The explicit
   // inventory is the one kept, because it is verified against the directory at
-  // config load and therefore STOPS the run when a spec is renamed instead of
-  // quietly shrinking it; the pattern is redundant beside it, not discarded on
-  // merit. The reasoning both shared still holds and is worth keeping on record:
-  // `specs/` also holds six superseded unnumbered specs, a sweep collected all
-  // twelve (103 tests), every workflow was collected twice, and the two
-  // generations disagreed about missing-stack behaviour with nothing selecting
-  // which was authoritative - which makes the result non-canonical rather than
-  // merely slow.
+  // config load and therefore STOPS the run when the directory and the enumeration
+  // disagree in either direction, instead of quietly shrinking or quietly excluding;
+  // the pattern is redundant beside it, not discarded on merit. The reasoning both
+  // shared is worth keeping on record: a sweep collected all twelve files (103
+  // tests), every workflow was collected twice, and the two generations disagreed
+  // about missing-stack behaviour with nothing selecting which was authoritative -
+  // which made the result non-canonical rather than merely slow.
 
   // Artifact root, kept inside this directory so nothing is ever written at
   // `tests/` level or above. In practice almost nothing lands here, because
@@ -385,9 +447,11 @@ export default defineConfig({
   // No retries. A retry must never be allowed to convert a real failure into
   // a pass, and the sharpest case is the stale update: it MUST fail, because
   // there is no silent overwrite anywhere in this system. Were a retry count
-  // ever introduced for CI flake, it would have to be documented, and the
-  // concurrency-conflict and event-ordering specs would have to pin it back to
-  // zero locally with `test.describe.configure({ retries: 0 })`.
+  // ever introduced for CI flake, it would have to be documented, and the two
+  // state-mutating specs — `06-concurrency-conflict` above all — would have to
+  // pin it back to zero locally with `test.describe.configure({ retries: 0 })`.
+  // That spec carries the pin today, and it matters more since its six steps
+  // became one atomic test: a retry would re-run the whole mutation sequence.
   retries: 0,
 
   // A stray `test.only` silently narrows a CI run to one test while still
@@ -449,11 +513,21 @@ export default defineConfig({
     // it off to "make TLS work locally" would silently disable the very
     // verification a mutually authenticated handshake exists to establish.
     //
-    // It costs nothing while every listener this repository binds is cleartext,
-    // and that is precisely why it is set now rather than when it first matters:
-    // the moment a deployment points this suite at an `https` address, an
-    // untrusted certificate is a real finding about the stack instead of noise
-    // somebody suppressed to get a run green.
+    // EVERY LISTENER THIS REPOSITORY BINDS IS `https`, so this setting is load
+    // bearing today rather than a precaution for later. Each service declares its
+    // TLS listener in its BASE settings file - https://+:5101, :5102, :5104,
+    // :5105 - and a docker compose bring-up presents a certificate issued by the
+    // throwaway private authority whose public half the manifest projects as a
+    // Compose secret, named on the host by INTERNAL_TLS_CA_PATH.
+    //
+    // WHICH MEANS THE RUNNER MUST TRUST THAT AUTHORITY, AND CANNOT BE MADE TO FROM
+    // HERE. Node reads NODE_EXTRA_CA_CERTS once at process start, so no code in
+    // this suite can install a trust anchor into a run already under way. Export
+    // it before invoking the runner:
+    //     docker compose bring-up: NODE_EXTRA_CA_CERTS="$INTERNAL_TLS_CA_PATH"
+    //     host dotnet run:         dotnet dev-certs https --trust
+    // `./global-setup.ts` detects the gap and refuses the run with that remedy
+    // quoted, which is the honest alternative to appearing to fix it here.
     ignoreHTTPSErrors: false,
 
     // The client certificate for the mutual-TLS half of the issuance edge.
@@ -468,7 +542,9 @@ export default defineConfig({
     //     auth.ts` attaches it to the issuance request and to nothing else,
     //     deliberately NOT through `extraHTTPHeaders`, which would send it to
     //     Gateway, DataServices and Persistence as well. This is the path the
-    //     documented cleartext bring-up uses.
+    //     documented bring-up uses — not because the channel is readable (it
+    //     is not; every listener here terminates TLS) but because a shared
+    //     secret needs no certificate provisioning.
     //   * a client certificate, which exists only inside a TLS handshake and so
     //     can only be supplied by the runner. That is what this entry is for, and
     //     it is reachable only against a deployment that terminates TLS at
@@ -481,12 +557,17 @@ export default defineConfig({
     // are mounted from the orchestration secret layer and are not part of this
     // repository.
     //
-    // Absent is the common case and is not an error: the listeners this
-    // repository binds are cleartext, so on the documented bring-up there is no
-    // handshake to present a certificate inside, the resolver yields nothing and
-    // `[]` configures none at all. That is exactly right — the readiness,
-    // capability and 401-without-a-token specs need none, and a suite that
-    // refused to start without certificates would be unrunnable for them.
+    // Absent is the common case and is not an error, though the reason is NOT
+    // that there is no handshake to present a certificate inside — every
+    // listener this repository binds terminates TLS, so there always is one.
+    // The reason is that the OTHER accepted credential needs no provisioning:
+    // the documented bring-up supplies a shared secret, so a deployment that
+    // has not issued caller certificates simply authenticates with `Basic` and
+    // the resolver yields nothing, leaving `[]` to configure none at all. That
+    // is exactly right — the readiness, capability and 401-without-a-token
+    // specs need no credential of either kind, and a suite that refused to
+    // start without certificates would be unrunnable for them. Both schemes
+    // have been exercised against the Compose stack; the suite passes on each.
     //
     // WHAT ABSENT DOES NOT MEAN. It does not mean the issuance edge is open.
     // `POST /v1/tokens` refuses a request carrying NEITHER credential with `401`
@@ -496,9 +577,11 @@ export default defineConfig({
     // `fixtures/service-endpoints.ts` and `fixtures/auth.ts` state the identical
     // policy; all three must stay in agreement.
     //
-    // This is the one place the runner imports from `fixtures/`, and the reason
-    // is that the value must reach `use`, which only the config can populate.
-    // The base-URL resolution above stays inlined for the reason stated there.
+    // This is one of the two places the runner imports from `fixtures/`, and the
+    // reason is that the value must reach `use`, which only the config can
+    // populate. (The other is `PROJECT_LABEL` at `projects` below, which must
+    // reach the project name for the same reason.) The base-URL resolution above
+    // stays inlined for the reason stated there.
     clientCertificates: SECURITY_CLIENT_CERTIFICATE ? [SECURITY_CLIENT_CERTIFICATE] : [],
 
     // Every artifact capture off. Screenshots and video are meaningless for a
@@ -510,14 +593,27 @@ export default defineConfig({
     video: 'off',
   },
 
-  // One logical project, so every reported line states plainly that this is
-  // the API suite. It carries no browser engine, no device preset and no
-  // screen geometry, and it inherits `testDir`, `outputDir` and `use` from
-  // above. No coverage instrumentation is configured here either: the
-  // line-coverage gate this migration must satisfy is a .NET-side obligation
-  // measured per service from its own report, and this suite carries none of
-  // it.
-  projects: [{ name: 'api' }],
+  // One logical project, so every reported line states plainly what kind of run
+  // this is. It carries no browser engine, no device preset and no screen
+  // geometry, and it inherits `testDir`, `outputDir` and `use` from above. No
+  // coverage instrumentation is configured here either: the line-coverage gate
+  // this migration must satisfy is a .NET-side obligation measured per service
+  // from its own report, and this suite carries none of it.
+  //
+  // THE NAME IS NOT A CONSTANT, and that is the point. `PROJECT_LABEL` is `api`
+  // for a full acceptance run and `api-partial-no-stack` for a run that set
+  // `E2E_ALLOW_ABSENT_STACK` to tolerate an absent stack. A summary line shows
+  // counts and a project name and nothing else, so `27 skipped` under a project
+  // called `api` is indistinguishable from an acceptance run that happened to
+  // skip a few tests — while the same counts under `api-partial-no-stack` cannot
+  // be mistaken for one. The skip reason each test carries says the same thing,
+  // but a reader of a summary never opens a skip reason.
+  //
+  // `./fixtures/run-mode` is importable from here precisely because it imports
+  // nothing itself — no runner, no fixture, no filesystem — so reading the run
+  // mode in the config costs no module-load side effect and keeps
+  // `playwright test --list` a pure collection step.
+  projects: [{ name: PROJECT_LABEL }],
 
   // Deliberately absent, and absent for stated reasons:
   //

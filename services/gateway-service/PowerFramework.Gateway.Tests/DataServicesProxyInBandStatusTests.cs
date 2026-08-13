@@ -14,8 +14,31 @@
 //  L11-L13], so PREVENT = 1 READS AS A SUCCESS and CANCELLED = -2 is NEITHER succeeded nor failed. A
 //  projection that used a plain "not zero means failure" test would turn both into HTTP errors and change
 //  observable behaviour, which constraint C-B forbids.
+//
+//  🔴 THIS TABLE HAS A TWIN, AND THE TWO ARE THE WHOLE OF AN EQUIVALENCE CLAIM THAT NOTHING ELSE CHECKS.
+//  DataServices publishes its own REST projection of the same operations, and the two surfaces are
+//  documented as equivalent: the same refusal must carry the same HTTP status whichever one a caller
+//  reached it through. Six codes broke that and neither side noticed, because on the OTHER side all six
+//  fell into a default arm that answered 500. The twin is
+//  PowerFramework.DataServices.Tests.RestProjectionStatusEquivalenceTests, and it states the same table
+//  row for row.
+//
+//  THE TABLE IS DUPLICATED DELIBERATELY RATHER THAN HOISTED. Constraint C-A permits exactly one thing to
+//  cross a service boundary - the published contract definitions - and that project carries NO behaviour.
+//  A shared mapping table would be behaviour, and one service reading another's table would be the
+//  coupling the decomposition exists to remove. Two identical tables that each fail loudly is the correct
+//  shape for an equivalence between two independently deployable services; each names the other so a
+//  reader changing one is told where the other is.
+//
+//  WHAT IS NOT COMPARED IS THE PROSE, and that is deliberate too. Each surface's fallback sentence names
+//  the surface a caller is talking to - this one says "upstream" where the direct projection does not -
+//  and either way the sentence yields to the upstream's own diagnostic whenever one was supplied, which is
+//  the case behaviour preservation cares about (C-B). The STATUS is the contract; the sentence is the
+//  courtesy.
 // =====================================================================================================
 
+using System.Globalization;
+using System.Reflection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
@@ -322,6 +345,74 @@ public sealed class DataServicesProxyInBandStatusTests(GatewayTestHostFixture ho
             HttpContext = new DefaultHttpContext(),
             ProblemDetails = problem,
         });
+    }
+
+    /// <summary>
+    /// The table above covers every arm the map classifies, so an arm added later cannot go unasserted.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE COMPLEMENT THAT MAKES THE TABLE TOTAL RATHER THAN A SAMPLE, AND THE ROW THAT WOULD HAVE
+    /// CAUGHT THE DIVERGENCE.</b> Every row above proves one arm answers what it should; none of them
+    /// notices an arm the table FORGOT - which is exactly how six codes came to be classified on one
+    /// surface and unclassified on the other with both suites green. This walks every negative
+    /// <c>RetCode</c> constant the kernel declares, asks the map for it, and requires that anything the map
+    /// classifies appears in the table above.
+    /// </para>
+    /// <para>
+    /// IT READS THE THEORY'S OWN ROWS BY REFLECTION rather than a second list kept beside them, so the
+    /// table and the guard cannot describe different sets and both pass. And it walks the KERNEL's
+    /// constants rather than a list of codes anyone chose, so a failure code that acquires a status later is
+    /// caught by this row on the day it is classified.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheTableCoversEveryClassifiedArm()
+    {
+        MethodInfo theory = typeof(DataServicesProxyInBandStatusTests)
+            .GetMethod(nameof(AFailingInBandOutcomeProjectsOntoItsPublishedStatus))!;
+
+        // READ AS ATTRIBUTE METADATA RATHER THAN THROUGH THE FRAMEWORK'S OWN ROW EXPANSION, which needs a
+        // disposal tracker and would couple this row to a test-framework API for no gain. Each row is
+        // `InlineData(code, status)`, so the first constructor argument of the params array is the code.
+        HashSet<long> tabled =
+        [
+            .. theory
+                .GetCustomAttributesData()
+                .Where(row => row.AttributeType == typeof(InlineDataAttribute))
+                .Select(row => (IReadOnlyList<CustomAttributeTypedArgument>)row
+                    .ConstructorArguments[0]
+                    .Value!)
+                .Select(arguments => Convert.ToInt64(arguments[0].Value, CultureInfo.InvariantCulture)),
+        ];
+
+        // The table is not empty, so a reflection change that found no rows cannot make this row vacuous.
+        Assert.NotEmpty(tabled);
+
+        List<string> unasserted = [];
+
+        foreach (FieldInfo field in typeof(RetCode).GetFields(BindingFlags.Public | BindingFlags.Static))
+        {
+            if (field.GetValue(null) is not long value || value >= 0L || tabled.Contains(value))
+            {
+                continue;
+            }
+
+            PowerFramework.Gateway.Endpoints.DataServicesProxyEndpoints.StatusProjection projected =
+                PowerFramework.Gateway.Endpoints.DataServicesProxyEndpoints.InBandStatus.Project(
+                    value,
+                    errorText: null);
+
+            if (projected.HttpStatus != StatusCodes.Status500InternalServerError)
+            {
+                unasserted.Add(
+                    string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"{field.Name} ({value}) maps to {projected.HttpStatus} but is not in the table"));
+            }
+        }
+
+        Assert.Empty(unasserted);
     }
 
     /// <summary>Builds a response whose nested status carries the given outcome.</summary>

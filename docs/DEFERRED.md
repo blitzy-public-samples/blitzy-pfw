@@ -41,18 +41,18 @@ destination would be built.
 
 ## Current state of the artifacts this document references
 
-One artifact referenced below is **planned and not yet present in this repository**. It is named
-because it is where the corresponding work belongs, not because a reader can open it today:
+**Every artifact referenced below is present in the tree** — the solution and project files, the shared
+libraries, the protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service
+settings, all four service applications with their test projects, **all four container definitions**, the
+complete `orchestration/` set — [`../orchestration/docker-compose.yml`](../orchestration/docker-compose.yml),
+[`../orchestration/.env.example`](../orchestration/.env.example) and
+[`../orchestration/README.md`](../orchestration/README.md) — `.github/workflows/ci.yml`,
+[`PARITY.md`](PARITY.md), and the read-only legacy tree.
 
-| Artifact | What it will carry | State |
-| --- | --- | --- |
-| `orchestration/docker-compose.yml`, `orchestration/README.md` | Local orchestration and the readiness-gate bring-up, for the four services this phase builds and for none of the four it defers. `orchestration/.env.example` is **present** | **Planned — not yet present** |
-
-Everything else this document references — the solution and project files, the shared libraries, the
-protocol and OpenAPI definitions under `shared/PowerFramework.Contracts/`, the per-service settings,
-all four service applications with their test projects, **all four container definitions**,
-`.github/workflows/ci.yml`, and [`PARITY.md`](PARITY.md) and
-the read-only legacy tree — **is present in the tree today**.
+**All of them are present for the four in-scope services and for none of the four deferred ones**, which is
+the only fact about them this document needs. For what has actually been *run*, this document defers to
+[`../orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised),
+the single execution-status statement in this repository.
 
 None of that changes anything this document says, and the reason is worth stating: the prohibition it
 records is about what must **not** exist for the four deferred services, so progress on the four
@@ -442,6 +442,12 @@ the end-to-end specs now all agree on `{401, 501}`.
 deferred service had been built; and any `4xx` **other** than that `401` — a `400`, a `404` or a `409`
 would each say the route inspects the request before answering. Neither appears on any of the eight
 operations.
+
+**And the `{401, 501}` pair has been observed rather than only declared.** Against the running stack, each
+of `/v1/design/**`, `/v1/documents/**`, `/v1/integration/**` and `/v1/scripting/**` answered `401` with no
+token and `501` with a valid one, each `501` body naming its deferred service — DesignSystem, Documents,
+Integration and ScriptBridge respectively ([`BUILD.md`](BUILD.md) §1.3). That is the audit of §5.3 carried
+out at runtime as well as against the source: four routes, two statuses, four names, nothing else.
 
 | Route | Deferred service | Capabilities it will eventually reach |
 | --- | --- | --- |
@@ -879,9 +885,11 @@ siblings:
   opposite, and Section 5.3 gives the mechanical test by which the claim can be falsified.
 - **It does not schedule, sequence, size or design any of the four.** Naming a destination and the
   capabilities it will eventually own is the whole of what it does.
-- **It does not claim the container bring-up was verified.** Container and orchestration correctness
-  is asserted by definition review plus continuous integration; [`ARCHITECTURE.md`](ARCHITECTURE.md)
-  §10.6 records what was and was not exercised.
+- **It claims about the bring-up only what the bring-up showed.** The four-service stack has been
+  brought up and the four reserved routes answered `501` with their capability names under a valid token
+  ([`BUILD.md`](BUILD.md) §1.3) — which is evidence for §5, not for any deferred service. Nothing here
+  claims a deployed topology beyond that one, and [`ARCHITECTURE.md`](ARCHITECTURE.md) §10.6 records the
+  boundary in full.
 - **It does not reproduce any credential, key, certificate or secret value**, and it does not
   restate secret locators; Section 4.5 records only the corrected attribution about which library
   carries them, and [`SECRETS.md`](SECRETS.md) is the register.

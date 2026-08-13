@@ -887,14 +887,14 @@ once rather than settled in favour of whichever one a reader happened to open.
 
 Without softening, and nothing above should be read as implying otherwise:
 
-- **Docker was not installed and no daemon was available in the environment where this migration was
-  planned.** The Compose bring-up was therefore never run there, and neither was any paired capture against
-  the `persistence-db` volume — the volume that
+- **The Compose bring-up has been exercised; no paired capture against the `persistence-db` volume has.**
+  That volume — the one
   [`orchestration/docker-compose.yml`](../../../orchestration/docker-compose.yml) declares and that
-  `persistence-service` alone mounts. **No health gate is claimed as passed, and no multi-service stack has
-  been started from that manifest.** [`orchestration/README.md`](../../../orchestration/README.md) §10 is the
-  authority for the orchestration position, and it records precisely what *has* been exercised on the
-  container side.
+  `persistence-service` alone mounts — was provisioned and re-used during the bring-up, which establishes the
+  seam a capture needs and records nothing.
+  [`orchestration/README.md` §10](../../../orchestration/README.md#10-what-has-and-has-not-been-exercised)
+  is the only place in this repository that reports execution status; it records precisely what was exercised
+  on the container side, and this document neither restates nor contradicts it.
 - **No capture has been taken on this side**, and none on the master side either. There is no
   `<workflowId>/` directory here, no candidate recording and therefore no pair — so **no parity result exists
   and none is claimed anywhere in this document.** No file that later appears in this tree may be presented as

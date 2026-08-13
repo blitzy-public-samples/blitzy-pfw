@@ -362,13 +362,14 @@ namespace PowerFramework.Persistence.Data
         /// </summary>
         /// <remarks>
         /// <para>
-        /// REQUIRED BECAUSE IT IS THE ONLY PROVISIONING PATH THIS SERVICE HAS. Nothing in this service
-        /// calls <c>EnsureCreated</c> or <c>Migrate</c> - deliberately, and both files say so at
-        /// length - so the schema arrives exclusively through <c>dotnet ef database update</c>, which
-        /// writes a row here for every migration it applies. A database holding the application table
-        /// but NOT this one is therefore not a hand-provisioned equivalent: it is a database the
-        /// migration tool would try to re-apply migration one against, and fail. Reporting it not-ready
-        /// is the actionable answer.
+        /// REQUIRED BECAUSE MIGRATION IS THE ONLY PROVISIONING PATH THIS SERVICE HAS. Nothing anywhere in
+        /// this service calls <c>EnsureCreated</c>, so the schema arrives exclusively by applying
+        /// migrations - either by <c>SchemaProvisioner</c> before this host reports ready, on a deployment
+        /// that switched <c>Schema:ApplyMigrationsOnStartup</c> on, or by <c>dotnet ef database update</c>
+        /// out of band on one that left it off - and both write a row here for every migration applied. A database holding the
+        /// application table but NOT this one is therefore not a hand-provisioned equivalent: it is a
+        /// database migration one would be re-applied against, and fail. Reporting it not-ready is the
+        /// actionable answer.
         /// </para>
         /// <para>
         /// The name is EF Core's default and is not configured anywhere in this service, so like the

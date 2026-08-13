@@ -397,7 +397,6 @@ public sealed class GeneratedStubPresenceTests
         // contract must carry what the source has rather than what the document lists.
         new("C-04", "ColumnExpressionService", "OpenExpressionSession", false, false, "dataservices.v1.OpenExpressionSessionRequest", "dataservices.v1.OpenExpressionSessionResponse"),
         new("C-04", "ColumnExpressionService", "CloseExpressionSession", false, false, "dataservices.v1.CloseExpressionSessionRequest", "dataservices.v1.CloseExpressionSessionResponse"),
-        new("C-04", "ColumnExpressionService", "LoadRows", false, false, "dataservices.v1.LoadRowsRequest", "dataservices.v1.LoadRowsResponse"),
         new("C-04", "ColumnExpressionService", "AddExpression", false, false, "dataservices.v1.AddExpressionRequest", "dataservices.v1.AddExpressionResponse"),
         new("C-04", "ColumnExpressionService", "SetExpression", false, false, "dataservices.v1.SetExpressionRequest", "dataservices.v1.SetExpressionResponse"),
         new("C-04", "ColumnExpressionService", "GetExpression", false, false, "dataservices.v1.GetExpressionRequest", "dataservices.v1.GetExpressionResponse"),
@@ -539,7 +538,7 @@ public sealed class GeneratedStubPresenceTests
         "common.v1.RichErrorTrailer",
         "common.v1.RichErrorBinding",
         "common.v1.RichError",
-        // ---- dataservices.v1.proto  (144 authored messages) ----
+        // ---- dataservices.v1.proto  (142 authored messages) ----
         "dataservices.v1.DwObjectRef",
         "dataservices.v1.SequencingToken",
         "dataservices.v1.Veto",
@@ -633,11 +632,6 @@ public sealed class GeneratedStubPresenceTests
         "dataservices.v1.OpenExpressionSessionResponse",
         "dataservices.v1.CloseExpressionSessionRequest",
         "dataservices.v1.CloseExpressionSessionResponse",
-        // The rows an expression session evaluates against. Without them the calculation half of C-04 is
-        // unreachable: a session's DataWindow is created empty and the retrieve operation on C-03 takes a
-        // registered data-object name rather than a session-scoped handle.
-        "dataservices.v1.LoadRowsRequest",
-        "dataservices.v1.LoadRowsResponse",
         "dataservices.v1.AddExpressionRequest",
         "dataservices.v1.AddExpressionResponse",
         "dataservices.v1.SetExpressionRequest",
@@ -1485,8 +1479,9 @@ public sealed class GeneratedStubPresenceTests
             + "names are reviewed rather than inferred from whatever was generated.");
 
         // Stated as a count as well, so the failure message carries the size of the surface a reader is
-        // being asked to trust. 78 is the whole of C-03 through C-08.
-        Assert.Equal(78, declared.Length);
+        // being asked to trust. 77 is the whole of C-03 through C-08 - 78 while C-04 also carried the
+        // withdrawn row-loading rpc, which AAP 0.4.3's frozen inventory never named.
+        Assert.Equal(77, declared.Length);
     }
 
     [Theory]
@@ -1853,15 +1848,16 @@ public sealed class GeneratedStubPresenceTests
             + $"[{string.Join(", ", unlisted)}]. Adding a message to the inventory in the same change that "
             + "adds it to the definition is what keeps the published surface a reviewed one.");
 
-        // 250 = 20 in common.v1 + 144 in dataservices.v1 + 88 in persistence.v1, less no map entries.
+        // 248 = 20 in common.v1 + 142 in dataservices.v1 + 88 in persistence.v1, less no map entries.
         // The count moved from 244 with the carrier-state typing: common.v1 gained DataWindowRow
         // (PROMOTED out of dataservices.v1, which therefore lost it) and NullableInt64, and
         // persistence.v1 gained CarrierBufferSegment and CarrierState - a net of three. It moved from
         // 247 to 248 with dataservices.v1.RowValidationError, the per-column refusal C-03's Update
-        // answers for a payload rejected before any statement is generated, and from 248 to 250 with
-        // dataservices.v1.LoadRowsRequest and LoadRowsResponse, the operation that makes C-04's
-        // calculation half reachable.
-        Assert.Equal(250, authored.Length);
+        // answers for a payload rejected before any statement is generated. It reached 250 with
+        // dataservices.v1.LoadRowsRequest and LoadRowsResponse and RETURNED to 248 when they were
+        // withdrawn: that pair was an unreviewed row-loading mutator absent from AAP 0.4.3's frozen C-04
+        // inventory, so it is no longer part of the published surface.
+        Assert.Equal(248, authored.Length);
         Assert.Equal(authored.Length, AuthoredMessageRoster.Distinct(StringComparer.Ordinal).Count());
     }
 

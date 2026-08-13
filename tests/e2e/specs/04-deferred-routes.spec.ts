@@ -184,7 +184,20 @@ import {
   requireServiceToken,
 } from '../fixtures/token-issuance';
 
-import { probeStackAvailability } from '../fixtures/live-stack';
+import { requireLiveStack } from '../fixtures/live-stack';
+
+import {
+  DEFERRED_SERVICE_TOKENS,
+  JSON_MEDIA_TYPE,
+  RESERVED_ROUTE_BODY,
+  RESERVED_ROUTE_MARKER,
+  RESERVED_ROUTE_RET_CODE,
+  RESERVED_ROUTE_STATUS,
+  assertEnumToken,
+  assertMediaType,
+  assertMembers,
+  describeShapeForFailure,
+} from '../fixtures/contract-shape';
 
 // ---------------------------------------------------------------------------
 // The reserved-route table — the single edit point of this file
@@ -252,16 +265,19 @@ const RESERVED_ROUTE_PROBE_SEGMENT = '/status';
  * where the marker text is written.
  *
  * Tolerant by design on the two things that carry no meaning — letter case and
- * the separator between the word and the digit, so `Phase 2`, `phase 2`,
- * `phase-2` and `Phase2` all match — and strict on the thing that does: the
- * marker phrase itself. A pattern rather than an equality check because the
- * assertion is made against the serialized body, where the marker sits inside
- * JSON punctuation.
+ * 🔴 IT USED TO BE A TOLERANT PATTERN AND THAT WAS THE SAME DEFECT THE FOUR
+ * CITED SPECS CARRIED. `/reserved[\s-]+for[\s-]+phase[\s-]*2/i`, matched against
+ * the serialized body, accepted `phase-2`, `Phase2` and `PHASE 2` on the
+ * reasoning that separators and casing are not what the assertion is about.
+ * `ReservedRouteBody.marker` is a schema `const` — the exact string below — and a
+ * client branching on a reserved route compares it ORDINALLY. A Gateway emitting
+ * `phase-2` therefore satisfied this assertion and failed every generated client,
+ * which is precisely what a contract test must not permit.
  *
- * No `g` flag: a global regular expression carries `lastIndex` between calls,
- * and this one is reused across four generated tests.
+ * So the constant is stated once, exactly as the schema fixes it, and the member
+ * is read by name off the parsed body rather than searched for in its text.
  */
-const PHASE_2_MARKER_PATTERN = /reserved[\s-]+for[\s-]+phase[\s-]*2/i;
+const PHASE_2_MARKER = 'reserved for Phase 2';
 
 /**
  * The leak guards: patterns that must NOT match a reserved-route body, each
@@ -436,22 +452,23 @@ test.describe('Reserved deferred-capability routes (constraint C-D)', () => {
   // The probe is memoised per worker, so this costs one request per worker and
   // not one per test.
   //
-  // TESTS TAGGED `@no-stack` ARE EXEMPT, and the tag is why this is a tag rather
-  // than a title match: several specs mix pure-fixture assertions in with HTTP
-  // ones, those assertions are exactly the part that still holds with nothing
-  // running, and skipping them would throw away the only coverage available
-  // before a bring-up. A tag is declarative and machine-read; a title substring
-  // would silently start skipping the moment someone reworded a test name, and
-  // two stack-free tests in this suite never carried the wording at all.
+  // ⚠ AN ABSENT STACK NOW FAILS A FULL ACCEPTANCE RUN RATHER THAN SKIPPING IT.
+  // This hook used to probe and then skip, which left the one state a
+  // misconfigured pipeline is in - nothing running - as the state that exited
+  // zero. `requireLiveStack` fails instead unless the run has explicitly
+  // acknowledged an absent stack with E2E_ALLOW_ABSENT_STACK, in which case it
+  // skips with a stated reason and the run is labelled api-partial-no-stack in
+  // every reported line so its result cannot be read as an acceptance result.
+  //
+  // THE DECISION LIVES IN ONE PLACE FOR ALL SIX SPECS. It was written out six
+  // times, once per spec, so the six could disagree about what an absent stack
+  // means - which mattered little while the answer was a skip and matters a great
+  // deal now that it gates acceptance. Tests tagged `@no-stack` are still exempt,
+  // and the tag is still why this is a tag rather than a title match; that
+  // reasoning now lives with the function.
   // ---------------------------------------------------------------------------
   test.beforeEach(async ({}, testInfo) => {
-    if (testInfo.tags.includes('@no-stack')) {
-      return;
-    }
-
-    const availability = await probeStackAvailability();
-
-    test.skip(!availability.reachable, availability.reason);
+    await requireLiveStack(testInfo);
   });
 
   // Every route asserted in this block is a DECLARATION in Gateway's routing
@@ -519,20 +536,31 @@ test.describe('Reserved deferred-capability routes (constraint C-D)', () => {
           `something exists behind a route that is only declared.`,
       ).toBe(false);
 
-      // Machine-readable begins with the media type. A framework error page is
-      // the classic way a route "answers" without carrying a body any client
-      // can branch on, and it announces itself here. Matched on the substring
-      // rather than on equality so that a JSON-family type is accepted while
-      // HTML and plain text are not.
-      const contentType: string = response.headers()['content-type'] ?? '';
-
-      expect(
-        contentType.toLowerCase().includes('json'),
-        `${probePath} must answer with a JSON media type, because a client is ` +
-          `required to branch on the body rather than parse prose. An HTML or ` +
-          `plain-text response indicates a framework-rendered error page ` +
-          `rather than the declared reservation.`,
-      ).toBe(true);
+      // Machine-readable begins with the media type, and it is now asserted
+      // EXACTLY. This was `contentType.toLowerCase().includes('json')`, chosen
+      // "so that a JSON-family type is accepted while HTML and plain text are
+      // not" — but a `text/html` page whose type parameter mentioned json
+      // satisfied it, and a family match cannot tell a problem document from a
+      // plain JSON body. The published response declares one of the two JSON
+      // media types, so one of the two is what is accepted, exactly, with only
+      // `charset=utf-8` permitted beside it.
+      //
+      // `application/json` AND NOT `application/problem+json`, which is a
+      // distinction the contract makes deliberately rather than an accident of
+      // implementation. `components/responses/ReservedForPhaseTwo` declares
+      // exactly one content type and it is `application/json`, while every
+      // genuine refusal on this service — `Unauthorized`, `Conflict` and the
+      // rest — declares `application/problem+json`. Gateway's own decision D1
+      // records the reason: THE RESERVED BODY IS A DECLARATION WITH A FIXED
+      // SHAPE, NOT A PROBLEM DOCUMENT. A reserved route answering with a problem
+      // document would be reporting a fault where the contract says it is
+      // reporting a plan, so asserting the exact type is asserting that
+      // distinction survived.
+      assertMediaType(
+        response.headers()['content-type'],
+        JSON_MEDIA_TYPE,
+        `${probePath}`,
+      );
 
       const body: string = await response.text();
 
@@ -548,16 +576,113 @@ test.describe('Reserved deferred-capability routes (constraint C-D)', () => {
           `this message.`,
       ).toBe('object');
 
-      // The declaration names its own destination. That naming is what makes
-      // the eventual shape of the system legible from the contract, and it is
-      // the only thing about the destination the body is permitted to carry.
+      // THE BODY'S MEMBER SET, EXACTLY, WHICH WAS NEVER ASSERTED AT ALL. Every
+      // assertion in this test used to be made against the SERIALIZED TEXT: the
+      // destination "named" by a case-insensitive substring anywhere in it, the
+      // marker matched by a tolerant pattern, the status inferred from the
+      // response line. So a body of `{"message":"DesignSystem is reserved for
+      // Phase 2"}` passed every one of them — prose in a JSON wrapper, which is
+      // exactly what "machine-readable" is supposed to rule out.
+      //
+      // `ReservedRouteBody` declares six required members and sets
+      // `additionalProperties: false`, so the member set is assertable and a
+      // response that carried its meaning in prose instead now fails.
+      const reserved: Record<string, unknown> = assertMembers(
+        JSON.parse(body) as unknown,
+        RESERVED_ROUTE_BODY,
+        `the 501 body for ${probePath}`,
+      );
+
+      // The declaration names its own destination, and the name is now read from
+      // the member that carries it and checked against the closed enumeration —
+      // not looked for anywhere in the text. `deferredService` is the member the
+      // contract declares for this, so a body that mentioned the area only in a
+      // human-readable sentence no longer satisfies the claim that the reserved
+      // roster is legible to a MACHINE.
+      const deferredService: string = assertEnumToken(
+        reserved['deferredService'],
+        DEFERRED_SERVICE_TOKENS,
+        `the 501 body's 'deferredService' for ${probePath}`,
+      );
+
       expect(
-        mentionsCaseInsensitively(body, route.deferredService),
+        deferredService,
         `the 501 body for ${probePath} must name ${route.deferredService} as ` +
           `the capability area reserved behind it. Without the name the ` +
           `response says only that something is unimplemented, and the ` +
           `reserved roster stops being legible from the running system.`,
-      ).toBe(true);
+      ).toBe(route.deferredService);
+
+      // `service` carries the same enumeration and must agree with it. Two
+      // members for one fact is the contract's choice, and a body whose two
+      // halves disagreed would be a body no client could trust either half of.
+      expect(
+        assertEnumToken(
+          reserved['service'],
+          DEFERRED_SERVICE_TOKENS,
+          `the 501 body's 'service' for ${probePath}`,
+        ),
+        `the 501 body for ${probePath} carries the destination twice — as ` +
+          `'service' and as 'deferredService' — and the two must agree.`,
+      ).toBe(route.deferredService);
+
+      // The echoed route, exact — and it is the REQUESTED PATH rather than the
+      // route pattern. The contract calls the member "the matched route pattern,
+      // echoed so a client can log what it asked for", and Gateway's decision D6
+      // resolves the ambiguity in favour of the request path without its query
+      // string. That is the more useful of the two for the stated purpose: four
+      // handlers each echoing their own pattern would be indistinguishable from
+      // one handler echoing a pattern it derived, whereas an echoed path a client
+      // can compare with what it sent correlates the refusal exactly.
+      //
+      // A single handler answering every reserved path could name the right area
+      // while echoing the wrong path, and a client correlating a refusal with its
+      // request would then correlate it with the wrong one — which is what this
+      // assertion rules out.
+      expect(
+        reserved['route'],
+        `the 501 body for ${probePath} must echo the path that was requested, ` +
+          `which is how a client correlates the refusal with the request it made.`,
+      ).toBe(probePath);
+
+      // The status echoed in the body, as a NUMBER, agreeing with the response
+      // line. `const: 501` on the schema. A document disagreeing with its own
+      // transport status is worse than no document: a client branching on the
+      // parsed value takes a different path from one branching on the status.
+      expect(
+        reserved['status'],
+        `the 501 body for ${probePath} must echo status ${RESERVED_ROUTE_STATUS} ` +
+          `as a number, agreeing with the response line.`,
+      ).toBe(RESERVED_ROUTE_STATUS);
+
+      // The legacy return code, exact. `const: -2001` is `E_NO_IMPLEMENTATION`
+      // from `retcode.sru`, so the reservation reports itself in the SAME algebra
+      // the migrated framework uses everywhere else rather than inventing a
+      // parallel vocabulary for the one case that has no implementation.
+      expect(
+        reserved['retCode'],
+        `the 501 body for ${probePath} must carry retCode ` +
+          `${RESERVED_ROUTE_RET_CODE}, the legacy E_NO_IMPLEMENTATION, so a ` +
+          `caller reading the framework's own return-code algebra sees the same ` +
+          `answer the transport gave.`,
+      ).toBe(RESERVED_ROUTE_RET_CODE);
+
+      // The marker, compared for EQUALITY against the contract's constant, and read
+      // by member name off the parsed body rather than searched for in its text. The
+      // former pattern accepted `Phase 2`, `phase-2` and `Phase2` in any casing
+      // "because the assertion is made against the serialized body, where the
+      // marker sits inside JSON punctuation" — true of a text search, and no
+      // longer relevant now that the member is read by name. `const: reserved
+      // for Phase 2` means there is exactly one conforming value, so a separator or
+      // casing variant is a DIFFERENT message that no generated client can branch on
+      // rather than another spelling of this one.
+      expect(
+        reserved['marker'],
+        `the 501 body for ${probePath} must carry the reservation marker the ` +
+          `contract fixes as a constant: '${RESERVED_ROUTE_MARKER}'. It is what ` +
+          `distinguishes a deliberately reserved route from any other ` +
+          `unimplemented one, and a client branches on it rather than on prose.`,
+      ).toBe(RESERVED_ROUTE_MARKER);
 
       // And names NONE of the other three. This is the assertion that proves
       // the four are distinctly declared rather than sharing one generic
@@ -575,16 +700,24 @@ test.describe('Reserved deferred-capability routes (constraint C-D)', () => {
         ).toBe(false);
       }
 
-      // The reservation marker, so the reservation is machine-detectable
-      // instead of inferred from a status code that many other causes also
-      // produce.
+      // THE TEXT-PRESENCE COROLLARY IS RETAINED, AND IT IS NO LONGER TOLERANT. The
+      // exact equality against `marker` above is the acceptance criterion; this is a
+      // corroboration that the exact constant appears in the serialized body at all,
+      // which catches the one case equality cannot: a projection that had moved the
+      // marker into a different member would fail the exact check with "missing
+      // member" while this one shows the text is present, and the two messages
+      // together name the drift precisely. It searches ORDINALLY for the constant the
+      // schema fixes, not for a pattern — the form this line used to carry,
+      // `/reserved[\s-]+for[\s-]+phase[\s-]*2/i`, accepted `phase-2` and `Phase2`,
+      // and a separator or casing variant is a different message that no generated
+      // client branching on a schema `const` can read, not a spelling of this one. It
+      // is deliberately the weaker of the two checks and would be worthless alone.
       expect(
-        PHASE_2_MARKER_PATTERN.test(body),
-        `the 501 body for ${probePath} must carry the reservation marker the ` +
-          `contract fixes as a constant, matching ${String(PHASE_2_MARKER_PATTERN)}. ` +
-          `It is what distinguishes a deliberately reserved route from any ` +
-          `other unimplemented one, and a client branches on it rather than on ` +
-          `prose.`,
+        body.includes(PHASE_2_MARKER),
+        `the 501 body for ${probePath} must carry the reservation marker text ` +
+          `'${PHASE_2_MARKER}' somewhere in it as well as in its 'marker' member. ` +
+          `If the exact assertion above passed and this one failed, the body is not ` +
+          `what it was serialized from. ${describeShapeForFailure(body)}.`,
       ).toBe(true);
 
       // The leak guards. Each pattern is a signature of code having run behind

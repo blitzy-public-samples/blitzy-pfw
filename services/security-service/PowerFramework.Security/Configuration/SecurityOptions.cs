@@ -168,32 +168,33 @@
 //  diagnostic that stringified the options instance. The type is deliberately unprintable.
 //
 //  ==================================================================================================
-//  WHAT THIS FILE *DOES* DECLARE THAT AN EARLIER REVISION REFUSED TO, AND WHY THAT REFUSAL WAS WRONG
+//  THE SIGNING KEY HAS A FORMAT DISCRIMINATOR AND NO SIZE FLOOR, AND BOTH HALVES ARE DELIBERATE
 //  ==================================================================================================
-//  An earlier revision of this header argued that SigningKeyFormat and SigningKeyMinimumSizeBits must
-//  stay UNBOUND, on the ground that a key-size floor would be a silent legacy correction: the legacy
-//  constant catalogue keeps CRYPTO_RSA_BITS_1024 = 1024 as a first-class legal size
-//  [ws_objects/pfw.shared.pbl.src/enums.sru:L965]. The premise is true. The conclusion does not follow,
-//  and the settings file has carried the correct reasoning at length all along:
+//  SigningKeyFormat is bound and enforced below: it names the closed set of accepted shapes and the
+//  acceptance ORDER, so a value outside that set is refused at startup instead of reaching an import
+//  that would fail for an unexplained reason. A declared, documented and inert leaf would be a false
+//  assurance rather than a neutral one, which is why it is bound rather than merely written down.
 //
-//    * THE 1024 ALLOWANCE BELONGS TO A DIFFERENT SURFACE. It is preserved on C-02's key GENERATION
-//      surface, where the caller supplies the size and byte-for-byte parity is the obligation - see
-//      Crypto/LegacyDefaults.cs and AAP 0.6.6.4, which lists 1024-bit RSA among the weak defaults
-//      replicated as ANNOTATED defaults. Nothing below touches that surface, and a test pins the two
-//      apart so a future edit cannot quietly merge them.
-//    * THE SIGNING KEY IS NET-NEW, SO THERE IS NO LEGACY BEHAVIOUR TO CORRECT. The legacy has no token
-//      issuer at all [AAP 0.1.4: decomposition creates the system's first-ever ingress], so this key
-//      has no legacy analogue whose behaviour a floor could change. Applying C-02's allowance to the
-//      system's own trust root would not be parity - it would import a weakness from a surface that has
-//      nothing to do with it.
-//    * AND AN UNBOUND LEAF IS WORSE THAN NO LEAF. Both keys were declared and documented in
-//      appsettings.json while the binder ignored them, so a deployment could set
-//      SigningKeyMinimumSizeBits to 4096, read the documentation, and still start with a 1024-bit key.
-//      A setting that is declared, documented and inert is a false assurance rather than a neutral one.
+//  THERE IS NO MINIMUM-SIZE SETTING, AND NO KEY IS REFUSED FOR BEING SHORT. An earlier revision
+//  declared Security:SigningKeyMinimumSizeBits, defaulted it to 2048 and failed startup below that
+//  floor. AAP 0.6.6.4 forbids exactly that: 1024-bit RSA "remains a legal key size, and the legacy
+//  demo uses it", and the AAP's instruction for every weak cryptographic default in this estate is to
+//  REPLICATE IT AS AN ANNOTATED DEFAULT rather than to correct it - "preserve each as the default and
+//  annotate it in the contract description as a known legacy weakness, so a caller can see the risk
+//  without the behaviour changing". A floor that rejects material the legacy catalogue admits
+//  [ws_objects/pfw.shared.pbl.src/enums.sru:L965 keeps CRYPTO_RSA_BITS_1024 = 1024 as a first-class
+//  legal size] is a behaviour change dressed as robustness, and C-B rules it out however desirable it
+//  looks.
 //
-//  Both are therefore bound and enforced below. The format discriminator is NOT dead either: it names
-//  the closed set of accepted shapes and the acceptance ORDER, so a value outside that set is refused
-//  at startup instead of reaching an import that would fail for an unexplained reason.
+//  WHAT REPLACES IT, so the weakness is visible rather than silently accepted:
+//    * Tokens/SigningKeyProvider measures the imported modulus, publishes it as SigningKeySizeBits,
+//      flags SigningKeyIsLegacyWeak below LegacyWeakSigningKeySizeBits, and LOGS A WARNING naming the
+//      measured size when it is. The key is used; the operator is told.
+//    * docs/SECRETS.md 4.1 states the same thing in prose, and Crypto/LegacyDefaults.cs carries the
+//      matching annotation for the C-02 key-GENERATION surface, which also still accepts 1024 bits.
+//  A structurally unusable key is still fatal - that is the fail-fast posture reproduced from
+//  ws_objects/pfw.pbl.src/pfw.sra:L143 - because material that cannot sign at all is not a weak
+//  configuration but a broken one.
 //
 //  ==================================================================================================
 //  RULES POSITION
@@ -497,48 +498,31 @@ public sealed class SecurityOptions
     [Required(AllowEmptyStrings = false)]
     public string SigningKeyFormat { get; set; } = PermittedSigningKeyFormat;
 
-    /// <summary>
-    /// The smallest RSA modulus, in bits, this service will accept for its OWN signing identity.
-    /// Defaults to 2048.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// A FLOOR ON THIS KEY AND ONLY ON THIS KEY. See this file's header: C-02's key-generation surface
-    /// keeps the legacy 1024-bit allowance untouched, and this value governs the system's own trust
-    /// root - which is net-new and therefore has no legacy behaviour to preserve.
-    /// </para>
-    /// <para>
-    /// CONFIGURABLE UPWARDS, NOT DOWNWARDS BELOW THE FLOOR ITSELF. A deployment may raise it to 3072 or
-    /// 4096; a value below <see cref="AbsoluteMinimumSigningKeySizeBits"/> is refused, because a
-    /// configuration file that could lower the floor to nothing would make the floor decorative.
-    /// </para>
-    /// </remarks>
-    [Range(AbsoluteMinimumSigningKeySizeBits, MaximumSigningKeySizeBits)]
-    public int SigningKeyMinimumSizeBits { get; set; } = DefaultSigningKeySizeBits;
-
     /// <summary>The only signing-key encoding set this service implements.</summary>
     public const string PermittedSigningKeyFormat = "PemOrPkcs8Base64";
 
-    /// <summary>The default signing-key floor, in bits.</summary>
-    public const int DefaultSigningKeySizeBits = 2048;
-
     /// <summary>
-    /// The lowest floor a deployment may configure, in bits.
+    /// The RSA modulus size, in bits, below which this service's own signing key is reported as a
+    /// legacy weakness rather than refused.
     /// </summary>
     /// <remarks>
-    /// EQUAL TO THE DEFAULT ON PURPOSE, so the floor can be raised but never lowered. A deployment that
-    /// needs a shorter key for the trust root needs a different trust root, not a weaker setting.
+    /// <para>
+    /// AN ANNOTATION THRESHOLD, NOT A FLOOR, AND NOT CONFIGURABLE. Nothing consults it in order to
+    /// reject: <c>Tokens/SigningKeyProvider</c> compares the measured modulus against it, publishes the
+    /// verdict on <c>SigningKeyIsLegacyWeak</c> and logs a warning naming the measured size. A shorter
+    /// key still mints tokens, because AAP 0.6.6.4 keeps 1024-bit RSA legal across this estate and
+    /// requires every weak cryptographic default to be replicated as an ANNOTATED default rather than
+    /// corrected (C-B).
+    /// </para>
+    /// <para>
+    /// 2048 is the value the annotation is drawn at because it is the smallest modulus in current
+    /// general recommendation, so a key at or above it warrants no remark, and the legacy catalogue's
+    /// own next size up from 1024 [<c>ws_objects/pfw.shared.pbl.src/enums.sru:L965</c>]. It is a
+    /// constant rather than a setting deliberately: a configurable threshold would read as a policy an
+    /// operator could tighten into a rejection, which is the behaviour this estate may not have.
+    /// </para>
     /// </remarks>
-    public const int AbsoluteMinimumSigningKeySizeBits = 2048;
-
-    /// <summary>
-    /// The largest floor a deployment may configure, in bits.
-    /// </summary>
-    /// <remarks>
-    /// A CEILING ON THE SETTING, NOT ON THE KEY. It exists so a typo - an extra digit - is refused at
-    /// startup rather than rejecting every key the deployment owns for a reason nobody can see.
-    /// </remarks>
-    public const int MaximumSigningKeySizeBits = 16384;
+    public const int LegacyWeakSigningKeySizeBits = 2048;
 
     /// <summary>
     /// The request path the JWKS document is published at. Defaults to
@@ -620,33 +604,44 @@ public sealed class SecurityOptions
     public SecurityKeyStoreOptions KeyStore { get; } = new();
 
     /// <summary>
-    /// The issuance roster: WHICH callers may obtain a token, and for which audiences and scopes.
-    /// Subject names, audience names, scope names and CONFIGURATION-KEY names only - never a secret.
+    /// The credential directory: WHICH identities may authenticate at the issuance edge, and under
+    /// which secret configuration key each one's secret is found. Subject names and
+    /// CONFIGURATION-KEY names only - never a secret, and never a permission.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// WHY THIS EXISTS AT ALL, WHICH IS THE WHOLE OF THE DEFECT IT CLOSES. Without a roster the issuer
-    /// can only ask one question - is the requested audience one this deployment serves - and that
-    /// question is the same for every caller. Any caller able to authenticate at the issuance edge
-    /// could therefore mint a token for ANY configured audience carrying ANY scope set it cared to
-    /// name, which makes the audience roster a list of who this system trusts rather than a list of who
-    /// each caller may impersonate. Least privilege is not expressible without a per-subject
-    /// statement, and this is that statement.
+    /// 🔴 <b>THIS SECTION DECLARES NO PERMISSION, AND THAT IS THE CORRECTION IT CARRIES.</b> An earlier
+    /// revision also carried per-entry <c>Audiences</c> and <c>Scopes</c> lists here, documented as a
+    /// second gate the issuer applied after the deployment-wide audience roster. It did not: the
+    /// issuance decision is taken entirely against the matrix folded from <see cref="Callers"/> and
+    /// <see cref="CallerAuthorizations"/>, and those two lists were bound, frozen onto the resolved
+    /// roster entry and then never read by anything that decides. Two surfaces described one caller's
+    /// permissions and only one of them decided anything - and the shipped settings had already
+    /// diverged, so an operator reading this section would conclude a caller could address an audience
+    /// it would in fact be refused for. <b>The unenforced surface is removed rather than enforced</b>,
+    /// because enforcing it would create a second permission gate able to refuse what the matrix
+    /// grants, which is the divided authority the matrix exists to avoid. One declaration, one
+    /// enforcement point, nothing to diverge.
     /// </para>
     /// <para>
-    /// THE ROSTER IS ALSO THE CREDENTIAL DIRECTORY, and folding the two together is deliberate rather
-    /// than economical. A caller's identity, the secret it authenticates with, the audiences it may
-    /// address and the scopes it may request are one decision about one caller; splitting them across
-    /// two configuration sections would let a deployment authenticate a caller it has authorised
-    /// nothing for, or authorise a caller it cannot authenticate - both of which read as working
-    /// configuration and neither of which mints a usable token.
+    /// <b>WHAT REMAINS HERE IS AUTHENTICATION, WHICH IS A DIFFERENT QUESTION FROM AUTHORIZATION.</b>
+    /// This section answers "can this identity prove it is who it says it is", and the matrix answers
+    /// "what may that identity then obtain". A deployment can get either wrong independently, so the
+    /// two are cross-checked rather than merged: a grant naming an identity no entry here declares is
+    /// reported at startup rather than refused
+    /// [see <c>IssuanceRosterAuthority.Describe</c>], because such a caller usually authenticates by
+    /// client certificate, whose identity <c>Endpoints/TokenEndpoints.cs</c> reads from the certificate
+    /// without consulting this roster at all - so refusing it would make a supported topology
+    /// unstartable. What DOES refuse the host is a second representation of the permission model: a
+    /// retired <c>Audiences</c> or <c>Scopes</c> member on an entry here
+    /// [see <c>IssuanceRosterAuthority.Require</c>].
     /// </para>
     /// <para>
-    /// AT LEAST ONE ENTRY IS REQUIRED, AND AN EMPTY ROSTER IS A STARTUP FAILURE RATHER THAN A SAFE
+    /// AT LEAST ONE ENTRY IS REQUIRED, AND AN EMPTY DIRECTORY IS A STARTUP FAILURE RATHER THAN A SAFE
     /// DEFAULT. That is the opposite of <see cref="SecurityKeyStoreOptions.PermittedKeyRefs"/>, whose
     /// empty default is safe, and the difference is which way the fault falls: an empty key-store
     /// allow-list refuses every reference, which is a service that works with one capability switched
-    /// off, whereas an empty issuance roster refuses every caller, which is a system in which no
+    /// off, whereas an empty credential directory refuses every caller, which is a system in which no
     /// service can obtain a credential at all while this service's readiness probe reports healthy
     /// throughout. A deployment that means to mint nothing does not deploy the sole issuer.
     /// </para>
@@ -968,8 +963,7 @@ public static class ClientCertificateRevocationModes
 }
 
 /// <summary>
-/// The recognised values of <see cref="SecurityOptions.SigningKeyFormat"/> and the bounds of
-/// <see cref="SecurityOptions.SigningKeyMinimumSizeBits"/>.
+/// The recognised values of <see cref="SecurityOptions.SigningKeyFormat"/>.
 /// </summary>
 /// <remarks>
 /// A named holder rather than literals scattered across the options type, its validator and its tests:
@@ -985,27 +979,18 @@ public static class SigningKeyFormats
     /// </summary>
     public const string PemOrPkcs8Base64 = "PemOrPkcs8Base64";
 
-    /// <summary>The default floor on the issuer key's size, in bits.</summary>
-    /// <remarks>
-    /// 2048 is the smallest RSA size in current general use for a signing identity. It is a DEFAULT and
-    /// not a constant in the check, so a deployment may raise it from configuration.
-    /// </remarks>
-    public const int DefaultMinimumKeySizeBits = 2048;
-
-    /// <summary>The smallest size a configured floor may name.</summary>
-    /// <remarks>
-    /// The legacy catalogue's own smallest RSA size [<c>enums.sru:L965</c>]. A floor may be lowered to
-    /// it, which is what keeps this a configurable policy rather than a hardcoded refusal - but doing so
-    /// is a deliberate, visible act in the settings file rather than the silent default.
-    /// </remarks>
-    public const int SmallestExpressibleKeySizeBits = 1024;
-
-    /// <summary>The largest size a configured floor may name.</summary>
-    /// <remarks>
-    /// A bound rather than an opinion: without one, a mistyped value refuses every key that could ever
-    /// be supplied, and the resulting bring-up failure names the key material rather than the typo.
-    /// </remarks>
-    public const int LargestSaneKeySizeBits = 16384;
+    // NO KEY-SIZE CONSTANT LIVES IN THIS HOLDER, AND ITS ABSENCE IS THE REQUIREMENT RATHER THAN AN
+    // OMISSION. An earlier revision declared three here - a default floor of 2048 together with the
+    // smallest and largest values a deployment could configure that floor to - because the options type
+    // carried a Security:SigningKeyMinimumSizeBits setting that refused a shorter modulus at startup.
+    // AAP 0.6.6.4 keeps 1024-bit RSA a legal size across this estate, and C-B forbids correcting a weak
+    // legacy default rather than annotating it, so the setting, its bounds and its rejection message are
+    // all gone: the modulus is measured in Tokens/SigningKeyProvider, published on SigningKeySizeBits,
+    // compared against SecurityOptions.LegacyWeakSigningKeySizeBits for the annotation alone, and never
+    // refused. This holder therefore carries FORMAT NAMES ONLY, which is exactly what its summary says.
+    // The one place a 2048-bit key is still named as a value is the test factory that generates host
+    // material, and it belongs there rather than here because it is a test's choice of an unremarkable
+    // size, not a policy of this service.
 
     /// <summary>The recognised format names, for a failure message and for a test to enumerate.</summary>
     public static IReadOnlyList<string> Recognised { get; } = [PemOrPkcs8Base64];
@@ -1024,8 +1009,9 @@ public static class SigningKeyFormats
 }
 
 /// <summary>
-/// One entry in the issuance roster: a caller identity, the configuration key its shared secret is
-/// injected under, and the closed sets of audiences and scopes that caller may ask for.
+/// One entry in the issuance CREDENTIAL roster: a caller identity and the configuration key its shared
+/// secret is injected under. It carries no permission member, deliberately - see the note at the foot of
+/// the type.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -1099,54 +1085,33 @@ public sealed class SecurityClientOptions
     /// </remarks>
     public string? SecretConfigurationKey { get; set; }
 
-    /// <summary>
-    /// The closed set of audiences this caller may request a token for. Every entry must also appear on
-    /// <see cref="SecurityOptions.Audiences"/>.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// TWO GATES RATHER THAN ONE, AND THEY ANSWER DIFFERENT QUESTIONS. The deployment-wide roster says
-    /// which audiences this issuer serves at all; this set says which of them THIS caller may address.
-    /// A request is refused if it fails either, and the validator additionally refuses a deployment in
-    /// which this set names an audience the deployment-wide roster does not - not because such an entry
-    /// is dangerous, but because it is unreachable configuration that reads as a granted permission.
-    /// </para>
-    /// <para>
-    /// NON-EMPTY, because a caller permitted no audience can obtain no usable token, and an entry that
-    /// can obtain nothing is a roster entry an operator believes is working.
-    /// </para>
-    /// </remarks>
-    [MinLength(1)]
-    public IList<string> Audiences { get; } = [];
-
-    /// <summary>
-    /// The closed set of scopes this caller may request. A request naming anything outside it is
-    /// refused rather than silently narrowed.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// REFUSED, NOT NARROWED, AND THAT IS A CONTRACT DECISION RATHER THAN STRICTNESS FOR ITS OWN SAKE.
-    /// The published contract permits a granted set to be narrower than a requested one and requires a
-    /// caller to read the granted set from the response, so narrowing would be contract-legal. It is
-    /// nevertheless the wrong behaviour here: a caller that asked for a scope it may not have has a
-    /// misconfiguration, and answering it with a usable token whose scope set silently differs turns
-    /// that misconfiguration into a failure at whichever downstream service refuses the call later, far
-    /// from its cause. A refusal at the issuance edge names the problem where it can be fixed.
-    /// </para>
-    /// <para>
-    /// EVERY ENTRY IS A SCOPE TOKEN, validated against the RFC 6749 section 3.3 charset. The granted set
-    /// travels as ONE space-delimited value in both the response and the token claim, so an entry
-    /// containing white space could not be recovered by a reader and would silently become two scopes -
-    /// the same constraint the issuance request type enforces on the caller's side, applied here to the
-    /// declared side so the two cannot disagree.
-    /// </para>
-    /// <para>
-    /// NON-EMPTY, for the same reason the audience set is: a token that authorises nothing is not a
-    /// credential, and a roster entry that can only produce one is a trap.
-    /// </para>
-    /// </remarks>
-    [MinLength(1)]
-    public IList<string> Scopes { get; } = [];
+    // ----------------------------------------------------------------------------------------------
+    //  🔴 THIS TYPE CARRIES NO PERMISSION MEMBER, AND THAT IS THE WHOLE POINT OF ITS SHAPE.
+    //
+    //  IT USED TO CARRY TWO - `Audiences` and `Scopes` - and they were BOUND, frozen onto the resolved
+    //  roster entry, and then CONSULTED BY NOTHING. The issuance decision is taken entirely against the
+    //  grant matrix folded from `Security:Callers` and `Security:CallerAuthorizations`
+    //  [Tokens/TokenIssuer.cs, gate 2 of Issue], which is deliberately the single enforcement point. So
+    //  the two lists described a permission decision they did not take, and the shipped settings had
+    //  already drifted away from the matrix: one caller advertised an audience the matrix does not grant
+    //  and both advertised scopes it withholds. An operator reading the roster would conclude a caller
+    //  may address audiences it will in fact be refused for, and editing those lists to fix an
+    //  authorization problem would change nothing at all (CWE-16, CWE-863).
+    //
+    //  ONE AUTHORITATIVE MODEL, NOT TWO DESCRIBING ONE DECISION. Restoring the lists as a SECOND
+    //  enforced gate was the other available repair and is the wrong one: it would create a second
+    //  permission surface able to refuse what the matrix grants, which is exactly the divided authority
+    //  the fold in TokenIssuer rejects in terms. So the lists are GONE, and this type is what remains
+    //  once the dead surface is removed: the CREDENTIAL DIRECTORY - who may authenticate at the issuance
+    //  edge, and under which secret. Authentication and authorization are two questions, and this type
+    //  answers only the first.
+    //
+    //  THE RETIRED KEYS ARE REFUSED RATHER THAN IGNORED. An options binder silently drops a key no
+    //  property matches, so a deployment carrying `Security:Clients[n]:Audiences` forward from an older
+    //  settings file would look configured and do nothing - which is the same defect in a new dress.
+    //  IssuanceRosterAuthority refuses to start such a host and names the key and the matrix that
+    //  replaced it.
+    // ----------------------------------------------------------------------------------------------
 }
 
 /// <summary>
@@ -1538,33 +1503,6 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
         "private key instead. This message never echoes the configured value.";
 
     /// <summary>
-    /// The fixed rejection for signing material whose RSA modulus is shorter than the configured
-    /// floor. Two placeholders: the measured size, then the configured floor.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// A SIZE IS NOT A SECRET, so unlike the unusable-material message this one DOES state what was
-    /// measured. The modulus length of a key is published in the key set this service serves anonymously
-    /// [<c>GET /.well-known/jwks.json</c>], so an operator learns nothing from this message they could
-    /// not read off the wire - and without the measured value the operator cannot tell a 1024-bit key
-    /// from a 2047-bit one, which is the difference between a wrong key and a wrong generation command.
-    /// </para>
-    /// <para>
-    /// IT NAMES THE SURFACE THE FLOOR APPLIES TO, because the neighbouring C-02 surface deliberately
-    /// still accepts 1024 bits and an operator who has just read that documentation would otherwise
-    /// reasonably conclude this refusal is a defect.
-    /// </para>
-    /// </remarks>
-    public const string SigningKeyTooShortMessageFormat =
-        "Configuration key '" + SecurityOptions.SigningKeyEnvironmentVariableName + "' imported " +
-        "successfully but its RSA modulus is {0} bits, below the configured floor of {1} bits in '" +
-        SecurityOptions.SectionName + ":" + nameof(SecurityOptions.SigningKeyMinimumSizeBits) +
-        "'. This floor governs THIS SERVICE'S OWN SIGNING IDENTITY only: the key-generation surface " +
-        "published at /v1/crypto deliberately still accepts 1024 bits, preserving the legacy " +
-        "allowance [ws_objects/pfw.shared.pbl.src/enums.sru:L965], and nothing about that surface " +
-        "changes. Generate a longer key for the issuer, or raise nothing and lower nothing here.";
-
-    /// <summary>
     /// The fixed rejection for a signing-key format outside the one set this service implements. One
     /// placeholder: the permitted value.
     /// </summary>
@@ -1582,10 +1520,10 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
     // naming this key, so a deployment that misspelled the format was told the same thing twice and any
     // assertion expecting one diagnostic per defect failed on the pair.
     //
-    // CheckSigningMaterial's arm is the one retained, because the screen and the SIZE enforcement it sits
-    // beside are one decision about one value: the size can only be measured on material that imported,
-    // and the format is what decides whether it can. Splitting them let the two disagree about whether an
-    // unusable value should also be reported as too short.
+    // CheckSigningMaterial's arm is the one retained, because the screen and the IMPORT it sits beside are
+    // one decision about one value: the shape a value is permitted to arrive in is what decides whether it
+    // can be imported at all, and nothing further can be said about a value that cannot. Splitting them
+    // let the two disagree about which single fault an unusable value should be reported as.
     /// <summary>
     /// <see cref="MaximumKeyRefLength"/> rendered once, culture-invariantly, for the one failure
     /// message that quotes it.
@@ -1628,8 +1566,6 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
 
     private const string SigningKeyFormatKey = SecurityOptions.SectionName + ":SigningKeyFormat";
 
-    private const string SigningKeyMinimumSizeBitsKey =
-        SecurityOptions.SectionName + ":SigningKeyMinimumSizeBits";
     private const string CallerAuthorizationsKey =
         SecurityOptions.SectionName + ":CallerAuthorizations";
 
@@ -1690,8 +1626,8 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
     }
 
     /// <summary>
-    /// Rejections 1 and 2 plus the modulus floor: the signing material must be present, it must be
-    /// usable as an asymmetric private key, and its modulus must reach the configured floor.
+    /// Rejections 1 and 2: the signing material must be present, and it must be usable as an asymmetric
+    /// private key. Its modulus is measured but never judged.
     /// </summary>
     /// <param name="options">The bound instance.</param>
     /// <param name="failures">The accumulating failure list.</param>
@@ -1712,29 +1648,32 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
     /// continuing in a degraded state [ws_objects/pfw.pbl.src/pfw.sra:L143].
     /// </para>
     /// <para>
-    /// A KEY-SIZE FLOOR *IS* APPLIED, AND AN EARLIER REVISION OF THIS PARAGRAPH ARGUED THAT IT MUST NOT
-    /// BE. That argument ran: the legacy constant catalogue keeps 1024-bit RSA as a first-class legal
-    /// size [ws_objects/pfw.shared.pbl.src/enums.sru:L965], therefore refusing a short key here would
-    /// be a silent legacy correction. The premise is true and the conclusion is wrong, because the two
-    /// clauses are about DIFFERENT KEYS. The 1024 allowance belongs to C-02's key-GENERATION surface,
-    /// where a caller names the size and parity is the obligation - <c>RsaProvider.GenRSAKey</c>
-    /// enforces no minimum and is untouched by this check. The key measured here is this service's own
-    /// signing identity, which is NET-NEW: the legacy has no token issuer at all, so there is no legacy
-    /// behaviour a floor on it could correct. See this file's header for the full argument, and
-    /// <c>SigningKeyPolicyTests</c> for the test that pins the two surfaces apart.
+    /// NO KEY-SIZE FLOOR IS APPLIED, AND AN EARLIER REVISION OF THIS CHECK APPLIED ONE. That revision
+    /// read a configurable <c>Security:SigningKeyMinimumSizeBits</c>, defaulted it to 2048 and failed
+    /// startup below it, on the argument that the 1024-bit allowance belongs only to C-02's
+    /// key-GENERATION surface while this service's own signing identity is NET-NEW - the legacy has no
+    /// token issuer at all - so no legacy behaviour existed for a floor to correct. AAP 0.6.6.4 settles
+    /// it the other way: 1024-bit RSA remains a legal key size across this whole estate
+    /// [ws_objects/pfw.shared.pbl.src/enums.sru:L965], and C-B requires a weak cryptographic default to
+    /// be replicated as an ANNOTATED default rather than corrected. The setting, its bounds and its
+    /// rejection message are therefore gone, and a short key starts the host. See this file's header for
+    /// the full argument, and <c>SigningKeyPolicyTests</c> for the cases that pin the REMOVAL rather than
+    /// merely the current behaviour - including a stray minimum-size key left in a deployment's own
+    /// settings after an upgrade, which now governs nothing.
     /// </para>
     /// <para>
-    /// THE FLOOR IS MEASURED HERE *AND* ENFORCED AGAIN IN <c>SigningKeyProvider</c>, deliberately. This
-    /// check is what produces a readable startup failure naming the setting; the provider's is what
-    /// makes the guarantee structural, because it stands between the import and the point at which
-    /// <c>SigningCredentials</c> become reachable. Neither is redundant: a validator alone could be
-    /// bypassed by any future construction path that does not run options validation, and the provider
-    /// alone would report the fault as an exception rather than as a named configuration failure.
+    /// THE SIZE IS ANNOTATED IN <c>SigningKeyProvider</c> INSTEAD, which is the only place that can do it
+    /// honestly: it stands between the import and the point at which <c>SigningCredentials</c> become
+    /// reachable, so the measurement it publishes on <c>SigningKeySizeBits</c> and the verdict it
+    /// publishes on <c>SigningKeyIsLegacyWeak</c> describe the key that will actually sign. This check
+    /// deliberately DISCARDS the modulus it measures - the <c>out</c> argument below is discarded - because
+    /// a validator's only output is a startup refusal, and a size may no longer produce one.
     /// </para>
     /// <para>
-    /// THE SIZE IS ONLY MEASURED ON MATERIAL THAT IMPORTED. An unusable value reports that one fault and
-    /// returns, so a deployment that supplied random bytes is never additionally told those bytes are
-    /// too short - which would be true, useless, and a second message for a single defect.
+    /// UNUSABLE MATERIAL REPORTS EXACTLY ONE FAULT. A value that cannot be imported at all returns after
+    /// saying so, so a deployment that supplied random bytes is never additionally told anything about
+    /// their length - which would be a second message for a single defect, and would point an operator at
+    /// a rule that does not exist.
     /// </para>
     /// </remarks>
     private static void CheckSigningMaterial(SecurityOptions options, List<string> failures)
@@ -1770,23 +1709,23 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
             return;
         }
 
-        if (!CanImportPrivateKey(options.SigningKey, out int keySizeBits))
+        // The measured modulus is discarded here on purpose: this validator's only question is whether
+        // the material can sign at all. Size is an annotation rather than a verdict, and
+        // Tokens/SigningKeyProvider owns it.
+        if (!CanImportPrivateKey(options.SigningKey, out _))
         {
             failures.Add(SigningKeyUnusableMessage);
-
-            // The measured size of material that did not import is meaningless, so the floor is not
-            // consulted. See the third remark above.
-            return;
         }
 
-        if (keySizeBits < options.SigningKeyMinimumSizeBits)
-        {
-            failures.Add(string.Format(
-                CultureInfo.InvariantCulture,
-                SigningKeyTooShortMessageFormat,
-                keySizeBits,
-                options.SigningKeyMinimumSizeBits));
-        }
+        // NO SIZE CHECK FOLLOWS, AND ITS ABSENCE IS THE REQUIREMENT RATHER THAN AN OMISSION. AAP 0.6.6.4
+        // keeps 1024-bit RSA a legal size across this estate and requires every weak cryptographic
+        // default to be replicated as an ANNOTATED default rather than corrected (C-B), so a short
+        // modulus is reported and used, never refused. Tokens/SigningKeyProvider measures it, publishes
+        // it on SigningKeySizeBits, flags SigningKeyIsLegacyWeak against
+        // SecurityOptions.LegacyWeakSigningKeySizeBits and logs a warning naming the measured size.
+        // Material that cannot be imported at all remains fatal above: that is a broken configuration
+        // rather than a weak one, and the fail-fast posture of ws_objects/pfw.pbl.src/pfw.sra:L143
+        // applies to it.
     }
 
     /// <summary>
@@ -2270,6 +2209,23 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
                 continue;
             }
 
+            // THE CHARSET SCREEN BELONGS TO THIS SURFACE BECAUSE THIS SURFACE IS THE AUTHORITY. It was
+            // previously applied to the retired `Security:Clients[n]:Scopes` list, which described a
+            // permission decision it did not take; removing that list without moving the screen would
+            // have retired a real check along with the dead configuration.
+            if (!IsScopeToken(scope.Trim()))
+            {
+                failures.Add(
+                    $"Configuration key '{key}' is not a usable scope token. It must be 1 to " +
+                    $"{MaximumScopeLengthText} characters, each a visible ASCII character other than " +
+                    "'\"' or '\\' - the RFC 6749 section 3.3 scope-token charset. The granted set " +
+                    "travels as one space-delimited value in the response and in the token claim, so a " +
+                    "scope outside that charset could not be recovered by a reader. This message does " +
+                    "not echo the configured value.");
+
+                continue;
+            }
+
             if (!seen.Add(scope.Trim()))
             {
                 failures.Add(
@@ -2632,7 +2588,12 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
             {
                 string scope = row.Scopes[scopeIndex];
 
-                if (!string.IsNullOrEmpty(scope) && !scope.Any(char.IsWhiteSpace))
+                // THE SAME CHARSET SCREEN THE NESTED SURFACE APPLIES, AND FOR THE SAME REASON: the two
+                // shapes state one decision and fold into one matrix, so a scope legal in one spelling
+                // and illegal in the other would make the rule depend on where an operator wrote it.
+                // The screen moved here from the retired `Security:Clients[n]:Scopes` list, which was
+                // where it used to live while describing a decision it did not take.
+                if (IsScopeToken(scope?.Trim()))
                 {
                     continue;
                 }
@@ -2640,10 +2601,11 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
                 failures.Add(
                     "Configuration key " +
                     $"'{IndexedKey(IndexedKey(CallerAuthorizationsKey, index) + ":Scopes", scopeIndex)}' " +
-                    "is not a usable scope. A scope must be non-empty and must carry no white space of " +
-                    "any kind, because the scope claim is space-delimited and a scope containing a " +
-                    "space would reach a verifier as two scopes. This message never echoes the " +
-                    "configured value.");
+                    "is not a usable scope token. It must be 1 to " +
+                    $"{MaximumScopeLengthText} characters, each a visible ASCII character other than " +
+                    "'\"' or '\\' - the RFC 6749 section 3.3 scope-token charset - because the scope " +
+                    "claim is space-delimited and a scope outside that charset could not be recovered " +
+                    "by a reader. This message never echoes the configured value.");
             }
 
             // Checked even when a member above was reported blank: a second blank row is a second
@@ -2763,15 +2725,12 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
                 $"Configuration key '{ClientsKey}' is empty. At least one issuance-roster entry is " +
                 "required: this service is the sole token issuer, so an empty roster is a deployment " +
                 "in which no service can obtain a credential at all while this one continues to " +
-                "report healthy. Declare one entry per calling identity, each naming the audiences " +
-                "and scopes that identity may request.");
+                "report healthy. Declare one entry per calling identity, each naming the subject and " +
+                $"the configuration key its shared secret arrives under; what each identity may " +
+                $"REQUEST is stated once, in '{CallerAuthorizationsKey}'.");
 
             return;
         }
-
-        // The deployment-wide roster the per-entry grants are cross-checked against. Read once, and
-        // ordinally, because the issuer compares against it ordinally.
-        HashSet<string> servedAudiences = new(options.Audiences, StringComparer.Ordinal);
 
         HashSet<string> seenSubjects = new(StringComparer.Ordinal);
 
@@ -2783,16 +2742,14 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
             {
                 failures.Add(
                     $"Configuration key '{IndexedKey(ClientsKey, index)}' bound to nothing. Every " +
-                    "roster entry must be an object declaring a subject, its permitted audiences and " +
-                    "its permitted scopes.");
+                    "roster entry must be an object declaring a subject, and optionally the " +
+                    "configuration key its shared secret is injected under.");
 
                 continue;
             }
 
             CheckClientSubject(client, index, seenSubjects, failures);
             CheckClientSecretKeyName(client, index, failures);
-            CheckClientAudiences(client, index, servedAudiences, failures);
-            CheckClientScopes(client, index, failures);
         }
     }
 
@@ -2863,110 +2820,6 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
                 "secret in any case.");
         }
     }
-
-    /// <summary>
-    /// Checks one roster entry's audience grants: non-empty, and every entry served by the deployment.
-    /// </summary>
-    /// <param name="client">The roster entry.</param>
-    /// <param name="index">Its zero-based position, for the failure message.</param>
-    /// <param name="servedAudiences">The deployment-wide audience roster.</param>
-    /// <param name="failures">The accumulating failure list.</param>
-    private static void CheckClientAudiences(
-        SecurityClientOptions client,
-        int index,
-        HashSet<string> servedAudiences,
-        List<string> failures)
-    {
-        if (client.Audiences.Count == 0)
-        {
-            failures.Add(
-                $"Configuration key '{IndexedKey(ClientsKey, index)}:Audiences' is empty. A caller " +
-                "permitted no audience can obtain no usable token, so an entry granting none is a " +
-                "roster entry an operator believes is working.");
-
-            return;
-        }
-
-        for (int audienceIndex = 0; audienceIndex < client.Audiences.Count; audienceIndex++)
-        {
-            string audience = client.Audiences[audienceIndex];
-
-            if (string.IsNullOrWhiteSpace(audience))
-            {
-                failures.Add(
-                    $"Configuration key " +
-                    $"'{IndexedKey(IndexedKey(ClientsKey, index) + ":Audiences", audienceIndex)}' is " +
-                    "empty or contains only whitespace.");
-
-                continue;
-            }
-
-            if (!servedAudiences.Contains(audience))
-            {
-                failures.Add(
-                    $"Configuration key " +
-                    $"'{IndexedKey(IndexedKey(ClientsKey, index) + ":Audiences", audienceIndex)}' " +
-                    $"grants an audience that '{AudiencesKey}' does not serve. The issuer applies both " +
-                    "gates and the deployment-wide one first, so this grant can never be exercised - " +
-                    "it is unreachable configuration that reads as a granted permission. Add the " +
-                    $"audience to '{AudiencesKey}' or remove it here. This message does not echo the " +
-                    "configured value.");
-            }
-        }
-    }
-
-    /// <summary>
-    /// Checks one roster entry's scope grants: non-empty, and every entry a usable scope token.
-    /// </summary>
-    /// <param name="client">The roster entry.</param>
-    /// <param name="index">Its zero-based position, for the failure message.</param>
-    /// <param name="failures">The accumulating failure list.</param>
-    private static void CheckClientScopes(
-        SecurityClientOptions client,
-        int index,
-        List<string> failures)
-    {
-        if (client.Scopes.Count == 0)
-        {
-            failures.Add(
-                $"Configuration key '{IndexedKey(ClientsKey, index)}:Scopes' is empty. A token that " +
-                "authorises nothing is not a credential, and every issuance request must name at " +
-                "least one scope, so an entry granting none can only ever produce a refusal.");
-
-            return;
-        }
-
-        HashSet<string> seenScopes = new(StringComparer.Ordinal);
-
-        for (int scopeIndex = 0; scopeIndex < client.Scopes.Count; scopeIndex++)
-        {
-            string scope = client.Scopes[scopeIndex];
-            string keyPath = IndexedKey(IndexedKey(ClientsKey, index) + ":Scopes", scopeIndex);
-
-            if (!IsScopeToken(scope))
-            {
-                failures.Add(
-                    $"Configuration key '{keyPath}' is not a usable scope token. It must be 1 to " +
-                    $"{MaximumScopeLengthText} characters, each a visible ASCII character other than " +
-                    "'\"' or '\\' - the RFC 6749 section 3.3 scope-token charset. The granted set " +
-                    "travels as one space-delimited value in the response and in the token claim, so a " +
-                    "scope containing white space could not be recovered by a reader and would " +
-                    "silently become two scopes. This message does not echo the configured value.");
-
-                continue;
-            }
-
-            if (!seenScopes.Add(scope))
-            {
-                failures.Add(
-                    $"Configuration key '{keyPath}' repeats a scope this entry already grants. A " +
-                    "repeated grant is not more permissive than a single one, so it is a typographical " +
-                    "error rather than a policy, and the issuance request type refuses a repeated " +
-                    "scope on the caller's side for the same reason.");
-            }
-        }
-    }
-
 
     /// <summary>
     /// Renders the full configuration key path of one element of a bound collection, so that a failure
@@ -3104,8 +2957,10 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
     /// </summary>
     /// <param name="material">The configured signing material. Never logged or echoed.</param>
     /// <param name="keySizeBits">
-    /// Receives the modulus size in bits of the imported key, so the caller can apply the configured
-    /// floor without importing the material a second time; zero when nothing imported.
+    /// Receives the modulus size in bits of the imported key, so a caller that wants to REPORT the size
+    /// need not import the material a second time; zero when nothing imported. This file's own caller
+    /// discards it, because no size produces a startup refusal here - the annotation is made in
+    /// <c>Tokens/SigningKeyProvider</c> against the key that will actually sign.
     /// </param>
     /// <returns>
     /// <see langword="true"/> when the material imports as a private key in either accepted encoding;
@@ -3222,8 +3077,8 @@ public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
 
         // Read from the IMPORTED key rather than from the platform default, and read only after the
         // private-component assertion has passed: a public-only key imports on this platform and would
-        // report a perfectly respectable modulus length, so measuring before that check would let a
-        // verification-only key satisfy a floor it has no business satisfying.
+        // report a perfectly respectable modulus length, so measuring before that check would publish a
+        // measurement for a verification-only key that can never sign anything.
         keySizeBits = candidate.KeySize;
 
         return true;

@@ -169,7 +169,20 @@ import {
   requireServiceToken,
 } from '../fixtures/token-issuance';
 
-import { probeStackAvailability } from '../fixtures/live-stack';
+import { requireLiveStack } from '../fixtures/live-stack';
+
+import {
+  CAPABILITY,
+  CAPABILITY_ALL_MASK,
+  CAPABILITY_DESTINATION_TOKENS,
+  CAPABILITY_NAME_TOKENS,
+  CAPABILITY_REPORT,
+  JSON_MEDIA_TYPE,
+  assertEnumToken,
+  assertMediaType,
+  assertMembers,
+  readCanonicalMember,
+} from '../fixtures/contract-shape';
 
 /*
  * ===========================================================================
@@ -185,11 +198,21 @@ import { probeStackAvailability } from '../fixtures/live-stack';
  * The first entry of each list is the member the published contract
  * `shared/PowerFramework.Contracts/OpenApi/gateway.v1.yaml` actually declares
  * for the `CapabilityReport` and `Capability` schemas. The alternatives that
- * follow are the plausible casings and synonyms a re-serialization might land
- * on. Accepting them is not laxity about the contract — it is what keeps a
- * *capability* assertion from failing for a *naming* reason, so that a genuine
- * gate regression is never masked by a renamed field. Whichever member is
- * found, the invariants asserted against it are identical.
+ * follow are the plausible casings and synonyms a re-serialization might land on.
+ *
+ * ⚠ THE ALTERNATIVES ARE NO LONGER ACCEPTED. They were, on the reasoning that
+ * accepting them "keeps a *capability* assertion from failing for a *naming*
+ * reason, so that a genuine gate regression is never masked by a renamed field".
+ * The diagnostic half of that is right and is kept; the acceptance half was the
+ * defect. A renamed field IS a contract regression on a boundary whose entire
+ * purpose is to be read by a machine, and a suite that accepted `effective_mask`
+ * for `effectiveMask` could not detect the single most likely drift there is.
+ *
+ * So the lists now do the opposite job: the FIRST entry — the contract's own
+ * spelling — is required, and any of the alternatives found in its place is
+ * reported as the drift it is, naming both spellings. Every read below goes
+ * through `readCanonicalMember`, and no assertion is weakened by the change: what
+ * used to pass silently now fails with the better of the two messages.
  */
 
 /**
@@ -199,12 +222,7 @@ import { probeStackAvailability } from '../fixtures/live-stack';
  * domain because the configured value is projected with an unchecked
  * conversion.
  */
-const EFFECTIVE_MASK_KEYS: readonly string[] = Object.freeze([
-  'effectiveMask',
-  'effective_mask',
-  'capabilityMask',
-  'mask',
-]);
+const EFFECTIVE_MASK_KEYS: readonly string[] = Object.freeze(['effectiveMask']);
 
 /**
  * The aggregate — the value of `INIT_FLAG_ENABLE_ALL`.
@@ -213,11 +231,7 @@ const EFFECTIVE_MASK_KEYS: readonly string[] = Object.freeze([
  * a range, because it is settled by the legacy declaration and not by this
  * deployment.
  */
-const ALL_MASK_KEYS: readonly string[] = Object.freeze([
-  'allMask',
-  'all_mask',
-  'allCapabilitiesMask',
-]);
+const ALL_MASK_KEYS: readonly string[] = Object.freeze(['allMask']);
 
 /**
  * Bits set in the effective mask that none of the eight declared capabilities
@@ -227,10 +241,7 @@ const ALL_MASK_KEYS: readonly string[] = Object.freeze([
  * schema does **not** mark required — so every read of it below tolerates its
  * absence rather than demanding it.
  */
-const UNRECOGNIZED_BITS_KEYS: readonly string[] = Object.freeze([
-  'unrecognizedBits',
-  'unrecognized_bits',
-]);
+const UNRECOGNIZED_BITS_KEYS: readonly string[] = Object.freeze(['unrecognizedBits']);
 
 /**
  * The array of per-capability entries.
@@ -238,31 +249,16 @@ const UNRECOGNIZED_BITS_KEYS: readonly string[] = Object.freeze([
  * Contract member: `capabilities`, declared with both `minItems` and `maxItems`
  * at eight, because the legacy declaration closes the set.
  */
-const CAPABILITY_CONTAINER_KEYS: readonly string[] = Object.freeze([
-  'capabilities',
-  'capabilityFlags',
-  'flags',
-]);
+const CAPABILITY_CONTAINER_KEYS: readonly string[] = Object.freeze(['capabilities']);
 
 /** One entry's legacy identifier. Contract member: `name`. */
-const CAPABILITY_NAME_KEYS: readonly string[] = Object.freeze([
-  'name',
-  'capability',
-  'flag',
-]);
+const CAPABILITY_NAME_KEYS: readonly string[] = Object.freeze(['name']);
 
 /** One entry's numeric bit value. Contract member: `value`. */
-const CAPABILITY_VALUE_KEYS: readonly string[] = Object.freeze([
-  'value',
-  'bit',
-  'bitValue',
-]);
+const CAPABILITY_VALUE_KEYS: readonly string[] = Object.freeze(['value']);
 
 /** Whether one entry's bit is set in the effective mask. Contract member: `enabled`. */
-const CAPABILITY_ENABLED_KEYS: readonly string[] = Object.freeze([
-  'enabled',
-  'isEnabled',
-]);
+const CAPABILITY_ENABLED_KEYS: readonly string[] = Object.freeze(['enabled']);
 
 /**
  * Where one capability's implementation lives in the Phase-1 slice.
@@ -272,11 +268,7 @@ const CAPABILITY_ENABLED_KEYS: readonly string[] = Object.freeze([
  * load-bearing for the deferred-name guard rather than merely descriptive —
  * see {@link DEFERRED_SERVICE_NAMES} for the reconciliation it makes possible.
  */
-const CAPABILITY_DESTINATION_KEYS: readonly string[] = Object.freeze([
-  'phaseOneDestination',
-  'phase_one_destination',
-  'destination',
-]);
+const CAPABILITY_DESTINATION_KEYS: readonly string[] = Object.freeze(['phaseOneDestination']);
 
 /*
  * ===========================================================================
@@ -594,13 +586,14 @@ function readCandidate(
   source: Record<string, unknown>,
   candidates: readonly string[],
 ): unknown {
-  for (const candidate of candidates) {
-    if (Object.hasOwn(source, candidate)) {
-      return source[candidate];
-    }
-  }
+  const [canonical = '', ...variants] = candidates;
 
-  return undefined;
+  return readCanonicalMember(
+    source,
+    canonical,
+    variants,
+    `the capability report member '${canonical}'`,
+  );
 }
 
 /** Reads the first candidate member that holds a finite number. */
@@ -703,72 +696,67 @@ function decodeReport(bodyText: string): Record<string, unknown> {
 }
 
 /**
- * Normalizes whichever container shape arrived into one list of sightings.
+ * Reads the capability container as EXACTLY the shape the contract declares.
  *
- * Three shapes are accepted, and accepting all three is what lets the
- * invariants below be written once:
+ * THREE SHAPES USED TO BE ACCEPTED, and accepting all three was described as
+ * "what lets the invariants below be written once": an array of objects, an array
+ * of bare identifier strings, and an object map keyed by identifier whose values
+ * might be numbers or booleans. Only the first is a shape the contract declares.
+ * The other two were alternate ENVELOPES, and tolerating them meant a projection
+ * that had collapsed each entry to a bare name — losing its bit value, its
+ * enabled flag and its Phase-1 destination — still satisfied this file, with the
+ * three assertions about those members quietly reading `undefined` and passing.
  *
- *   - an **array of objects** — what the published schema declares, each entry
- *     carrying a name, a value, an enabled flag and a destination;
- *   - an **array of strings** — bare identifiers, with no value to compare;
- *   - an **object map** keyed by identifier, whose values may be numeric bit
- *     values or booleans.
- *
- * Every member name is resolved through the single edit point, so no key string
- * is written here. A shape that is neither an array nor an object yields
- * `undefined`, which the caller reports as a shape failure rather than passing
- * over in silence.
+ * `CapabilityReport.capabilities` is an array of `Capability` objects, pinned at
+ * eight items, each with four required members. So an array is required, each
+ * element is asserted against the `Capability` member set, and every one of the
+ * four members is read as present. A non-array container is a shape failure the
+ * caller reports; it is no longer normalized into something assertable.
  */
 function normalizeCapabilityEntries(
   container: unknown,
 ): readonly CapabilitySighting[] | undefined {
-  if (Array.isArray(container)) {
-    return container.map((element: unknown): CapabilitySighting => {
-      if (typeof element === 'string') {
-        return {
-          name: element,
-          value: undefined,
-          enabled: undefined,
-          destination: undefined,
-        };
-      }
-
-      const entry: Record<string, unknown> | undefined = asJsonObject(element);
-
-      if (entry === undefined) {
-        return {
-          name: undefined,
-          value: undefined,
-          enabled: undefined,
-          destination: undefined,
-        };
-      }
-
-      return {
-        name: readString(entry, CAPABILITY_NAME_KEYS),
-        value: readNumber(entry, CAPABILITY_VALUE_KEYS),
-        enabled: readBoolean(entry, CAPABILITY_ENABLED_KEYS),
-        destination: readString(entry, CAPABILITY_DESTINATION_KEYS),
-      };
-    });
-  }
-
-  const map: Record<string, unknown> | undefined = asJsonObject(container);
-
-  if (map === undefined) {
+  if (!Array.isArray(container)) {
     return undefined;
   }
 
-  return Object.entries(map).map(
-    ([name, value]: [string, unknown]): CapabilitySighting => ({
-      name,
-      value: typeof value === 'number' && Number.isFinite(value)
-        ? value
-        : undefined,
-      enabled: typeof value === 'boolean' ? value : undefined,
-      destination: undefined,
-    }),
-  );
+  return container.map((element: unknown, index: number): CapabilitySighting => {
+    // Each element asserted against the `Capability` member set before anything
+    // is read from it: four required members, `additionalProperties: false`. This
+    // is where a bare identifier string, an entry missing its destination, or an
+    // entry carrying a member the schema does not declare now fails — and it
+    // fails naming the member rather than silently producing an `undefined` that
+    // three assertions below would have read straight past.
+    const entry: Record<string, unknown> = assertMembers(
+      element,
+      CAPABILITY,
+      `capabilities[${index}]`,
+    );
+
+    // The closed enumerations, asserted here rather than left to a subset check
+    // downstream. `name` is one of the eight verbatim legacy identifiers and
+    // `phaseOneDestination` one of the four Phase-1 destinations; both are read
+    // from the contract's own token sets, so a value the contract does not
+    // declare fails even if it happens to be plausible.
+    assertEnumToken(
+      entry['name'],
+      CAPABILITY_NAME_TOKENS,
+      `capabilities[${index}].name`,
+    );
+
+    assertEnumToken(
+      entry['phaseOneDestination'],
+      CAPABILITY_DESTINATION_TOKENS,
+      `capabilities[${index}].phaseOneDestination`,
+    );
+
+    return {
+      name: readString(entry, CAPABILITY_NAME_KEYS),
+      value: readNumber(entry, CAPABILITY_VALUE_KEYS),
+      enabled: readBoolean(entry, CAPABILITY_ENABLED_KEYS),
+      destination: readString(entry, CAPABILITY_DESTINATION_KEYS),
+    };
+  });
 }
 
 /**
@@ -884,22 +872,23 @@ test.describe('Capability gating', () => {
   // The probe is memoised per worker, so this costs one request per worker and
   // not one per test.
   //
-  // TESTS TAGGED `@no-stack` ARE EXEMPT, and the tag is why this is a tag rather
-  // than a title match: several specs mix pure-fixture assertions in with HTTP
-  // ones, those assertions are exactly the part that still holds with nothing
-  // running, and skipping them would throw away the only coverage available
-  // before a bring-up. A tag is declarative and machine-read; a title substring
-  // would silently start skipping the moment someone reworded a test name, and
-  // two stack-free tests in this suite never carried the wording at all.
+  // ⚠ AN ABSENT STACK NOW FAILS A FULL ACCEPTANCE RUN RATHER THAN SKIPPING IT.
+  // This hook used to probe and then skip, which left the one state a
+  // misconfigured pipeline is in - nothing running - as the state that exited
+  // zero. `requireLiveStack` fails instead unless the run has explicitly
+  // acknowledged an absent stack with E2E_ALLOW_ABSENT_STACK, in which case it
+  // skips with a stated reason and the run is labelled api-partial-no-stack in
+  // every reported line so its result cannot be read as an acceptance result.
+  //
+  // THE DECISION LIVES IN ONE PLACE FOR ALL SIX SPECS. It was written out six
+  // times, once per spec, so the six could disagree about what an absent stack
+  // means - which mattered little while the answer was a skip and matters a great
+  // deal now that it gates acceptance. Tests tagged `@no-stack` are still exempt,
+  // and the tag is still why this is a tag rather than a title match; that
+  // reasoning now lives with the function.
   // ---------------------------------------------------------------------------
   test.beforeEach(async ({}, testInfo) => {
-    if (testInfo.tags.includes('@no-stack')) {
-      return;
-    }
-
-    const availability = await probeStackAvailability();
-
-    test.skip(!availability.reachable, availability.reason);
+    await requireLiveStack(testInfo);
   });
 
   // Deliberately NOT `mode: 'serial'`. Every assertion below is independent,
@@ -1063,6 +1052,20 @@ test.describe('Capability gating', () => {
         'the aggregate. This is the arithmetic of enums.sru:L49 performed over ' +
         'the independent transcription rather than over the fixture.',
     ).toBe(INIT_FLAG_ENABLE_ALL);
+
+    // AND AGAINST THE PUBLISHED CONTRACT'S OWN CONSTANT — a third witness, and one
+    // that needs no stack. The assertion above performs the legacy arithmetic over
+    // the independent transcription; this compares its result with the `const: 3847`
+    // that `CapabilityReport.allMask` declares. Three descriptions of one number —
+    // the legacy source, this file's transcription, and the published contract —
+    // and a drift in any of them is now visible rather than mutual.
+    expect(
+      summedTotal,
+      'the legacy arithmetic must reproduce the constant the published contract ' +
+        'fixes for allMask. A failure here means the contract and the legacy ' +
+        'declaration have diverged from each other, which no wire assertion could ' +
+        'attribute.',
+    ).toBe(CAPABILITY_ALL_MASK);
 
     // Sum and bitwise union agree only because the seven bits are pairwise
     // disjoint. Asserting both therefore also asserts that no term is repeated —
@@ -1264,7 +1267,23 @@ test.describe('Capability gating', () => {
         'root faults while projecting its own configuration.',
     ).toBe(200);
 
-    const report: Record<string, unknown> = decodeReport(await response.text());
+    // THE MEDIA TYPE AND THE MEMBER SET, BEFORE ANY MEMBER IS READ. Neither was
+    // asserted at either read site: `decodeReport` established only that the body
+    // parsed to an object, so a report carrying `effective_mask` and nothing else
+    // — or carrying five members the schema does not declare — reached the reads
+    // below and produced "member not found" for a reason that named the wrong
+    // culprit.
+    assertMediaType(
+      response.headers()['content-type'],
+      JSON_MEDIA_TYPE,
+      `Gateway ${CAPABILITIES_PATH}`,
+    );
+
+    const report: Record<string, unknown> = assertMembers(
+      decodeReport(await response.text()),
+      CAPABILITY_REPORT,
+      `Gateway ${CAPABILITIES_PATH} report`,
+    );
 
     // ---------------------------------------------------------------------
     // The aggregate. This is the assertion the whole file exists for.
@@ -1284,6 +1303,17 @@ test.describe('Capability gating', () => {
         'INIT_FLAG_ENABLE_BLINKFAST into a seven-term sum that deliberately ' +
         'omits it — a behavioural change, not a corrected total.',
     ).toBe(INIT_FLAG_ENABLE_ALL);
+
+    // The same value, compared with the constant the PUBLISHED CONTRACT fixes.
+    // The assertion above compares the wire value with this file's transcription
+    // of `enums.sru`; this one compares it with `const: 3847` on
+    // `CapabilityReport.allMask`. A failure of exactly one of the two says which
+    // pair diverged, which a single assertion could never do.
+    expect(
+      allMask,
+      'the reported aggregate must equal the constant the published contract ' +
+        'fixes for allMask.',
+    ).toBe(CAPABILITY_ALL_MASK);
 
     expect(
       allMask & INIT_FLAG_ENABLE_BLINKFAST,
@@ -1407,7 +1437,23 @@ test.describe('Capability gating', () => {
         'contents can be asserted.',
     ).toBe(200);
 
-    const report: Record<string, unknown> = decodeReport(await response.text());
+    // THE MEDIA TYPE AND THE MEMBER SET, BEFORE ANY MEMBER IS READ. Neither was
+    // asserted at either read site: `decodeReport` established only that the body
+    // parsed to an object, so a report carrying `effective_mask` and nothing else
+    // — or carrying five members the schema does not declare — reached the reads
+    // below and produced "member not found" for a reason that named the wrong
+    // culprit.
+    assertMediaType(
+      response.headers()['content-type'],
+      JSON_MEDIA_TYPE,
+      `Gateway ${CAPABILITIES_PATH}`,
+    );
+
+    const report: Record<string, unknown> = assertMembers(
+      decodeReport(await response.text()),
+      CAPABILITY_REPORT,
+      `Gateway ${CAPABILITIES_PATH} report`,
+    );
 
     const effectiveMask: number = requireNumber(
       readNumber(report, EFFECTIVE_MASK_KEYS),

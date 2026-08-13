@@ -176,9 +176,9 @@ public sealed class CryptoAuthorizationTests
     /// One representative of every declared family of the cryptographic surface.
     /// </summary>
     /// <remarks>
-    /// SIX ENTRIES SO THAT NO FAMILY CAN HIDE. The seventeen operations are mapped in family groups on a
-    /// single route group, so an operation that lost the requirement would take its family with it and a
-    /// table sampling one family would not notice.
+    /// SIX ENTRIES SO THAT NO FAMILY CAN HIDE. The contract's eighteen operations are mapped in family
+    /// groups on a single route group, so an operation that lost the requirement would take its family
+    /// with it and a table sampling one family would not notice.
     /// </remarks>
     private static readonly string[] FamilyRepresentativeRoutes =
     [

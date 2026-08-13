@@ -105,7 +105,7 @@
 //        The contract inventory assigns C-02's consumer explicitly - Security serves DataServices -
 //        and Gateway's endpoint roster is health, ping, capabilities, the DataServices projections and
 //        the reserved extension points. Not one of them consumes a cryptographic operation. Adding an
-//        unused 17-operation crypto surface here would be precisely the convenience aggregation the
+//        unused 18-operation crypto surface here would be precisely the convenience aggregation the
 //        no-new-features constraint forbids. DataServices carries that surface in its own client at
 //        its own layer; this file does not reference it, and the resulting duplication between the two
 //        services' Security clients is REQUIRED by the one-coupling constraint rather than being a
@@ -189,6 +189,7 @@ using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using PowerFramework.Gateway.Configuration;
+using PowerFramework.Shared.Diagnostics;
 
 namespace PowerFramework.Gateway.Clients;
 
@@ -878,7 +879,7 @@ public sealed class SecurityClient : IServiceTokenProvider
             _logger.LogTrace(
                 "Reusing the held service token for subject {Subject} and audience {Audience}; it "
                 + "remains valid until {ExpiresAt:O}.",
-                request.Subject,
+                LogSafeText.Render(request.Subject),
                 request.Audience,
                 held.ExpiresAt);
 
@@ -987,7 +988,7 @@ public sealed class SecurityClient : IServiceTokenProvider
         _logger.LogDebug(
             "Requesting a service token from Security for subject {Subject} and audience {Audience} "
             + "with {RequestedScopeCount} requested scope(s).",
-            request.Subject,
+            LogSafeText.Render(request.Subject),
             request.Audience,
             request.Scopes.Count);
 
@@ -1059,7 +1060,7 @@ public sealed class SecurityClient : IServiceTokenProvider
             "Security issued a service token for subject {Subject} and audience {Audience}; it expires "
             + "at {ExpiresAt:O} with {GrantedScopeCount} of {RequestedScopeCount} requested scope(s) "
             + "granted.",
-            request.Subject,
+            LogSafeText.Render(request.Subject),
             request.Audience,
             token.ExpiresAt,
             token.GrantedScopes.Count,

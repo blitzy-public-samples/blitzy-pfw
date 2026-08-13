@@ -655,11 +655,13 @@ Cited, not reproduced — the plan's inventory is the authority for their wordin
 
 Without softening, and nothing above should be read as implying otherwise:
 
-- **Docker was not installed and no daemon was available in the environment this document was authored in.**
-  The Compose bring-up was therefore never run, and neither was any paired capture against the
-  `persistence-db` volume — the volume that
+- **The Compose bring-up has been exercised; no paired capture has.** The distinction is the whole of this
+  section. [`orchestration/README.md` §10](../../../orchestration/README.md#10-what-has-and-has-not-been-exercised)
+  is the only place in this repository that reports execution status, and it records what the bring-up showed
+  against the `persistence-db` volume that
   [`orchestration/docker-compose.yml`](../../../orchestration/docker-compose.yml) declares and that
-  `persistence-service` alone mounts. **No health gate is claimed as passed.**
+  `persistence-service` alone mounts. **No capture was taken during it**, and a bring-up that establishes the
+  volume seam is not a recording of anything.
 - **The legacy oracle has not been executed.** Running it needs a PowerBuilder toolchain that is not
   present here.
 - **This tree contains no capture today, and it must not pretend otherwise.** There is no

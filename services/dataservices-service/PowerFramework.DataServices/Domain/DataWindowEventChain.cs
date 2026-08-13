@@ -1170,11 +1170,18 @@ internal sealed class DataWindowEventSequencer
     /// was built here first and then removed, because reordering CANNOT BE MADE SOUND on this contract:
     /// one dispatch of token 1 leaves the next expected token at 4 - the chain's outcome report takes 2
     /// and the result write takes 3 - so a message held awaiting token 2 waits for a number no client will
-    /// ever send. Every hold would strand. Worse, since a client must read a response to learn its next
-    /// token, it cannot pipeline, and a gRPC stream delivers one sender's messages in order: an
-    /// out-of-order pattern-(a) arrival is therefore not a transport artifact at all, it is a client
-    /// defect, and the right answer to a client defect is a defined error rather than a buffer. That is
-    /// AAP 0.1.5's rule - narrow with a defined error, never widen with a guess.
+    /// ever send. Every hold would strand. Worse, since a client following the convention reads a response
+    /// to learn its next token, and a gRPC stream delivers one sender's messages in order, an out-of-order
+    /// pattern-(a) arrival is not a transport artifact at all: it is a client defect, and the right answer
+    /// to a client defect is a defined error rather than a buffer. That is AAP 0.1.5's rule - narrow with a
+    /// defined error, never widen with a guess.
+    /// </para>
+    /// <para>
+    /// FOLLOWING THE CONVENTION IS NOT THE SAME AS BEING BOUND BY IT, which matters one layer up rather
+    /// than here: the rule this method enforces is "above the mark", so a pattern-(a) client may pipeline
+    /// legitimately by leaving gaps. The number of notifications that may be awaiting dispatch is therefore
+    /// bounded by the transport boundary's own ceiling rather than by an assumption about the client - see
+    /// <c>DataServices:EventChain:MaxPendingNotifications</c>.
     /// </para>
     /// <para>
     /// SOUND REORDERING WOULD REQUIRE CONTIGUOUS INBOUND TOKENS, which means giving each direction its own

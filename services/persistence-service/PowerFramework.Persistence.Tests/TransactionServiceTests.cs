@@ -277,9 +277,84 @@ public sealed class TransactionServiceTests
             Records.Add($"{logLevel}|{formatter(state, exception)}");
     }
 
+    /// <summary>
+    /// Pooled-transaction hooks whose liveness check cancels the request in flight and then reports the
+    /// transaction as not live.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// IT EXISTS TO REACH ONE ARM AND NOTHING ELSE. The cancellation observation between the acquisition
+    /// gate and the connect is reachable only by a token signalled at that instant.
+    /// </para>
+    /// <para>
+    /// <b><c>OnTest</c> AND NOT <c>OnCheck</c>, WHICH IS THE WHOLE REASON THIS DOUBLE IS PRECISE.</b> Both
+    /// are consulted by the liveness sequence, but <c>OnCheck</c> is ALSO consulted by <c>IsBroken</c>,
+    /// which the pool asks while handing the transaction back - BEFORE the acquisition gate is taken - so a
+    /// hook that cancelled there would land in the gate-wait arm instead and prove nothing about this one.
+    /// <c>OnTest</c> is consulted from exactly one place, the liveness probe inside <c>IsConnected</c>
+    /// [<c>Transactions/TransactionPool</c>], which runs inside the gate.
+    /// </para>
+    /// <para>
+    /// IT IS INERT UNTIL ARMED, and reaching it needs two preconditions the test sets up deliberately: one
+    /// session must already have connected the transaction, because the sequence answers false at its first
+    /// arm while an entry has never connected; and the clock must be past the liveness CACHE WINDOW, because
+    /// inside it the sequence answers true from the cache without probing at all.
+    /// </para>
+    /// <para>
+    /// THE FAILURE CODE IS LOAD BEARING. The probe's answer is tested with the shared kernel's SUCCESS
+    /// predicate, under which a prevention would read as connected, so <c>FAILED</c> is what makes the
+    /// liveness test report "not live" and carry execution into the branch the arm sits in.
+    /// </para>
+    /// </remarks>
+    private sealed class CancellingCheckHooks : IPooledTransactionHooks
+    {
+        private CancellationTokenSource? _source;
+
+        /// <summary>How many times the liveness probe has been asked while armed.</summary>
+        internal int ProbeCalls { get; private set; }
+
+        /// <summary>Arms the hook against a request's own cancellation source.</summary>
+        /// <param name="source">The source to cancel from inside the next liveness probe.</param>
+        internal void Arm(CancellationTokenSource source) => _source = source;
+
+        /// <inheritdoc/>
+        public long? OnTest()
+        {
+            if (_source is null)
+            {
+                // Unarmed: answer nothing, so the sequence takes its own dialect probe exactly as it would
+                // with no hooks installed at all.
+                return null;
+            }
+
+            ProbeCalls++;
+
+            _source.Cancel();
+
+            return RetCode.FAILED;
+        }
+    }
+
     private sealed class Harness
     {
-        internal Harness(bool keepAlive = false, CapturingLogger? logger = null)
+        /// <summary>Builds the service over fakes.</summary>
+        /// <param name="keepAlive">Whether the pool parks an entry at zero references.</param>
+        /// <param name="logger">Optional capturing logger.</param>
+        /// <param name="hooks">
+        /// Optional pooled-transaction hooks, handed to every transaction the activator creates.
+        /// </param>
+        /// <remarks>
+        /// THE HOOKS PARAMETER EXISTS BECAUSE THE LIVENESS SEQUENCE CONSULTS THEM, and that is the only
+        /// deterministic way into the arms that sit between the acquisition gate and the connect: the
+        /// pooled transaction asks <c>OnCheck</c> from inside <c>IsConnected</c>
+        /// [<c>Transactions/TransactionPool</c>, the liveness sequence], so a hook is the one place a test
+        /// can act at that instant without a seam invented for it. It is the same reasoning that put
+        /// <see cref="FakeEngine.OnConnect"/> on the engine.
+        /// </remarks>
+        internal Harness(
+            bool keepAlive = false,
+            CapturingLogger? logger = null,
+            IPooledTransactionHooks? hooks = null)
         {
             Clock = new FakeClock(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero));
             Engine = new FakeEngine();
@@ -292,7 +367,7 @@ public sealed class TransactionServiceTests
             Pool = new TransactionPool(
                 Options.Create(options),
                 Clock,
-                new PooledTransactionActivator(() => Engine, Clock));
+                new PooledTransactionActivator(() => Engine, Clock, hooks));
 
             Registry = new TransactionSessionRegistry(Options.Create(options), Clock, Pool);
             QuerySurface = new FakeQuerySurface();
@@ -1687,8 +1762,82 @@ public sealed class TransactionServiceTests
 
         // And no session exists, so there is nothing the caller could end. The diagnostic says exactly
         // that, and it quotes no descriptor field (constraint C-F).
-        Assert.Contains("no session was created", response.Status.ErrorText, StringComparison.Ordinal);
+        //
+        // 🔴 IT IS THE GATE-WAIT ARM'S SENTENCE NOW, because that arm is reached first: the acquisition
+        // gate honours the request token, and a semaphore consults an already-signalled token before it
+        // considers admitting a waiter, so an already-cancelled caller never reaches the liveness test at
+        // all. The pre-connect arm below is still live for a token signalled between the two, which
+        // ACancellationObservedInsideTheLivenessGateIsRefusedBeforeTheConnect drives.
+        Assert.Equal(0, harness.Registry.Count);
+        Assert.Contains("no session", response.Status.ErrorText, StringComparison.Ordinal);
         Assert.DoesNotContain(Password, response.Status.ErrorText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A cancellation observed after the acquisition gate but before the connect takes the pre-connect arm,
+    /// which reports that no connection was opened.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE ARM BETWEEN THE OTHER TWO, AND IT NEEDS A HOOK TO REACH. The gate wait refuses an
+    /// already-signalled token, and the pre-registration check catches one signalled later, so this arm is
+    /// reached only by a cancellation that lands while the liveness test is running. The pooled transaction
+    /// asks its <c>OnTest</c> hook from inside that test and from nowhere else, so a hook cancelling there
+    /// puts the request at exactly the instant this arm exists for - and answering a failure makes the
+    /// liveness test report "not live", which is what carries execution into the arm's enclosing branch.
+    /// </para>
+    /// <para>
+    /// KEEP-ALIVE, A FIRST SESSION AND A CLOCK ADVANCE ARE ALL REQUIRED. The liveness sequence answers false
+    /// at its first arm while the entry has never connected, and answers TRUE from its cache while the
+    /// configured window has not elapsed - so the probe, and therefore the hook, is unreachable until one
+    /// session has connected and the clock has moved past that window.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ACancellationObservedInsideTheLivenessGateIsRefusedBeforeTheConnect()
+    {
+        using CancellationTokenSource source = new();
+
+        CancellingCheckHooks hooks = new();
+        Harness harness = new(keepAlive: true, hooks: hooks);
+
+        SessionHandle first = await Open(harness);
+        Assert.Equal(1, harness.Engine.ConnectCalls);
+
+        // PAST THE LIVENESS CACHE WINDOW, so the next liveness test actually probes instead of answering
+        // from the cache. Read from the production constant rather than restated, so the two cannot drift.
+        harness.Clock.Advance(
+            TimeSpan.FromMilliseconds(PooledTransaction.LivenessCacheWindowMilliseconds + 1));
+
+        // Arm the hook: the next liveness probe cancels the request and answers "not live", which is the
+        // pre-connect arm's exact precondition.
+        hooks.Arm(source);
+
+        BeginSessionResponse response = await harness.Service.BeginSession(
+            new BeginSessionRequest { Descriptor_ = Descriptor() },
+            new FakeCallContext(source.Token));
+
+        Assert.Equal(WireRetCode.Cancelled, response.Status.RetCode);
+        Assert.Null(response.Session);
+
+        // THE PROBE RAN, so the arm really was reached through the liveness test rather than by some other
+        // route that happens to answer the same code.
+        Assert.Equal(1, hooks.ProbeCalls);
+
+        // NO SECOND CONNECT WAS ISSUED, which is what the arm exists to prevent.
+        Assert.Equal(1, harness.Engine.ConnectCalls);
+
+        // THE PRE-CONNECT ARM'S OWN SENTENCE, which is how this case is told apart from the other two.
+        Assert.Contains(
+            "before a connection was opened",
+            response.Status.ErrorText,
+            StringComparison.Ordinal);
+
+        // The first caller keeps its session and its pool entry; nothing was torn down.
+        Assert.Equal(1, harness.Pool.UpperBound);
+        Assert.Equal(1, harness.Registry.Count);
+        Assert.True(harness.Registry.TryResolve(first, out _));
+        Assert.Equal(0, harness.Engine.DisconnectCalls);
     }
 
     [Fact]
@@ -1708,17 +1857,38 @@ public sealed class TransactionServiceTests
         Assert.Equal(1, harness.Pool.UpperBound);
     }
 
+    /// <summary>
+    /// 🔴 A cancellation arriving after the shared transaction is connected does not undo the connect or the
+    /// FIRST caller's session - and the cancelled caller is refused rather than issued a session it can
+    /// never end.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THE PROPERTY THIS CASE PINS IS UNCHANGED; WHAT CHANGED IS THE CANCELLED CALLER'S OWN OUTCOME.</b>
+    /// It used to assert that the second caller received a session, on the reading that a live pooled
+    /// transaction is not reconnected, so "no work is issued and the cancellation has nothing to refuse".
+    /// The premise is right and the conclusion cost a permanent leak: a caller whose token is already
+    /// signalled IS GONE, gRPC discards the response, and the handle that response carried is the ONLY way
+    /// that session could ever be named - so the session could never be ended. Nothing reclaimed it either,
+    /// because the registry has no expiry sweep and the pool reference the session held stopped the pool's
+    /// own idle collection from reaping the entry. Repeating the cancellation walked the caller up to its
+    /// handle ceiling against sessions it did not know it owned.
+    /// </para>
+    /// <para>
+    /// THE THREE ASSERTIONS THAT WERE WORTH KEEPING ARE KEPT AND SHARPENED: the connect is not undone, the
+    /// FIRST caller's session is untouched, and one pool entry still serves the descriptor. A cancellation
+    /// is a refusal to be issued a handle, never a rollback of work already done - which is exactly what the
+    /// original name says, now asserted over the caller it actually applies to.
+    /// </para>
+    /// </remarks>
     [Fact]
-    public async Task ACancellationArrivingAfterTheConnectDoesNotUndoTheSession()
+    public async Task ACancellationArrivingWhenTheTransactionIsConnectedIsRefusedAndUndoesNothing()
     {
-        // A LIVE pooled transaction is NOT reconnected [:L173], so the cancellation arm - which sits
-        // inside that liveness gate - is not even reached on a second session over the same descriptor.
-        // This is the property that keeps a cancellation from tearing down work already completed: the
-        // observation is a refusal to START, never a rollback of something started.
         Harness harness = new(keepAlive: true);
 
         SessionHandle first = await Open(harness);
         Assert.Equal(1, harness.Engine.Handle);
+        Assert.Equal(1, harness.Engine.ConnectCalls);
 
         using CancellationTokenSource source = new();
         await source.CancelAsync();
@@ -1727,15 +1897,161 @@ public sealed class TransactionServiceTests
             new BeginSessionRequest { Descriptor_ = Descriptor() },
             new FakeCallContext(source.Token));
 
-        // The pooled transaction is already connected, so no work is issued and the cancellation has
-        // nothing to refuse. The caller gets its session.
-        Assert.Equal(WireRetCode.Ok, second.Status.RetCode);
-        Assert.NotNull(second.Session);
+        // 🔴 THE CANCELLED CALLER IS REFUSED AND IS GIVEN NOTHING TO END.
+        Assert.Equal(WireRetCode.Cancelled, second.Status.RetCode);
+        Assert.Null(second.Session);
 
-        // Both sessions are live over ONE pool entry, and the first is untouched by the second's token.
+        // NOTHING WAS UNDONE. The connect stands, no disconnect was issued, and the descriptor is still
+        // served by exactly one pool entry - so the refusal cost the first caller nothing.
+        Assert.Equal(1, harness.Engine.ConnectCalls);
+        Assert.Equal(0, harness.Engine.DisconnectCalls);
+        Assert.Equal(1, harness.Engine.Handle);
+        Assert.Equal(1, harness.Pool.UpperBound);
+
+        // THE FIRST CALLER'S SESSION IS UNTOUCHED, and it is the ONLY session: the second caller left no
+        // orphan behind.
+        Assert.True(harness.Registry.TryResolve(first, out _));
+        Assert.Equal(1, harness.Registry.Count);
+    }
+
+    /// <summary>
+    /// 🔴 Repeated cancellations over a connected shared descriptor leave no orphan session and consume no
+    /// pool reference, which is the leak the pre-registration check exists to close.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>ONE CANCELLATION IS A BUG AND REPETITION IS THE IMPACT, so the impact is what this asserts.</b>
+    /// Each cancelled request used to mint a session and take a pool reference that nothing could release:
+    /// not the caller, which never received the handle; not the registry, which has no expiry sweep; and not
+    /// the pool's idle collection, which cannot reap an entry whose reference count is non-zero. Twenty
+    /// cancellations therefore left twenty permanent sessions over one connection, and every one of them
+    /// counted against the caller's own ceiling - so a caller that cancelled could lock ITSELF out with
+    /// <c>E_BUSY</c> and never recover inside the process's lifetime.
+    /// </para>
+    /// <para>
+    /// THE FIRST SESSION IS OPENED UNCANCELLED ON PURPOSE. It connects the shared transaction, which is what
+    /// makes every subsequent request take the already-connected path - the path on which the only
+    /// cancellation check used to sit inside a branch that path skips entirely.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task RepeatedCancellationsOverAConnectedDescriptorLeaveNoOrphanSessionOrPoolReference()
+    {
+        const int cancellations = 20;
+
+        Harness harness = new(keepAlive: true);
+
+        SessionHandle first = await Open(harness);
+
+        for (int attempt = 0; attempt < cancellations; attempt++)
+        {
+            using CancellationTokenSource source = new();
+            await source.CancelAsync();
+
+            BeginSessionResponse refused = await harness.Service.BeginSession(
+                new BeginSessionRequest { Descriptor_ = Descriptor() },
+                new FakeCallContext(source.Token));
+
+            Assert.Equal(WireRetCode.Cancelled, refused.Status.RetCode);
+            Assert.Null(refused.Session);
+        }
+
+        // ONE SESSION AND ONE POOL ENTRY, after twenty-one requests. Both numbers would have been
+        // twenty-one before the check existed.
+        Assert.Equal(1, harness.Registry.Count);
         Assert.Equal(1, harness.Pool.UpperBound);
         Assert.True(harness.Registry.TryResolve(first, out _));
-        Assert.True(harness.Registry.TryResolve(second.Session, out _));
+
+        // AND THE CALLER CAN STILL OPEN ONE, which is the consequence a ceiling charge would have taken
+        // away.
+        SessionHandle another = await Open(harness);
+        Assert.Equal(2, harness.Registry.Count);
+        Assert.True(harness.Registry.TryResolve(another, out _));
+    }
+
+    /// <summary>
+    /// A cancelled request queueing for the shared transaction's gate GIVES UP THE WAIT instead of being
+    /// served behind the holder, and the holder completes untouched.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE THIRD CANCELLATION POINT, AND THE ONE AN ALREADY-CONNECTED TEST CANNOT REACH. Acquisition
+    /// serializes the liveness test and the connect on one gate per pooled transaction, so a second caller
+    /// arriving during another's open QUEUES. While that wait ignored the request token, a caller who had
+    /// already gone waited out the holder's whole connect and was then handed a session it could not
+    /// receive - the same orphan, arrived at by a different route.
+    /// </para>
+    /// <para>
+    /// THE DISCRIMINATING ASSERTION IS THE TIMING RATHER THAN THE CODE, which is why the holder is still
+    /// blocked inside its connect when the cancelled caller's answer is awaited: a build that ignores the
+    /// token cannot answer at that moment at all, so it fails by exceeding the budget rather than by
+    /// returning the wrong status. The budget is generous because it detects a wait, not a latency.
+    /// </para>
+    /// <para>
+    /// KEEP-ALIVE IS ON so both callers borrow ONE pooled transaction, which is the condition under which
+    /// the gate is shared and the queueing exists at all.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ACancelledRequestQueuedBehindAConnectGivesUpTheWaitRatherThanBeingServed()
+    {
+        Harness harness = new(keepAlive: true);
+
+        using ManualResetEventSlim connecting = new(false);
+        using ManualResetEventSlim release = new(false);
+
+        // THE HOLDER PARKS INSIDE THE CONNECT, so the gate is genuinely held while the second caller
+        // arrives. Synchronous, because the provider this stands in for is synchronous - which is the
+        // reason the acquisition needed a gate in the first place.
+        harness.Engine.OnConnect = () =>
+        {
+            connecting.Set();
+            release.Wait();
+        };
+
+        Task<BeginSessionResponse> holder = Task.Run(
+            () => harness.Service.BeginSession(
+                new BeginSessionRequest { Descriptor_ = Descriptor() },
+                Context),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(
+            connecting.Wait(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken),
+            "the holder never reached its connect.");
+
+        using CancellationTokenSource source = new();
+        await source.CancelAsync();
+
+        Task<BeginSessionResponse> queued = harness.Service.BeginSession(
+            new BeginSessionRequest { Descriptor_ = Descriptor() },
+            new FakeCallContext(source.Token));
+
+        // ANSWERED WHILE THE HOLDER IS STILL INSIDE ITS CONNECT. A build that waits cannot get here.
+        BeginSessionResponse refused = await queued.WaitAsync(
+            TimeSpan.FromSeconds(30),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(WireRetCode.Cancelled, refused.Status.RetCode);
+        Assert.Null(refused.Session);
+
+        // The holder is still holding, which is what makes the assertion above about the WAIT.
+        Assert.False(holder.IsCompleted);
+
+        release.Set();
+
+        BeginSessionResponse served = await holder.WaitAsync(
+            TimeSpan.FromSeconds(30),
+            TestContext.Current.CancellationToken);
+
+        // THE HOLDER IS UNAFFECTED: cancelling a queued waiter cancels the WAIT, never the holder.
+        Assert.Equal(WireRetCode.Ok, served.Status.RetCode);
+        Assert.NotNull(served.Session);
+        Assert.True(harness.Registry.TryResolve(served.Session, out _));
+
+        // ONE CONNECT, ONE ENTRY, AND NO DISCONNECT: the refusal released only its own reference.
+        Assert.Equal(1, harness.Engine.ConnectCalls);
+        Assert.Equal(0, harness.Engine.DisconnectCalls);
+        Assert.Equal(1, harness.Pool.UpperBound);
     }
 
     // ==============================================================================================
@@ -1784,10 +2100,36 @@ public sealed class TransactionServiceTests
 
         using Barrier gate = new(callers);
 
-        // A SHORT HOLD INSIDE THE CONNECT, so a sibling that is able to race certainly does. It is a
-        // synchronous sleep because the provider this stands in for is synchronous, which is precisely why
-        // the real acquisition needed serializing.
-        harness.Engine.OnConnect = () => Thread.Sleep(40);
+        // ================================================================================================
+        //  THE OVERLAP IS HELD OPEN BY A SIGNAL, NOT BY A SLEEP
+        //
+        //  This used to widen the race window with `Thread.Sleep(40)` inside the connect. The intent was
+        //  right - a connect that returns instantly can finish before a sibling has reached the liveness
+        //  test, so an unguarded implementation could pass by luck - but forty milliseconds is a guess
+        //  about how long eight tasks take to be scheduled, and a guess is exactly what makes an outcome a
+        //  function of host load. On a busy agent it is too short and the test proves nothing; it can never
+        //  be long enough to be certain, only long enough to be usually right.
+        //
+        //  Two signals replace it and between them the window is held open for precisely as long as it
+        //  needs to be, with no duration named anywhere:
+        //
+        //    * `entered` counts callers that have entered `BeginSession`, and completes `allEntered` when
+        //      the last one does.
+        //    * `release` is what the winning caller waits on INSIDE its connect. The test sets it only
+        //      after `allEntered` has completed, so the connect cannot return until every sibling is
+        //      already inside the acquisition path - which is the state an unguarded implementation would
+        //      turn into a second connect.
+        //
+        //  Neither signal carries a timeout. A run in which a caller never arrives is ended by the test
+        //  runner's own timeout, which is the separate liveness bound that belongs outside an assertion;
+        //  nothing here asserts a duration (AAP 0.8.5).
+        // ================================================================================================
+        using ManualResetEventSlim release = new(initialState: false);
+
+        TaskCompletionSource allEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int entered = 0;
+
+        harness.Engine.OnConnect = () => release.Wait(TestContext.Current.CancellationToken);
 
         Task<BeginSessionResponse>[] openings = [.. Enumerable.Range(0, callers).Select(_ => Task.Run(
             async () =>
@@ -1795,11 +2137,25 @@ public sealed class TransactionServiceTests
                 // ARRIVE TOGETHER. Every task blocks until the last one reaches this line.
                 gate.SignalAndWait(TestContext.Current.CancellationToken);
 
+                // ENTERED, ANNOUNCED BEFORE THE CALL. The last caller to get here completes `allEntered`,
+                // which is what lets the test decide the window has been held open long enough.
+                if (Interlocked.Increment(ref entered) == callers)
+                {
+                    // NOT DISCARDED WITH `_`: the enclosing Select lambda already binds `_` as its int
+                    // parameter, so a discard here would assign a bool to it.
+                    allEntered.TrySetResult();
+                }
+
                 return await harness.Service.BeginSession(
                     new BeginSessionRequest { Descriptor_ = Descriptor() },
                     new FakeCallContext(CancellationToken.None));
             },
             TestContext.Current.CancellationToken))];
+
+        // EVERY CALLER IS IN THE ACQUISITION PATH before the winning connect is allowed to finish.
+        await allEntered.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+        release.Set();
 
         BeginSessionResponse[] responses = await Task.WhenAll(openings);
 

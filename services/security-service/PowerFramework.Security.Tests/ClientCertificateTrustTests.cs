@@ -709,7 +709,7 @@ public sealed class ClientCertificateTrustStartupTests
     /// </remarks>
     private static SecurityOptions Bootable()
     {
-        using RSA key = RSA.Create(SigningKeyFormats.DefaultMinimumKeySizeBits);
+        using RSA key = RSA.Create(SecurityAppFactory.DefaultSigningKeySizeInBits);
 
         SecurityOptions options = new()
         {
@@ -726,12 +726,7 @@ public sealed class ClientCertificateTrustStartupTests
         // about a DIFFERENT rule, so the entry exists only to keep the failure list free of an unrelated
         // one. It names no secret key, which is the certificate-only shape a TLS-terminating deployment
         // uses and is valid on its own.
-        SecurityClientOptions registered = new() { Subject = "powerframework-gateway" };
-
-        registered.Audiences.Add("powerframework-gateway");
-        registered.Scopes.Add("s");
-
-        options.Clients.Add(registered);
+        options.Clients.Add(new SecurityClientOptions { Subject = "powerframework-gateway" });
 
         return options;
     }
