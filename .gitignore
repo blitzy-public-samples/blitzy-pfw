@@ -13,3 +13,45 @@
 thumbs.db
 !/res/*.zip
 !/samples/*.zip
+
+# ================================================================================================
+#  THE .NET BUILD OUTPUT OF THE MIGRATION TREE.
+#
+#  Everything above this banner is the legacy PowerBuilder repository's own ignore set and is left
+#  exactly as it stands: no pattern is edited, reordered or removed, and the two negations that
+#  re-admit the packaged archives under res/ and samples/ still apply to the patterns above them.
+#  This block is purely additive.
+#
+#  WHY IT IS HERE AT ALL, WHICH IS A CORRECTION. The migration plan records that no .gitignore
+#  change is required. That was true of the legacy tree and is not true of the tree beside it: a
+#  clean clone followed by the documented per-service command - dotnet restore, dotnet build -c
+#  Release, dotnet test - writes bin/ and obj/ under twenty projects and leaves the working tree
+#  DIRTY, which contradicts the requirement that each service build and test independently from a
+#  clean checkout (C-I) and makes `git status` useless as the review instrument it has to be. The
+#  patterns lived only in .git/info/exclude, which is per-clone and is not committed - so the
+#  property held for whoever created that clone and for nobody else.
+#
+#  UNANCHORED AND TRAILING-SLASHED, DELIBERATELY. bin/ and obj/ appear at every project root, so an
+#  anchored pattern would have to be repeated twenty times and would be wrong on the twenty-first.
+#  The trailing slash restricts each to a DIRECTORY, so a source file that happens to be named
+#  bin or obj is unaffected.
+#
+#  NOTHING HERE SUPPRESSES A SOURCE PATH. Neither name is a directory this refactor authors, and the
+#  CI target-scope audit enumerates every tracked file outside the legacy tree, so a source file
+#  hidden by one of these patterns would surface there as a missing member of its declared group.
+# ================================================================================================
+
+bin/
+obj/
+
+# The test host's own result directory. Written by `dotnet test` alongside the coverage report the
+# 80-percent gate is measured from, and never an input to anything.
+TestResults/
+
+# The end-to-end suite's installed closure and run artifacts. The suite's own nested ignore file
+# already covers these for anyone working inside tests/e2e; these entries make the same guarantee
+# hold for a `git status` run from the repository root, which is where the review instrument runs.
+node_modules/
+playwright-report/
+blob-report/
+test-results/

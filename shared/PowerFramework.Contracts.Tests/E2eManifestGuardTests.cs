@@ -27,14 +27,21 @@
 //  compiler never reads the manifest, and a C# build has no reason to. That is exactly the shape of
 //  defect a guard has to hold, rather than a reviewer.
 //
-//  WHY THESE FOUR ASSERTIONS AND NOT A SCHEMA
+//  WHY THESE FIVE ASSERTIONS AND NOT A SCHEMA
 //  ------------------------------------------------------------------------------------------------
-//  A JSON Schema would describe the manifest's shape and would be blind to every one of the four
+//  A JSON Schema would describe the manifest's shape and would be blind to every one of the five
 //  properties that actually matter here: that no key repeats (a schema validates the PARSED object,
 //  by which point the repeat is gone), that each of the two partial scripts sets the variables its
 //  name claims and no others, that every command the suite's own failure messages tell an operator to
-//  run exists, and that every command that exists is documented. Each is asserted against the raw
+//  run exists, that every command that exists is documented, and that the development dependency set
+//  is exactly the approved three with every version an exact pin. Each is asserted against the raw
 //  text or the parsed manifest directly, and each names the offending entry when it fails.
+//
+//  THE FIFTH ASSERTION IS A DECLARED DEVIATION MADE BINDING. Agent Action Plan 0.5.1 declares ONE npm
+//  entry; the manifest carries three, because the typecheck path cannot exist without a compiler and
+//  the Node ambient declarations. docs/BUILD.md 1.6.2 records that overrun as deviation D10, and the
+//  assertion is what stops the register from drifting away from the manifest it describes - in either
+//  direction, since it fails on an unapproved addition AND on the removal of an approved entry.
 //
 //  WHY A CONTRACTS TEST OWNS IT
 //  ------------------------------------------------------------------------------------------------
@@ -308,6 +315,95 @@ public sealed class E2eManifestGuardTests
                 $"{ManifestRelativePath} declares the script '{name}' and {ReadmeRelativePath} never names "
                     + "it. An undocumented command surface is one an operator can only find by reading the "
                     + "manifest, which is where this suite's one silent behavioural change hid.");
+        }
+    }
+
+    /// <summary>
+    /// The manifest declares exactly the three approved development dependencies, each exactly pinned,
+    /// and declares no runtime dependency at all.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>WHY THIS ASSERTS THREE WHEN THE MIGRATION PLAN DECLARES ONE.</b> Agent Action Plan 0.5.1's npm
+    /// table names a single entry, <c>@playwright/test</c>. The delivered manifest carries two more -
+    /// <c>typescript</c> and <c>@types/node</c> - because the <c>typecheck</c> script this same suite
+    /// asserts the existence of runs <c>tsc --noEmit</c>, and neither the compiler nor the Node ambient
+    /// declarations the fixtures compile against can be resolved without them. That overrun is declared
+    /// as deviation <b>D10</b> in <c>docs/BUILD.md</c> 1.6.2, and this test is what makes the declaration
+    /// binding rather than merely written down: a fourth dependency, or the silent removal of one of the
+    /// three, fails here and names itself.
+    /// </para>
+    /// <para>
+    /// <b>EXACT PINS, NOT RANGES.</b> A caret or tilde range makes the installed version a function of
+    /// when <c>npm ci</c> ran, which is the one property a parity suite cannot tolerate: two runs of the
+    /// same commit would exercise two different toolchains. Every version is therefore asserted to be a
+    /// bare exact version, which is also what lets the committed lockfile's integrity hashes mean
+    /// anything.
+    /// </para>
+    /// <para>
+    /// <b>AND NO <c>dependencies</c> BLOCK.</b> All three entries are development-only, so nothing here
+    /// reaches a container image or a running service. A runtime dependency would be a new shipped
+    /// component rather than a test tool, so its absence is asserted rather than assumed.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheDevelopmentDependencySetIsExactlyTheApprovedThreeAndEachIsExactlyPinned()
+    {
+        // The approved set, in the order docs/BUILD.md 1.6.2 D10 records it: the plan's one entry first,
+        // then the two the typecheck path adds.
+        string[] approved = ["@playwright/test", "@types/node", "typescript"];
+
+        using JsonDocument manifest = JsonDocument.Parse(
+            File.ReadAllBytes(RequireRepositoryFile(ManifestRelativePath)));
+
+        Assert.False(
+            manifest.RootElement.TryGetProperty("dependencies", out _),
+            $"{ManifestRelativePath} declares a 'dependencies' block. Every end-to-end package is a test "
+                + "tool and must be development-only; a runtime dependency here would be a shipped "
+                + "component that no service project declares and no container image carries.");
+
+        if (!manifest.RootElement.TryGetProperty("devDependencies", out JsonElement declared))
+        {
+            throw FailException.ForFailure(
+                $"{ManifestRelativePath} declares no 'devDependencies' object, so the suite cannot "
+                    + "install. Its absence is a finding rather than a reason to skip a check.");
+        }
+
+        Dictionary<string, string> versions = new(StringComparer.Ordinal);
+
+        foreach (JsonProperty entry in declared.EnumerateObject())
+        {
+            // A repeated key is reported by TheManifestDeclaresNoObjectKeyTwice against the raw bytes.
+            versions[entry.Name] = entry.Value.GetString() ?? string.Empty;
+        }
+
+        foreach (string name in approved)
+        {
+            Assert.True(
+                versions.ContainsKey(name),
+                $"{ManifestRelativePath} no longer declares '{name}'. All three approved development "
+                    + "dependencies are load-bearing: '@playwright/test' runs the suite, and 'typescript' "
+                    + "with '@types/node' are what the 'typecheck' script needs to compile the fixtures.");
+        }
+
+        foreach (string name in versions.Keys)
+        {
+            Assert.True(
+                Array.IndexOf(approved, name) >= 0,
+                $"{ManifestRelativePath} declares the development dependency '{name}', which is outside "
+                    + "the approved set. Agent Action Plan 0.5.1 declares one npm entry and "
+                    + "docs/BUILD.md 1.6.2 declares deviation D10 for the two beyond it. A fourth needs "
+                    + "the same treatment - record it in that register with its reason, then add it here.");
+        }
+
+        foreach ((string name, string version) in versions)
+        {
+            Assert.True(
+                Regex.IsMatch(version, @"^\d+\.\d+\.\d+$", RegexOptions.None, RegexBudget),
+                $"{ManifestRelativePath} pins '{name}' as '{version}', which is not a bare exact version. "
+                    + "A range makes the installed toolchain a function of when 'npm ci' ran, so two runs "
+                    + "of one commit could exercise two toolchains - and it makes the committed lockfile's "
+                    + "integrity hashes describe only one of them.");
         }
     }
 

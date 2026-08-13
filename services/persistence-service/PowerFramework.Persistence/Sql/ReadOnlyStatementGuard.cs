@@ -63,6 +63,14 @@
 //      credential minted for `persistence.read` cannot reach either of them at all, which is what makes
 //      gating the read surface the whole of the fix rather than half of it.
 //
+//      ⚠ READ THAT PARAGRAPH FOR WHAT IT SAYS AND NOT FOR MORE. It is about whole STATEMENTS, which is
+//      all this file judges. C-06 has a second exposure that a statement guard cannot express and that
+//      scope separation does not close: the IDENTIFIER POSITIONS of the DML the update carrier composes
+//      itself. Values there are bound as parameters and identifiers cannot be, so the table name and the
+//      column names a caller supplies reach the engine as SQL. Sql/SqlIdentifierGuard.cs is the
+//      admission test for those, applied at the C-06 boundary and again at the carrier's own sink; it is
+//      this file's sibling rather than an extension of it, and neither substitutes for the other.
+//
 //  WHAT THIS FILE IS NOT
 //  ------------------------------------------------------------------------------------------------
 //  Pure in-memory string inspection. It opens no connection, touches no database, names no DBMS client,

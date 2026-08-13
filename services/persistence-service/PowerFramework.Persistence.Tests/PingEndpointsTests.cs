@@ -57,6 +57,8 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.IdentityModel.Tokens;
 
@@ -395,6 +397,69 @@ public sealed class PingEndpointsTests
             TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.MethodNotAllowed, response.StatusCode);
+    }
+
+    /// <summary>
+    /// A refusal this service did not compose itself still carries the correlation identifier, and the
+    /// composition root tracks the same trace context onto every log record.
+    /// </summary>
+    /// <returns>A task representing the assertion.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>WHAT THIS EXISTS TO CATCH.</b> Gateway and DataServices published a <c>traceId</c> from their own
+    /// hand-written fault paths while this service published none at all, so an operator holding a Gateway
+    /// identifier from a <c>502</c> could not join it to the record on this side that explains the fault -
+    /// even though the W3C trace context had propagated here and the identifier was sitting in
+    /// <c>Activity.Current</c> the whole time. The problem-details customization in <c>Program.cs</c> closes
+    /// that, and this asserts it on the body the FRAMEWORK writes rather than on one an endpoint composed:
+    /// the bearer challenge is produced beneath every line of this service's own code, which is exactly the
+    /// body that carried nothing.
+    /// </para>
+    /// <para>
+    /// <b>BOTH HALVES ARE ASSERTED, BECAUSE EITHER ALONE IS USELESS.</b> An identifier on the wire that no
+    /// log record carries cannot be joined to anything, and a record stamped with a trace context nobody
+    /// published cannot be found. So this checks the published member AND that
+    /// <see cref="LoggerFactoryOptions.ActivityTrackingOptions"/> resolves with trace, span and parent
+    /// tracking on. Baggage and tags are asserted OFF: both are caller-controlled key-value sets, and
+    /// tracking them would copy attacker-influenced content into log records.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AFrameworkWrittenRefusalCarriesTheCorrelationIdentifierAndTheHostTracksIt()
+    {
+        await using PersistenceHost host = PersistenceHost.Create();
+        using HttpClient client = host.CreateClient();
+
+        using HttpResponseMessage response = await SendAsync(client, "not-a-token.at-all.whatsoever");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+
+        using JsonDocument body = await ReadJsonAsync(response);
+
+        // The member is present and is NOT empty. An empty traceId advertises a bridge with no far side,
+        // which is worse than omitting it, because a consumer reads it as a value.
+        Assert.True(
+            body.RootElement.TryGetProperty("traceId", out JsonElement traceId),
+            "The bearer challenge's problem body carries no 'traceId'. It is written by the framework "
+                + "beneath this service's own code, so it is the body that proves the composition root's "
+                + "customization runs rather than only the endpoints.");
+
+        Assert.Equal(JsonValueKind.String, traceId.ValueKind);
+        Assert.False(string.IsNullOrWhiteSpace(traceId.GetString()));
+
+        // retCode travels on the same body, so the two members that make a refusal actionable are proven
+        // together rather than in two places that could diverge.
+        Assert.Equal(RetCode.E_ACCESS_DENIED, body.RootElement.GetProperty("retCode").GetInt64());
+
+        LoggerFactoryOptions logging = host.Services
+            .GetRequiredService<IOptions<LoggerFactoryOptions>>()
+            .Value;
+
+        Assert.Equal(
+            ActivityTrackingOptions.TraceId
+                | ActivityTrackingOptions.SpanId
+                | ActivityTrackingOptions.ParentId,
+            logging.ActivityTrackingOptions);
     }
 
     /// <summary>

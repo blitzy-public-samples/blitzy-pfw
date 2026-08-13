@@ -92,6 +92,7 @@
 //      disables even its own theming [ws_objects/pfw.pbl.src/pfw.sra:L25].
 // ==================================================================================================
 
+using System.Diagnostics;
 using System.Net.Security;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -110,6 +111,30 @@ using PowerFramework.Security.Tokens;
 using PowerFramework.Shared.Kernel;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+
+// --------------------------------------------------------------------------------------------------
+//  CORRELATION: THE W3C TRACE CONTEXT IS STAMPED ONTO EVERY LOG RECORD THIS SERVICE WRITES.
+//
+//  ASP.NET Core already starts an Activity per request and already continues an inbound `traceparent`,
+//  so the identifier a caller upstream of this service holds is present here on every request - it was
+//  simply never written anywhere an operator can read. An operator holding a Gateway `traceId` from a
+//  502 therefore could not join it to the record on this side that explains the fault, which is the
+//  whole point of having a correlation identifier at all.
+//
+//  ActivityTrackingOptions is shared-framework code and adds NO package: the deliberately-excluded list
+//  in Directory.Packages.props rules out Serilog and the OpenTelemetry family, and this is the built-in
+//  mechanism that remains. TraceId and SpanId identify the operation and the step within it; ParentId
+//  is what makes a record attributable to the CALLER's span rather than only to the trace. Baggage and
+//  Tags are deliberately NOT tracked: both are caller-controlled key-value sets, so tracking them would
+//  copy attacker-influenced content into log records - the opposite of the redaction posture
+//  docs/ARCHITECTURE.md 9.9 records.
+//
+//  This changes no response and no behaviour. It changes what a record CONTAINS, which is why it is
+//  paired with the `traceId` member the problem-details customization below adds to every problem body:
+//  one identifier, published on the wire and written in the log, so the two can be joined.
+// --------------------------------------------------------------------------------------------------
+builder.Logging.Configure(static options => options.ActivityTrackingOptions =
+    ActivityTrackingOptions.TraceId | ActivityTrackingOptions.SpanId | ActivityTrackingOptions.ParentId);
 
 // --------------------------------------------------------------------------------------------------
 // 0. FILE-BACKED SECRET MATERIAL, RESOLVED BEFORE ANYTHING READS A SECRET
@@ -823,6 +848,31 @@ builder.Services.AddHealthChecks();
 builder.Services.AddProblemDetails(static options =>
     options.CustomizeProblemDetails = static context =>
     {
+        // THE CORRELATION IDENTIFIER IS ADDED TO EVERY PROBLEM BODY, INCLUDING ONE AN ENDPOINT COMPOSED
+        // ITSELF - which is why it sits ABOVE the retCode guard rather than below it. The guard returns
+        // early for a body that already carries retCode, so anything written after it would be skipped
+        // for exactly the bodies this service authored by hand.
+        //
+        // The value is resolved the same way in every service that publishes it: the current Activity's
+        // id when there is one - which there is on every request, because the host starts an Activity and
+        // continues an inbound W3C `traceparent` - and the host's own request identifier otherwise. The
+        // presence guard keeps a hand-written path that already set the member authoritative, and keeps an
+        // empty member out of the body: a `traceId` with no value advertises a bridge with no far side.
+        //
+        // The published problem schema sets `additionalProperties: true` and states that a consumer must
+        // ignore members it does not recognise, so this adds a member without widening any contract.
+        if (!context.ProblemDetails.Extensions.ContainsKey(ProblemResults.TraceIdExtensionMember))
+        {
+            string correlationId = Activity.Current?.Id
+                ?? context.HttpContext.TraceIdentifier
+                ?? string.Empty;
+
+            if (!string.IsNullOrEmpty(correlationId))
+            {
+                context.ProblemDetails.Extensions[ProblemResults.TraceIdExtensionMember] = correlationId;
+            }
+        }
+
         if (context.ProblemDetails.Extensions.ContainsKey(ProblemResults.RetCodeExtensionMember))
         {
             return;

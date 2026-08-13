@@ -113,6 +113,7 @@
 // ==================================================================================================
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Security.Claims;
 using System.Security.Cryptography;
@@ -154,6 +155,30 @@ using Predicates = PowerFramework.Shared.Kernel.Predicates;
 using RetCode = PowerFramework.Shared.Kernel.RetCode;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+
+// --------------------------------------------------------------------------------------------------
+//  CORRELATION: THE W3C TRACE CONTEXT IS STAMPED ONTO EVERY LOG RECORD THIS SERVICE WRITES.
+//
+//  ASP.NET Core already starts an Activity per request and already continues an inbound `traceparent`,
+//  so the identifier a caller upstream of this service holds is present here on every request - it was
+//  simply never written anywhere an operator can read. An operator holding a Gateway `traceId` from a
+//  502 therefore could not join it to the record on this side that explains the fault, which is the
+//  whole point of having a correlation identifier at all.
+//
+//  ActivityTrackingOptions is shared-framework code and adds NO package: the deliberately-excluded list
+//  in Directory.Packages.props rules out Serilog and the OpenTelemetry family, and this is the built-in
+//  mechanism that remains. TraceId and SpanId identify the operation and the step within it; ParentId
+//  is what makes a record attributable to the CALLER's span rather than only to the trace. Baggage and
+//  Tags are deliberately NOT tracked: both are caller-controlled key-value sets, so tracking them would
+//  copy attacker-influenced content into log records - the opposite of the redaction posture
+//  docs/ARCHITECTURE.md 9.9 records.
+//
+//  This changes no response and no behaviour. It changes what a record CONTAINS, which is why it is
+//  paired with the `traceId` member the problem-details customization below adds to every problem body:
+//  one identifier, published on the wire and written in the log, so the two can be joined.
+// --------------------------------------------------------------------------------------------------
+builder.Logging.Configure(static options => options.ActivityTrackingOptions =
+    ActivityTrackingOptions.TraceId | ActivityTrackingOptions.SpanId | ActivityTrackingOptions.ParentId);
 
 // --------------------------------------------------------------------------------------------------
 //  REGISTRATION. One call per concern, each implemented as an extension method at the bottom of this
@@ -1206,6 +1231,31 @@ internal static class PersistenceServiceCollectionExtensions
         services.AddProblemDetails(static options =>
             options.CustomizeProblemDetails = static context =>
             {
+                // THE CORRELATION IDENTIFIER IS ADDED TO EVERY PROBLEM BODY, INCLUDING ONE AN ENDPOINT COMPOSED
+                // ITSELF - which is why it sits ABOVE the retCode guard rather than below it. The guard returns
+                // early for a body that already carries retCode, so anything written after it would be skipped
+                // for exactly the bodies this service authored by hand.
+                //
+                // The value is resolved the same way in every service that publishes it: the current Activity's
+                // id when there is one - which there is on every request, because the host starts an Activity and
+                // continues an inbound W3C `traceparent` - and the host's own request identifier otherwise. The
+                // presence guard keeps a hand-written path that already set the member authoritative, and keeps an
+                // empty member out of the body: a `traceId` with no value advertises a bridge with no far side.
+                //
+                // The published problem schema sets `additionalProperties: true` and states that a consumer must
+                // ignore members it does not recognise, so this adds a member without widening any contract.
+                if (!context.ProblemDetails.Extensions.ContainsKey(ProblemContractMembers.TraceId))
+                {
+                    string correlationId = Activity.Current?.Id
+                        ?? context.HttpContext.TraceIdentifier
+                        ?? string.Empty;
+
+                    if (!string.IsNullOrEmpty(correlationId))
+                    {
+                        context.ProblemDetails.Extensions[ProblemContractMembers.TraceId] = correlationId;
+                    }
+                }
+
                 if (context.ProblemDetails.Extensions.ContainsKey(ProblemContractMembers.RetCode))
                 {
                     return;
@@ -1282,6 +1332,22 @@ internal static class ProblemContractMembers
 {
     /// <summary>The legacy return code carried by every problem body.</summary>
     internal const string RetCode = "retCode";
+
+    /// <summary>The correlation identifier carried by every problem body this service writes.</summary>
+    /// <remarks>
+    /// <para>
+    /// Spelled <c>traceId</c>, which is the spelling every other service in the estate publishes and the
+    /// one the authored OpenAPI documents describe. A second spelling anywhere would leave an operator
+    /// joining two halves of one request by two different member names.
+    /// </para>
+    /// <para>
+    /// The value is the current <c>Activity</c> identifier - a W3C trace context id, continued from an
+    /// inbound <c>traceparent</c> when the caller sent one - falling back to the host's request identifier.
+    /// The composition root's logging configuration stamps the same trace and span identifiers onto every
+    /// log record, which is what makes a body and a record joinable rather than merely both timestamped.
+    /// </para>
+    /// </remarks>
+    internal const string TraceId = "traceId";
 }
 
 /// <summary>

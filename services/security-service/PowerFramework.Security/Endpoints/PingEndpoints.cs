@@ -281,6 +281,24 @@ public static class PingEndpoints
             // challenged and still answered 401, because authentication precedes authorization - the
             // scope check can only narrow an already-authenticated request (C-L).
             .ProducesProblem(StatusCodes.Status403Forbidden)
+
+            // 🔴 THE TWO STATUSES THIS ROUTE PRODUCES WITHOUT ANY CODE IN THIS FILE, AND ONLY ONE OF THEM
+            // APPEARED IN EITHER ARTIFACT. Neither comes from the handler, which is why neither was
+            // noticed: a reviewer reading this file sees a handler that cannot fail and a response set that
+            // matches it.
+            //
+            // 429 comes from the request-layer limiter, whose ONLY exemption is /health
+            // [Configuration/IngressHardening.cs - HealthPath]. The authored security.v1.yaml has always
+            // declared it on this operation, so the GENERATED document was the one disagreeing, and a
+            // consumer reading the two side by side saw a status appear and disappear depending on which
+            // it read.
+            //
+            // 500 was declared in NEITHER artifact, and it comes from the exception handler
+            // [Program.cs - UseExceptionHandler]. /health declares neither and correctly does not: it is
+            // the limiter's one exemption, and its own handler converts every fault into a degraded
+            // component entry and a 503 rather than letting one escape.
+            .ProducesProblem(StatusCodes.Status429TooManyRequests)
+            .ProducesProblem(StatusCodes.Status500InternalServerError)
             .AddOpenApiOperationTransformer(DeclareBearerRequirementAsync);
 
         return endpoints;
@@ -608,6 +626,28 @@ internal static class ProblemResults
     /// for its own readiness problem, so the whole service answers one shape.
     /// </remarks>
     internal const string RetCodeExtensionMember = "retCode";
+
+    /// <summary>
+    /// The name of the extension member carrying the request's correlation identifier.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Spelled <c>traceId</c>, which is the spelling Gateway and DataServices already publish, so an
+    /// operator holding a Gateway identifier from a failed proxied call reads the same member name on
+    /// this service's own refusal. A second spelling would defeat the only purpose the member has.
+    /// </para>
+    /// <para>
+    /// The value is the current <c>Activity</c> identifier - a W3C trace context id continued from an
+    /// inbound <c>traceparent</c> when the caller sent one - falling back to the host's request
+    /// identifier. The composition root writes it into every problem body and stamps the same trace and
+    /// span identifiers onto every log record, which is what makes the two joinable.
+    /// </para>
+    /// <para>
+    /// Permitted by the published schema's <c>additionalProperties: true</c>, exactly as
+    /// <see cref="MessageCategoryExtensionMember"/> is, so publishing it widens no contract.
+    /// </para>
+    /// </remarks>
+    internal const string TraceIdExtensionMember = "traceId";
 
     /// <summary>
     /// The name of the extension member carrying the preserved localization category.

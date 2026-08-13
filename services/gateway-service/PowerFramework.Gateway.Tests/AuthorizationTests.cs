@@ -2866,6 +2866,91 @@ public sealed class AuthorizationTests(GatewayTestHostFixture host) : IClassFixt
         Assert.Empty(paths.GetProperty(ReadinessRoute).GetProperty("get").GetProperty("security").EnumerateArray());
     }
 
+    /// <summary>
+    /// The two authenticated diagnostic operations declare the two statuses they produce without any code
+    /// of their own, and the anonymous readiness probe declares neither.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>BOTH WERE UNDECLARED ON BOTH OPERATIONS, AND THEY REACH A CALLER FROM MIDDLEWARE RATHER THAN
+    /// FROM A HANDLER - WHICH IS EXACTLY WHY NEITHER WAS NOTICED.</b> A reviewer reading either endpoint
+    /// file sees a handler that cannot fail and a response set that matches it.
+    /// </para>
+    /// <para>
+    /// <c>429</c> comes from the ingress request bound, which applies to every route except
+    /// <c>/health</c>. The AUTHORED contract already declared it on both operations, so the generated
+    /// document was the one disagreeing - a consumer reading the two side by side saw a status appear and
+    /// disappear depending on which artifact it read.
+    /// </para>
+    /// <para>
+    /// <c>500</c> was declared in NEITHER artifact. It is reachable upstream of both handlers: these routes
+    /// are authenticated, so the bearer handler must obtain the issuer's key set before either handler is
+    /// reached, and a retrieval that fails with no last-known-good configuration cached faults inside the
+    /// authentication middleware. That is the condition <c>Program.cs</c> keeps
+    /// <c>UseLastKnownGoodConfiguration</c> enabled in order to survive, so its reachability is already on
+    /// the record there.
+    /// </para>
+    /// <para>
+    /// <c>/health</c> is the control, and it declares neither for two independent reasons: it is exempt
+    /// from the ingress bound, because rate-limiting the gate three dependents are held behind would make
+    /// a busy service a permanently unready one; and it is anonymous, so no key set is needed to reach it,
+    /// while its own handler converts every fault into a degraded component entry and a <c>503</c>.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task TheAuthenticatedDiagnosticOperationsDeclareTheirMiddlewareStatuses()
+    {
+        using HttpClient client = host.CreateAuthenticatedClient();
+
+        using HttpResponseMessage response = await client.GetAsync(
+            new Uri(DocumentRoute, UriKind.Relative),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        using JsonDocument document = await ReadJsonAsync(response);
+
+        JsonElement paths = document.RootElement.GetProperty("paths");
+
+        foreach (string route in new[] { PingRoute, CapabilitiesRoute })
+        {
+            JsonElement responses = paths.GetProperty(route).GetProperty("get").GetProperty("responses");
+
+            Assert.True(
+                responses.TryGetProperty("429", out _),
+                $"{route} is subject to the ingress request bound, so it must declare 429. The authored "
+                    + "contract already does, so an omission here is the two artifacts disagreeing.");
+
+            Assert.True(
+                responses.TryGetProperty("500", out _),
+                $"{route} is authenticated, so a key-set retrieval that fails with nothing cached faults "
+                    + "inside the authentication middleware and is answered 500. An undeclared status is "
+                    + "one no generated client has a branch for.");
+
+            // AND NOTHING THE PROJECTION-ONLY MAP PRODUCES. These operations reach no upstream, so an
+            // upstream-shaped status here would be a declaration copied by habit.
+            foreach (string unreachable in new[] { "404", "409", "502", "503", "504" })
+            {
+                Assert.False(
+                    responses.TryGetProperty(unreachable, out _),
+                    $"{route} declares {unreachable}, which it cannot produce: it calls no upstream and "
+                        + "holds no resource a request could collide with.");
+            }
+        }
+
+        JsonElement readiness = paths.GetProperty(ReadinessRoute).GetProperty("get").GetProperty("responses");
+
+        Assert.False(
+            readiness.TryGetProperty("429", out _),
+            "/health is exempt from the ingress bound, so declaring 429 on it would be untrue - and a "
+                + "rate-limited readiness gate would make a busy service a permanently unready one.");
+
+        Assert.False(
+            readiness.TryGetProperty("500", out _),
+            "/health is anonymous and converts every fault into a degraded entry and a 503, so it cannot "
+                + "answer 500.");
+    }
+
     // --------------------------------------------------------------------------------------------------
     //  3.5  THE NEGATIVE SECURITY PROPERTY: GATEWAY MINTS NOTHING
     // --------------------------------------------------------------------------------------------------

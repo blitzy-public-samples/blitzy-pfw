@@ -1263,12 +1263,23 @@ internal sealed class SelectStatementModel
     /// a keyword that is genuinely a keyword.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The set covers the letters and digits every dialect allows plus the four extras the two
     /// target dialects add - the underscore, and SQL Server's dollar, hash and at signs, which begin
     /// or appear in temporary-table and variable names.
+    /// </para>
+    /// <para>
+    /// <b>DELEGATED RATHER THAN RESTATED, AND THE DELEGATION IS THE POINT.</b>
+    /// <see cref="SqlIdentifierGuard"/> owns the one definition of this character set because the same
+    /// question is asked on two paths that must agree: this scanner decides whether a candidate keyword
+    /// is a keyword or the tail of a longer name, and the write path's identifier gate decides whether
+    /// a caller-supplied name may occupy an identifier position in generated DML. Two copies would
+    /// eventually disagree, and the disagreement would surface as a name this scanner reads as one word
+    /// while the gate admits it as something wider.
+    /// </para>
     /// </remarks>
     private static bool IsIdentifierCharacter(char value) =>
-        char.IsLetterOrDigit(value) || value == '_' || value == '$' || value == '#' || value == '@';
+        SqlIdentifierGuard.IsIdentifierCharacter(value);
 
     /// <summary>
     /// Whether the character before <paramref name="index"/> lets a keyword start there.

@@ -207,6 +207,59 @@ public sealed class IngressBoundCoherenceTests
     }
 
     /// <summary>
+    /// Every service's authenticated probe declares the two statuses the ingress layer produces on it, and
+    /// its anonymous readiness probe declares neither.
+    /// </summary>
+    /// <param name="serviceDirectory">The service directory under <c>services/</c>.</param>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>ALL FOUR SERVICES OMITTED BOTH, AND THE OMISSION HAS THE SAME SHAPE EVERYWHERE: NEITHER
+    /// STATUS COMES FROM THE HANDLER.</b> A reviewer reading any of the four <c>PingEndpoints.cs</c> files
+    /// sees a handler that reads a clock, cannot fail, and a declared response set that matches it exactly -
+    /// so the gap is invisible from the one file that looks authoritative.
+    /// </para>
+    /// <para>
+    /// <c>429</c> is produced by the request-layer limiter this suite already proves every service
+    /// registers and consults, whose ONLY exemption is <c>/health</c>. <c>500</c> is produced by the
+    /// exception handler, and it is reachable UPSTREAM of the handler: <c>/v1/ping</c> is authenticated on
+    /// all four, so the bearer handler must obtain the issuer's key set first, and a retrieval that fails
+    /// with no last-known-good configuration cached faults inside the authentication middleware.
+    /// </para>
+    /// <para>
+    /// <c>/health</c> is the control and must declare neither: it is the limiter's one exemption - rate
+    /// limiting the gate three dependents are held behind would make a busy service a permanently unready
+    /// one - and it is anonymous, so no key set is needed to reach it.
+    /// </para>
+    /// <para>
+    /// Asserted on source text rather than on a booted host because this suite has no host: it is the
+    /// cross-service coherence suite, and a per-service runtime assertion would have to be written four
+    /// times in four projects. The service suites assert the runtime document; this asserts that all four
+    /// agree.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(EveryServiceDirectory))]
+    public void EveryAuthenticatedProbeDeclaresTheStatusesItsIngressLayerProduces(string serviceDirectory)
+    {
+        string projectDirectory = ApplicationProjectDirectory(serviceDirectory);
+
+        string ping = File.ReadAllText(
+            Path.Combine(projectDirectory, "Endpoints", "PingEndpoints.cs"));
+
+        Assert.Contains("Status429TooManyRequests", ping, StringComparison.Ordinal);
+        Assert.Contains("Status500InternalServerError", ping, StringComparison.Ordinal);
+
+        string health = File.ReadAllText(
+            Path.Combine(projectDirectory, "Endpoints", "HealthEndpoints.cs"));
+
+        // THE ABSENCE IS ASSERTED, NOT ASSUMED. A 429 declared on the readiness gate would describe a
+        // refusal the limiter exempts it from, and a 500 would describe a fault its own handler converts
+        // into a degraded entry and a 503. Either would be a declaration copied across by habit.
+        Assert.DoesNotContain("Status429TooManyRequests", health, StringComparison.Ordinal);
+        Assert.DoesNotContain("Status500InternalServerError", health, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Every service declares its bounds in the settings file an operator reads.
     /// </summary>
     /// <param name="serviceDirectory">The service directory under <c>services/</c>.</param>

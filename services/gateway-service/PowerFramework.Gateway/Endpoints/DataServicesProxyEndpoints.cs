@@ -734,18 +734,47 @@ public static class DataServicesProxyEndpoints
         + "missing credential from an insufficient one.";
 
     /// <summary>The contract's shared <c>404</c> description.</summary>
+    /// <remarks>
+    /// Worded for the WHOLE not-found family rather than for the session case alone, because that family
+    /// is reachable from every projected operation: the upstream's own <c>NotFound</c> status, and the
+    /// five in-band codes <c>E_INVALID_HANDLE</c>, <c>E_OBJECT_NOT_FOUND</c>, <c>E_NOT_EXISTS</c>,
+    /// <c>E_VAR_NOT_FOUND</c> and <c>E_MEMBER_NOT_FOUND</c>, all of which this projection maps here.
+    /// </remarks>
     private const string NotFoundDescription =
-        "The projected gRPC method returned NotFound - most often a session identifier that has expired "
-        + "or was already closed, or a column selector naming a column the DataWindow does not have.";
+        "The request named something the upstream could not find. Most often that is a session identifier "
+        + "that has expired or was already closed, a DataWindow handle nothing resolves, or a column, "
+        + "variable or member selector naming something the DataWindow or the expression environment does "
+        + "not have. It is the projection of an upstream NotFound status or of one of the five in-band "
+        + "not-found codes, and it is never synthesized from a response field.";
 
     /// <summary>The contract's <c>409</c> description.</summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 WORDED FOR THE CONFLICT CLASS RATHER THAN FOR THE UPDATE ALONE, because the class has three
+    /// mutually distinguishable members and the update's detail-bearing form is only one of them. The
+    /// other two - an upstream <c>Aborted</c> whose detail did not decode, and the in-band
+    /// <c>E_RETRY</c> - are reachable from EVERY projected operation, and a description that promised a
+    /// <c>conflict</c> member unconditionally would have been read as a guarantee on 38 operations that
+    /// cannot make it.
+    /// </para>
+    /// <para>
+    /// The three stay readable apart by their problem type, their title and their <c>retCode</c>, which
+    /// is what <c>MapExceptionToOutcome</c>'s two conflict arms and the in-band map exist to keep
+    /// distinct.
+    /// </para>
+    /// </remarks>
     private const string ConflictDescription =
-        "The projected gRPC method returned Aborted: an optimistic-concurrency conflict. The body carries "
-        + "the conflict detail UNCHANGED, including the current row state, so a caller has what it needs "
-        + "to decide between retrying and surfacing. Callers implement an explicit retry-or-surface "
-        + "policy, and there is no silent overwrite anywhere in the system. Re-sending the same payload "
-        + "produces the same 409, because the original values it carries are still stale - a retry must "
-        + "first re-read.";
+        "The request collided with the current state of the resource, and it is the caller's to resolve. "
+        + "Three outcomes reach this status and they are mutually distinguishable by problem type, title "
+        + "and retCode. An optimistic-concurrency conflict on the update carries the conflict member "
+        + "UNCHANGED, including the current row state, so a caller has what it needs to decide between "
+        + "retrying and surfacing. An upstream Aborted whose detail could not be decoded, and the in-band "
+        + "E_RETRY an upstream reports without one, carry NO conflict member: the status is preserved "
+        + "because reporting anything else would let a rejected call look successful, and no detail is "
+        + "fabricated because an empty one would describe a conflict no caller could act on. Callers "
+        + "implement an explicit retry-or-surface policy, and there is no silent overwrite anywhere in "
+        + "the system. Re-sending the same payload produces the same 409, because the original values it "
+        + "carries are still stale - a retry must first re-read.";
 
     /// <summary>The contract's shared <c>500</c> description.</summary>
     private const string InternalErrorDescription =
@@ -991,8 +1020,11 @@ public static class DataServicesProxyEndpoints
                 + "the item-changed return value STASHED for the validation-error event to consume. A "
                 + "stateless request boundary has nowhere to put those, which is why the session is "
                 + "explicit rather than implicit, and why Gateway holds none of it. Sessions must be "
-                + "closed; an abandoned one holds server-side state until its configured idle expiry.",
-                DeclaresNotFound: false),
+                + "closed; an abandoned one holds server-side state until its configured idle expiry. THE "
+                + "404 THIS OPERATION DECLARES IS NOT ABOUT A SESSION IDENTIFIER - it has none yet - but "
+                + "about the datawindowHandle in the BODY: a session is scoped to one DataWindow, so a "
+                + "handle nothing resolves is refused rather than opened, and the refusal reaches a caller "
+                + "as 404 carrying E_INVALID_HANDLE."),
             static (client, request, cancellationToken) =>
                 client.OpenValidationSessionAsync(request, cancellationToken));
 
@@ -1026,8 +1058,10 @@ public static class DataServicesProxyEndpoints
                 + "caller that re-sends the same payload receives the same 409 because the original values "
                 + "it carries are still stale. On success the response carries inserted, updated and "
                 + "deleted counts plus the identity column and the identity value arrays that reproduce the "
-                + "legacy identity round trip [n_cst_thread_task_sqlupdate.sru:L215-L245].",
-                DeclaresConflict: true),
+                + "legacy identity round trip [n_cst_thread_task_sqlupdate.sru:L215-L245]. THIS IS THE ONLY "
+                + "OPERATION WHOSE 409 CARRIES THE CONFLICT DETAIL. Every projected operation declares 409, "
+                + "because an upstream Aborted with no decodable detail and the in-band E_RETRY reach any of "
+                + "them; only here is a conflict member populated."),
             static (client, request, cancellationToken) => client.UpdateAsync(request, cancellationToken));
 
         MapSessionScoped<GetEventGateRequest, GetEventGateResponse>(
@@ -1212,8 +1246,11 @@ public static class DataServicesProxyEndpoints
                 + "holds a LIVE IN-PROCESS POINTER to another DataWindow's expression service, a pointer "
                 + "cannot be serialized, so a foreign reference is supported only while both DataWindows are "
                 + "co-resident in ONE session inside ONE DataServices instance. A reference spanning "
-                + "sessions or instances is BLOCKED with a defined error rather than approximated.",
-                DeclaresNotFound: false),
+                + "sessions or instances is BLOCKED with a defined error rather than approximated. THE 404 "
+                + "THIS OPERATION DECLARES IS NOT ABOUT A SESSION IDENTIFIER - it has none yet - but about "
+                + "the datawindowHandles in the BODY: a name no host binds closes the part-opened session "
+                + "rather than leaving a hole in it, and reaches a caller as 404 carrying "
+                + "E_OBJECT_NOT_FOUND."),
             static (client, request, cancellationToken) =>
                 client.OpenExpressionSessionAsync(request, cancellationToken));
 
@@ -1666,9 +1703,12 @@ public static class DataServicesProxyEndpoints
     /// being reachable.
     /// </para>
     /// <para>
-    /// Each status is declared only where the contract declares it. A status a generated client must
-    /// branch on but the route does not produce hides the real surface, which is why <c>400</c>,
-    /// <c>404</c> and <c>409</c> are conditional here rather than applied uniformly.
+    /// THE DECLARED SET AND THE REACHABLE SET MUST BE THE SAME SET, in both directions. A status a route
+    /// produces but does not declare leaves a generated client with no branch for a response it will
+    /// receive; a status a route declares but cannot produce makes a consumer write a branch that never
+    /// runs, and hides which responses are real. Only <c>400</c> stays conditional, and only because one
+    /// operation shape genuinely cannot produce it: <c>404</c> and <c>409</c> were conditional and are not,
+    /// for the reasons recorded at each declaration below.
     /// </para>
     /// </remarks>
     private static void Describe<TRequest, TResponse>(
@@ -1696,25 +1736,48 @@ public static class DataServicesProxyEndpoints
         route.ProducesProblem(StatusCodes.Status401Unauthorized, MediaTypeNames.Application.ProblemJson);
         route.ProducesProblem(StatusCodes.Status403Forbidden, MediaTypeNames.Application.ProblemJson);
 
-        if (operation.DeclaresNotFound)
-        {
-            route.ProducesProblem(StatusCodes.Status404NotFound, MediaTypeNames.Application.ProblemJson);
-        }
+        // 🔴 404 IS DECLARED ON EVERY PROJECTED OPERATION, WHICH IT WAS NOT.
+        //
+        // It was gated on a per-operation flag that the two SESSION-OPENING operations set false, on the
+        // reasoning that they have no prior identifier to fail to resolve. That reasoning is true about
+        // the session identifier and false about the status: the not-found family this projection maps is
+        // wider than one parameter. `OpenValidationSession` answers the in-band E_INVALID_HANDLE when no
+        // DataWindow resolves the handle its BODY carried [DataWindowService.OpenValidationSession], and
+        // `OpenExpressionSession` answers E_OBJECT_NOT_FOUND when no host binds a requested name and
+        // E_NOT_EXISTS when its own session closed underneath the open [ColumnExpressionService]. All three
+        // codes are 404 in the in-band map below, so both operations really produced a status neither of
+        // them declared - which is the same defect in the same direction as the 409 immediately below, and
+        // leaves a generated client with no branch for a response it will receive.
+        route.ProducesProblem(StatusCodes.Status404NotFound, MediaTypeNames.Application.ProblemJson);
 
-        if (operation.DeclaresConflict)
-        {
-            // NOT `ProducesProblem`, AND THE DIFFERENCE IS THE WHOLE POINT OF THE 409.
-            //
-            // `ProducesProblem` publishes the bare problem shape, so a consumer reading the generated
-            // document could not see that a `conflict` member is present - while the authored contract
-            // declares a `ConflictProblemDetails` schema for exactly this response, and the projection
-            // does attach the detail. Three artifacts, one of them silently disagreeing, on the one body
-            // a caller has to ACT on rather than merely read. See ConflictProblemDetails at the foot of
-            // this file for why a caller that cannot see WHICH column moved cannot construct a retry.
-            route.Produces<ConflictProblemDetails>(
-                StatusCodes.Status409Conflict,
-                MediaTypeNames.Application.ProblemJson);
-        }
+        // 🔴 409 IS DECLARED ON EVERY PROJECTED OPERATION, AND IT USED TO BE DECLARED ON EXACTLY ONE.
+        //
+        // The single declaration sat on the update, because the update is the only operation that can
+        // encounter an optimistic-concurrency MISMATCH and therefore the only one that can carry the
+        // conflict DETAIL. But the status is produced by three arms, and two of them are reachable from
+        // any operation at all: `MapExceptionToOutcome` answers 409 for an upstream `Aborted` whose detail
+        // did not decode, and the in-band map answers 409 for `E_RETRY`. Thirty-eight operations could
+        // therefore return a 409 that the contract said they could not - the worst direction for this
+        // particular status, because 409 is the one response a caller must BRANCH on to build a retry, and
+        // an undeclared branch is one a generated client does not have.
+        //
+        // NOT `ProducesProblem`, AND THE DIFFERENCE IS THE WHOLE POINT OF THE 409.
+        //
+        // `ProducesProblem` publishes the bare problem shape, so a consumer reading the generated
+        // document could not see that a `conflict` member is present - while the authored contract
+        // declares a `ConflictProblemDetails` schema for exactly this response, and the projection
+        // does attach the detail. Three artifacts, one of them silently disagreeing, on the one body
+        // a caller has to ACT on rather than merely read. See ConflictProblemDetails at the foot of
+        // this file for why a caller that cannot see WHICH column moved cannot construct a retry.
+        //
+        // THE SCHEMA IS TRUTHFUL ON ALL THIRTY-NINE because its `conflict` member is OPTIONAL. Declaring
+        // it therefore publishes "a conflict member may be present", never "one will be" - and the
+        // response description says in prose which of the three arms populates it. The alternative
+        // considered and rejected was a second, detail-free 409 schema: it would have published two
+        // shapes for one status, and a caller reading either would still have to handle a null member.
+        route.Produces<ConflictProblemDetails>(
+            StatusCodes.Status409Conflict,
+            MediaTypeNames.Application.ProblemJson);
 
         // THE FOUR STATUSES EVERY PROJECTED OPERATION CAN REALLY PRODUCE, declared unconditionally
         // because none of them depends on which method is projected.
@@ -1726,9 +1789,15 @@ public static class DataServicesProxyEndpoints
         // all. 504 is the deadline this service sets on EVERY outbound call elapsing, so its expiry is an
         // ordinary outcome of a slow upstream rather than a hypothetical.
         //
-        // One status the failure map also translates is deliberately NOT declared. AlreadyExists is
-        // produced by exactly one method in the estate - the macro channel reporting an existing
-        // attachment - and that method is bidirectional and unprojected, so no route here can return it.
+        // 🔴 AND NO STATUS THE FAILURE MAP TRANSLATES IS LEFT UNDECLARED, WHICH IS NOW TRUE OF ALL OF THEM.
+        // The one that used to be was AlreadyExists: it maps to 409, and 409 was declared on the update
+        // alone, so the note here argued the status unreachable because the only method that raises it - the
+        // macro channel reporting an existing attachment - is bidirectional and unprojected. That argument
+        // was about ONE arm of a status with three, it depended on an upstream implementation detail rather
+        // than on the upstream's published contract, and it was load-bearing for a declaration it should
+        // never have been load-bearing for. The 409 declared above covers all three arms, so the reasoning
+        // is no longer needed and the reachability question no longer has to be answered correctly for the
+        // contract to be truthful.
         //
         // 🔴 AND 501 IS DECLARED BY NO PROJECTED ROUTE BECAUSE NO PROJECTED ROUTE PRODUCES IT, WHICH IS NOW
         // TRUE. It was not: the failure map sent an upstream Unimplemented, and the in-band pair
@@ -3536,14 +3605,6 @@ public static class DataServicesProxyEndpoints
     /// the same thing to a consumer.
     /// </param>
     /// <param name="BadRequest">Whether, and how, the operation declares a <c>400</c>.</param>
-    /// <param name="DeclaresNotFound">
-    /// Whether the operation declares a <c>404</c>. The two session-opening operations do not: there is no
-    /// prior identifier for them to fail to resolve.
-    /// </param>
-    /// <param name="DeclaresConflict">
-    /// Whether the operation declares a <c>409</c>. Exactly one does - the update - because it is the only
-    /// one that can encounter an optimistic-concurrency mismatch.
-    /// </param>
     /// <param name="ServerStreaming">
     /// Whether the projected method is a server stream. Set by the streaming registration helper rather
     /// than by hand, so it cannot disagree with the helper that declared the route.
@@ -3552,6 +3613,14 @@ public static class DataServicesProxyEndpoints
     /// The contract's own <c>200</c> description where it differs from the shared one, and
     /// <see langword="null"/> where it does not.
     /// </param>
+    /// <remarks>
+    /// 🔴 <b>THIS ROW NO LONGER CARRIES A <c>DeclaresNotFound</c> OR A <c>DeclaresConflict</c> FLAG, AND
+    /// THE ABSENCE IS THE FIX.</b> Both existed to suppress a declaration on the operations thought unable
+    /// to produce the status, and both were wrong about that - see the two declarations in
+    /// <see cref="Describe{TRequest,TResponse}"/> for the reachability evidence. Retaining them as
+    /// always-true would have left the suppression one edit away from returning; removing them makes the
+    /// declared surface a property of the projection rather than of a per-row opinion about it.
+    /// </remarks>
     private sealed record ProjectedOperation(
         string Route,
         string OperationId,
@@ -3560,8 +3629,6 @@ public static class DataServicesProxyEndpoints
         string Summary,
         string Description,
         BadRequestDeclaration BadRequest = BadRequestDeclaration.Standard,
-        bool DeclaresNotFound = true,
-        bool DeclaresConflict = false,
         bool ServerStreaming = false,
         string? SuccessDescription = null)
     {

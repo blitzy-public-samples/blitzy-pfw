@@ -887,6 +887,21 @@ added is that the contract *says so*, so the consequence is discoverable before 
 mechanism is visible at `:L313-L315`, where the column-expression service's changed handler is
 invoked from inside the item-changed path — a path the gate short-circuits.
 
+**The two mutators return DIFFERENT types, deliberately, and a reviewer has already read that as a defect
+once.** The oracle declares `public function long of_disableevent` [`:L110`] against
+`public function integer of_enableevent` [`:L111`] — two widths, for mirror-image bodies. It is almost
+certainly an oversight in the original, and C-B forbids repairing an oversight: under AAP §0.4.5.2
+PowerScript `long` maps to `long` and `integer` to `int`, so `DisableEvent` returns `long` and
+`EnableEvent` returns `int` in every layer that exposes them — the gate, the validation session and the
+event chain alike. The suggestion to align them on one type "matching the legacy return-code width"
+cannot be acted on even in principle, because **the legacy has two widths and therefore names no single
+one**. It is observationally benign, and saying so is part of preserving it honestly: both members return
+only `RetCode.OK` or `RetCode.E_INVALID_ARGUMENT`, and both values fit either width without truncation, so
+what is preserved is the *contract's* fidelity rather than a value's. `EventGateTests` holds it with three
+assertions, one of which asserts the two types are **not equal** — so the obvious tidy-up fails the build
+instead of passing unnoticed. [§17.2](#172-corrections-applied-during-verification) row 14 records the
+same finding from the corrections side.
+
 ### 6.3 The 22-event surface, enumerated
 
 `se_cst_dw.sru` declares exactly 22 events at `:L11-L32`. The split the brief cites is real and it
@@ -2074,6 +2089,28 @@ key-in-place]. A proto3 scalar with an implicit zero default cannot express "lea
 own setting alone", and conflating unset with zero would silently force a concurrency mode the
 caller never asked for.
 
+**Four of the six fields are identifier positions, and the contract admits them by shape.** `name`,
+`updatablecolumns`, `keycolumns` and `identitycolumn` are concatenated into the DML the update path
+generates. Every *value* on that path travels as a bound parameter and no dialect has a parameter form
+for a table or a column, so those four fields are the only text a caller sends that reaches the engine
+as SQL rather than as data. Each is therefore admitted only if it can occupy an identifier position —
+letters, digits, the underscore and the dollar, hash and at signs, with `name` additionally allowed up
+to two leading period-separated qualifier parts — and anything else is refused with
+`RetCode.E_INVALID_ARGUMENT` **before any descriptor is recorded**, with a diagnostic that quotes none
+of the caller's own text. An empty `identitycolumn` stays legal, because it means "no identity column"
+[`:L127-L129`].
+
+This is a boundary rule with no legacy counterpart, and it is one rather than an oversight on the
+legacy's part: PowerFramework is a library, so the identifiers that reached a generated statement came
+from a compiled DataWindow shipped inside the application and the only caller that could name a column
+was code already in the same process. It is **not** an existence test — a well-shaped name the
+definition does not declare still gets the oracle's own `E_INTERNAL_ERROR` with the invalid-column-name
+diagnostic [`:L118-L122`], so "this table has no such column" and "no statement can carry that text as
+a name" stay distinguishable — and a reserved word is admitted, because whether a provider accepts it
+unquoted is the provider's answer to give. The same gate is applied again at the generator itself,
+which is what covers a carrier whose column model came from a supplied `sql_syntax` rather than from a
+descriptor; `ARCHITECTURE.md` §8.5 records both sites and why nothing is quoted.
+
 ### 9.2 The update contract is re-derived at run time, not trusted
 
 `_of_updateprepare` [`n_cst_thread_task_sqlupdate.sru:L98-L170`] does not trust the DataWindow's
@@ -2665,12 +2702,41 @@ statuses back. The status mapping is the substantive part:
 | `ResourceExhausted` | `429` | A capacity ceiling declining to take more work, carrying the legacy `E_BUSY` code. A refusal rather than a fault |
 | `Unavailable` | `503` | The upstream answered that it is not currently serving — distinct from `502`, where it answered nothing at all |
 | `DeadlineExceeded` | `504` | The deadline this service sets on the outbound call elapsed |
-| `AlreadyExists` | `409` | Translated but declared on no operation; see below |
+| `AlreadyExists` | `409` | Shares the status with the concurrency conflict, and stays distinguishable from it by problem type, title and `retCode` |
 | `Internal` / `Unknown` | `500` | With the statement field redacted per [§8.6](#86-errors-and-the-two-fields-that-must-be-redacted) |
 
 Each operation declares the responses it can **actually** produce rather than the whole table, because a
 status every generated client must branch on but no operation can return hides the real surface. That rule
 cuts both ways, and applying it honestly settles every row of the table above.
+
+**The declared surface is now identical across all thirty-nine projected operations, and getting there
+closed a defect in the harder direction of that rule.** A status declared but unreachable is noise; a status
+**reachable but undeclared** leaves a generated client with no branch for a response it will receive, and it
+survives review precisely because nothing about it fails until the response arrives. Two statuses were in
+that second class, and in both cases the suppression was deliberate and its reasoning was right about a
+narrower question than the one it decided:
+
+- **`409` was declared on `updateDataWindow` alone.** The reasoning — that the optimistic-concurrency check
+  belongs to the update third of the triple and to nothing else — is correct, and it decides where a
+  conflict **detail** can come from, not where the **status** can. Three arms answer `409`, and two of them
+  are operation-independent: an upstream `Aborted` whose detail did not decode, and the in-band `E_RETRY`.
+  So thirty-eight operations could return the one status a caller must branch on in order to construct a
+  retry, while publishing that they could not. All thirty-nine now declare it, referencing the same
+  `ConflictProblemDetails` schema, which stays truthful on all of them because its `conflict` member is
+  **optional** — declaring it publishes "a conflict member may be present", never "one will be". The update
+  remains the only operation that populates it, and its summary is the only one promising it.
+- **`404` was suppressed on the two session-opening operations**, on the reasoning that neither carries a
+  prior session identifier to fail to resolve. True of the identifier, false of the status: the not-found
+  family is wider than one parameter. `openValidationSession` refuses a `datawindowHandle` **in its body**
+  that no DataWindow resolves and answers `E_INVALID_HANDLE`; `openExpressionSession` answers
+  `E_OBJECT_NOT_FOUND` for a name no host binds and `E_NOT_EXISTS` for a session that closed underneath the
+  open. All three are `404` in the in-band map, so both operations really produced a status neither declared.
+
+Only the `400` remains conditional, and only because three operations bind no request body at all. Both
+directions are now asserted rather than assumed — against the authored contract by
+`GatewayContractTests.NoProjectedOperationDeclaresAStatusItCannotProduce`, and against each generated
+document by `DataServicesRouteCensusTests.EveryProjectedRoutePublishesExactlyTheStatusSurfaceItsMappingProduces`
+on Gateway and its counterpart on the DataServices projection.
 
 **Four statuses are declared on every projected operation, because every projected operation can really
 produce them.** `429` when a handle registry behind [C-05](#8-c-05--persistencev1queryservice) through
@@ -2696,12 +2762,60 @@ strict ordering, an unknown validation session, a transaction the upstream will 
 400-class group DataServices' unary outcome map spells that way — and still projects to `400` through the
 canonical mapping.
 
-**One row is translated but declared nowhere, for a checkable reason.** `AlreadyExists` is produced
-by exactly one method in the estate — the macro channel reporting that a channel is already attached — and
-that method is bidirectional and therefore **not projected**, so no REST operation can return it; the
-translation arm exists so a future projection could not fall through to `500`. `503` additionally appears on
-`/health` on C-10's own account rather than from this mapping, and carries the aggregate report rather than a
-problem document.
+**`RetCode.E_RETRY` was the second code that had to be settled the same way, and it was divided against
+itself inside a single file.** DataServices carries two return-code maps: `BuildUpstreamFailure`, which
+runs when an upstream outcome arrived carrying a database error, and `MapOutcomeToStatus`, which runs when
+the identical outcome arrived without one. The first has always given `E_RETRY` → `Aborted` → **`409`**;
+the second had it grouped with `E_BUSY` in the capacity arm, giving `ResourceExhausted` → **`429`**. So one
+upstream code left the service as two different statuses **decided by which helper happened to raise it**,
+and a caller's retry-or-surface policy cannot key on a status that changes with the reporting path. The
+direction was fixed by this table rather than chosen: `Aborted` → `409` is the concurrency answer and
+`E_BUSY` → `429` is the capacity answer, both already asserted in both projections' suites, and
+harmonising the other way would have made `429` mean two unrelated things. The two remain **distinct
+codes with distinct statuses**, which is the point — a shed request and a conflict are different events,
+and the legacy declares a separate member for each.
+
+**`AlreadyExists` used to be the one row translated but declared nowhere, and that gap closed with the
+`409`.** It is produced by exactly one method in the estate — the macro channel reporting that a channel is
+already attached — and that method is bidirectional and therefore **not projected**, which is why the earlier
+revision argued the status unreachable and declined to declare it. That argument was load-bearing for a
+declaration it should never have been load-bearing for: it reasoned about one arm of a status with three, and
+it depended on an upstream implementation detail rather than on the upstream's published contract. The `409`
+now declared on every projected operation covers all three arms, so the reachability question no longer has
+to be answered correctly for the contract to be truthful, and the three outcomes stay readable apart by
+problem type, title and `retCode` — the concurrency conflict carrying `E_RETRY` with a detail, the
+detail-free `Aborted` carrying `E_RETRY` without one, and `AlreadyExists` carrying `E_INVALID_ARGUMENT`.
+`503` additionally appears on `/health` on C-10's own account rather than from this mapping, and carries the
+aggregate report rather than a problem document.
+
+**The two authenticated diagnostic operations declare two statuses that no code in their own files
+produces.** `/v1/ping` and `/v1/capabilities` project no gRPC method, so the mapping table above does not
+apply to them, and both statuses reach a caller from middleware:
+
+- **`429`** from Gateway's own ingress request bound, which applies to every route except `/health`. Both
+  operations reference their own `IngressBusy` response rather than the projection's `UpstreamBusy`, whose
+  first sentence names a gRPC status neither of them can receive.
+- **`500`** from the exception handler. Neither handler can fail on its own account — the ping falls back to
+  the system clock rather than requiring a registration, and the capability projection reads a mask that
+  failed validation at startup if it was going to fail at all — but both routes are **authenticated**, so the
+  bearer handler must obtain the issuer's key set before either handler is reached, and a retrieval that
+  fails with no last-known-good configuration cached faults inside the authentication middleware. That is
+  precisely the condition `UseLastKnownGoodConfiguration` is left enabled in order to survive.
+
+**`503` is deliberately NOT declared on either of them, and stating why is what keeps the addition above
+from being a licence to declare the rest of the table.** On the thirty-nine projected operations `503` means
+*an upstream answered that it is not currently serving* — it is a projection of gRPC `Unavailable`, and these
+two operations call no upstream, so nothing can produce it. The ingress layer does not produce one either:
+the request-layer limiter's rejection status is `429` and only `429`, and no middleware in either pipeline
+answers `503`. Declaring it would be the same defect as the two above with its sign reversed — a status a
+generated client must branch on and can never receive — which is why the closed set for these two operations
+is `{200, 401, 403, 429, 500}` and no wider. `/health` is the one route in the document that answers `503`,
+on C-10's own account, and it carries the aggregate report rather than a problem document.
+
+**`/health` declares neither, and correctly does not.** It is exempt from the ingress bound, because
+rate-limiting the gate three dependents are held behind would make a busy service a permanently unready one;
+and it is anonymous, so no key set is needed to reach it, while its own handler converts every fault into a
+degraded component entry and a `503` rather than letting one escape.
 
 **`501` is not in the projected mapping at all, and the reason is a constraint rather than an omission.**
 It belongs exclusively to the four reserved routes of [§13](#13-the-four-reserved-gateway-extension-points),
@@ -2896,6 +3010,19 @@ echoed in the `route` field and is otherwise unused", so echoing the literal tem
 value appearing nowhere in the body and make the statement false. The **query string is excluded** on two
 grounds: it is not part of a route, and a caller who mistakenly placed a credential in one must not have
 it reflected back.
+
+**The template itself is published, per operation, as `x-route-template`, and the level it sits at is a
+correction.** OpenAPI 3.1 defines a path parameter as matching a single segment and offers no conformant way
+to widen it, so each reserved family's real matching behaviour is carried in the `x-catch-all` vendor
+extension on the shared `ReservedPath` parameter: the captured value may contain `/`, it may be empty so the
+bare prefix resolves, and every HTTP method answers identically. All three statements hold for all four
+families, which is what makes one shared parameter the right place for them. A fourth member used to stand
+beside them naming the route template as `/v1/{area}/{**path}` — **a template that exists nowhere**, because
+the four families are literal prefixes and no `area` route parameter has ever been declared, so a tool
+reading the field as what it is presented as would model a bindable parameter the server does not have. A
+template is per-family, so a shared field could only ever hold a generalisation; it now lives on each
+operation, carrying that operation's own literal template, in both the authored contract and the generated
+document.
 
 `retCode` reuses the legacy vocabulary rather than inventing a parallel one, so a client that already
 branches on `retCode` handles a reserved route with the code it knows. Its neighbour `E_NO_SUPPORT`
@@ -3358,6 +3485,7 @@ this document, and each of those changed the schema, this document, or both:
 | 11 | Encrypting the channel is enough, so issuance needs no credential | **Authentication on that operation is a per-operation credential, not a transport property.** The service has exactly ONE listener — `https://+:5104`, `Http1` — and TLS establishes that the channel is private, not who is on the other end of it. `POST /v1/tokens` therefore requires a caller credential regardless: an HTTP `Basic` credential naming a subject on the issuance roster, or a client certificate the listener's configured authority trusts. Presenting neither is `401`. So no address on any topology mints a token without a credential, and the transport is a necessary condition rather than a sufficient one — [`ARCHITECTURE.md`](ARCHITECTURE.md) §4.1 and §9.4 — [§4.1](#41-method-surface) |
 | 12 | The topic contract carries three decomposed fields | **Every encoding is its own field**, including the namespace with explicit presence and the two *filter* negation flags — and the negated-namespace filter spares the named namespace rather than selecting it, the reverse of how it reads — [§6.7](#67-the-three-encoding-topic-string-and-why-naive-serialization-fails) |
 | 13 | The transaction response mirrors the nine-field descriptor with `logpass` removed | **Three slots are `reserved` on the response** — `logpass`, `dbparm` and `userparm` — with a typed flag allowlist carrying the one behaviourally significant value the parameter string held — [§11.2](#112-the-transaction-descriptor-mirrors-the-legacy-structure-field-for-field) |
+| 14 | The event gate's two mutators should be aligned on one return type, "matching the legacy return-code width" | **The legacy has TWO widths, so there is no single width to match.** `se_cst_dw.sru:L110` declares `public function long of_disableevent` and `:L111` declares `public function integer of_enableevent`, for mirror-image bodies. Under AAP §0.4.5.2 PowerScript `long` maps to `long` and `integer` to `int`, so the port is faithful and harmonising the two would be the behavioural change to a published signature that C-B and G2 forbid. It is observationally benign — both members return only `OK` or `E_INVALID_ARGUMENT`, which fit either width — so what is preserved is the CONTRACT's fidelity, not a value's. Held by three assertions in `EventGateTests`, one of which fails the build if the two types are ever made equal — [§6.2](#62-the-event-gate-and-its-one-non-obvious-coupling) |
 
 ### 17.3 What this document does not claim
 

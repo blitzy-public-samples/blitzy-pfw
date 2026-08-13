@@ -77,9 +77,15 @@
 //      was INVALID - OpenAPI 3.1 defines `allowReserved` for `in: query` parameters only, so the
 //      document failed validation while still not expressing catch-all semantics. Both this file and
 //      gateway.v1.yaml therefore carry the behaviour in the `x-catch-all` vendor extension attached to
-//      the parameter, which states the route template, the nested-segment capture, the empty-remainder
-//      match and the every-method answer. A vendor extension is metadata about how the URL is
-//      templated; it is not a request schema, and no operation here declares one.
+//      the parameter, which states the nested-segment capture, the empty-remainder match and the
+//      every-method answer. A vendor extension is metadata about how the URL is templated; it is not a
+//      request schema, and no operation here declares one.
+//      🔴 THE ROUTE TEMPLATE ITSELF IS AN OPERATION-LEVEL EXTENSION, `x-route-template`, AND NOT A
+//      MEMBER OF THAT BLOCK. It used to be, spelled `/v1/{area}/{**path}` - a template that exists
+//      nowhere, because the four families are literal prefixes and no `area` route parameter has ever
+//      been declared. The three statements above are true of all four families and are therefore
+//      shareable on one parameter; a template is per-family, so a shared field could only ever hold a
+//      generalisation, and this one was read as a template a tool could bind against.
 //
 //  D3  GET AND POST ARE MAPPED SEPARATELY, AND EVERY OTHER METHOD IS MAPPED TOO. The contract
 //      declares two operations per path with DISTINCT operation identifiers - `reservedDesignSystem`
@@ -244,6 +250,21 @@ public static class DeferredCapabilityEndpoints
     private const string ReservedMarkerExtension = "x-reserved-marker";
 
     /// <summary>
+    /// The specification-extension name carrying this family's ACTUAL ASP.NET Core route template.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 OPERATION-LEVEL RATHER THAN ON THE PATH PARAMETER, AND THE LEVEL IS THE FIX. The template used
+    /// to be a member of the parameter's <c>x-catch-all</c> block, spelled <c>/v1/{area}/{**path}</c> -
+    /// a template that exists nowhere. No route in this file declares an <c>area</c> parameter; the four
+    /// families are LITERAL prefixes [<see cref="ReservedDeclarations"/>], and a tool reading that field
+    /// as what it is presented as - a route template - would model a bindable parameter the server has
+    /// never had. The parameter's other three catch-all statements are genuinely family-independent, so
+    /// they stay shared there; the template is per-family, so it lives where a per-family value can be
+    /// stated truthfully.
+    /// </remarks>
+    private const string RouteTemplateExtension = "x-route-template";
+
+    /// <summary>
     /// The name of the catch-all route parameter every reserved template carries, and therefore also
     /// the name of the path parameter the generated document declares for it.
     /// </summary>
@@ -264,8 +285,10 @@ public static class DeferredCapabilityEndpoints
         + "and is otherwise unused, because nothing exists behind the route to use it. "
         + "The server matches it as an ASP.NET Core catch-all route parameter, so the captured value "
         + "may itself contain '/' and may be empty; OpenAPI 3.1 has no conformant way to declare that, "
-        + "so it is stated in the x-catch-all extension on this parameter rather than implied. Treat "
-        + "the value as an opaque remainder and do not encode its separators.";
+        + "so it is stated in the x-catch-all extension on this parameter rather than implied. This "
+        + "operation's own route template is published separately, as the x-route-template extension on "
+        + "the operation, because the template is per-family while the three x-catch-all statements are "
+        + "not. Treat the value as an opaque remainder and do not encode its separators.";
 
     /// <summary>
     /// The specification-extension name carrying the catch-all matching behaviour OpenAPI 3.1 cannot
@@ -464,7 +487,7 @@ public static class DeferredCapabilityEndpoints
             // Specification extensions, so the generated document names the deferred service in the
             // same place and with the same spelling as the authored contract does.
             .AddOpenApiOperationTransformer((operation, _, _) =>
-                ApplyReservedOperationMetadata(operation, deferredService))
+                ApplyReservedOperationMetadata(operation, declaration))
 
             // Decision D5. An anonymous request is answered by the authentication middleware and
             // never reaches the handler, so the reserved roster is not anonymously enumerable.
@@ -575,26 +598,35 @@ public static class DeferredCapabilityEndpoints
         """;
 
     /// <summary>
-    /// Attaches the contract's three specification extensions to a generated reserved operation.
+    /// Attaches the contract's four specification extensions to a generated reserved operation.
     /// </summary>
     /// <param name="operation">The operation being generated for a reserved route.</param>
-    /// <param name="deferredService">The deferred service this family names.</param>
+    /// <param name="declaration">The reserved family being described.</param>
     /// <returns>A completed task; the transformer contract is asynchronous, this work is not.</returns>
     /// <remarks>
+    /// <para>
     /// Metadata only. It names the destination and marks the route reserved, which is exactly what
     /// makes the eventual system legible, and it changes nothing about what the route does. The
     /// deferred-service extension deliberately carries the same value as the body's
     /// <see cref="ReservedRouteBody.DeferredService"/> member, so the routing metadata and the wire
     /// member read the same.
+    /// </para>
+    /// <para>
+    /// 🔴 THE FOURTH EXTENSION IS THE FAMILY'S OWN ROUTE TEMPLATE, taken from the declaration that
+    /// registered the route rather than composed here, so the published template and the template
+    /// ASP.NET Core matches on are the same string by construction. See
+    /// <see cref="RouteTemplateExtension"/> for what it replaced and why.
+    /// </para>
     /// </remarks>
     private static Task ApplyReservedOperationMetadata(
         OpenApiOperation operation,
-        string deferredService)
+        ReservedRouteDeclaration declaration)
     {
         operation.Extensions ??= new Dictionary<string, IOpenApiExtension>(StringComparer.Ordinal);
         operation.Extensions[ContractIdExtension] = StringExtension(ReservedContractId);
-        operation.Extensions[DeferredServiceExtension] = StringExtension(deferredService);
+        operation.Extensions[DeferredServiceExtension] = StringExtension(declaration.DeferredService);
         operation.Extensions[ReservedMarkerExtension] = StringExtension(ReservedMarker);
+        operation.Extensions[RouteTemplateExtension] = StringExtension(declaration.RoutePattern);
 
         DeclareReservedPathParameter(operation);
 
@@ -662,16 +694,23 @@ public static class DeferredCapabilityEndpoints
     /// </summary>
     /// <returns>The extension value, ready to attach to the generated path parameter.</returns>
     /// <remarks>
-    /// Four statements, each of which OpenAPI 3.1 leaves unsayable on a path parameter: the ASP.NET Core
-    /// route template, that the captured value spans nested segments, that it matches an empty
-    /// remainder so the bare prefix resolves here, and that every HTTP method answers identically even
-    /// though the described surface enumerates two. All four are facts about URL templating; none of
-    /// them describes a capability.
+    /// <para>
+    /// Three statements, each of which OpenAPI 3.1 leaves unsayable on a path parameter: that the
+    /// captured value spans nested segments, that it matches an empty remainder so the bare prefix
+    /// resolves here, and that every HTTP method answers identically even though the described surface
+    /// enumerates two. All three are facts about URL templating; none of them describes a capability.
+    /// </para>
+    /// <para>
+    /// 🔴 A FOURTH MEMBER USED TO STAND HERE AND WAS THE ONLY UNTRUE STATEMENT IN THE BLOCK: a
+    /// <c>routeTemplate</c> of <c>/v1/{area}/{**path}</c>. All three statements above are true of every
+    /// family, which is what makes them shareable; a route template is not, because the four families
+    /// are literal prefixes and no <c>area</c> parameter has ever existed. It now lives on the operation
+    /// as <see cref="RouteTemplateExtension"/>, carrying that operation's own literal template.
+    /// </para>
     /// </remarks>
     private static JsonNodeExtension CatchAllExtensionValue() =>
         new(new JsonObject
         {
-            ["routeTemplate"] = JsonValue.Create("/v1/{area}/{**" + ReservedPathParameter + "}"),
             ["capturesNestedSegments"] = JsonValue.Create(true),
             ["matchesEmptyRemainder"] = JsonValue.Create(true),
             ["matchesEveryHttpMethod"] = JsonValue.Create(true),

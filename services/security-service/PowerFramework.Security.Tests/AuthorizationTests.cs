@@ -188,6 +188,8 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using PowerFramework.Security.Configuration;
 using PowerFramework.Security.Endpoints;
 using PowerFramework.Security.Tokens;
@@ -1549,6 +1551,46 @@ public sealed class AuthorizationTests
     }
 
     /// <summary>
+    /// The composition root stamps the W3C trace context onto every log record this service writes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE OTHER HALF OF THE CORRELATION PAIR. <see cref="AssertUnauthorizedProblemBodyAsync"/> proves the
+    /// identifier reaches the WIRE; this proves it reaches the LOG. Either alone is useless: an identifier
+    /// on the wire that no record carries cannot be joined to anything, and a record stamped with a context
+    /// nobody published cannot be found.
+    /// </para>
+    /// <para>
+    /// BAGGAGE AND TAGS ARE ASSERTED OFF, not merely left unmentioned. Both are caller-controlled
+    /// key-value sets, so tracking them would copy attacker-influenced content into this service's log
+    /// records - and this is the service that handles credentials, so it is the last one where that would
+    /// be acceptable.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheHostTracksTheTraceContextOnEveryLogRecordAndTracksNoCallerControlledSet()
+    {
+        using SecurityAppFactory factory = new();
+
+        // Touching the client is what forces the host to build; the options are read from the built host's
+        // own provider rather than from a hand-assembled one, so this asserts the DEPLOYED configuration.
+        using HttpClient client = factory.CreateClient();
+
+        LoggerFactoryOptions logging = factory.Services
+            .GetRequiredService<IOptions<LoggerFactoryOptions>>()
+            .Value;
+
+        Assert.Equal(
+            ActivityTrackingOptions.TraceId
+                | ActivityTrackingOptions.SpanId
+                | ActivityTrackingOptions.ParentId,
+            logging.ActivityTrackingOptions);
+
+        Assert.False(logging.ActivityTrackingOptions.HasFlag(ActivityTrackingOptions.Baggage));
+        Assert.False(logging.ActivityTrackingOptions.HasFlag(ActivityTrackingOptions.Tags));
+    }
+
+    /// <summary>
     /// Asserts that a refusal carries the single published problem shape, the unauthorized status inside
     /// the body, the legacy access-denied return code, and no fault detail.
     /// </summary>
@@ -1598,6 +1640,26 @@ public sealed class AuthorizationTests
             + "and a consumer loses the only member tying this failure back to the behavioural oracle.");
 
         Assert.Equal(RetCode.E_ACCESS_DENIED, retCode.GetInt64());
+
+        // THE CORRELATION IDENTIFIER TRAVELS ON EVERY REFUSAL, and it is asserted in this shared helper
+        // rather than in one row so that all fourteen refusals in this file are held to it. This service
+        // published no identifier at all while Gateway and DataServices published one from their own fault
+        // paths, so an operator holding a Gateway identifier from a failed proxied call had no member on
+        // this side to join it to - even though the W3C trace context had already propagated here. It is
+        // checked non-empty as well as present: an empty traceId advertises a bridge with no far side,
+        // which a consumer reads as a value rather than as an absence.
+        bool carriesCorrelationId = problem.RootElement.TryGetProperty(
+            ProblemResults.TraceIdExtensionMember,
+            out JsonElement traceId);
+
+        Assert.True(
+            carriesCorrelationId,
+            "Every refusal must carry the request's correlation identifier as an extension member. Its "
+            + "absence means the composition root's problem-details customization was bypassed, and an "
+            + "operator cannot join this refusal to the log record that explains it.");
+
+        Assert.Equal(JsonValueKind.String, traceId.ValueKind);
+        Assert.False(string.IsNullOrWhiteSpace(traceId.GetString()));
 
         foreach (string fragment in ForbiddenBodyFragments)
         {

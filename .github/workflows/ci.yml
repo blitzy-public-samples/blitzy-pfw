@@ -366,12 +366,20 @@ jobs:
   #      instead of being silently unchecked. One of the five does carry trailing whitespace, and it
   #      stays.
   #    * README.md is held out by OMISSION - it is simply not among the listed paths, since the root
-  #      is enumerated file by file. It is the single UPDATE in the whole refactor and its pre-existing
+  #      is enumerated file by file. It is ONE OF THE TWO UPDATEs in the refactor and its pre-existing
   #      content is preserved VERBATIM, whitespace included: its first line carries a trailing space.
   #      A whole-content check would demand editing preserved text to satisfy a style gate, which is
   #      the wrong trade. The .NET section appended to it is reviewed like any other change.
   #  Every other listed path is agent-authored in full, which is what makes whole-content the right
   #  strictness for them.
+  #
+  #  .gitignore IS THE SECOND UPDATE AND IT IS CHECKED, NOT HELD OUT. It gained a committed block
+  #  excluding bin/, obj/, TestResults/ and the npm and Playwright output directories, because those
+  #  were previously excluded only by a per-clone .git/info/exclude that a fresh clone does not carry -
+  #  see docs/BUILD.md 1.6.2 D11. Unlike README.md its pre-existing content is whitespace-clean under
+  #  this exact gate, measured rather than assumed, so listing it costs nothing and closes what would
+  #  otherwise be a target path no gate inspects. That is the direction this banner tells a reader to
+  #  take: add the path, never widen the exclusion list.
   # ================================================================================================
   hygiene:
     name: Characterization roster and source hygiene
@@ -477,6 +485,7 @@ jobs:
               global.json \
               .editorconfig \
               .dockerignore \
+              .gitignore \
               NOTICE \
               docs \
               ':(exclude)docs/README.md' \
@@ -492,6 +501,70 @@ jobs:
             echo 'exclusion list, which exists only for the read-only legacy paths.'
             exit 1
           fi
+
+      # ============================================================================================
+      #  THE STRICT-JSON GATE
+      #
+      #  🔴 EVERY COMMITTED JSON ARTIFACT MUST PARSE AS STRICT RFC 8259 JSON, WITH NO CARVE-OUT.
+      #
+      #  The gate exists because comment syntax had been smuggled into six appsettings files against
+      #  each file's own specification - one of them opened with a `//` banner rather than with `{`,
+      #  and 1,009 of its 1,184 lines were comment. RFC 8259 has no comment syntax at all; the .NET
+      #  JSON configuration provider happens to tolerate `//` and `/* */`, and that tolerance is the
+      #  whole trap: the file loads, the service starts, and every OTHER consumer of the same path -
+      #  `jq`, a schema validator, `python3 -m json.tool`, a deployment tool reading a setting - fails
+      #  on it. A tolerated violation is the kind that survives review indefinitely.
+      #
+      #  WHERE THE PROSE WENT, so this gate is not read as a demand to delete documentation. Every
+      #  settings key is annotated on the bound member of its own options type; the logging categories,
+      #  which bind the framework's own LoggerFilterOptions and so have no options type here, are in
+      #  docs/ARCHITECTURE.md 9.9; the type-check flags are in tests/e2e/README.md 9.1.
+      #
+      #  NO EXCEPTION FOR tsconfig.json, AND ITS ABSENCE IS DELIBERATE. TypeScript reads JSONC, so
+      #  comments there are legal - but a gate with one documented exception is a gate the next file
+      #  hides behind, and the choice recorded in tests/e2e/README.md section 9 is a uniform rule over
+      #  a carve-out. Anything genuinely needing comments is not JSON and should not be named .json.
+      # ============================================================================================
+      - name: Assert every committed JSON artifact parses as strict RFC 8259 JSON
+        run: |
+          set -euo pipefail
+
+          # The read-only legacy oracle (C-C) is never edited and is not this gate's subject. It
+          # contains no *.json today; the exclusion is written so that a legacy file appearing later
+          # cannot fail a gate that has no authority over it.
+          legacy='^(ws_objects/|oldversion/|pack/|res/|samples/|sciter_control/|tests/(blink|sciter|webview)/)'
+
+          mapfile -t candidates < <(git ls-files -- '*.json' | grep -Ev "${legacy}" | sort)
+
+          if [ "${#candidates[@]}" -eq 0 ]; then
+            echo '::error::The strict-JSON gate found no committed JSON artifact to check.'
+            echo 'The estate holds settings files, a solution-adjacent global.json and an npm manifest,'
+            echo 'so an empty candidate set means this step stopped measuring rather than that the'
+            echo 'tree is clean.'
+            exit 1
+          fi
+
+          failed=0
+
+          for candidate in "${candidates[@]}"; do
+            if python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' "${candidate}"
+            then
+              printf '  ok      %s\n' "${candidate}"
+            else
+              printf '::error file=%s::%s is not strict RFC 8259 JSON.\n' "${candidate}" "${candidate}"
+              failed=1
+            fi
+          done
+
+          if [ "${failed}" -ne 0 ]; then
+            echo '::error::At least one committed JSON artifact is not strict RFC 8259 JSON.'
+            echo 'The usual cause is comment syntax. JSON has none: move the explanatory note to the'
+            echo 'XML documentation on the options member that binds the key, or to docs/. Do not'
+            echo 'exclude the file from this gate.'
+            exit 1
+          fi
+
+          printf 'All %d committed JSON artifacts parse as strict RFC 8259 JSON.\n' "${#candidates[@]}"
 
       # ============================================================================================
       #  THE TARGET-SCOPE AUDIT
@@ -639,12 +712,17 @@ jobs:
       #  explicitly so that including `tests/` at all cannot pull the three read-only sibling
       #  directories in with it.
       #
-      #  README.md IS EXCLUDED, AND THE REASON IS THE SAME CONSTRAINT. It is the one pre-existing file
-      #  this refactor updates, and its first line - the legacy heading - carries a trailing space that
+      #  README.md IS EXCLUDED, AND THE REASON IS THE SAME CONSTRAINT. It is one of the two pre-existing
+      #  files this refactor updates, and its first line - the legacy heading - carries a trailing space that
       #  predates this work. The .NET section is appended; the BSD-2-Clause text, its four-condition
       #  Chinese restatement and the surrounding legacy prose are preserved VERBATIM, which forbids
       #  reformatting that line. An exclusion that is stated is honest; silently rewriting preserved
       #  legacy text to satisfy a lint gate would be the behaviour change C-B rules out.
+      #
+      #  .gitignore, THE OTHER UPDATE, IS LISTED RATHER THAN EXCLUDED. Its pre-existing content carries
+      #  no whitespace defect under this gate - measured, not assumed - so the reason README.md is held
+      #  out does not apply to it, and the committed bin/obj block appended to it (docs/BUILD.md 1.6.2
+      #  D11) is agent-authored like every other listed path.
       # ------------------------------------------------------------------------------------------
       - name: Whitespace hygiene gate over the owned tree
         run: |
@@ -656,6 +734,7 @@ jobs:
             '.dockerignore' \
             '.editorconfig' \
             '.github/**' \
+            '.gitignore' \
             'Directory.Build.props' \
             'Directory.Packages.props' \
             'NOTICE' \

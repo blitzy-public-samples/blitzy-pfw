@@ -44,11 +44,37 @@
     THESE THREE LINES ARE A CLAIM ABOUT THE PRESENT AND ARE KEPT TRUE BY RE MEASUREMENT
     An earlier revision named SDK 10.0.302 with 10.0.10 runtimes while global.json beside this file
     pinned a later SDK and Directory.Packages.props pinned later platform packages, so the header
-    contradicted its own repository. Where a comment further down this file says a behaviour was
-    MEASURED on 10.0.302 it is a statement about a past measurement and stays as written; this block
-    is not, so it moves whenever global.json does. The runtime pair is the one a framework dependent
-    net10.0 process actually resolves, not merely one that is installed: a host can carry several
-    patches side by side and roll forward to the newest, which is what a probe on this host reported.
+    contradicted its own repository. This block therefore names no version at all and moves whenever
+    global.json does. The runtime pair is the one a framework dependent net10.0 process actually
+    resolves, not merely one that is installed: a host can carry several patches side by side and roll
+    forward to the newest, which is what a probe on this host reported.
+
+    AND EVERY BEHAVIOURAL MEASUREMENT FURTHER DOWN THIS FILE NOW NAMES BOTH SDKS IT HOLDS ON.
+    Three comments below record MSBuild behaviours that were reproduced rather than reasoned about, and
+    each named only SDK 10.0.302 - the SDK pinned when the measurement was taken. That reads to a later
+    reader as a claim about a toolchain the repository no longer pins, and it leaves the obvious
+    question - does the behaviour still hold? - unanswered by the file that depends on the answer.
+    Rather than delete the provenance or restate it as timeless, each was RE MEASURED on the SDK
+    global.json pins today and now names both. The three re measurements, all on SDK 10.0.303:
+
+      * Configuration propagation. `dotnet build -c Release` in services/gateway-service put every
+        referenced shared project in bin/Release; the same command with the property overridden to
+        true on the command line put four of them in bin/Debug and failed with PFW0001.
+      * The artifacts layout pivot. The same build directed at an artifacts path produced the pivot
+        directory 'release' in lower case, and PFW0001 selected nothing, so the lowercased comparison
+        below is still what makes both layouts pass.
+      * Both layouts, warning clean. Zero warnings and zero errors under each.
+
+    A future SDK bump repeats those three commands and adds its version here. That is cheap, and it is
+    the only way a comment claiming a measurement stays worth reading.
+
+    THE PATCH LEVEL ITSELF IS A DECLARED DEVIATION, RECORDED AWAY FROM HERE ON PURPOSE. Agent Action
+    Plan 0.5.1 names SDK 10.0.302 and 10.0.10 runtimes; the repository pins later ones, because the
+    10.0.11 platform release fixes ten CVEs against 10.0.10 and holding the plan's figure would ship a
+    knowingly vulnerable platform. Directory.Packages.props carries that reasoning where the six
+    platform pins are, and docs/BUILD.md 1.6.2 D9 carries it as a numbered deviation from the frozen
+    plan. This comment deliberately does not restate the reasoning: one authority per fact is the whole
+    point of the paragraph above it.
 
     PROVENANCE: THERE IS NO LEGACY SOURCE EQUIVALENT TO TRANSLATE
     The Appeon PowerBuilder 2021 framework this .NET tree is being added to has no build system in
@@ -275,7 +301,8 @@
     This is the property that makes `dotnet build -c Release` mean Release for the WHOLE dependency
     closure of a service, and not merely for the two projects its solution happens to list.
 
-    THE PROBLEM IT SOLVES, measured on SDK 10.0.302 rather than reasoned about. Each service
+    THE PROBLEM IT SOLVES, measured on SDK 10.0.302 and re measured on SDK 10.0.303 rather than
+    reasoned about. Each service
     directory carries a .slnx listing exactly two projects, the application and its tests, because
     constraint C-A forbids a service solution from enumerating the shared projects it consumes: those
     arrive by ProjectReference, and listing them would create a second inventory and paths climbing
@@ -406,13 +433,13 @@
         '_$(TargetFramework)' and/or '_$(RuntimeIdentifier)' suffix for a multi targeting or RID
         specific build - 'release_net10.0'.
 
-    Both facts are MEASURED on SDK 10.0.302 rather than assumed. An earlier form of this filter
-    compared case sensitively against '/$(Configuration)/' alone, which made a genuine all Release
-    build under the artifacts layout fail PFW0001 against '/release/' - the layout and the casing were
-    the whole of the mismatch, not the configuration, and overriding ArtifactsPivots to 'Release' made
-    the identical build advance. The comparison is therefore performed with BOTH sides lowercased, and
-    a pivot suffix is accepted by testing for the segment prefix '/<configuration>_' alongside the
-    exact segment '/<configuration>/'.
+    Both facts are MEASURED on SDK 10.0.302 and RE MEASURED on SDK 10.0.303 rather than assumed. An
+    earlier form of this filter compared case sensitively against '/$(Configuration)/' alone, which
+    made a genuine all Release build under the artifacts layout fail PFW0001 against '/release/' -
+    the layout and the casing were the whole of the mismatch, not the configuration, and overriding
+    ArtifactsPivots to 'Release' made the identical build advance. The comparison is therefore
+    performed with BOTH sides lowercased, and a pivot suffix is accepted by testing for the segment
+    prefix '/<configuration>_' alongside the exact segment '/<configuration>/'.
 
     Separators are normalised to forward slashes before either test, so the rule behaves identically
     on Linux, the target operating system, and on Windows. Lowercasing is invariant rather than culture
@@ -426,10 +453,10 @@
     dumping all forty metadata names MSBuild attaches to _ResolvedProjectReferencePaths - so the output
     path is the only signal available.
 
-    Verified both ways on SDK 10.0.302 rather than assumed: with propagation in place the target
-    selects nothing across every project in the tree, under the default layout and under the artifacts
-    layout alike, and with propagation switched off it selects the shared project outputs and fails the
-    build with the message below.
+    Verified both ways on SDK 10.0.302 and again on SDK 10.0.303 rather than assumed: with
+    propagation in place the target selects nothing across every project in the tree, under the
+    default layout and under the artifacts layout alike, and with propagation switched off it
+    selects the shared project outputs and fails the build with the message below.
 
     IT IS AN Error AND NOT A Warning, deliberately. MSBuildTreatWarningsAsErrors is not set, for the
     reasons recorded above, so a warning here would be advisory only and could be merged past CI

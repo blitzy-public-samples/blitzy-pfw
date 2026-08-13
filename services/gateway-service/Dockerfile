@@ -253,8 +253,21 @@ COPY --from=build /app/publish ./
 #
 # EXPOSE therefore DOCUMENTS the contract rather than creating it; the binding comes from configuration.
 #
-# ASPNETCORE_ENVIRONMENT is deliberately NOT set. Leaving it unset selects the framework default,
-# Production; which overlay a deployment wants is a deployment decision that orchestration supplies.
+# ASPNETCORE_ENVIRONMENT IS SET TO Production, STATED EXPLICITLY RATHER THAN RELIED UPON - and the
+# three sibling images do the same. An earlier revision of this file left it unset and argued that the
+# framework default already resolves to Production, so setting it would add nothing. That reasoning is
+# true about a CLEAN host and false about the property that matters: appsettings.Development.json IS
+# present in this image's publish output, so an ambient or inherited ASPNETCORE_ENVIRONMENT can pull the
+# development overlay into a shipped image by accident. What that overlay actually changes here, stated
+# rather than gestured at: it raises every log category - Default to Debug and the other three from
+# Warning to Information - and it restates the upstream and health-probe addresses. Selecting it
+# unintentionally is therefore a real observable change to a shipped ingress, not a no-op. An explicit
+# value closes that, changes no behaviour on a clean host, and leaves the setting fully overridable:
+# orchestration supplies whichever overlay a local run wants, and that override reaches the host
+# normally because a container environment value takes precedence over this default. Being the sole
+# ingress is the reason this image should have been the FIRST to state it rather than the only one that
+# did not.
+ENV ASPNETCORE_ENVIRONMENT=Production
 ENV ASPNETCORE_HTTP_PORTS=
 EXPOSE 5105
 

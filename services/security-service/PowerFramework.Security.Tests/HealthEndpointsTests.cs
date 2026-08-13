@@ -1430,7 +1430,36 @@ internal sealed class ThrowingHealthCheckService : HealthCheckService
 internal sealed class OperatorChannel
 {
     /// <summary>Every readiness record this host wrote, in order.</summary>
-    public List<(LogLevel Level, string Message)> Records { get; } = [];
+    /// <summary>The records, guarded by its own monitor.</summary>
+    private readonly List<(LogLevel Level, string Message)> _records = [];
+
+    /// <summary>A snapshot of every record, in arrival order.</summary>
+    /// <remarks>
+    /// SYNCHRONISED FOR THE SAME REASON AS <c>CapturedRecords</c>: this channel is installed into a running
+    /// host, so records arrive on request and framework threads while a test enumerates them. The read
+    /// copies under the lock, because locking only the append would leave every enumeration racing a writer.
+    /// </remarks>
+    public IReadOnlyList<(LogLevel Level, string Message)> Records
+    {
+        get
+        {
+            lock (_records)
+            {
+                return [.. _records];
+            }
+        }
+    }
+
+    /// <summary>Appends one record.</summary>
+    /// <param name="level">The level it was written at.</param>
+    /// <param name="message">The formatted message.</param>
+    public void Add(LogLevel level, string message)
+    {
+        lock (_records)
+        {
+            _records.Add((level, message));
+        }
+    }
 }
 
 /// <summary>
@@ -1483,7 +1512,7 @@ internal sealed class RecordingLoggerProvider : ILoggerProvider
         {
             ArgumentNullException.ThrowIfNull(formatter);
 
-            _channel.Records.Add((logLevel, formatter(state, exception)));
+            _channel.Add(logLevel, formatter(state, exception));
         }
     }
 }

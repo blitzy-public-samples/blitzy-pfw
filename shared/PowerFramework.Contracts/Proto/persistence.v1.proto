@@ -1364,6 +1364,34 @@ service QueryService {
 // possible failure on this particular contract. A reserved magic number such as -1 would work
 // mechanically but would invent a value that has no oracle locator and would have to be documented
 // at every consumer. Explicit presence says exactly what the legacy's IsNull says, with no invention.
+//
+// ================ THE IDENTIFIER ADMISSION RULE, WHICH IS NEW HERE (C-G, CWE-89) =============
+//
+// FOUR OF THESE SIX FIELDS ARE IDENTIFIER POSITIONS IN A GENERATED STATEMENT: name,
+// updatablecolumns, keycolumns and identitycolumn. Every VALUE the update path emits travels as a
+// bound parameter, and no dialect has a parameter form for a table or a column - so these four are
+// the fields whose text reaches the engine as SQL rather than as data.
+//
+// EACH IS THEREFORE ADMITTED ONLY IF IT CAN OCCUPY AN IDENTIFIER POSITION: letters, digits, the
+// underscore and the dollar, hash and at signs, with `name` additionally allowed up to two leading
+// period-separated qualifier parts. Anything else - whitespace, a quote, a semicolon, a comment
+// marker, a parenthesis, an operator, or the empty string in a position that requires a name - is
+// refused with common.v1.RetCode.Value.E_INVALID_ARGUMENT before any descriptor is recorded, and the
+// diagnostic quotes none of the caller's own text. An EMPTY identitycolumn stays legal, because it
+// means "no identity column" [:L127-L129].
+//
+// IT IS NOT AN EXISTENCE TEST. A well-shaped name the definition does not declare still gets the
+// oracle's own refusal - E_INTERNAL_ERROR with the invalid-column-name diagnostic and the name
+// [:L118-L122] - so the two conditions stay distinguishable: one says this table has no such column,
+// the other says no statement can carry that text as a name. And a reserved word is admitted, because
+// whether the provider accepts it unquoted is the provider's answer to give.
+//
+// THE LEGACY HAS NO EQUIVALENT AND NEEDED NONE. PowerFramework is a library: the identifiers that
+// reached a generated statement came from a COMPILED DataWindow shipped inside the application, and
+// the only caller that could name a column was code already in the same process. This contract is
+// where a remote caller names one, so the rule is a REQUIRED ADDITION of the boundary - the contract
+// narrowed with a defined error rather than widened with a guess - and it changes nothing about a
+// descriptor the legacy could actually have produced.
 // ==========================================================================================
 message TableUpdateContract {
   // The update table name. [:L11]

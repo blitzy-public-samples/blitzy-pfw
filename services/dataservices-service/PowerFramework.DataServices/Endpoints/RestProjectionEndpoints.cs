@@ -783,19 +783,45 @@ public static class RestProjectionEndpoints
         + "tell a missing credential from an insufficient one.";
 
     /// <summary>The contract's shared <c>404</c> description.</summary>
+    /// <remarks>
+    /// Worded for the WHOLE not-found family rather than for the session case alone, because that family
+    /// is reachable from every projected operation: the projected method's own <c>NotFound</c> status, and
+    /// the five in-band codes <c>E_INVALID_HANDLE</c>, <c>E_OBJECT_NOT_FOUND</c>, <c>E_NOT_EXISTS</c>,
+    /// <c>E_VAR_NOT_FOUND</c> and <c>E_MEMBER_NOT_FOUND</c>, all of which this projection maps here.
+    /// </remarks>
     private const string NotFoundDescription =
-        "The projected gRPC method returned NotFound - most often a session identifier that has "
-        + "expired or was already closed, or a column selector naming a column the DataWindow does "
-        + "not have.";
+        "The request named something the projected method could not find. Most often that is a session "
+        + "identifier that has expired or was already closed, a DataWindow handle nothing resolves, or a "
+        + "column, variable or member selector naming something the DataWindow or the expression "
+        + "environment does not have. It is the projection of a NotFound status or of one of the five "
+        + "in-band not-found codes, and it is never synthesized from a response field.";
 
     /// <summary>The contract's <c>409</c> description.</summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 WORDED FOR THE CONFLICT CLASS RATHER THAN FOR THE UPDATE ALONE, because the class has three
+    /// mutually distinguishable members and the update's detail-bearing form is only one of them. The
+    /// other two - an <c>Aborted</c> whose detail did not decode, and the in-band <c>E_RETRY</c> - are
+    /// reachable from EVERY projected operation, and a description that promised a <c>conflict</c> member
+    /// unconditionally would have been read as a guarantee on 38 operations that cannot make it.
+    /// </para>
+    /// <para>
+    /// The three stay readable apart by their problem type, their title and their <c>retCode</c>, which
+    /// is what the failure map's two conflict arms and the in-band map exist to keep distinct.
+    /// </para>
+    /// </remarks>
     private const string ConflictDescription =
-        "The projected gRPC method returned Aborted: an optimistic-concurrency conflict. The body "
-        + "carries the conflict detail UNCHANGED, including the current row state, so a caller has "
-        + "what it needs to decide between retrying and surfacing. Callers implement an explicit "
-        + "retry-or-surface policy, and there is no silent overwrite anywhere in the system. "
-        + "Re-sending the same payload produces the same 409, because the original values it carries "
-        + "are still stale - a retry must first re-read.";
+        "The request collided with the current state of the resource, and it is the caller's to resolve. "
+        + "Three outcomes reach this status and they are mutually distinguishable by problem type, title "
+        + "and retCode. An optimistic-concurrency conflict on the update carries the conflict member "
+        + "UNCHANGED, including the current row state, so a caller has what it needs to decide between "
+        + "retrying and surfacing. An Aborted whose detail could not be decoded, and the in-band E_RETRY "
+        + "a projected method reports without one, carry NO conflict member: the status is preserved "
+        + "because reporting anything else would let a rejected call look successful, and no detail is "
+        + "fabricated because an empty one would describe a conflict no caller could act on. Callers "
+        + "implement an explicit retry-or-surface policy, and there is no silent overwrite anywhere in "
+        + "the system. Re-sending the same payload produces the same 409, because the original values it "
+        + "carries are still stale - a retry must first re-read.";
 
     /// <summary>The contract's shared <c>500</c> description.</summary>
     private const string InternalErrorDescription =
@@ -1142,8 +1168,11 @@ public static class RestProjectionEndpoints
                 + "boundary has nowhere to put those, which is why the session is explicit rather "
                 + "than implicit, and the returned identifier correlates every subsequent operation "
                 + "in the chain. Sessions must be closed; an abandoned one holds server-side state "
-                + "until its configured idle expiry.",
-                DeclaresNotFound: false),
+                + "until its configured idle expiry. THE 404 THIS OPERATION DECLARES IS NOT ABOUT A "
+                + "SESSION IDENTIFIER - it has none yet - but about the datawindowHandle in the BODY: "
+                + "a session is scoped to one DataWindow, so a handle nothing resolves is refused "
+                + "rather than opened, and the refusal reaches a caller as 404 carrying "
+                + "E_INVALID_HANDLE."),
             static (service, request, context) => service.OpenValidationSession(request, context));
 
         MapSessionScoped<DataWindowImplementation, CloseValidationSessionRequest, CloseValidationSessionResponse>(
@@ -1175,8 +1204,10 @@ public static class RestProjectionEndpoints
                 + "this projection performs no retry of any kind. The response also relays the "
                 + "inserted, updated and deleted counts and the identity round trip - the identity "
                 + "column and its two value arrays - unchanged, because a caller that inserted rows "
-                + "could not otherwise learn the values the database assigned them.",
-                DeclaresConflict: true),
+                + "could not otherwise learn the values the database assigned them. THIS IS THE ONLY "
+                + "OPERATION WHOSE 409 CARRIES THE CONFLICT DETAIL. Every projected operation declares "
+                + "409, because an Aborted with no decodable detail and the in-band E_RETRY reach any "
+                + "of them; only here is a conflict member populated."),
             static (service, request, context) => service.Update(request, context));
 
         MapSessionScoped<DataWindowImplementation, GetEventGateRequest, GetEventGateResponse>(
@@ -1361,8 +1392,10 @@ public static class RestProjectionEndpoints
                 + "such a reference is supported when both DataWindows are CO-RESIDENT in one session "
                 + "inside one service instance and is BLOCKED with a defined error otherwise. That is "
                 + "this refactor's one deliberately narrowed contract, narrowed with a defined error "
-                + "rather than widened with a guess.",
-                DeclaresNotFound: false),
+                + "rather than widened with a guess. THE 404 THIS OPERATION DECLARES IS NOT ABOUT A "
+                + "SESSION IDENTIFIER - it has none yet - but about the datawindowHandles in the BODY: "
+                + "a name no host binds closes the part-opened session rather than leaving a hole in "
+                + "it, and reaches a caller as 404 carrying E_OBJECT_NOT_FOUND."),
             static (service, request, context) => service.OpenExpressionSession(request, context));
 
         MapSessionScoped<ColumnExpressionImplementation, CloseExpressionSessionRequest, CloseExpressionSessionResponse>(
@@ -1911,10 +1944,18 @@ public static class RestProjectionEndpoints
     /// <param name="route">The route being described.</param>
     /// <param name="operation">The operation's published metadata.</param>
     /// <remarks>
-    /// Each operation declares the responses it can ACTUALLY produce and no others. A status every
-    /// generated client must branch on but no operation can return is noise that hides the real
-    /// surface, which is why the two session opens declare no <c>404</c>, the two closes and the gate
-    /// read declare no <c>400</c>, and <c>409</c> appears on the update alone.
+    /// <para>
+    /// THE DECLARED SET AND THE REACHABLE SET MUST BE THE SAME SET, in both directions. A status a route
+    /// declares but cannot produce is noise that hides the real surface; a status a route produces but
+    /// does not declare leaves a generated client with no branch for a response it will receive, which is
+    /// the worse of the two because nothing about it looks wrong until the response arrives.
+    /// </para>
+    /// <para>
+    /// 🔴 Only <c>400</c> is now conditional, and only because the two session closes and the gate read
+    /// bind no body at all. <c>404</c> was suppressed on the two session opens and <c>409</c> on every
+    /// operation but the update, and both suppressions were wrong in the second direction - the
+    /// reachability evidence is recorded at each declaration below.
+    /// </para>
     /// </remarks>
     private static void Describe<TRequest, TResponse>(
         RouteHandlerBuilder route,
@@ -1943,26 +1984,46 @@ public static class RestProjectionEndpoints
         route.ProducesProblem(StatusCodes.Status401Unauthorized, MediaTypeNames.Application.ProblemJson);
         route.ProducesProblem(StatusCodes.Status403Forbidden, MediaTypeNames.Application.ProblemJson);
 
-        if (operation.DeclaresNotFound)
-        {
-            route.ProducesProblem(StatusCodes.Status404NotFound, MediaTypeNames.Application.ProblemJson);
-        }
+        // 🔴 404 IS DECLARED ON EVERY PROJECTED OPERATION, WHICH IT WAS NOT.
+        //
+        // It was gated on a per-operation flag that the two SESSION-OPENING operations set false, on the
+        // reasoning that they have no prior identifier to fail to resolve. That reasoning is true about
+        // the session identifier and false about the status: the not-found family this projection maps is
+        // wider than one parameter. `OpenValidationSession` answers the in-band E_INVALID_HANDLE when no
+        // DataWindow resolves the handle its BODY carried [DataWindowService.OpenValidationSession], and
+        // `OpenExpressionSession` answers E_OBJECT_NOT_FOUND when no host binds a requested name and
+        // E_NOT_EXISTS when its own session closed underneath the open [ColumnExpressionService]. All three
+        // codes are 404 in the in-band map below, so both operations really produced a status neither of
+        // them declared - which leaves a generated client with no branch for a response it will receive.
+        route.ProducesProblem(StatusCodes.Status404NotFound, MediaTypeNames.Application.ProblemJson);
 
-        if (operation.DeclaresConflict)
-        {
-            // NOT `ProducesProblem`, and the difference is the whole point of the 409.
-            //
-            // `ProducesProblem` would publish the bare problem shape, and a consumer reading this
-            // document could not see that a `conflict` member is present. The contract's own
-            // `ConflictProblemDetails` says why that is unacceptable: the conflict payload is the one
-            // body in this document a caller must be able to read in order to ACT. A caller that
-            // cannot see WHICH column moved cannot construct a retry - it would re-send the same stale
-            // original values and receive the same 409 for ever [AAP 0.6.3.8: callers implement an
-            // explicit retry-or-surface policy, and there is no silent overwrite anywhere].
-            route.Produces<ConflictProblemDetails>(
-                StatusCodes.Status409Conflict,
-                MediaTypeNames.Application.ProblemJson);
-        }
+        // 🔴 409 IS DECLARED ON EVERY PROJECTED OPERATION, AND IT USED TO BE DECLARED ON EXACTLY ONE.
+        //
+        // The single declaration sat on the update, because the update is the only operation that can
+        // encounter an optimistic-concurrency MISMATCH and therefore the only one that can carry the
+        // conflict DETAIL. But the status is produced by three arms, and two of them are reachable from
+        // any operation at all: the failure map answers 409 for an `Aborted` whose detail did not decode,
+        // and the in-band map answers 409 for `E_RETRY`. Thirty-eight operations could therefore return a
+        // 409 the contract said they could not - the worst direction for this particular status, because
+        // 409 is the one response a caller must BRANCH on to build a retry, and an undeclared branch is
+        // one a generated client does not have.
+        //
+        // NOT `ProducesProblem`, and the difference is the whole point of the 409.
+        //
+        // `ProducesProblem` would publish the bare problem shape, and a consumer reading this
+        // document could not see that a `conflict` member is present. The contract's own
+        // `ConflictProblemDetails` says why that is unacceptable: the conflict payload is the one
+        // body in this document a caller must be able to read in order to ACT. A caller that
+        // cannot see WHICH column moved cannot construct a retry - it would re-send the same stale
+        // original values and receive the same 409 for ever [AAP 0.6.3.8: callers implement an
+        // explicit retry-or-surface policy, and there is no silent overwrite anywhere].
+        //
+        // THE SCHEMA IS TRUTHFUL ON ALL THIRTY-NINE because its `conflict` member is OPTIONAL. Declaring
+        // it therefore publishes "a conflict member may be present", never "one will be" - and the
+        // response description says in prose which of the three arms populates it.
+        route.Produces<ConflictProblemDetails>(
+            StatusCodes.Status409Conflict,
+            MediaTypeNames.Application.ProblemJson);
 
         // THE FOUR STATUSES EVERY PROJECTED OPERATION CAN REALLY PRODUCE, declared unconditionally
         // because none of them depends on which method is projected.
@@ -1974,9 +2035,13 @@ public static class RestProjectionEndpoints
         // all. 504 is the deadline this service sets on EVERY outbound call elapsing, so its expiry is an
         // ordinary outcome of a slow upstream rather than a hypothetical.
         //
-        // One status the failure map also translates is deliberately NOT declared. AlreadyExists is
-        // produced by exactly one method in the estate - the macro channel reporting an existing
-        // attachment - and that method is bidirectional and unprojected, so no route here can return it.
+        // 🔴 AND NO STATUS THE FAILURE MAP TRANSLATES IS LEFT UNDECLARED, WHICH IS NOW TRUE OF ALL OF THEM.
+        // The one that used to be was AlreadyExists: it maps to 409, and 409 was declared on the update
+        // alone, so the note here argued the status unreachable because the only method that raises it - the
+        // macro channel reporting an existing attachment - is bidirectional and unprojected. That argument
+        // was about ONE arm of a status with three, and it was load-bearing for a declaration it should
+        // never have been load-bearing for. The 409 declared above covers all three arms, so the
+        // reachability question no longer has to be answered correctly for the contract to be truthful.
         //
         // 🔴 AND 501 IS DECLARED BY NO ROUTE HERE BECAUSE NO ROUTE HERE PRODUCES IT, WHICH IS NOW TRUE.
         // It was not: the failure map sent an upstream Unimplemented, and the in-band pair E_NO_SUPPORT /
@@ -3018,10 +3083,16 @@ public static class RestProjectionEndpoints
         DescribeSessionIdParameter(openApiOperation);
         ApplyBearerSecurityRequirement(openApiOperation, context.Document);
 
-        if (operation.DeclaresConflict)
-        {
-            PruneGeneratedMessageSchemas(context.Document);
-        }
+        // 🔴 UNCONDITIONAL, BECAUSE EVERY OPERATION NOW PUBLISHES THE CONFLICT SCHEMA.
+        //
+        // This used to be gated on the update's own conflict flag, which was sufficient while the update
+        // was the only route declaring a 409 and therefore the only route dragging the generated conflict
+        // message types into the document. Now that all thirty-nine declare it, gating here would leave the
+        // generated C# scaffolding - the `hasX` presence accessors and the `kindCase` discriminator - on the
+        // published schemas for any document built without the update, which is the exact untruthfulness the
+        // prune exists to remove. It is idempotent and document-scoped, so running it once per operation
+        // costs a walk of a four-message closure and cannot double-remove anything.
+        PruneGeneratedMessageSchemas(context.Document);
 
         return Task.CompletedTask;
     }
@@ -3473,13 +3544,18 @@ public static class RestProjectionEndpoints
     /// <param name="Summary">The one-line summary.</param>
     /// <param name="Description">The prose, carried across from the authored contract.</param>
     /// <param name="BadRequest">How the operation declares its <c>400</c>.</param>
-    /// <param name="DeclaresNotFound">Whether the operation can answer <c>404</c>.</param>
-    /// <param name="DeclaresConflict">Whether the operation can answer <c>409</c>.</param>
     /// <param name="ServerStreaming">Whether the projected method is a server stream.</param>
     /// <param name="SuccessDescription">
     /// The <c>200</c> description where it differs from the shared one, which is the case for the two
     /// projected server streams.
     /// </param>
+    /// <remarks>
+    /// 🔴 <b>THIS ROW NO LONGER CARRIES A <c>DeclaresNotFound</c> OR A <c>DeclaresConflict</c> FLAG, AND
+    /// THE ABSENCE IS THE FIX.</b> Both existed to suppress a declaration on the operations thought unable
+    /// to produce the status, and both were wrong about that - see the two declarations in
+    /// <see cref="Describe{TRequest,TResponse}"/> for the reachability evidence. Retaining them as
+    /// always-true would have left the suppression one edit away from returning.
+    /// </remarks>
     private sealed record ProjectedOperation(
         string Route,
         string OperationId,
@@ -3488,8 +3564,6 @@ public static class RestProjectionEndpoints
         string Summary,
         string Description,
         BadRequestDeclaration BadRequest = BadRequestDeclaration.Standard,
-        bool DeclaresNotFound = true,
-        bool DeclaresConflict = false,
         bool ServerStreaming = false,
         string? SuccessDescription = null)
     {

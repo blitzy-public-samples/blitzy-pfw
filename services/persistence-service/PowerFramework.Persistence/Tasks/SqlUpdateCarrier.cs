@@ -35,6 +35,17 @@
 //  and the shape is what the SQL-preview channel publishes and what a characterization recording
 //  compares.
 //
+//  AND THE POSITION PARAMETERS CANNOT COVER: THE IDENTIFIER GATE
+//  No dialect has a parameter form for a table or a column, so the identifier positions of the four
+//  statement shapes below are the only places caller-supplied text reaches the engine as SQL. Across
+//  this boundary both sources of those identifiers - the installed update table and the carrier's
+//  column model - are caller-controlled, which the legacy's compiled DataWindow never was. `Update`
+//  therefore admits them through `Sql/SqlIdentifierGuard.cs` BEFORE generating anything, refusing on
+//  the datastore channel and emitting no statement at all when a name cannot occupy an identifier
+//  position. Nothing is quoted, escaped or normalised: an admitted name is concatenated exactly as it
+//  arrived, so byte-exact statement parity is untouched. The C-06 boundary applies the same gate to a
+//  descriptor one layer out, where it can answer E_INVALID_ARGUMENT.
+//
 //  LEGACY REFERENCE (read only - never edited, never built, never shipped: constraint C-C)
 //      ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru
 //          :L98-L145   _of_updateprepare, the runtime re-derivation this file's flags come from
@@ -69,6 +80,7 @@ using PowerFramework.Persistence.Buffers;
 using PowerFramework.Persistence.Concurrency;
 using PowerFramework.Persistence.Data;
 using PowerFramework.Persistence.Errors;
+using PowerFramework.Persistence.Sql;
 using PowerFramework.Persistence.Transactions;
 
 using Predicates = PowerFramework.Shared.Kernel.Predicates;
@@ -209,6 +221,62 @@ namespace PowerFramework.Persistence.Tasks
         /// it is a fixed statement rather than a composed one and there is nothing in it to interpolate.
         /// </remarks>
         internal const string LastInsertRowIdStatement = "SELECT last_insert_rowid()";
+
+        /// <summary>
+        /// The alias each branch of the batched conflict reread selects its submitted-row ordinal under.
+        /// </summary>
+        /// <remarks>
+        /// NAMED IN THE FRAMEWORK'S OWN SENTINEL STYLE, exactly as the paging rewriters name theirs
+        /// (<c>pfwPagedSQL_RN</c> and its siblings) and for the same reason: the alias sits in the same
+        /// result set as the caller's own columns, so a name that could collide with a real column would
+        /// make the ordinal unreadable on precisely the payload a caller has to act on. It is never
+        /// returned to a caller - the projection reads it and drops it.
+        /// </remarks>
+        internal const string ConflictRowOrdinalAlias = "pfwConflictRow";
+
+        /// <summary>
+        /// The most parameters one batched conflict-reread command may carry.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// A CEILING WELL INSIDE THE PROVIDER'S OWN. SQLite's compiled default for
+        /// <c>SQLITE_MAX_VARIABLE_NUMBER</c> has been 32766 since 3.32 and was 999 before it; the reread
+        /// runs on whatever build the host resolves, so the batch is sized under the OLDER limit rather
+        /// than the newer one. Nothing about the answer depends on the value - a larger ceiling means
+        /// fewer commands and an identical payload - so the conservative figure costs only round trips on
+        /// a conflict large enough to reach it.
+        /// </para>
+        /// <para>
+        /// PARAMETERS RATHER THAN ROWS, because the parameter count is what the provider limits: a row
+        /// contributes one parameter per non-null key column, so the row count a batch admits is derived
+        /// from the key width at the call site.
+        /// </para>
+        /// </remarks>
+        internal const int MaximumBatchedParameters = 900;
+
+        /// <summary>
+        /// The most rows one batched conflict-reread command may cover.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// 🔴 A SECOND CEILING, AND IT IS THE BINDING ONE. Each row contributes one term to a compound
+        /// <c>SELECT</c>, and SQLite refuses a compound statement past
+        /// <c>SQLITE_MAX_COMPOUND_SELECT</c> - whose compiled default is 500 - with
+        /// <c>too many terms in compound SELECT</c>. THAT WAS OBSERVED RATHER THAN REASONED ABOUT: a
+        /// batch sized only by the parameter ceiling reached it on the first conflict wider than 500
+        /// rows, and the reread then threw where a row-at-a-time reread had succeeded. Both ceilings
+        /// therefore bound the batch and the smaller wins.
+        /// </para>
+        /// <para>
+        /// A HUNDRED, WHICH IS A FIFTH OF THE LIMIT IT RESPECTS. The limit is compile-time
+        /// configurable, so a host could ship a lower one; sitting well inside the default leaves room
+        /// for that without making the value a claim about anything. Nothing about the projected payload
+        /// depends on it - a larger batch means fewer commands and an identical answer - so the
+        /// conservative figure costs only round trips, and a hundredfold reduction is already the whole
+        /// of what the batching is for.
+        /// </para>
+        /// </remarks>
+        internal const int MaximumBatchedRows = 100;
 
         /// <summary>The store this carrier wraps.</summary>
         private readonly ISqlDataStore _store;
@@ -508,6 +576,72 @@ namespace PowerFramework.Persistence.Tasks
             }
 
             UpdateColumnPlan plan = BuildPlan();
+
+            // ==========================================================================================
+            //  🔴 THE IDENTIFIER ADMISSION GATE - THE ONE POSITION IN A GENERATED STATEMENT THAT CANNOT
+            //  BE PARAMETERIZED.
+            //
+            //  EVERY VALUE BELOW THIS LINE TRAVELS AS AN `@pN` PARAMETER; NO IDENTIFIER CAN. There is no
+            //  parameter form for a table or a column in any dialect - `UPDATE @p1 SET ...` is not a
+            //  statement - so the identifier positions of the four statement shapes this class composes
+            //  (ApplyInsert, ApplyUpdate, ApplyDelete and the conflict re-read) are the only positions
+            //  where caller-supplied text reaches the engine as SQL rather than as data. This gate is
+            //  what admits it, and it sits HERE because every one of those shapes is reached only from
+            //  this member and only after these two facts have resolved: the update table it names, and
+            //  the column model its plan was read from.
+            //
+            //  BOTH SOURCES ARE CALLER-CONTROLLED ACROSS THIS BOUNDARY, WHICH IS WHAT THE LEGACY'S WERE
+            //  NOT. The table arrives through `DataWindow.Table.UpdateTable`, written by the prepare
+            //  step's modification script [n_cst_thread_task_sqlupdate.sru:L143], and the column model
+            //  comes either from the bindings a supplied `sql_syntax` produced or from a catalogue entry
+            //  that supplied syntax registered. In the legacy both came from a COMPILED DataWindow
+            //  shipped inside the application, so no remote party could reach either.
+            //
+            //  A SHAPE TEST, AND DELIBERATELY NOT A CATALOGUE LOOKUP. Checking a name against the
+            //  carrier's own model cannot close this: on the derived-definition path the model IS the
+            //  caller's declaration, so the input would be validated against itself. See
+            //  Sql/SqlIdentifierGuard.cs for the full account, including why nothing is quoted - the
+            //  parity criterion for this service is byte-exact generated SQL, so an admitted name is
+            //  concatenated exactly as it arrived and a refused one produces no statement at all.
+            //
+            //  THE WHOLE MODEL IS TESTED, NOT ONLY THE FLAGGED SUBSETS. `plan.AllColumns` is the model
+            //  every subset is drawn from - updatable, key, where-clause and the conflict projection's
+            //  union - so testing it once covers every position any of the four shapes can emit, and
+            //  cannot be left behind by a later change that emits from a different subset.
+            //
+            //  ANSWERED IN THE DATASTORE ALPHABET because that is this member's return contract - 1 for
+            //  success, -1 for failure [n_cst_thread_task_sqlupdate.sru:L204] - and the caller turns it
+            //  into a database error. The precise E_INVALID_ARGUMENT refusal a caller can act on is
+            //  produced one layer out, at the C-06 boundary, where the descriptor arrives; this arm is
+            //  the sink that also covers the syntax-derived path that boundary does not parse.
+            //
+            //  NO IDENTIFIER IS LOGGED (constraint C-F). The caller sent the name and gets a refusal for
+            //  it; a log record is read by someone who did not, and the name is caller-supplied text.
+            // ==========================================================================================
+            if (!SqlIdentifierGuard.IsAdmissibleQualifiedName(table))
+            {
+                _logger.LogError(
+                    "An update was refused before any statement was generated: the installed update "
+                        + "table name cannot occupy an identifier position. No name, column or value is "
+                        + "recorded.");
+
+                return DataWindowBufferStore.DataStoreFailure;
+            }
+
+            foreach (UpdateColumn column in plan.AllColumns)
+            {
+                if (SqlIdentifierGuard.IsAdmissibleIdentifier(column.Name))
+                {
+                    continue;
+                }
+
+                _logger.LogError(
+                    "An update was refused before any statement was generated: a column of the "
+                        + "carrier's model cannot occupy an identifier position. No name, column or "
+                        + "value is recorded.");
+
+                return DataWindowBufferStore.DataStoreFailure;
+            }
 
             // THE CARRIER LEARNS ITS COLUMN NAMES HERE TOO, once per update rather than per row. The
             // retrieve path records them as it fills; an update carrier is filled from a payload the caller
@@ -1473,37 +1607,53 @@ namespace PowerFramework.Persistence.Tasks
                     && !string.IsNullOrWhiteSpace(column.Name))
                 .Select(static column => new ConflictColumn(column.Name, column.Number))];
 
+            // ONE ROUND TRIP PER BATCH RATHER THAN ONE PER ROW. The reread is a compound statement whose
+            // branches are the SAME per-row predicates a row-at-a-time reread would have issued, so what
+            // changes is the number of commands and nothing about what is compared or what is reported.
+            // See ReadStorageRows for why the attribution stays on the engine's side of the boundary.
+            IReadOnlyDictionary<int, IReadOnlyDictionary<int, object?>> storage =
+                ReadStorageRows(commands, table, keyColumns, columns, unmatched);
+
             List<ConflictRow> rows = new(unmatched.Count);
 
-            foreach ((DwBuffer buffer, long row) in unmatched)
+            for (int index = 0; index < unmatched.Count; index++)
             {
+                (DwBuffer buffer, long row) = unmatched[index];
+
+                // AN ABSENT ENTRY IS AN ANSWER, NOT A GAP: the other writer deleted the row, and the
+                // pairing of populated originals against no current values is what tells a caller so.
                 rows.Add(ConflictDetector.ProjectConflictRow(
                     _store.Carrier,
                     buffer,
                     row,
                     columns,
-                    ReadStorageRow(commands, table, keyColumns, columns, buffer, row)));
+                    storage.TryGetValue(index, out IReadOnlyDictionary<int, object?>? current)
+                        ? current
+                        : null));
             }
 
             return rows;
         }
 
         /// <summary>
-        /// Rereads one conflicting row's CURRENT values out of storage, on the connection the failed
-        /// statement ran on.
+        /// Rereads every conflicting row's CURRENT values out of storage, on the connection the failed
+        /// statements ran on, in one round trip per batch.
         /// </summary>
         /// <param name="commands">
-        /// The command source. <b>THE SAME ONE THE UPDATE RAN ON</b> - see the remarks.
+        /// The command source. <b>THE SAME ONE THE UPDATES RAN ON</b> - see the remarks.
         /// </param>
         /// <param name="table">The update table.</param>
-        /// <param name="keyColumns">The key columns, whose ORIGINAL values address the row.</param>
+        /// <param name="keyColumns">The key columns, whose ORIGINAL values address each row.</param>
         /// <param name="columns">The columns to read, in payload order.</param>
-        /// <param name="buffer">The buffer the submitted row lives in.</param>
-        /// <param name="row">The one-based row number within <paramref name="buffer"/>.</param>
+        /// <param name="unmatched">
+        /// The buffer and row of every statement that affected zero rows, in the order the conflict
+        /// payload reports them. The POSITION in this list is the key of the returned map.
+        /// </param>
         /// <returns>
-        /// The storage values keyed by one-based column number, or <see langword="null"/> when the row
-        /// could not be read - either because no key column is installed to address it by, or because
-        /// STORAGE NO LONGER HOLDS IT.
+        /// The storage values of each row that could still be read, keyed by that row's position in
+        /// <paramref name="unmatched"/> and then by one-based column number. A position is ABSENT when
+        /// its row could not be read - either because no key column is installed to address it by, or
+        /// because STORAGE NO LONGER HOLDS IT.
         /// </returns>
         /// <remarks>
         /// <para>
@@ -1531,72 +1681,186 @@ namespace PowerFramework.Persistence.Tasks
         /// predicate.
         /// </para>
         /// <para>
-        /// <b>AN EMPTY RESULT IS AN ANSWER, NOT A FAULT.</b> The other writer may have DELETED the row.
+        /// 🔴 <b>ONE COMMAND FOR THE WHOLE BATCH, AND THE ATTRIBUTION STAYS ON THE ENGINE'S SIDE.</b> An
+        /// earlier form issued one keyed <c>SELECT</c> per conflicting row, so a conflict over N rows cost
+        /// N round trips inside an already-failed update. The batch is a compound statement whose branches
+        /// are the SAME per-row predicates - branch <c>i</c> carries exactly the text and the parameters
+        /// row <c>i</c> would have been read with - joined by <c>UNION ALL</c>, and each branch selects a
+        /// LITERAL ORDINAL as its first column so every returned row names the submitted row it belongs
+        /// to.
+        /// </para>
+        /// <para>
+        /// <b>THAT TAG IS WHY THE BATCH IS SAFE, AND AN <c>IN</c> LIST WOULD NOT HAVE BEEN.</b> Matching
+        /// returned rows back to submitted rows by comparing key VALUES in managed code would introduce a
+        /// second comparison semantics beside the engine's: SQLite compares under column type affinity and
+        /// the column's declared collation, so a key the engine matched could fail a managed comparison and
+        /// the row would be reported as DELETED when it is present - a wrong conflict payload, which is
+        /// worse than the round trips. Reading the engine's own answer to "which branch matched" keeps the
+        /// comparison exactly where the per-row form had it. The ordinal is a server-side integer this
+        /// method generates, never caller input, so it is a literal rather than a parameter.
+        /// </para>
+        /// <para>
+        /// <b>CHUNKED, BECAUSE A PARAMETER CEILING IS A REAL LIMIT RATHER THAN A HYPOTHETICAL ONE.</b>
+        /// Every non-null key value is a parameter, so a batch's parameter count is the number of rows
+        /// times the number of key columns; SQLite refuses a statement past its own ceiling. The batch is
+        /// therefore split so no single command exceeds <see cref="MaximumBatchedParameters"/>, and a
+        /// batch of one row degenerates to exactly the statement the per-row form issued.
+        /// </para>
+        /// <para>
+        /// <b>AN ABSENT POSITION IS AN ANSWER, NOT A FAULT.</b> The other writer may have DELETED the row.
         /// The projection then reports the original values with NO current values, and the pairing of a
         /// populated original set against an empty current set is what tells a caller the row is gone -
         /// distinct from a row whose values changed, which reports both sets.
         /// </para>
         /// <para>
-        /// PARAMETERIZED, and the statement carries only identifiers from the carrier's own installed
-        /// column model - never a caller-supplied fragment. It is a plain SELECT and mutates nothing, so
-        /// it cannot alter the state it is reporting.
+        /// PARAMETERIZED, and the statement carries only identifiers admitted by
+        /// <see cref="SqlIdentifierGuard"/> from the carrier's own installed column model - never a
+        /// caller-supplied fragment. It is a plain SELECT and mutates nothing, so it cannot alter the
+        /// state it is reporting.
         /// </para>
         /// </remarks>
-        private IReadOnlyDictionary<int, object?>? ReadStorageRow(
+        private IReadOnlyDictionary<int, IReadOnlyDictionary<int, object?>> ReadStorageRows(
             ISqliteCommandSource commands,
             string table,
             IReadOnlyList<ConflictColumn> keyColumns,
             IReadOnlyList<ConflictColumn> columns,
-            DwBuffer buffer,
-            long row)
+            List<(DwBuffer Buffer, long Row)> unmatched)
         {
+            Dictionary<int, IReadOnlyDictionary<int, object?>> projected = [];
+
             if (keyColumns.Count == 0)
             {
-                return null;
+                // Nothing addresses a row, so nothing is reread - the same answer the per-row form gave,
+                // reached without issuing a statement that could not have had a predicate.
+                return projected;
             }
 
-            StringBuilder statement = new("SELECT ");
+            // ROWS PER COMMAND, BOUNDED BY BOTH CEILINGS, SMALLER WINS. The parameter ceiling is derived
+            // from the key width, because a wide key uses more of it per row; the compound-term ceiling is
+            // flat, because each row contributes exactly one term whatever its key. At least one row
+            // always travels, because a batch of none would loop for ever.
+            int rowsPerCommand = Math.Max(
+                1,
+                Math.Min(MaximumBatchedRows, MaximumBatchedParameters / keyColumns.Count));
 
-            for (int index = 0; index < columns.Count; index++)
+            for (int start = 0; start < unmatched.Count; start += rowsPerCommand)
             {
-                if (index > 0)
-                {
-                    _ = statement.Append(", ");
-                }
+                int length = Math.Min(rowsPerCommand, unmatched.Count - start);
 
-                _ = statement.Append(columns[index].Name);
+                ReadStorageBatch(commands, table, keyColumns, columns, unmatched, start, length, projected);
             }
 
-            _ = statement.Append(" FROM ").Append(table).Append(" WHERE ");
+            if (projected.Count < unmatched.Count)
+            {
+                // ONE RECORD FOR THE WHOLE BATCH, and it names no key, no column and no value: a caller
+                // reading the payload sees which rows carry no current values, and an operator reading the
+                // log needs only the fact that some no longer exist (constraint C-F).
+                _logger.LogWarning(
+                    "{Missing} of {Conflicting} conflicting row(s) could not be reread from storage, so "
+                        + "their conflict payload reports the submitted originals with no current values - "
+                        + "those rows no longer exist.",
+                    unmatched.Count - projected.Count,
+                    unmatched.Count);
+            }
 
+            return projected;
+        }
+
+        /// <summary>
+        /// Rereads one chunk of the conflicting rows with a single compound statement.
+        /// </summary>
+        /// <param name="commands">The command source the failed statements ran on.</param>
+        /// <param name="table">The update table.</param>
+        /// <param name="keyColumns">The key columns whose ORIGINAL values address each row.</param>
+        /// <param name="columns">The columns to read, in payload order.</param>
+        /// <param name="unmatched">The whole unmatched list.</param>
+        /// <param name="start">The index in <paramref name="unmatched"/> this chunk begins at.</param>
+        /// <param name="length">How many rows this chunk covers.</param>
+        /// <param name="projected">
+        /// The map every chunk contributes to, keyed by position in <paramref name="unmatched"/>.
+        /// </param>
+        /// <remarks>
+        /// <para>
+        /// THE BRANCH TEXT IS THE PER-ROW STATEMENT, UNCHANGED. Each branch is
+        /// <c>SELECT &lt;ordinal&gt; AS &lt;sentinel&gt;, &lt;columns&gt; FROM &lt;table&gt; WHERE
+        /// &lt;key predicate&gt;</c>, and the key predicate is built exactly as the update's own predicate
+        /// builds it: an equality against a parameter for a non-null original, and <c>IS NULL</c> for a
+        /// null one, because an equality against null is never true in SQL and the reread must address the
+        /// same row the statement did.
+        /// </para>
+        /// <para>
+        /// THE SENTINEL ALIAS IS NAMED IN THE FRAMEWORK'S OWN SENTINEL STYLE, for the same reason the
+        /// paging rewriters' sentinels are: an alias that could collide with a real column name would make
+        /// the ordinal unreadable on exactly the payload a caller acts on.
+        /// </para>
+        /// <para>
+        /// A ROW WHOSE BRANCH MATCHED NOTHING SIMPLY CONTRIBUTES NO RESULT ROW, which is how a deleted row
+        /// stays distinguishable without a second query.
+        /// </para>
+        /// </remarks>
+        private void ReadStorageBatch(
+            ISqliteCommandSource commands,
+            string table,
+            IReadOnlyList<ConflictColumn> keyColumns,
+            IReadOnlyList<ConflictColumn> columns,
+            List<(DwBuffer Buffer, long Row)> unmatched,
+            int start,
+            int length,
+            Dictionary<int, IReadOnlyDictionary<int, object?>> projected)
+        {
+            StringBuilder statement = new();
             List<object?> values = [];
 
-            for (int index = 0; index < keyColumns.Count; index++)
+            for (int offset = 0; offset < length; offset++)
             {
-                if (index > 0)
+                int position = start + offset;
+                (DwBuffer buffer, long row) = unmatched[position];
+
+                if (offset > 0)
                 {
-                    _ = statement.Append(" AND ");
+                    _ = statement.Append(" UNION ALL ");
                 }
-
-                object? original =
-                    _store.Carrier.GetItemOriginalValue(row, keyColumns[index].Number, buffer);
-
-                if (original is null)
-                {
-                    // AN EQUALITY AGAINST NULL IS NEVER TRUE IN SQL, so the null key is compared with
-                    // IS NULL exactly as the update predicate does - the two must agree or the reread
-                    // would address a different row than the statement did.
-                    _ = statement.Append(keyColumns[index].Name).Append(" IS NULL");
-
-                    continue;
-                }
-
-                values.Add(original);
 
                 _ = statement
-                    .Append(keyColumns[index].Name)
-                    .Append(" = @p")
-                    .Append(values.Count.ToString(CultureInfo.InvariantCulture));
+                    .Append("SELECT ")
+                    .Append(position.ToString(CultureInfo.InvariantCulture))
+                    .Append(" AS ")
+                    .Append(ConflictRowOrdinalAlias);
+
+                for (int index = 0; index < columns.Count; index++)
+                {
+                    _ = statement.Append(", ").Append(columns[index].Name);
+                }
+
+                _ = statement.Append(" FROM ").Append(table).Append(" WHERE ");
+
+                for (int index = 0; index < keyColumns.Count; index++)
+                {
+                    if (index > 0)
+                    {
+                        _ = statement.Append(" AND ");
+                    }
+
+                    object? original =
+                        _store.Carrier.GetItemOriginalValue(row, keyColumns[index].Number, buffer);
+
+                    if (original is null)
+                    {
+                        // AN EQUALITY AGAINST NULL IS NEVER TRUE IN SQL, so the null key is compared with
+                        // IS NULL exactly as the update predicate does - the two must agree or the reread
+                        // would address a different row than the statement did.
+                        _ = statement.Append(keyColumns[index].Name).Append(" IS NULL");
+
+                        continue;
+                    }
+
+                    values.Add(original);
+
+                    _ = statement
+                        .Append(keyColumns[index].Name)
+                        .Append(" = @p")
+                        .Append(values.Count.ToString(CultureInfo.InvariantCulture));
+                }
             }
 
             using SqliteCommand command = commands.CreateCommand();
@@ -1611,27 +1875,26 @@ namespace PowerFramework.Persistence.Tasks
 
             using SqliteDataReader reader = command.ExecuteReader();
 
-            if (!reader.Read())
+            while (reader.Read())
             {
-                _logger.LogWarning(
-                    "A conflicting row could not be reread from storage, so the conflict payload reports "
-                        + "its submitted originals with no current values - the row no longer exists.");
+                // COLUMN 0 IS THE ORDINAL THE BRANCH CARRIED, so the row that came back names the
+                // submitted row it belongs to and no value comparison is needed to find out.
+                int position = (int)reader.GetInt64(0);
 
-                return null;
+                Dictionary<int, object?> storage = new(columns.Count);
+
+                for (int index = 0; index < columns.Count; index++)
+                {
+                    // DBNull IS FOLDED ONTO NULL, because null is a value in this model and the wire
+                    // projection has a published null arm for it; leaving DBNull would reach the value
+                    // mapper as a type it cannot express and fail the projection of a legitimate stored
+                    // null. The reader offset is one past the ordinal the branch selected first.
+                    storage[columns[index].Number] =
+                        reader.IsDBNull(index + 1) ? null : reader.GetValue(index + 1);
+                }
+
+                projected[position] = storage;
             }
-
-            Dictionary<int, object?> storage = new(columns.Count);
-
-            for (int index = 0; index < columns.Count; index++)
-            {
-                // DBNull IS FOLDED ONTO NULL, because null is a value in this model and the wire
-                // projection has a published null arm for it; leaving DBNull would reach the value mapper
-                // as a type it cannot express and fail the projection of a legitimate stored null.
-                storage[columns[index].Number] =
-                    reader.IsDBNull(index) ? null : reader.GetValue(index);
-            }
-
-            return storage;
         }
 
         /// <summary>

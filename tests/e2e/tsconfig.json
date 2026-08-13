@@ -1,145 +1,22 @@
 {
-  // ===========================================================================
-  //  TypeScript configuration for the PowerFramework cross-service end-to-end
-  //  suite.
-  //
-  //  WHY THIS FILE EXISTS
-  //  --------------------
-  //  Without it there is no type check of this directory at all. `playwright
-  //  test` transpiles each spec with Babel and DELIBERATELY performs no type
-  //  checking - it strips the types and runs the JavaScript - so a spec that
-  //  reads a misspelled export, passes a string where a number is required, or
-  //  ignores a possibly-undefined value runs happily and fails, if at all, as a
-  //  confusing runtime error against a live stack. `playwright test --list`
-  //  does not close that gap either: it loads and collects the files, which
-  //  catches a syntax error or a missing module, and catches nothing else.
-  //
-  //  The type check is therefore a SEPARATE gate, run as `npm run typecheck`,
-  //  and it is the only mechanism in this directory that reads the types the
-  //  fixtures so carefully declare. `npm run verify` runs it and then the
-  //  collection pass, which together are everything that can be verified
-  //  without a running stack.
-  //
-  //  NO EMIT, EVER
-  //  -------------
-  //  This project produces no JavaScript. Playwright owns the transform at run
-  //  time, so a second compiled copy of every spec would be an untracked
-  //  artifact that could drift from its source and be run by accident.
-  //  `noEmit` is therefore not a convenience - it is what keeps the transform
-  //  in exactly one place.
-  //
-  //  STRICTNESS, AND WHY EVERY EXTRA FLAG IS HERE
-  //  -------------------------------------------
-  //  The project has no user-specified rules - the rules document contains
-  //  exactly one line stating that none were provided - so the
-  //  enterprise-standard baseline applies in their place, and on the .NET side
-  //  of this repository that baseline is `Nullable` enabled with
-  //  `TreatWarningsAsErrors`. The nearest equivalent available here is `strict`
-  //  plus the additional checks below, so this file is the TypeScript
-  //  counterpart of that setting rather than a looser local choice. Each flag
-  //  beyond `strict` is listed with the mistake it catches.
-  //
-  //  READ-ONLY BOUNDARY (C-C)
-  //  ------------------------
-  //  `include` names only this directory's own `fixtures` and `specs` folders,
-  //  and `exclude` names `node_modules` and the runner's artifact directory.
-  //  The three sibling directories under `tests/` - `blink`, `sciter` and
-  //  `webview` - hold read-only behavioural-oracle assets, and nothing here may
-  //  reach them: this file lives inside `tests/e2e`, every path below is
-  //  relative to it, and no path ascends. A `../` anywhere in this file would
-  //  be the one way to break that containment by accident.
-  // ===========================================================================
   "compilerOptions": {
-    // The runtime this suite actually runs on. Node 22 is an LTS line and is
-    // what `engines` in the sibling package.json requires, so targeting and
-    // libbing it means the type checker models the same platform the runner
-    // uses rather than a hypothetical older one.
     "target": "ES2023",
     "lib": ["ES2023"],
-
-    // Node's own module resolution as Node 20+ implements it, which is what
-    // Playwright's loader uses. `nodenext` rather than `bundler` because there
-    // is no bundler anywhere in this suite.
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-
-    // No JavaScript is produced by this project - Playwright transpiles at run
-    // time. See the header: this is a containment decision, not a convenience.
     "noEmit": true,
-
-    // Node's platform types, which is what makes `process.env` a known symbol.
-    // Naming the set explicitly rather than letting every package under
-    // node_modules/@types load implicitly keeps the ambient surface auditable:
-    // only Node's types and whatever a spec imports by name are in scope.
     "types": ["node"],
-
-    // The whole strict family, matching the .NET side's nullable-plus-warnings-
-    // as-errors posture.
     "strict": true,
-
-    // An indexed read yields `T | undefined`. This is the flag that turns
-    // "the payload had no such field" from a silent `undefined` flowing
-    // onward into a compile error at the point of the read - the exact class of
-    // defect the capability fixture's own domain guard exists to catch at run
-    // time.
     "noUncheckedIndexedAccess": true,
-
-    // A property read through an index signature must be written as one, so a
-    // misspelled dotted access cannot silently resolve to `any`.
     "noPropertyAccessFromIndexSignature": true,
-
-    // A dead local or an unused parameter in a spec is nearly always a partly
-    // finished assertion, so both are errors rather than hints.
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-
-    // Every branch of a function that returns a value must return one, and a
-    // `switch` case may not fall through implicitly. Both are silent-wrong-
-    // answer bugs rather than crashes, which is what makes them worth failing
-    // the build over.
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
-
-    // `override` must be written where it applies, and a class field that
-    // shadows a base accessor is an error rather than a surprise.
     "noImplicitOverride": true,
-
-    // An optional property may be absent, but it may not be explicitly
-    // `undefined` - so an absent field and a present-but-undefined field stay
-    // distinguishable. That distinction is load-bearing in this repository: the
-    // published contracts use an explicit "unspecified" marker precisely
-    // because absence and a zero value mean different things.
     "exactOptionalPropertyTypes": true,
-
-    // A caught value is `unknown`, so an error has to be narrowed before its
-    // message is read. The fixtures already throw typed errors and the specs
-    // assert on them; this keeps that honest.
     "useUnknownInCatchVariables": true,
-
-    // Every file must be independently transformable. This is the flag that
-    // matches Playwright's actual mechanism: it hands each spec to Babel one
-    // file at a time with no whole-program knowledge, so a construct that needs
-    // cross-file type information to lower correctly - a re-export of something
-    // that turns out to be a type, say - would transpile to something subtly
-    // wrong. `isolatedModules` rejects exactly those constructs.
     "isolatedModules": true,
-
-    // `verbatimModuleSyntax` is DELIBERATELY NOT SET, and the reason is
-    // measured rather than assumed. The sibling package.json declares no
-    // `"type": "module"`, so Node - and therefore TypeScript under `NodeNext` -
-    // treats every `.ts` file here as CommonJS. With `verbatimModuleSyntax`
-    // enabled, the `import`/`export` syntax these files are authored in becomes
-    // an error (TS1287 and TS1295, 31 of them across the two fixtures and the
-    // runner config). That syntax is correct as written: Playwright transpiles
-    // each file to CommonJS at load time, which is its documented arrangement.
-    // The two ways to satisfy the flag would be to add `"type": "module"`,
-    // changing how the runner loads every file, or to rewrite the fixtures in
-    // CommonJS syntax - both are behavioural changes to satisfy a stylistic
-    // check, so neither is done. Every other strict flag is on.
-
-    // Case-sensitive imports, matching the Linux container this runs in, and
-    // interop settings that let the CommonJS-shaped Playwright entry point be
-    // imported by name.
     "forceConsistentCasingInFileNames": true,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,

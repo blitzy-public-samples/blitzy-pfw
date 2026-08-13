@@ -1162,6 +1162,124 @@ public sealed class UpdateServiceTests
         Assert.Empty(surface.Calls);
     }
 
+    /// <summary>
+    /// A descriptor field whose text cannot occupy an identifier position is refused, atomically, and
+    /// never reaches the task.
+    /// </summary>
+    /// <param name="table">The update table the descriptor states.</param>
+    /// <param name="column">The single updatable column the descriptor states.</param>
+    /// <param name="key">The single key column the descriptor states.</param>
+    /// <param name="identity">The identity column the descriptor states.</param>
+    /// <remarks>
+    /// <para>
+    /// ⚠️ <b>THIS IS THE ROW THE CWE-89 FINDING EXISTS FOR.</b> Values on the C-06 write path are
+    /// parameterized as <c>@pN</c> and identifiers cannot be, because no dialect has a parameter form for
+    /// a table or a column - so these four fields are the text that reaches the engine as SQL. Before this
+    /// screen a descriptor naming <c>COMPANY; DROP TABLE COMPANY --</c> was recorded verbatim and
+    /// <c>Tasks/SqlUpdateCarrier.cs</c> concatenated it into generated DML, where the separator turns one
+    /// statement into two and the comment marker removes the concurrency predicate that followed.
+    /// </para>
+    /// <para>
+    /// EACH ROW EXERCISES A DIFFERENT FIELD, in the oracle's own visit order - the table, an updatable
+    /// column, a key column and the identity column
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L111-L129</c>] - because a
+    /// gate that screened only the table would leave three positions open and would still pass a
+    /// single-row case.
+    /// </para>
+    /// <para>
+    /// THE REFUSAL IS <c>E_INVALID_ARGUMENT</c>, which is the code both sibling descriptor arms already
+    /// answer, and it is ATOMIC: nothing was cleared, nothing was switched and nothing was recorded, so a
+    /// refused prepare leaves the task exactly as it was. THE DIAGNOSTIC QUOTES NOTHING the caller sent
+    /// (constraint C-F).
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("COMPANY; DROP TABLE COMPANY --", "id", "id", "id")]
+    [InlineData("COMPANY WHERE 1=1", "id", "id", "id")]
+    [InlineData("COMPANY", "id) --", "id", "id")]
+    [InlineData("COMPANY", "id", "id;DELETE FROM COMPANY", "id")]
+    [InlineData("COMPANY", "id", "id", "id,name")]
+    [InlineData("COMPANY", "", "id", "id")]
+    [InlineData("", "id", "id", "id")]
+    public async Task ADescriptorNamingTextThatCannotBeAnIdentifierIsRefusedAtomically(
+        string table,
+        string column,
+        string key,
+        string identity)
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        PrepareUpdateResponse refused = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+
+                // THE SWITCH IS OFF, WHICH IS THE HARDER HALF. A descriptor sent with it off is inert
+                // today, but the switch is settable on a later prepare and this call REPLACES the array
+                // wholesale, so admitting an inadmissible name now would leave it in place for a call that
+                // does apply it.
+                MultiTableUpdate = false,
+                DataObject = EvidencedDataObject,
+                Tables =
+                {
+                    new TableUpdateContract
+                    {
+                        Name = table,
+                        Updatablecolumns = { column },
+                        Keycolumns = { key },
+                        Identitycolumn = identity,
+                    },
+                },
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.EInvalidArgument, refused.Status.RetCode);
+        Assert.Equal(UpdateService.InadmissibleIdentifierDiagnostic, refused.Status.ErrorText);
+
+        // THE DIAGNOSTIC CARRIES NONE OF THE CALLER'S OWN TEXT (constraint C-F).
+        Assert.DoesNotContain("DROP", refused.Status.ErrorText, StringComparison.Ordinal);
+        Assert.DoesNotContain("DELETE", refused.Status.ErrorText, StringComparison.Ordinal);
+
+        // ATOMIC: nothing was cleared, nothing was switched, nothing was recorded.
+        Assert.Empty(surface.Calls);
+        Assert.Empty(surface.Adds);
+    }
+
+    /// <summary>
+    /// The evidenced descriptor is still admitted, and so is a qualified update table.
+    /// </summary>
+    /// <remarks>
+    /// THE NEGATIVE CONTROL FOR THE CASE ABOVE, and it is not optional: a gate that refused everything
+    /// would satisfy every refusal assertion while breaking the only cross-service update path in the
+    /// estate. The first descriptor is the sole updatable DataWindow in the legacy tree
+    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14</c>], transcribed by <c>Company()</c>; the
+    /// second qualifies the table, which is the shape a deployment addressing an attached database sends
+    /// and which all three target dialects accept. An EMPTY identity column is legal and means "no
+    /// identity column" [<c>n_cst_thread_task_sqlupdate.sru:L127-L129</c>], so it is admitted rather than
+    /// refused.
+    /// </remarks>
+    [Fact]
+    public async Task TheEvidencedDescriptorAndAQualifiedTableAreStillAdmitted()
+    {
+        (UpdateService service, FakeTaskSurface surface, TaskHandle handle, _) = await CreateTaskAsync();
+
+        TableUpdateContract qualified = Company("main.COMPANY");
+        qualified.Identitycolumn = string.Empty;
+
+        PrepareUpdateResponse accepted = await service.PrepareUpdate(
+            new PrepareUpdateRequest
+            {
+                Task = handle,
+                MultiTableUpdate = true,
+                Tables = { Company(), qualified },
+                DataObject = EvidencedDataObject,
+            },
+            Context);
+
+        Assert.Equal(WireRetCode.Ok, accepted.Status.RetCode);
+        Assert.Equal(["COMPANY", "main.COMPANY"], surface.Adds.Select(static add => add.Name));
+    }
+
     [Fact]
     public async Task SingleTableWithAnEmptyArrayIsOrdinaryAndForcesNoPrepare()
     {

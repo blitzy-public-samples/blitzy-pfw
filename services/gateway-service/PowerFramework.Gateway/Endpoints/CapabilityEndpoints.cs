@@ -308,6 +308,32 @@ public static class CapabilityEndpoints
                  // as absent, which is the distinction the contract's own two statuses exist to make.
                  .ProducesProblem(StatusCodes.Status403Forbidden)
 
+                 // 🔴 THE TWO STATUSES THIS ROUTE PRODUCES WITHOUT ANY CODE IN THIS FILE, AND BOTH WERE
+                 // UNDECLARED HERE.
+                 //
+                 // 429 comes from the ingress request bound, which applies to every route but /health
+                 // [Composition/IngressHardening.cs]. The authored contract already declared it on this
+                 // operation, so the GENERATED document was the one disagreeing - a consumer reading the
+                 // two side by side saw a status appear and disappear depending on which it read.
+                 //
+                 // 500 was declared in NEITHER document, and it is reachable upstream of the handler:
+                 // this route is authenticated, so the bearer handler must obtain the issuer's key set
+                 // first, and a retrieval that fails with no last-known-good configuration cached faults
+                 // inside the authentication middleware. The exception handler answers that as 500 with a
+                 // problem document carrying E_INTERNAL_ERROR [Program.cs - UseExceptionHandler,
+                 // ClassifyFailure]. /health declares no 500 and correctly does not: it is anonymous, so
+                 // no key set is needed to reach it, and its own handler converts every fault into a
+                 // degraded entry and a 503 rather than letting one escape.
+                 //
+                 // AND 503 IS DELIBERATELY NOT DECLARED HERE, which is the other half of the same rule.
+                 // On a projected route 503 is a gRPC Unavailable - an upstream answering that it is not
+                 // currently serving - and this operation calls no upstream. The ingress layer produces no
+                 // 503 either: the limiter's rejection status is 429 and only 429. Declaring it would be
+                 // this same defect with its sign reversed, so the closed set for this operation is
+                 // {200, 401, 403, 429, 500}.
+                 .ProducesProblem(StatusCodes.Status429TooManyRequests)
+                 .ProducesProblem(StatusCodes.Status500InternalServerError)
+
                  // A NAMED POLICY RATHER THAN THE PARAMETERLESS FORM. The parameterless call used to
                  // stand here, requiring only an authenticated principal - so any token addressed to this
                  // service could read the capability gate's projection, which tells a caller which of the

@@ -542,23 +542,69 @@ public sealed class GatewayContractTests
     //  C-09 - THE STATUS MAPPING, WHOSE CENTREPIECE IS Aborted -> 409
     // ==============================================================================================
 
+    /// <summary>
+    /// Every projected operation declares the conflict, and the update is the one whose conflict carries
+    /// a detail.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THIS TEST USED TO ASSERT THAT EXACTLY ONE OPERATION DECLARED A <c>409</c>, AND THAT ASSERTION
+    /// WAS THE DEFECT WRITTEN DOWN. Its reasoning was that the optimistic-concurrency check belongs to the
+    /// update half of the triple and to nothing else, which is true - and which decides only where a
+    /// conflict DETAIL can come from, not where the STATUS can. Two of the three arms that answer 409 are
+    /// operation-independent: the shared failure map answers it for an upstream <c>Aborted</c> whose detail
+    /// did not decode, and the shared in-band map answers it for <c>E_RETRY</c>. So thirty-eight operations
+    /// could return a status their published surface said they could not, and the suite that should have
+    /// caught it instead required the omission.
+    /// </para>
+    /// <para>
+    /// What remains true, and is what this now pins, is that the update is the only operation whose
+    /// conflict carries the detail - which is why the schema's <c>conflict</c> member is optional.
+    /// </para>
+    /// </remarks>
     [Fact]
-    public void TheUpdateOperationIsTheOnlyOneCarryingAConflictAndItProjectsAborted()
+    public void EveryProjectedOperationDeclaresTheConflictAndTheUpdateIsTheOneCarryingItsDetail()
     {
         OpenApiDocument document = Document;
 
+        (string Route, HttpMethod Method, OpenApiOperation Operation)[] projected = Operations(document)
+            .Where(static entry => Extension(entry.Operation, "x-grpc-method") is not null)
+            .ToArray();
+
+        Assert.NotEmpty(projected);
+
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in projected)
+        {
+            Assert.True(
+                operation.Responses!.ContainsKey("409"),
+                $"{method} {route} can be answered 409 - by an upstream Aborted whose detail did not "
+                    + "decode, or by an in-band E_RETRY - so it must declare it. 409 is the one response "
+                    + "a caller must branch on in order to build a retry, and an undeclared branch is one "
+                    + "a generated client does not have.");
+        }
+
+        // AND NO OPERATION OUTSIDE THE PROJECTION DECLARES ONE. /health, the two authenticated
+        // diagnostic probes and the eight reserved routes reach no upstream and hold no resource whose
+        // state a request could collide with, so a 409 on any of them would be the mapping applied by
+        // habit rather than from the semantics.
         (string Route, HttpMethod Method, OpenApiOperation Operation)[] conflicting = Operations(document)
             .Where(static entry => entry.Operation.Responses!.ContainsKey("409"))
             .ToArray();
 
-        // EXACTLY ONE OPERATION CAN CONFLICT, AND IT IS THE UPDATE.
-        //
-        // The optimistic-concurrency check belongs to the update half of the retrieval/validation/update
-        // triple and to nothing else. A 409 appearing on a read would mean the mapping had been applied
-        // by habit rather than from the semantics.
-        (string route, HttpMethod method, OpenApiOperation update) = Assert.Single(conflicting);
-        Assert.Equal("/v1/datawindow/update", route);
-        Assert.Equal(HttpMethod.Post, method);
+        Assert.Equal(projected.Length, conflicting.Length);
+
+        // THE UPDATE IS STILL THE ONLY OPERATION WHOSE SUMMARY PROMISES THE CONFLICT, because it is the
+        // only one that can encounter a concurrency MISMATCH and therefore the only one whose 409 carries
+        // the detail that makes a retry constructible.
+        (string Route, HttpMethod Method, OpenApiOperation Operation)[] promising = projected
+            .Where(static entry =>
+                entry.Operation.Summary is not null
+                && entry.Operation.Summary.Contains("409", StringComparison.Ordinal))
+            .ToArray();
+
+        (string updateRoute, HttpMethod updateMethod, OpenApiOperation update) = Assert.Single(promising);
+        Assert.Equal("/v1/datawindow/update", updateRoute);
+        Assert.Equal(HttpMethod.Post, updateMethod);
 
         Assert.Equal("dataservices.v1.DataWindowService/Update", Extension(update, "x-grpc-method"));
     }
@@ -651,6 +697,87 @@ public sealed class GatewayContractTests
             Assert.True(
                 operation.Responses.ContainsKey("504"),
                 $"{method} {route} carries an outbound deadline, so it must declare 504.");
+
+            // 🔴 AND THE TWO THAT WERE SUPPRESSED PER OPERATION RATHER THAN MERELY OMITTED. Both were
+            // gated on a per-row flag in the projection table, and both flags were wrong about
+            // reachability: 404 was suppressed on the two session opens, which really answer the in-band
+            // not-found codes for a handle in their BODY, and 409 was suppressed on all but the update,
+            // which is right about the conflict DETAIL and wrong about the conflict STATUS.
+            Assert.True(
+                operation.Responses.ContainsKey("404"),
+                $"{method} {route} can be answered 404 - an upstream NotFound, or one of the five "
+                    + "in-band not-found codes - so it must declare it.");
+
+            Assert.True(
+                operation.Responses.ContainsKey("409"),
+                $"{method} {route} can be answered 409 by the shared failure map or the shared in-band "
+                    + "map, so it must declare it.");
+        }
+    }
+
+    /// <summary>
+    /// No projected operation declares a status it cannot produce, which is the converse of the rule
+    /// above and the half that was missing.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A DECLARED SET LARGER THAN THE REACHABLE SET IS ALSO A DEFECT, and the suite only ever checked one
+    /// direction. A status a consumer must write a branch for and can never receive hides which responses
+    /// are real, and it survives review precisely because nothing about it fails.
+    /// </para>
+    /// <para>
+    /// The closed set is the one <c>docs/CONTRACTS.md</c> §12.1 sanctions plus <c>502</c> and <c>503</c>.
+    /// <c>501</c> is the case that matters most: it identifies a RESERVED deferred-capability route and
+    /// nothing else (AAP 0.4.4, C-D), so a projected operation declaring one would present an implemented
+    /// operation as a placeholder and would collapse the distinction the reserved routes exist to draw.
+    /// <c>422</c> is closed to this document outright.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void NoProjectedOperationDeclaresAStatusItCannotProduce()
+    {
+        OpenApiDocument document = Document;
+
+        string[] reachable =
+        [
+            "200", "400", "401", "403", "404", "409", "429", "500", "502", "503", "504",
+        ];
+
+        (string Route, HttpMethod Method, OpenApiOperation Operation)[] projected = Operations(document)
+            .Where(static entry => Extension(entry.Operation, "x-grpc-method") is not null)
+            .ToArray();
+
+        Assert.NotEmpty(projected);
+
+        foreach ((string route, HttpMethod method, OpenApiOperation operation) in projected)
+        {
+            string[] declared = [.. operation.Responses!.Keys];
+
+            string[] surplus = [.. declared.Where(status => !reachable.Contains(status, StringComparer.Ordinal))];
+
+            Assert.True(
+                surplus.Length == 0,
+                $"{method} {route} declares {string.Join(", ", surplus)}, which its mapping cannot "
+                    + "produce. A status a generated client must branch on and can never receive hides "
+                    + "which responses are real.");
+
+            Assert.False(
+                operation.Responses.ContainsKey("501"),
+                $"{method} {route} is an operation this document publishes as IMPLEMENTED, so it must "
+                    + "not declare 501. That status identifies a reserved deferred-capability route and "
+                    + "nothing else (AAP 0.4.4, C-D); declaring it here would leave a caller unable to "
+                    + "tell an unbuilt capability area from a live operation.");
+        }
+
+        // AND THE DECLARED SURFACE IS IDENTICAL ACROSS ALL THIRTY-NINE, which is the property that makes
+        // the two directions checkable at all: the only per-operation variation left is WHICH 400
+        // description applies, and a description is not a status.
+        string[][] surfaces = [.. projected
+            .Select(static entry => (string[])[.. entry.Operation.Responses!.Keys.Order(StringComparer.Ordinal)])];
+
+        foreach (string[] surface in surfaces)
+        {
+            Assert.Equal(surfaces[0], surface);
         }
     }
 

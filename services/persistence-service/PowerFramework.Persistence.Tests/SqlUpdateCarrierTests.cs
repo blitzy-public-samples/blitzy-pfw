@@ -76,6 +76,19 @@ public sealed class SqlUpdateCarrierTests
         ["id", "name", "age", "address", "salary", "birth"];
 
     /// <summary>
+    /// A column name that cannot occupy an identifier position, standing in for a hostile declaration.
+    /// </summary>
+    /// <remarks>
+    /// IT CARRIES A STATEMENT SEPARATOR AND A COMMENT MARKER, which is the shape that matters: the
+    /// separator turns one generated statement into two and <c>Microsoft.Data.Sqlite</c> executes every
+    /// statement in a batch it is handed, while the marker comments out whatever followed - including the
+    /// concurrency predicate. It carries NO <c>=</c> deliberately: the modification script splits each
+    /// line on its first equals sign, so a name containing one would be refused by the script's own
+    /// grammar and the case would pass without ever reaching the gate under test.
+    /// </remarks>
+    private const string HostileColumn = "birth;DROP TABLE COMPANY --";
+
+    /// <summary>
     /// A row another writer has changed underneath matches nothing, and the mismatch carries the current
     /// row state a caller needs.
     /// </summary>
@@ -365,6 +378,265 @@ public sealed class SqlUpdateCarrierTests
         Assert.Equal(2L, error.Row);
     }
 
+    // ==============================================================================================
+    //  THE IDENTIFIER ADMISSION GATE AT THE SINK (CWE-89)
+    //
+    //  The C-06 boundary screens a DESCRIPTOR, and UpdateServiceTests pins that. These two cases pin
+    //  the SINK, which is the half that covers the path the boundary cannot: a carrier whose column
+    //  model came from a supplied `sql_syntax` rather than from a descriptor. Both drive the production
+    //  carrier against a real database, because the point being proved is that NO STATEMENT RUNS - and
+    //  only storage can testify to that.
+    // ==============================================================================================
+
+    /// <summary>
+    /// An installed update table whose text cannot occupy an identifier position generates no statement.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE TABLE IS INSTALLED THE WAY THE PREPARE STEP INSTALLS IT - through the modification script's
+    /// table-level <c>DataWindow.Table.UpdateTable</c> property, which is the property
+    /// <c>Concurrency/UpdateWhereBuilder.cs</c> writes [<c>n_cst_thread_task_sqlupdate.sru:L143</c>]. The
+    /// script accepts it, exactly as PowerBuilder's own Modify accepts a table-level property without
+    /// consulting a column model; the refusal belongs to the generator, at the point the name would reach
+    /// a statement.
+    /// </para>
+    /// <para>
+    /// THE THIRD ASSERTION IS THE ONE THAT MATTERS. A refusal code alone would also be produced by a
+    /// statement that ran and failed, so the case reads storage afterwards: the table still exists and
+    /// the seeded row is untouched, which is only true if nothing was executed at all.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AnUpdateTableThatCannotOccupyAnIdentifierPositionGeneratesNoStatement()
+    {
+        using CarrierFixture fixture = new();
+
+        fixture.Seed("Ada Lovelace", 36, "London", 92500m, "1815-12-10");
+
+        ISqlUpdateCarrier carrier = fixture.AdaptWithRetrievedRow();
+
+        // The shape the finding was raised on: a statement separator and a comment marker, which would
+        // turn one generated UPDATE into an UPDATE plus a DROP with the concurrency predicate commented
+        // out - and Microsoft.Data.Sqlite executes every statement in a batch it is handed.
+        Assert.Equal(
+            string.Empty,
+            carrier.TargetModifier.Modify(
+                $"{SqlUpdateCarrier.UpdateTableProperty}=\"COMPANY; DROP TABLE COMPANY --\""));
+
+        MarkColumnModified(carrier, column: 5, value: 95000d);
+
+        Assert.Equal(
+            Buffers.DataWindowBufferStore.DataStoreFailure,
+            carrier.Target.Update(acceptText: true, resetFlag: false, TestContext.Current.CancellationToken));
+
+        // NOTHING RAN. The table still exists and the row still holds its seeded salary, which no
+        // execution path other than "no statement was generated" can produce.
+        Assert.Equal(
+            92500d,
+            Convert.ToDouble(
+                fixture.ScalarDirect("SELECT SALARY FROM COMPANY WHERE NAME = 'Ada Lovelace'"),
+                CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// A column of the carrier's model whose text cannot occupy an identifier position generates no
+    /// statement.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THIS IS THE PATH THE BOUNDARY CANNOT SCREEN, AND THE REASON THE SINK IS GUARDED AT ALL. A carrier
+    /// built from a supplied <c>sql_syntax</c> takes its column model from the bindings that syntax
+    /// produced, and the catalogue a lookup would validate against is the one that same syntax registered
+    /// - so a name checked against the model would be checked against itself. The model is therefore
+    /// replaced here AFTER a successful retrieval, which is exactly the state a syntax-derived carrier is
+    /// in, and the flag for the hostile name is installed through the ordinary script so the case cannot
+    /// pass merely because the column carried no flags.
+    /// </para>
+    /// <para>
+    /// STORAGE IS READ AFTERWARDS for the same reason as the sibling case: it is the only witness that no
+    /// statement was generated.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AColumnNameThatCannotOccupyAnIdentifierPositionGeneratesNoStatement()
+    {
+        using CarrierFixture fixture = new();
+
+        fixture.Seed("Ada Lovelace", 36, "London", 92500m, "1815-12-10");
+
+        ISqlUpdateCarrier carrier = fixture.AdaptWithRetrievedRow();
+
+        MarkColumnModified(carrier, column: 5, value: 95000d);
+
+        // A hostile SIXTH column name, replacing `birth`: the five preceding ordinals keep their real
+        // names so the plan is otherwise exactly the one the successful cases build.
+        fixture.ReplaceColumnModel(
+            carrier,
+            ["id", "name", "age", "address", "salary", HostileColumn]);
+
+        // THE FLAG IS INSTALLED UNDER THE HOSTILE NAME TOO, so the case cannot pass merely because the
+        // column carried none. The script's own stem test accepts it, exactly as PowerBuilder's Modify
+        // accepts a property whose object the loaded definition declares - the model now declares it.
+        Assert.Equal(
+            string.Empty,
+            carrier.TargetModifier.Modify($"{HostileColumn}{SqlUpdateCarrier.UpdateSuffix}=yes"));
+
+        Assert.Equal(
+            Buffers.DataWindowBufferStore.DataStoreFailure,
+            carrier.Target.Update(acceptText: true, resetFlag: false, TestContext.Current.CancellationToken));
+
+        Assert.Equal(
+            92500d,
+            Convert.ToDouble(
+                fixture.ScalarDirect("SELECT SALARY FROM COMPANY WHERE NAME = 'Ada Lovelace'"),
+                CultureInfo.InvariantCulture));
+    }
+
+    // ==============================================================================================
+    //  THE CONFLICT REREAD - ONE ROUND TRIP, AND STILL PER-ROW EXACT
+    // ==============================================================================================
+
+    /// <summary>
+    /// Every conflicting row keeps its own current state, and a row another writer deleted reports none.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE CASE THAT WOULD CATCH A MIS-ATTRIBUTED BATCH. The conflict reread used to issue one keyed
+    /// <c>SELECT</c> per conflicting row and now issues one compound statement for the batch, so the risk
+    /// the change introduces is a row being handed ANOTHER row's current values - or being reported as
+    /// deleted when it is present. Three rows conflict here and each holds a DIFFERENT competing value,
+    /// so a batch that mixed them up cannot pass; the third row is DELETED by the competing writer, so
+    /// the "no current values" arm is exercised in the same payload rather than in a separate case where
+    /// a single-row batch would hide the attribution question entirely.
+    /// </para>
+    /// <para>
+    /// THE COMPETING WRITER RUNS ONE STATEMENT PER ROW because it is standing in for three independent
+    /// writers; that is the race the concurrency contract exists for, and it is what leaves each row with
+    /// a distinguishable stored value.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void EveryConflictingRowKeepsItsOwnCurrentStateAndADeletedRowReportsNone()
+    {
+        using CarrierFixture fixture = new();
+
+        fixture.Seed("Ada Lovelace", 36, "London", 92500m, "1815-12-10");
+        fixture.Seed("Alan Turing", 41, "Wilmslow", 75000m, "1912-06-23");
+        fixture.Seed("Grace Hopper", 45, "Arlington", 71000m, "1906-12-09");
+
+        ISqlUpdateCarrier carrier = fixture.AdaptWithRetrievedRow(expectedRows: 3L);
+
+        // Three competing writers, three distinct outcomes: two rows moved to two different values and
+        // one row is gone.
+        fixture.ExecuteDirect("UPDATE COMPANY SET SALARY = 10001 WHERE NAME = 'Ada Lovelace'");
+        fixture.ExecuteDirect("UPDATE COMPANY SET SALARY = 20002 WHERE NAME = 'Alan Turing'");
+        fixture.ExecuteDirect("DELETE FROM COMPANY WHERE NAME = 'Grace Hopper'");
+
+        MarkColumnModified(carrier, row: 1, column: 5, value: 95000d);
+        MarkColumnModified(carrier, row: 2, column: 5, value: 76000d);
+        MarkColumnModified(carrier, row: 3, column: 5, value: 72000d);
+
+        Assert.Equal(
+            Buffers.DataWindowBufferStore.DataStoreSuccess,
+            carrier.Target.Update(acceptText: true, resetFlag: false, TestContext.Current.CancellationToken));
+
+        ConcurrencyEvidence? evidence = carrier.CaptureConcurrencyEvidence();
+
+        Assert.NotNull(evidence);
+        Assert.False(evidence.ProviderFaulted);
+        Assert.Equal(3L, evidence.RowsExpected);
+        Assert.Equal(0L, evidence.RowsMatched);
+        Assert.True(ConflictDetector.IsConcurrencyMismatch(evidence));
+
+        ConflictDetail detail = ConflictDetector.BuildConflictDetail(evidence, UpdateTable);
+
+        Assert.Equal(3, detail.Rows.Count);
+        Assert.Equal([1L, 2L, 3L], detail.Rows.Select(static row => row.Row));
+
+        // ROW ONE AND ROW TWO CARRY THEIR OWN COMPETING VALUE, which is the attribution assertion.
+        Assert.Equal(10001d, SalaryOf(detail.Rows[0]));
+        Assert.Equal(20002d, SalaryOf(detail.Rows[1]));
+
+        // ROW THREE IS GONE, so it reports its submitted originals and NO current values - the pairing
+        // that tells a caller the row was deleted rather than changed.
+        Assert.NotEmpty(detail.Rows[2].OriginalValues);
+        Assert.Empty(detail.Rows[2].CurrentValues);
+
+        static double SalaryOf(ConflictRow row) =>
+            row.CurrentValues
+                .Single(value => string.Equals(value.ColumnName, "salary", StringComparison.Ordinal))
+                .Value.DoubleValue;
+    }
+
+    /// <summary>
+    /// A conflict wider than one batch is still projected exactly, row for row.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE CHUNK BOUNDARY IS CROSSED FOR REAL RATHER THAN REASONED ABOUT. Every non-null key value in the
+    /// reread is a parameter, and a provider refuses a statement past its own parameter ceiling, so the
+    /// batch respects <see cref="SqlUpdateCarrier.MaximumBatchedParameters"/>. It respects a SECOND
+    /// ceiling as well, and that one is binding here: each row is one term of a compound
+    /// <c>SELECT</c> and SQLite refuses a compound statement past its own term limit, so the batch is
+    /// also bounded by <see cref="SqlUpdateCarrier.MaximumBatchedRows"/>. THIS CASE FOUND THAT LIMIT
+    /// rather than documenting it after the fact: a batch sized only by the parameter ceiling threw
+    /// <c>too many terms in compound SELECT</c> where a row-at-a-time reread had succeeded. Seeding one
+    /// row past the row ceiling forces exactly two commands, and the case asserts the payload is
+    /// indistinguishable from what a row-at-a-time reread would have produced.
+    /// </para>
+    /// <para>
+    /// THE LAST ROW IS THE ONE THAT PROVES IT. It lives in the SECOND chunk, so a batch loop that stopped
+    /// after the first, or that mis-computed the offset the second begins at, reports it as deleted -
+    /// which the final assertion refuses.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AConflictWiderThanOneBatchIsProjectedExactlyAcrossTheChunkBoundary()
+    {
+        using CarrierFixture fixture = new();
+
+        int rows = SqlUpdateCarrier.MaximumBatchedRows + 1;
+
+        for (int index = 0; index < rows; index++)
+        {
+            fixture.Seed(
+                string.Format(CultureInfo.InvariantCulture, "Person {0}", index),
+                30,
+                "Somewhere",
+                1000m + index,
+                "1900-01-01");
+        }
+
+        ISqlUpdateCarrier carrier = fixture.AdaptWithRetrievedRow(expectedRows: rows);
+
+        // One competing statement moves every stored row, so every predicate built from originals fails.
+        fixture.ExecuteDirect("UPDATE COMPANY SET SALARY = SALARY + 500000");
+
+        for (int index = 0; index < rows; index++)
+        {
+            MarkColumnModified(carrier, row: index + 1, column: 5, value: 1d);
+        }
+
+        Assert.Equal(
+            Buffers.DataWindowBufferStore.DataStoreSuccess,
+            carrier.Target.Update(acceptText: true, resetFlag: false, TestContext.Current.CancellationToken));
+
+        ConcurrencyEvidence? evidence = carrier.CaptureConcurrencyEvidence();
+
+        Assert.NotNull(evidence);
+        Assert.Equal(rows, evidence.RowsExpected);
+        Assert.Equal(0L, evidence.RowsMatched);
+
+        ConflictDetail detail = ConflictDetector.BuildConflictDetail(evidence, UpdateTable);
+
+        Assert.Equal(rows, detail.Rows.Count);
+
+        // EVERY row carries current values, including the one that fell into the second chunk.
+        Assert.All(detail.Rows, static row => Assert.NotEmpty(row.CurrentValues));
+
+        Assert.Equal(rows, detail.Rows[^1].Row);
+    }
+
     /// <summary>
     /// Modifies one column of row one and marks both the column and the row modified, exactly as an
     /// arriving changeset marks them.
@@ -381,16 +653,34 @@ public sealed class SqlUpdateCarrierTests
     /// rather than being inferred from an assignment, so a test that only assigned a value would generate
     /// an empty SET list and prove nothing.
     /// </remarks>
-    private static void MarkColumnModified(ISqlUpdateCarrier carrier, int column, object? value)
+    private static void MarkColumnModified(ISqlUpdateCarrier carrier, int column, object? value) =>
+        MarkColumnModified(carrier, row: 1, column, value);
+
+    /// <summary>
+    /// Marks one column of one row modified, which is what makes the row reach the generator.
+    /// </summary>
+    /// <param name="carrier">The carrier holding the row.</param>
+    /// <param name="row">The one-based row number within the primary buffer.</param>
+    /// <param name="column">The one-based column number.</param>
+    /// <param name="value">The new value.</param>
+    /// <remarks>
+    /// R9: BOTH ORDINALS ARE ONE-BASED and neither is rebased. The row-status column at ordinal zero is
+    /// marked as well, because that is the status the generator's walk selects a row by.
+    /// </remarks>
+    private static void MarkColumnModified(
+        ISqlUpdateCarrier carrier,
+        long row,
+        int column,
+        object? value)
     {
-        _ = carrier.Store.Carrier.SetItemValue(1, column, DwBuffer.Primary, value);
+        _ = carrier.Store.Carrier.SetItemValue(row, column, DwBuffer.Primary, value);
         _ = carrier.Store.Carrier.SetItemStatus(
-            1,
+            row,
             column,
             DwBuffer.Primary,
             ItemStatus.DataModified);
         _ = carrier.Store.Carrier.SetItemStatus(
-            1,
+            row,
             ItemStatusMachine.RowStatusColumn,
             DwBuffer.Primary,
             ItemStatus.DataModified);
@@ -523,6 +813,21 @@ public sealed class SqlUpdateCarrierTests
         /// <summary>Runs a statement directly, standing in for a competing writer.</summary>
         /// <param name="sql">The statement to run.</param>
         internal void ExecuteDirect(string sql) => Assert.Equal(0, _transaction.Exec(sql));
+
+        /// <summary>
+        /// Replaces the column model a carrier's plan is read from, after its retrieval has run.
+        /// </summary>
+        /// <param name="carrier">The carrier whose store the model belongs to.</param>
+        /// <param name="columns">The model to install, in one-based column order.</param>
+        /// <remarks>
+        /// THIS IS THE STATE A SYNTAX-DERIVED CARRIER IS IN, reached without standing up a second
+        /// composition root. The bindings are where a carrier built from a supplied <c>sql_syntax</c> takes
+        /// its column names from, and the retrieval has already happened by the time an update reads them -
+        /// so replacing them here reproduces the path the C-06 boundary cannot screen, which is exactly the
+        /// path the sink gate exists for.
+        /// </remarks>
+        internal void ReplaceColumnModel(ISqlUpdateCarrier carrier, string[] columns) =>
+            _bindings.SetColumns(carrier.Store, columns);
 
         /// <summary>Reads one scalar directly, so an assertion sees storage rather than the carrier.</summary>
         /// <param name="sql">The statement to read.</param>

@@ -245,6 +245,14 @@
       direction; and it adds exactly one assembly to the graph, SharpYaml, which carries no advisory at
       this version. No service behaviour depends on it, so removing it would cost the validation and
       nothing else.
+
+      IT IS ALSO A DECLARED DEVIATION, AND THIS PARAGRAPH IS NOT THE DECLARATION. Agent Action Plan
+      0.5.1 approves fifteen NuGet packages; this file pins sixteen. The justification above says why
+      the sixteenth is defensible, which is a different statement from saying that a sixteenth exists
+      at all, and a reviewer reading the approved inventory had no way to see the difference. It is
+      therefore recorded as deviation D8 in docs/BUILD.md 1.6.2, alongside the SDK and platform patch
+      move (D9) that the header of this file explains. Removing this package means removing that
+      register entry with it.
     -->
     <PackageVersion Include="Microsoft.OpenApi.YamlReader" Version="2.11.0" />
   </ItemGroup>

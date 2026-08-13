@@ -4601,4 +4601,98 @@ public sealed class RestProjectionStreamWindowTests
             Assert.Contains(published, text, StringComparison.Ordinal);
         }
     }
+
+    /// <summary>
+    /// Every projected operation publishes exactly the status surface its mapping can produce, in both
+    /// directions.
+    /// </summary>
+    /// <returns>A task representing the assertions.</returns>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>TWO STATUSES WERE PRODUCED AND NOT DECLARED, AND BOTH SUPPRESSIONS WERE DELIBERATE.</b>
+    /// <c>404</c> was gated off the two session opens, on the reasoning that they carry no prior session
+    /// identifier to fail to resolve - true of the identifier and false of the status, because
+    /// <c>OpenValidationSession</c> answers the in-band <c>E_INVALID_HANDLE</c> for a
+    /// <c>datawindowHandle</c> in its BODY that no DataWindow resolves, and <c>OpenExpressionSession</c>
+    /// answers <c>E_OBJECT_NOT_FOUND</c> for a name no host binds. <c>409</c> was gated onto the update
+    /// alone, which is right about the conflict DETAIL and wrong about the conflict STATUS: the shared
+    /// failure map answers it for an <c>Aborted</c> whose detail did not decode and the shared in-band map
+    /// answers it for <c>E_RETRY</c>, from any operation at all.
+    /// </para>
+    /// <para>
+    /// The converse is asserted too, because a declared status that cannot occur hides which responses are
+    /// real - and <c>501</c> in particular is reserved system-wide for Gateway's four deferred-capability
+    /// route families (AAP 0.4.4, C-D), so an operation this service publishes as implemented must never
+    /// declare one.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task EveryProjectedOperationPublishesExactlyItsProducibleStatusSurfaceAsync()
+    {
+        string[] reachable =
+        [
+            "200", "400", "401", "403", "404", "409", "429", "500", "502", "503", "504",
+        ];
+
+        await using DataServicesTestHostFactory host = new();
+
+        using HttpClient client = host.CreateAuthenticatedClient();
+
+        using HttpResponseMessage served = await client.GetAsync(
+            RestProjection.Relative(RestProjection.DocumentRoute),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, served.StatusCode);
+
+        using JsonDocument document = await RestProjection.DocumentAsync(served);
+
+        int checkedOperations = 0;
+
+        foreach (JsonProperty path in document.RootElement.GetProperty("paths").EnumerateObject())
+        {
+            if (!path.Name.StartsWith(RestProjectionContract.ProjectedPrefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            foreach (JsonProperty operation in path.Value.EnumerateObject())
+            {
+                if (!operation.Value.TryGetProperty("x-grpc-method", out _))
+                {
+                    continue;
+                }
+
+                string[] declared =
+                [
+                    .. operation.Value.GetProperty("responses")
+                        .EnumerateObject()
+                        .Select(static status => status.Name)
+                        .Order(StringComparer.Ordinal),
+                ];
+
+                foreach (string required in (string[])["404", "409"])
+                {
+                    Assert.True(
+                        declared.Contains(required, StringComparer.Ordinal),
+                        $"{operation.Name.ToUpperInvariant()} {path.Name} can produce {required} and "
+                            + "declares it nowhere. An undeclared status is one no generated client has a "
+                            + "branch for.");
+                }
+
+                string[] surplus =
+                    [.. declared.Where(status => !reachable.Contains(status, StringComparer.Ordinal))];
+
+                Assert.True(
+                    surplus.Length == 0,
+                    $"{operation.Name.ToUpperInvariant()} {path.Name} declares "
+                        + $"{string.Join(", ", surplus)}, which its mapping cannot produce.");
+
+                checkedOperations++;
+            }
+        }
+
+        // Guards against a silently empty loop: the projection declares thirty-nine operations, so a
+        // document that served none would otherwise satisfy every assertion above by finding nothing.
+        Assert.Equal(39, checkedOperations);
+    }
 }

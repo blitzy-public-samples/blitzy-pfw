@@ -600,7 +600,9 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
         '429':
-          $ref: '#/components/responses/UpstreamBusy'
+          $ref: '#/components/responses/IngressBusy'
+        '500':
+          $ref: '#/components/responses/IngressInternalError'
 
   # ================================================================================================
   #  C-09 - CAPABILITY PROJECTION
@@ -673,7 +675,9 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
         '429':
-          $ref: '#/components/responses/UpstreamBusy'
+          $ref: '#/components/responses/IngressBusy'
+        '500':
+          $ref: '#/components/responses/IngressInternalError'
 
   # ================================================================================================
   #  C-09 - THE /v1/datawindow PROJECTION OF C-03 (dataservices.v1.DataWindowService)
@@ -823,6 +827,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -879,6 +885,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -924,6 +934,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1092,6 +1104,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1140,6 +1154,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1187,6 +1203,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1265,6 +1283,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1317,6 +1337,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1365,6 +1387,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1415,6 +1439,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1471,6 +1497,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1521,6 +1549,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1571,6 +1601,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1628,6 +1660,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1736,6 +1770,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1781,6 +1819,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1846,6 +1886,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1894,6 +1936,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1950,6 +1994,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -1999,6 +2045,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2048,6 +2096,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2100,6 +2150,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2155,6 +2207,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2205,6 +2259,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2252,6 +2308,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2300,6 +2358,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2374,6 +2434,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2425,6 +2487,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2475,6 +2539,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2537,6 +2603,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2591,6 +2659,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2645,6 +2715,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2700,6 +2772,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2748,6 +2822,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2798,6 +2874,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2847,6 +2925,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -2918,6 +2998,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -3028,6 +3110,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/UpstreamBusy'
         '500':
@@ -3093,6 +3177,7 @@ paths:
       x-required-scope: none
       x-deferred-service: DesignSystem
       x-reserved-marker: reserved for Phase 2
+      x-route-template: /v1/design/{**path}
       tags: [Reserved]
       summary: Reserved for the deferred DesignSystem service. Always 501.
       description: |-
@@ -3149,6 +3234,7 @@ paths:
       x-required-scope: none
       x-deferred-service: DesignSystem
       x-reserved-marker: reserved for Phase 2
+      x-route-template: /v1/design/{**path}
       tags: [Reserved]
       summary: Reserved for the deferred DesignSystem service. Always 501.
       description: |-
@@ -3209,6 +3295,7 @@ paths:
       x-required-scope: none
       x-deferred-service: Documents
       x-reserved-marker: reserved for Phase 2
+      x-route-template: /v1/documents/{**path}
       tags: [Reserved]
       summary: Reserved for the deferred Documents service. Always 501.
       description: |-
@@ -3263,6 +3350,7 @@ paths:
       x-required-scope: none
       x-deferred-service: Documents
       x-reserved-marker: reserved for Phase 2
+      x-route-template: /v1/documents/{**path}
       tags: [Reserved]
       summary: Reserved for the deferred Documents service. Always 501.
       description: |-
@@ -3321,6 +3409,7 @@ paths:
       x-required-scope: none
       x-deferred-service: Integration
       x-reserved-marker: reserved for Phase 2
+      x-route-template: /v1/integration/{**path}
       tags: [Reserved]
       summary: Reserved for the deferred Integration service. Always 501.
       description: |-
@@ -3375,6 +3464,7 @@ paths:
       x-required-scope: none
       x-deferred-service: Integration
       x-reserved-marker: reserved for Phase 2
+      x-route-template: /v1/integration/{**path}
       tags: [Reserved]
       summary: Reserved for the deferred Integration service. Always 501.
       description: |-
@@ -3433,6 +3523,7 @@ paths:
       x-required-scope: none
       x-deferred-service: ScriptBridge
       x-reserved-marker: reserved for Phase 2
+      x-route-template: /v1/scripting/{**path}
       tags: [Reserved]
       summary: Reserved for the deferred ScriptBridge service. Always 501.
       description: |-
@@ -3488,6 +3579,7 @@ paths:
       x-required-scope: none
       x-deferred-service: ScriptBridge
       x-reserved-marker: reserved for Phase 2
+      x-route-template: /v1/scripting/{**path}
       tags: [Reserved]
       summary: Reserved for the deferred ScriptBridge service. Always 501.
       description: |-
@@ -3676,7 +3768,8 @@ components:
 
         **This parameter's real matching behaviour cannot be expressed in OpenAPI 3.1, and the gap is
         declared rather than papered over.** The server implements each family as an ASP.NET Core
-        catch-all route parameter, `/v1/<area>/{**path}`, which does three things a conformant OpenAPI
+        catch-all route parameter - each operation publishes its own literal template in its
+        `x-route-template` extension - which does three things a conformant OpenAPI
         path template does not describe: the captured value MAY ITSELF CONTAIN `/`, so a nested path
         such as `/v1/design/a/b/c` resolves here rather than falling through to a generic 404; the
         remainder may be EMPTY, so the bare prefix `/v1/design` also resolves here; and every HTTP
@@ -3692,14 +3785,19 @@ components:
       schema:
         type: string
       x-catch-all:
-        routeTemplate: /v1/{area}/{**path}
         capturesNestedSegments: true
         matchesEmptyRemainder: true
         matchesEveryHttpMethod: true
         note: >-
           A vendor extension because OpenAPI 3.1 has no conformant way to declare a multi-segment path
           parameter. It is metadata about how the URL is templated and about nothing else - it is not a
-          request schema, and no reserved operation declares one.
+          request schema, and no reserved operation declares one. All three statements above hold for
+          every reserved family, which is what makes this parameter shareable across the four path items.
+          A FOURTH MEMBER, `routeTemplate`, USED TO STAND HERE AND WAS THE ONLY UNTRUE STATEMENT IN THE
+          BLOCK: it read `/v1/{area}/{**path}`, a template that exists nowhere, because the four families
+          are literal prefixes and no `area` route parameter has ever been declared - so a tool reading
+          the field as what it is presented as would model a bindable parameter the server does not have.
+          The template is per-family and now lives on each operation as `x-route-template`.
 
   responses:
     BadRequest:
@@ -3772,10 +3870,22 @@ components:
             $ref: '#/components/schemas/ProblemDetails'
 
     NotFound:
-      description: >-
-        The projected gRPC method returned `NotFound` - most often a session identifier that has
-        expired or was already closed, or a column selector naming a column the DataWindow does not
-        have.
+      description: |-
+        **The request named something the upstream could not find.** Most often that is a session
+        identifier that has expired or was already closed, a DataWindow handle nothing resolves, or a
+        column, variable or member selector naming something the DataWindow or the expression environment
+        does not have.
+
+        It is the projection of an upstream `NotFound` status or of one of five in-band not-found codes -
+        `E_INVALID_HANDLE`, `E_OBJECT_NOT_FOUND`, `E_NOT_EXISTS`, `E_VAR_NOT_FOUND` and
+        `E_MEMBER_NOT_FOUND` - and it is never synthesized from a response field.
+
+        🔴 **EVERY PROJECTED OPERATION DECLARES IT, INCLUDING THE TWO SESSION OPENS.** Those two used to
+        declare no `404`, on the reasoning that they carry no prior session identifier to fail to resolve.
+        That is true of the identifier and false of the status: `openValidationSession` refuses a
+        `datawindowHandle` in its BODY that no DataWindow resolves and answers `E_INVALID_HANDLE`, and
+        `openExpressionSession` answers `E_OBJECT_NOT_FOUND` for a name no host binds. Both reach a caller
+        as this response, so both must declare it.
       content:
         application/problem+json:
           schema:
@@ -3783,14 +3893,30 @@ components:
 
     Conflict:
       description: |-
-        **The projected gRPC method returned `Aborted`: an optimistic-concurrency conflict.**
+        **The request collided with the current state of the resource, and it is the caller's to
+        resolve.** Three outcomes reach this status and they are mutually distinguishable by problem
+        `type`, `title` and `retCode`.
 
-        The body carries the conflict detail **unchanged** from C-06, including the current row state,
-        so a caller has what it needs to decide between retrying and surfacing.
+        **An optimistic-concurrency conflict on `updateDataWindow` carries the `conflict` member**
+        unchanged from C-06, including the current row state, so a caller has what it needs to decide
+        between retrying and surfacing. That is the only outcome on the only operation that populates it.
+
+        **An `Aborted` whose detail could not be decoded, and the in-band `E_RETRY` an upstream reports
+        without one, carry NO `conflict` member.** The status is preserved because reporting anything else
+        would let a rejected call look successful, and no detail is fabricated because an empty one would
+        describe a conflict no caller could act on.
 
         **Callers implement an explicit retry-or-surface policy, and there is no silent overwrite
         anywhere in the system.** Re-sending the same payload will produce the same 409, because the
         original values it carries are still stale - a retry must first re-read.
+
+        🔴 **EVERY PROJECTED OPERATION DECLARES THIS RESPONSE, AND UNTIL NOW ONLY `updateDataWindow` DID.**
+        The update is the only operation that can encounter a concurrency MISMATCH, which is why it is the
+        only one whose 409 carries a detail - but the other two outcomes above are produced by the shared
+        failure map and the shared in-band map, so any of the thirty-nine can answer 409. Thirty-eight
+        therefore published a surface that omitted the one status a caller must branch on in order to build
+        a retry. The schema below stays truthful on all thirty-nine because its `conflict` member is
+        OPTIONAL: declaring it publishes "a conflict member may be present", never "one will be".
       content:
         application/problem+json:
           schema:
@@ -3906,6 +4032,78 @@ components:
             type: integer
             format: int32
             minimum: 0
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    # ==============================================================================================
+    #  THE TWO RESPONSES THE NON-PROJECTING DIAGNOSTIC OPERATIONS CARRY
+    #
+    #  🔴 `/v1/ping` AND `/v1/capabilities` USED TO REFERENCE `UpstreamBusy` FOR THEIR 429, AND THAT
+    #  COMPONENT'S FIRST SENTENCE IS "the projected gRPC method returned ResourceExhausted". Neither
+    #  operation projects a gRPC method - they read this service's own clock and its own configured
+    #  capability mask - so the shared component described, on those two operations, a cause that cannot
+    #  occur. The second half of that component covers the ingress bound and would have been the accurate
+    #  half, but a consumer reads a description from its first line, and generated documentation reads it
+    #  in full. These two responses say only what is true of these two operations.
+    #
+    #  🔴 AND NEITHER OPERATION DECLARED A 500 AT ALL, in this document or in the runtime metadata, while
+    #  both can produce one. See `IngressInternalError` for the path.
+    # ==============================================================================================
+
+    IngressBusy:
+      description: |-
+        **A capacity ceiling refused the request, and this is a refusal rather than a fault.** No upstream
+        was called: this operation reaches none, so the refusal is entirely this gateway's own ingress
+        bound declining to take more work.
+
+        Two bounds reach it - a process-wide concurrency ceiling and a per-caller request allowance over a
+        fixed window - and a caller cannot tell them apart, deliberately: distinguishing them would report
+        how much of this deployment's capacity its OTHER callers are holding. `retCode` carries `E_BUSY`
+        (-23), and the correct response is to release what is held, or to retry later, rather than to
+        change the request.
+
+        `Retry-After` is present whenever the limiter can determine it and absent when it cannot; an
+        absent header means "retry with backoff", never "retry immediately".
+
+        The bound exists because the decomposition created this system's first listening socket (C-B): the
+        legacy was an in-process library that received no unsolicited request, so nothing could be flooded
+        and there was no legacy limit to port. `/health` is exempt and therefore declares no `429`,
+        because it is the readiness gate this gateway's own health condition is published through and a
+        rate-limited probe would make a busy service a permanently unready one.
+      headers:
+        Retry-After:
+          description: >-
+            How many seconds to wait before retrying, when the limiter can determine it. Absent when it
+            cannot.
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+    IngressInternalError:
+      description: |-
+        Gateway failed while handling the request. `retCode` carries `E_INTERNAL_ERROR`, and the body
+        never carries key material, a stack trace, a file path or a connection string.
+
+        **The reachable path is upstream of the handler, which is why this status is not obvious from
+        reading one.** Neither of these two operations can fail on its own account: the ping reads a clock
+        and falls back to the system clock rather than requiring a registration, and the capability
+        projection reads a mask that failed validation at startup if it was going to fail at all. Both
+        routes are AUTHENTICATED, so the bearer handler must obtain the issuer's key set before either
+        handler is reached - and a retrieval that fails with no last-known-good configuration cached, which
+        is what a cold start against an unreachable Security service produces, faults inside the
+        authentication middleware. That fault is answered here.
+
+        **`/health` declares no `500` and correctly does not**, for two independent reasons: it is
+        anonymous, so no key set is needed to reach it, and its own handler converts every fault into a
+        degraded component entry and a `503` rather than letting one escape.
       content:
         application/problem+json:
           schema:

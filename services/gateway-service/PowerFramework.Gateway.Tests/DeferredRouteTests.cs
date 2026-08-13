@@ -1095,6 +1095,18 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
             Assert.True(catchAll.GetProperty("capturesNestedSegments").GetBoolean());
             Assert.True(catchAll.GetProperty("matchesEmptyRemainder").GetBoolean());
             Assert.True(catchAll.GetProperty("matchesEveryHttpMethod").GetBoolean());
+
+            // 🔴 AND THE ROUTE TEMPLATE IS NO LONGER A MEMBER OF THAT BLOCK, BECAUSE IT WAS THE ONE
+            // UNTRUE STATEMENT IN IT. The block carried `routeTemplate: /v1/{area}/{**path}` - a template
+            // that exists nowhere. No route in this service declares an `area` parameter; the four
+            // families are LITERAL prefixes, so a tool reading the field as what it is presented as would
+            // model a bindable parameter the server has never had. The three statements above are true of
+            // every family and stay shared; a template is per-family, so it moved to the operation.
+            Assert.False(
+                catchAll.TryGetProperty("routeTemplate", out _),
+                "x-catch-all declares a routeTemplate again. A shared block can only hold a "
+                    + "generalisation of four literal templates, and the generalisation it held named a "
+                    + "route parameter that does not exist.");
         }
 
         foreach (string operationName in declaredOperations)
@@ -1104,6 +1116,15 @@ public sealed class DeferredRouteTests(GatewayTestHostFixture host) : IClassFixt
             Assert.Equal(
                 deferredService,
                 operation.GetProperty(DeferredServiceExtension).GetString());
+
+            // 🔴 AND THE OPERATION PUBLISHES ITS OWN LITERAL ROUTE TEMPLATE, which is where the template
+            // moved to and the whole reason the move was necessary: a per-family fact can be stated
+            // truthfully per operation and cannot be stated truthfully on one shared parameter. The
+            // expected value is composed from the family prefix this theory row carries, so a template
+            // published for the wrong family fails here rather than being read as documentation.
+            Assert.Equal(
+                prefix + "/{**path}",
+                operation.GetProperty("x-route-template").GetString());
 
             Assert.False(
                 operation.TryGetProperty("requestBody", out _),

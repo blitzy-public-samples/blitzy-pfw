@@ -219,6 +219,22 @@ public static class PingEndpoints
             // to produce one and empty otherwise. Declaring a schema here would advertise a body
             // this file cannot guarantee.
             .Produces(StatusCodes.Status401Unauthorized)
+
+            // 🔴 THE TWO STATUSES THIS ROUTE PRODUCES WITHOUT ANY CODE IN THIS FILE, AND BOTH WERE
+            // UNDECLARED. Neither comes from the handler, which is why neither was noticed: a reviewer
+            // reading this file sees a handler that cannot fail and a response set that matches it.
+            //
+            // 429 comes from the request-layer limiter, whose ONLY exemption is /health
+            // [Configuration/IngressHardening.cs - HealthPath]. 500 comes from the exception handler
+            // [Program.cs - UseExceptionHandler] and is reachable upstream of the handler: this route is
+            // authenticated, so the bearer handler must obtain Security's key set before the handler is
+            // reached, and a retrieval that fails with no last-known-good configuration cached - a cold
+            // start while Security is unreachable - faults inside the authentication middleware.
+            //
+            // /health declares neither and correctly does not: it is the limiter's one exemption, and it is
+            // anonymous, so no key set is needed to reach it.
+            .ProducesProblem(StatusCodes.Status429TooManyRequests)
+            .ProducesProblem(StatusCodes.Status500InternalServerError)
             .AddOpenApiOperationTransformer(DeclareBearerRequirementAsync);
 
         return endpoints;

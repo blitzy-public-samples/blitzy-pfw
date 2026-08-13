@@ -676,6 +676,94 @@ public sealed class DataServicesRouteCensusTests
                 + "beyond its status.");
     }
 
+    /// <summary>
+    /// Every projected route's published status surface is exactly the surface its mapping can produce -
+    /// checked in BOTH directions, on the generated document.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE SUITE ONLY EVER CHECKED ONE DIRECTION, AND THE DEFECT THAT SLIPPED THROUGH WAS IN THE
+    /// OTHER.</b> A status a route PRODUCES but does not DECLARE leaves a generated client with no branch
+    /// for a response it will receive, and nothing about it fails until the response arrives. That is what
+    /// happened to <c>409</c> - declared on the update alone while the shared failure map answers it for
+    /// an upstream <c>Aborted</c> whose detail did not decode, and the shared in-band map answers it for
+    /// <c>E_RETRY</c>, from any operation at all - and to <c>404</c> on the two session opens, which
+    /// really answer the in-band not-found codes for a handle carried in their BODY.
+    /// </para>
+    /// <para>
+    /// The converse is also asserted, because a declared status that cannot occur hides which responses
+    /// are real. The closed set is the one <c>docs/CONTRACTS.md</c> §12.1 sanctions plus <c>502</c> and
+    /// <c>503</c>; <c>422</c> is closed to this document outright, and <c>501</c> is reserved system-wide
+    /// for the four deferred-capability route families (AAP 0.4.4, C-D), so a projected route declaring
+    /// one would present an implemented operation as a placeholder.
+    /// </para>
+    /// <para>
+    /// Asserted against the GENERATED document, which is the half the authored contract cannot police:
+    /// the contracts suite checks <c>gateway.v1.yaml</c>, and the divergence guarded here is between the
+    /// two artifacts a consumer may read.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task EveryProjectedRoutePublishesExactlyTheStatusSurfaceItsMappingProduces()
+    {
+        string[] reachable =
+        [
+            "200", "400", "401", "403", "404", "409", "429", "500", "502", "503", "504",
+        ];
+
+        await using GatewayTestHostFixture host =
+            GatewayTestHostFixture.ForEnvironment(Environments.Production);
+
+        using HttpClient client = host.CreateAuthenticatedClient();
+
+        using JsonDocument document = await ReadDocumentAsync(client);
+
+        int checkedRoutes = 0;
+
+        foreach (ProjectedRoute route in Census)
+        {
+            JsonElement operation = FindOperation(document, route);
+
+            string[] declared =
+            [
+                .. operation.GetProperty("responses")
+                    .EnumerateObject()
+                    .Select(static status => status.Name)
+                    .Order(StringComparer.Ordinal),
+            ];
+
+            // THE DECLARED SET MUST COVER THE REACHABLE SET. The 400 is the one status a route may omit,
+            // and only where the operation binds no body at all - so it is excluded from the required
+            // list rather than from the permitted one.
+            string[] required =
+                [.. reachable.Where(static status => !string.Equals(status, "400", StringComparison.Ordinal))];
+
+            string[] missing = [.. required.Where(status => !declared.Contains(status, StringComparer.Ordinal))];
+
+            Assert.True(
+                missing.Length == 0,
+                $"{route.HttpMethod} {route.Path} can produce {string.Join(", ", missing)} and declares "
+                    + "none of them. An undeclared status is one no generated client has a branch for.");
+
+            // AND THE REACHABLE SET MUST COVER THE DECLARED SET.
+            string[] surplus =
+                [.. declared.Where(status => !reachable.Contains(status, StringComparer.Ordinal))];
+
+            Assert.True(
+                surplus.Length == 0,
+                $"{route.HttpMethod} {route.Path} declares {string.Join(", ", surplus)}, which its "
+                    + "mapping cannot produce.");
+
+            Assert.DoesNotContain("501", declared, StringComparer.Ordinal);
+            Assert.DoesNotContain("422", declared, StringComparer.Ordinal);
+
+            checkedRoutes++;
+        }
+
+        // Guards against a silently empty loop: the count is the census, not a number this test chose.
+        Assert.Equal(Census.Length, checkedRoutes);
+    }
+
     /// <summary>Finds one census row's operation object in the published document.</summary>
     /// <param name="document">The published document.</param>
     /// <param name="route">The census row.</param>

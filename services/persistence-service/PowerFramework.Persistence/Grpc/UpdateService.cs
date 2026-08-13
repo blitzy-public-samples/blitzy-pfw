@@ -134,6 +134,7 @@ using PowerFramework.Persistence.Configuration;
 using PowerFramework.Persistence.Data;
 using PowerFramework.Persistence.Errors;
 using PowerFramework.Persistence.Runtime;
+using PowerFramework.Persistence.Sql;
 using PowerFramework.Shared.Diagnostics;
 
 // The generated C-06 service base, reached through an alias for two reasons. First, the mandated class
@@ -1461,6 +1462,31 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
         + "reported as a success. Set multi_table_update to true to have the descriptors applied, send a "
         + "descriptor that agrees with the definition, or send no descriptors at all.";
 
+    /// <summary>
+    /// The diagnostic for a descriptor field that cannot occupy an identifier position in generated DML.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// IT STATES THE RULE AND QUOTES NOTHING. A caller holds the value it sent, so repeating it back buys
+    /// nothing and would put caller-supplied text into a field that is logged and displayed
+    /// (constraint C-F). What a caller cannot know without being told is WHICH rule refused it, so the
+    /// message names the accepted shape and the four fields the rule applies to.
+    /// </para>
+    /// <para>
+    /// IT IS DELIBERATELY NOT A CLAIM THAT THE NAME DOES NOT EXIST. That refusal is a different one, with
+    /// its own code and the oracle's own wording [<c>UpdateWhereBuilder.InvalidColumnNameMessage</c>], and
+    /// the two must stay distinguishable: one says "this table has no such column", this one says "no
+    /// statement can carry this text as a name".
+    /// </para>
+    /// </remarks>
+    internal const string InadmissibleIdentifierDiagnostic =
+        "A descriptor in this request states a table, updatable column, key column or identity column "
+        + "whose text cannot occupy an identifier position in a generated statement. An identifier may "
+        + "contain letters, digits, the underscore and the dollar, hash and at signs only, and an update "
+        + "table may additionally be qualified with up to two leading parts separated by periods. Values "
+        + "are parameterized and identifiers cannot be, so a name outside that shape is refused rather "
+        + "than quoted or escaped - the generated statement is byte-exact by contract.";
+
     private readonly IUpdateTaskFactory _factory;
     private readonly UpdateTaskRegistry _tasks;
 
@@ -1769,6 +1795,104 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
             }
 
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Decides whether one descriptor states a name that cannot occupy an identifier position in a
+    /// generated statement, and composes the refusal when it does.
+    /// </summary>
+    /// <param name="table">The descriptor under test.</param>
+    /// <param name="entry">The task the request addresses, named in the log record.</param>
+    /// <param name="ordinal">The descriptor's one-based position, named in the log record.</param>
+    /// <param name="count">How many descriptors the request carries, named in the log record.</param>
+    /// <param name="refusal">
+    /// Receives the status to answer. Undefined when this method answers <see langword="false"/>.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the descriptor must be refused; <see langword="false"/> when every name
+    /// it states can occupy an identifier position.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// THE ORACLE'S OWN VISIT ORDER - the update table, then the updatable columns, then the key columns,
+    /// then the identity column - so the field reported is the one the preparer would have reached first
+    /// [<c>ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L111-L129</c>].
+    /// </para>
+    /// <para>
+    /// THE TABLE TAKES THE QUALIFIED TEST AND THE COLUMNS TAKE THE BARE ONE, because that is what each
+    /// position can legitimately hold: the generated statements name exactly one table, so a column
+    /// reference carries no qualifier, while an update table addressing an attached database has no other
+    /// way to say so. See <c>Sql/SqlIdentifierGuard.cs</c>.
+    /// </para>
+    /// <para>
+    /// AN EMPTY IDENTITY COLUMN MEANS "NO IDENTITY COLUMN" AND IS LEGAL [<c>:L127-L129</c>], so it is
+    /// skipped. An empty entry in either array is refused: the guard answers false for the empty string
+    /// because the empty string cannot occupy an identifier position.
+    /// </para>
+    /// <para>
+    /// THE LOG RECORD NAMES THE ORDINAL, THE COUNT AND THE FIELD KIND - never the offending text, the table
+    /// name, a column name or a value (constraint C-F).
+    /// </para>
+    /// </remarks>
+    private bool TryRefuseInadmissibleIdentifier(
+        TableUpdateContract table,
+        UpdateTaskEntry entry,
+        int ordinal,
+        int count,
+        out OperationStatus refusal)
+    {
+        string? field = null;
+
+        if (!SqlIdentifierGuard.IsAdmissibleQualifiedName(table.Name))
+        {
+            field = "update table";
+        }
+        else if (!AllAdmissible(table.Updatablecolumns))
+        {
+            field = "updatable column";
+        }
+        else if (!AllAdmissible(table.Keycolumns))
+        {
+            field = "key column";
+        }
+        else if (table.Identitycolumn.Length != 0
+            && !SqlIdentifierGuard.IsAdmissibleIdentifier(table.Identitycolumn))
+        {
+            field = "identity column";
+        }
+
+        if (field is null)
+        {
+            refusal = null!;
+
+            return false;
+        }
+
+        _logger?.LogWarning(
+            "PrepareUpdate refused update table descriptor {Ordinal} of {TableCount} on task {TaskId}: its "
+            + "{Field} states text that cannot occupy an identifier position in a generated statement. No "
+            + "table name, column name or value is recorded.",
+            ordinal,
+            count,
+            LogSafeText.Render(entry.TaskId),
+            field);
+
+        refusal = UpdateWireCodes.Status(RetCode.E_INVALID_ARGUMENT, InadmissibleIdentifierDiagnostic);
+
+        return true;
+
+        static bool AllAdmissible(IEnumerable<string> columns)
+        {
+            foreach (string column in columns)
+            {
+                if (!SqlIdentifierGuard.IsAdmissibleIdentifier(column))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
     }
 
@@ -2333,6 +2457,76 @@ internal sealed class UpdateService : GeneratedUpdateServiceBase
                         RetCode.E_INVALID_ARGUMENT,
                         UpdateWhereBuilder.NoUpdatableTableMessage),
                 });
+            }
+
+            // ==========================================================================================
+            //  🔴 THE IDENTIFIER ADMISSION GATE - THE POSITION IN A GENERATED STATEMENT THAT CANNOT BE
+            //  PARAMETERIZED (CWE-89).
+            //
+            //  EVERY VALUE THE WRITE PATH EMITS TRAVELS AS AN `@pN` PARAMETER; NO IDENTIFIER CAN, because
+            //  no dialect has a parameter form for a table or a column. So the four fields of each
+            //  descriptor - the update table, the updatable columns, the key columns and the identity
+            //  column - are the caller-supplied text that reaches the engine as SQL rather than as data:
+            //  `Tasks/SqlUpdateCarrier.cs` concatenates them into the INSERT, UPDATE and DELETE it
+            //  composes, and into the conflict reread. In the legacy that text came from a COMPILED
+            //  DataWindow shipped inside the application and the only party that could name a column was
+            //  code in the same process; this boundary is where a remote, authenticated but untrusted
+            //  caller now names one.
+            //
+            //  IT SITS AT THE BOUNDARY, NOT IN THE TASK, exactly as Sql/ReadOnlyStatementGuard.cs does on
+            //  the read scope. Tasks/SqlUpdateTask.cs is a faithful port of an object whose descriptor
+            //  setter validates nothing [n_cst_thread_task_sqlupdate.sru:L84-L93], and adding a screen
+            //  there would make the port unfaithful and would refuse in-process callers the legacy
+            //  accepts. The scope lives on this class - it carries [Authorize(Policy = Write)] - so the
+            //  admission test lives here too. The SINK is guarded as well, in the carrier itself: this
+            //  boundary does not parse a supplied `sql_syntax`, so a syntax-derived column model is
+            //  admitted there rather than here, and the two gates share one predicate.
+            //
+            //  A SHAPE TEST, AND DELIBERATELY NOT A CATALOGUE LOOKUP. TryFindUndeclaredColumn above asks
+            //  whether a name is DECLARED, which is a different question and cannot close this: on the
+            //  derived-definition path the declaration is the caller's own, registered into the very
+            //  catalogue a lookup would consult, so the input would be validated against itself. Whether
+            //  the text can occupy an identifier position at all is a property of the text.
+            //
+            //  E_INVALID_ARGUMENT, which is the code both sibling descriptor arms above already answer for
+            //  a descriptor that cannot be honoured, and the diagnostic and the log record NAME NOTHING
+            //  the caller sent (constraint C-F): a caller knows the name it sent, and a log record is read
+            //  by someone who does not. The AAP's posture for a legacy behaviour that cannot survive a new
+            //  boundary is exactly this - narrow the contract with a DEFINED ERROR rather than widen it
+            //  with a guess [AAP 0.1.5].
+            //
+            //  EVERY DESCRIPTOR IS TESTED WHATEVER THE MULTI-TABLE SWITCH SAYS. A descriptor sent with the
+            //  switch off is inert today, but the switch is settable on a later prepare and the array is
+            //  replaced wholesale rather than merged [:L67], so admitting an inadmissible name now would
+            //  leave it in place for a call that does apply it.
+            //
+            //  AN EMPTY IDENTITY COLUMN IS LEGAL AND IS NOT A NAME [:L127-L129], so it is skipped rather
+            //  than refused - the same exemption TryFindUndeclaredColumn makes, for the same reason. An
+            //  empty entry in either ARRAY is refused, because the oracle's script grammar cannot carry
+            //  one and no statement position can hold it.
+            //
+            //  IT RUNS AHEAD OF THE TWO DESCRIPTOR ARMS BELOW, AND THE ORDER IS DELIBERATE. Both of those
+            //  ask questions ABOUT A NAME - does it match the definition's update table, does the
+            //  definition declare it - and neither question is meaningful for text that cannot be a name
+            //  at all: a caller sending an injection-shaped table with the multi-table switch off would
+            //  otherwise be told its descriptor "names a different update table", which is true and
+            //  useless. This gate is also the only one of the three that does not depend on the data
+            //  object resolving, so it covers the requests the other two exempt. All three refuse ahead of
+            //  the clear, so the ordering costs nothing in atomicity.
+            // ==========================================================================================
+            for (int index = 0; index < request.Tables.Count; index++)
+            {
+                if (!TryRefuseInadmissibleIdentifier(
+                    request.Tables[index],
+                    entry,
+                    index + OneBasedIndex.FirstIndex,
+                    request.Tables.Count,
+                    out OperationStatus identifierRefusal))
+                {
+                    continue;
+                }
+
+                return Task.FromResult(new PrepareUpdateResponse { Status = identifierRefusal });
             }
 
             // ==========================================================================================

@@ -896,6 +896,36 @@ from, whereas every value above has a stated derivation. The backoff *shape* —
 — is written down explicitly even though it matches the package default, because a requirement that
 holds only because a dependency's default happens to satisfy it is not being enforced by anything.
 
+**The two services expose that decision differently, and the difference is a configuration surface rather
+than a behaviour.** It is recorded here because reading either service alone gives the wrong impression of
+the other.
+
+| | Gateway → DataServices / Security | DataServices → Persistence / Security |
+| --- | --- | --- |
+| Circuit-breaker settings on the options type | **none** | **four** — `CircuitBreakerFailureRatio`, `CircuitBreakerMinimumThroughput`, `CircuitBreakerSamplingDuration`, `CircuitBreakerBreakDuration` |
+| Values actually in force | the standard handler's defaults: ratio `0.1`, minimum throughput `100`, sampling `30 s`, break `5 s` | `0.1`, `100`, `30 s`, `5 s` — the same four values, declared |
+| Consequence | identical breaker behaviour on every edge in the system today | identical, and re-declarable by a deployment |
+
+**Gateway inherits rather than declares, and that is the deliberate half.** Its three typed clients call
+`AddStandardResilienceHandler()` and configure the retry and timeout stages only. Publishing four more
+settings whose only defensible values are the four already in force would invite a deployment to choose
+different ones — and there is nothing in this repository to derive a different value *from*, which is the
+same reason the paragraph above gives for not choosing them in the first place. It would also cut against
+the "one value, one place, two consumers" discipline the next paragraph establishes for the retry count.
+The asymmetry is therefore that DataServices names the defaults and Gateway does not; **neither behaves
+differently from the other**, and no edge in this system is running an unreviewed threshold.
+
+**And the arithmetic worth stating about all four edges, because it bounds what the breaker can do at all.**
+A minimum throughput of `100` inside a `30 s` sampling window means the failure proportion is not even
+computed until a hundred attempts have been observed in one window — that is the strategy's own admission
+rule, not a target. On the single-instance Compose deployment, where each edge carries the traffic one
+gateway instance generates, that threshold is not reached, so **the breaker is structurally inert there**:
+retry admission, the deadlines and the per-attempt timeout are what actually bound a failing edge, and they
+are the mechanisms the sections above derive. This is arithmetic about a strategy's trigger condition and is
+**not** a throughput claim, a latency claim or an availability claim — this repository publishes no such
+objective and this document asserts none. It is recorded so that nobody reads the breaker as the thing
+protecting these edges when the bounds above it are.
+
 **The retry attempt count and the backoff base are NOT left at the defaults, and the reason is
 arithmetic rather than posture.** Retry admission on these edges exists at **two** layers — the HTTP
 pipeline and, because a gRPC channel connects inside the balancer where an HTTP handler cannot see it,
@@ -1326,6 +1356,42 @@ generated SQL. The implementation may be safer than the legacy exactly where the
 unobservable; where the generated statement is observable, it matches. The complete security register —
 locators, severities and required actions, with no value ever reproduced — is
 [`SECRETS.md`](SECRETS.md).
+
+**And the position parameters cannot cover: the identifier gate on the C-06 write path.**
+Parameterizing values closes the value positions and *only* the value positions. No dialect has a
+parameter form for a table or a column — `UPDATE @p1 SET …` is not a statement — so the identifier
+positions of the DML `Tasks/SqlUpdateCarrier.cs` composes are the remaining places where
+caller-supplied text reaches the engine as SQL rather than as data. Across this boundary both sources of
+those identifiers are caller-controlled, which the legacy's compiled DataWindow never was: the update
+table arrives through `DataWindow.Table.UpdateTable` written by the prepare step's modification script
+[`n_cst_thread_task_sqlupdate.sru:L143`], and the column model comes either from the bindings a supplied
+`sql_syntax` produced or from a catalogue entry that same syntax registered.
+
+- **`Sql/SqlIdentifierGuard.cs` is the admission test**, and it is a **shape** test rather than a
+  catalogue lookup. Checking a name against the carrier's own column model is circular here — a
+  syntax-derived carrier registers its declaration into the very catalogue a lookup would consult, so the
+  input would be validated against itself. Whether text can occupy an identifier position at all is a
+  property of the text.
+- **It refuses; it never rewrites.** Nothing is quoted, escaped or normalised, because byte-exact
+  generated SQL is this service's parity criterion (§8.2) — a guard that quoted an identifier would change
+  every generated statement and invalidate every recording taken against the fixture. This is the posture
+  the plan fixes for a legacy behaviour that cannot survive a boundary the migration created: narrow the
+  contract with a **defined error** rather than widen it with a guess.
+- **Two enforcement sites, deliberately.** The **C-06 boundary** (`Grpc/UpdateService.cs`, which carries
+  the write-scope policy) screens each descriptor's table, updatable columns, key columns and identity
+  column and answers `E_INVALID_ARGUMENT`, ahead of the descriptor clear so a refusal changes nothing. The
+  **sink** (`Tasks/SqlUpdateCarrier.cs`) screens the installed update table and the whole column model
+  before generating anything, which covers the `sql_syntax` path the boundary does not parse. Neither log
+  record and neither diagnostic quotes the offending text (C-F).
+- **It mirrors `Sql/ReadOnlyStatementGuard.cs`'s placement**, which is applied on the read scope and
+  states in its own header that it deliberately does not guard C-06 or C-07 — because generating INSERT,
+  UPDATE and DELETE is their purpose. What C-06 needed was not a statement guard but an identifier gate,
+  and the two are now symmetric: the read surface screens whole statements, the write surface screens the
+  positions it composes itself.
+- **A reserved word and an unknown name are both still admitted**, because "does this table have that
+  column" is a different question with its own answer — the preparer's own `无效的列名:` arm
+  [`n_cst_thread_task_sqlupdate.sru:L118-L122`] — and whether a provider accepts an unquoted reserved word
+  is the provider's answer to give.
 
 ### 8.6 How the schema reaches the database, and why the switch defaults off
 
@@ -2056,6 +2122,95 @@ the largest published modulus, file digesting is capped by size, and the update 
 and on values per row. Each answers the legacy return-code algebra's own refusal rather than a new
 vocabulary, and each is published in the contract that carries the operation.
 
+### 9.9 Logging: the redaction obligation a level cannot relax, and the category levels each service ships
+
+Logging uses **the built-in abstractions from the shared framework and nothing else.** Serilog and the
+OpenTelemetry family are on the deliberate-exclusion list of AAP §0.5.3 and are absent by design rather
+than by oversight: neither is in the mandated stack, the framework's own abstractions cover the requirement,
+and every project file records the same omission from the other direction. **A development overlay is not a
+side door for a package the refactor declined**, so no overlay adds either.
+
+**The redaction obligation is the reason this posture is documented at all, and it is a property of the
+CONTENT rather than of the level.** DataServices relays the structured database error of the
+`persistence.v1` contract, whose statement field carries the **complete generated SQL including
+interpolated literal values** — the legacy transaction layer parses its connection string for a
+bind-disabling flag [`ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru:L128-L129`], and with
+binding disabled the runtime interpolates literals instead of using bind variables. **The legacy logger
+performed no redaction whatsoever.** No log record emitted by any service may reproduce that field
+unredacted, and the identical caution applies to the caller-supplied expression text and caret position
+carried by a column-expression parse failure.
+
+**A level decides WHETHER a record is written, never whether its content is safe.** Raising `Default` to
+`Debug` or `Trace` — in a deployment or in a development overlay — therefore grants no permission and
+relaxes no obligation. §8.5 and §8.6 carry the redaction mechanism itself; this paragraph exists so that
+nobody reads a level as an authorisation.
+
+The shipped category levels, and the reason each is where it is:
+
+| Category | Base | Development | Why |
+| --- | --- | --- | --- |
+| `Default` | `Information` | **inherited** | The level at which each service's own lifecycle, session and event-chain records are written. It is deliberately NOT raised in the overlay: raising it would also raise every framework category with no rule of its own — the resilience pipeline and its policy internals among them — which widens the surface on which a relayed upstream payload could be written out |
+| `PowerFramework.<Service>` | *(absent)* | `Debug` | The one category a development overlay ADDS, and it is a populated entry in an open map rather than an extended contract: `Logging:LogLevel` maps a category prefix to a level, the map itself is declared in the base file, and an entry here binds to a real filter rule. The prefix matches every category beneath it, so one entry covers a service's endpoints, domain, engine, validators and typed clients together — which is why the narrow prefix is the safer instrument than raising `Default` |
+| `Microsoft.AspNetCore` | `Warning` | `Information` | `Warning` keeps a per-request record out of a deployed log while leaving every fault visible, and it matters because **the Compose health probe polls `/health` continuously** — `Information` there would bury real records under readiness traffic. No probe polls a developer's machine, and per-request records are the first thing a developer wants, so the overlay raises it to `Information` rather than to `Debug` so the console stays readable |
+| `System.Net.Http.HttpClient` | `Warning` | `Information` | The typed clients. At `Information` the outbound calls become visible, which is the fastest way to see an upstream that is simply not running. **Their request records include the request URI, which is exactly why no address in any settings file may carry a credential** — each address validator rejects a userinfo component for this reason |
+| `Grpc` | `Warning` | `Information` | The gRPC server for the contracts a service publishes and the client for the ones it consumes. On DataServices and Persistence gRPC is the primary transport, so method and status records are the most useful local diagnostic. **`Information` does not enable message-payload logging**: that requires an explicit opt-in no file here makes, because a payload record would carry precisely the relayed content the redaction obligation covers |
+| `Microsoft.EntityFrameworkCore` | `Warning` | *(per service)* | Persistence only. Conservative by default so a deployed run does not emit statement text at volume |
+
+**Where this is recorded, and why it is here rather than beside the values.** Every `appsettings*.json` in
+the estate is strict RFC 8259 JSON with no comment syntax, which each file's own specification requires;
+`Logging` binds the framework's `LoggerFilterOptions` and so has no `*Options.cs` of this repository's to
+document, which leaves this document as its single authority. Every other settings key is annotated on the
+bound member of its own options type.
+
+### 9.10 Observability posture: one correlation identifier, published on the wire and stamped in the log
+
+**There is one identifier, it is the W3C trace context, and both halves of using it are in place on all four
+services.** This subsection exists because an earlier state of the tree had exactly half of it, in a way that
+looked complete from either side alone.
+
+**What was wrong.** Gateway and DataServices resolved `Activity.Current?.Id`, falling back to the host's
+request identifier, and published it as the ProblemDetails member `traceId` — but only from the fault paths
+they wrote *themselves*. Persistence and Security published no identifier at all, on any body. The trace
+context was nevertheless present on every request in all four services: ASP.NET Core starts an `Activity` per
+request and continues an inbound `traceparent` without being asked, and every internal call in this topology
+is made with a typed `HttpClient` or a gRPC client that propagates it. So an operator holding a Gateway
+`traceId` from a `502` had the identifier, the far service had the identifier, and there was no member and no
+log field on the far side to join them by. The identifier existed and was unusable, which is the failure mode
+worth naming: not a missing capability, an unpublished one.
+
+**What is in place now, stated as the two halves it takes:**
+
+| Half | Where it lives | What it does |
+| --- | --- | --- |
+| **On the wire** | each service's `AddProblemDetails` customization in its own `Program.cs` | Sets `traceId` on **every** problem body the service answers with — including the ones the framework writes beneath all of this repository's code: the bearer challenge, an authorization refusal, an unmatched route, a rejected method, a rate-limit rejection and an unhandled-fault response. It sits **above** the `retCode` guard, because that guard returns early for a body an endpoint composed itself, which is exactly the set that must also carry the identifier |
+| **In the log** | `builder.Logging.Configure` in the same four files | Sets `ActivityTrackingOptions` to `TraceId`, `SpanId` and `ParentId` combined, so every record the service writes carries the trace, the span and the caller's span. Shared-framework code; **no package** |
+
+**Three properties of that arrangement are deliberate and each closes a way of getting it wrong.**
+
+- **The member name is `traceId` in all four services.** A second spelling would leave an operator joining
+  two halves of one request by two different names, which is the same defect as having no member.
+- **An empty value is not published.** A `traceId` present but blank advertises a bridge with no far side, and
+  a consumer reads it as a value rather than as an absence. The member is written only when the resolution
+  produces something; in practice it always does, because the host always starts an `Activity`.
+- **`Baggage` and `Tags` are NOT tracked.** Both are caller-controlled key-value sets, so tracking them would
+  copy attacker-influenced content into log records — the exact opposite of the redaction obligation §9.9
+  states, and least acceptable on Security, which handles credentials. The three identifiers tracked are
+  generated by the host, not supplied by a caller.
+
+**What this posture deliberately does NOT include, so that its limits are readable rather than assumed.**
+There is **no distributed tracing backend, no metrics exporter and no structured-log sink**: the
+OpenTelemetry family and Serilog are on AAP §0.5.3's deliberate-exclusion list and adding either would be
+scope creep against C-B. Correlation here means *an identifier an operator can grep for across four
+containers' logs*, and nothing more. It is not a trace viewer, there is no span hierarchy to browse, and no
+sampling decision is made anywhere. A deployment that wants those adds an exporter; because the trace context
+is already flowing and already stamped, that addition is configuration rather than a change to any service.
+
+**Held to it by tests rather than by this paragraph.** `PingEndpointsTests` on Persistence asserts the member
+on the **framework-written** `401` body — the body that previously carried nothing — and asserts the tracking
+options resolve from the built host. On Security, `AuthorizationTests` asserts the member inside the shared
+refusal assertion, so all fourteen refusals in that file are held to it at once, and asserts that `Baggage`
+and `Tags` are off.
+
 ---
 
 ## 10. Orchestration
@@ -2157,7 +2312,7 @@ of the stack cannot talk to.
 > easy to assume: `services/gateway-service/Dockerfile` uses `openssl s_client`, and its own comments explain
 > why a raw socket cannot work against a TLS listener. The distinction reaches past this table, because "the
 > ingress is plaintext" is the premise behind every `http://localhost:5105` probe — see
-> [`BUILD.md`](BUILD.md) §1.6 **D7**, which enumerates the https-only transport as a deviation from the
+> [`BUILD.md`](BUILD.md) §1.6.1 **D7**, which enumerates the https-only transport as a deviation from the
 > attached environment's instructions and carries the `curl --cacert https://…` forms this stack requires.
 
 ### 10.4 Rejected alternative — .NET Aspire's Docker Compose publishing
@@ -2212,31 +2367,37 @@ health status `healthy`, and was confirmed to carry `openssl` and neither `curl`
 driven negative as well — a dead port and the 401 route both fail it — so it is a probe and not a formality.
 
 **The Persistence image was built and run the same way, and it is the one whose storage seam was exercised in
-isolation.** `docker build --check` reported no warnings; the build completed with zero warnings, zero errors
-and no NuGet advisory, the three repository-root MSBuild files resolving central package management from
-`/src`. On the built image: the final stage runs as uid 1654, PID 1 is `dotnet
-PowerFramework.Persistence.dll`, `EXPOSE` carries 5101 and 5111, `ASPNETCORE_HTTP_PORTS` is empty, and the
-layer contains no test assembly, no xunit, no `.proto`, no `ws_objects` content and no legacy native binary,
-while the SQLitePCLRaw `linux-x64` `libe_sqlite3.so` is published beside the managed assemblies. Running it
-against a **fresh named volume** confirmed the property that matters most for this service: Docker seeded the
-volume from the image directory as `1654:1654`, so the non-root process found its storage directory writable.
-Both listeners bound — HTTP/1.1 on 5101, HTTP/2 on 5111 — `/health` answered anonymously, `/v1/ping` answered
-401 without a token, and Docker's own `HEALTHCHECK` reached `healthy`. Its probe was driven negative five ways
-— the 401 route, a dead port, a wrong trust anchor, a missing anchor, and an HTTP/1.1 request against the
-`Http2`-only 5111 — and all five failed it. A deliberately unwritable storage directory made the process
-**refuse to start and terminate**, which is the fail-fast posture surviving as fail-fast.
+isolation. READ THE NEXT SENTENCE BEFORE THE FINDINGS: that run was taken against a TWO-LISTENER
+arrangement, which is NOT the one this repository ships.** The shipped definition puts both surfaces on one
+`Http1AndHttp2` endpoint on **5101** for the reason §4.1 records, and declares `EXPOSE 5101` **alone** — there
+is no second listener in the shipped image to probe or to drive negative. Two of the findings below are
+therefore reported as **observations of that run's arrangement and not as properties of the shipped image**,
+and each is marked where it appears rather than corrected afterwards. Everything else the run established is
+unaffected, because none of it depends on how many sockets the host opens.
 
-**That probe run was taken against a two-listener arrangement, which is NOT the shipped one.** In that
-run `EXPOSE` carried 5101 and a second gRPC port, both bound, and a
-fifth negative probe — an HTTP/1.1 request against the `Http2`-only second port — failed the probe as
-intended. The shipped arrangement puts both surfaces on one `Http1AndHttp2` endpoint on 5101 for the reason
-§4.1 records, so the definition declares `EXPOSE 5101` alone and there is no second listener to probe or
-to drive negative. Everything else that run established — the uid, PID 1, the empty `ASPNETCORE_HTTP_PORTS`,
-the layer contents, the native provider, the volume ownership seam, the three response codes, the health
-transition and the fail-fast refusal — is unaffected by the change, since none of it depends on how many
-sockets the host opens. `ServiceConfigurationCoherenceTests` and `OperationalTopologyCoherenceTests` continue
-to assert the declaration and the `EXPOSE` line against each other on every build, which is what keeps the
-two from drifting apart again.
+With that established: `docker build --check` reported no warnings; the build completed with zero warnings,
+zero errors and no NuGet advisory, the three repository-root MSBuild files resolving central package
+management from `/src`. On the built image: the final stage runs as uid 1654, PID 1 is `dotnet
+PowerFramework.Persistence.dll`, `ASPNETCORE_HTTP_PORTS` is empty, `EXPOSE` carried 5101 **and 5111 — that
+run's arrangement; the shipped definition declares 5101 alone**, and the layer contains no test assembly, no
+xunit, no `.proto`, no `ws_objects` content and no legacy native binary, while the SQLitePCLRaw `linux-x64`
+`libe_sqlite3.so` is published beside the managed assemblies. Running it against a **fresh named volume**
+confirmed the property that matters most for this service: Docker seeded the volume from the image directory
+as `1654:1654`, so the non-root process found its storage directory writable. `/health` answered
+anonymously, `/v1/ping` answered 401 without a token, and Docker's own `HEALTHCHECK` reached `healthy`. Both
+of that run's listeners bound — HTTP/1.1 on 5101 and HTTP/2 on 5111, **again that run's arrangement and not
+the shipped one, which binds a single `Http1AndHttp2` endpoint on 5101**. Its probe was driven negative five
+ways — the 401 route, a dead port, a wrong trust anchor, a missing anchor, and an HTTP/1.1 request against
+the `Http2`-only 5111 — and all five failed it; the fifth of those has no shipped equivalent, so the shipped
+image is driven negative four ways. A deliberately unwritable storage directory made the process **refuse to
+start and terminate**, which is the fail-fast posture surviving as fail-fast.
+
+**Why the qualifier leads rather than trails.** It used to follow the findings, one paragraph later, which
+meant a reader who stopped at the findings took away two facts about the shipped image that are not true of
+it — that it exposes a second port and that it binds two listeners. A correction a reader reaches only if
+they keep reading is not a correction. `ServiceConfigurationCoherenceTests` and
+`OperationalTopologyCoherenceTests` assert the shipped declaration and the shipped `EXPOSE` line against each
+other on every build, so the two cannot drift apart again while this prose describes a superseded run.
 
 **That run also predates the startup schema step, and that changes who performs the transition it observed —
 not whether the transition happens.** At the time the service applied no migration under any configuration,

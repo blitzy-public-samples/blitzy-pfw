@@ -3760,7 +3760,26 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
     /// </remarks>
     private static StatusCode MapOutcomeToStatus(long returnCode) => returnCode switch
     {
-        RetCode.E_BUSY or RetCode.E_RETRY or RetCode.E_OUT_OF_MEMORY => StatusCode.ResourceExhausted,
+        RetCode.E_BUSY or RetCode.E_OUT_OF_MEMORY => StatusCode.ResourceExhausted,
+
+        // 🔴 E_RETRY IS SPLIT OUT OF THE CAPACITY GROUP, WHICH IS A CORRECTION RATHER THAN A PREFERENCE.
+        //
+        // It sat with E_BUSY here and reached a caller as ResourceExhausted, therefore 429 - while the
+        // sibling BuildUpstreamFailure in this same file gives it Aborted, therefore 409, and Gateway's
+        // in-band map does too. So ONE upstream code left this service as two different statuses
+        // depending on which helper happened to raise it: 409 when a retrieval ended in a database error,
+        // 429 when the identical outcome arrived with no error to carry. A caller's retry-or-surface
+        // policy cannot key on a status that changes with the reporting path.
+        //
+        // THE DIRECTION IS FIXED BY THE PUBLISHED CONTRACT, NOT CHOSEN HERE. E_RETRY is the code the
+        // conflict path carries - a rejection a retry can satisfy once the caller rebases - and the
+        // contract declares Aborted -> 409 as the concurrency answer with E_BUSY -> 429 as the capacity
+        // answer, which the projection suites already assert in both services. Harmonising the other way
+        // would have made 429 mean two unrelated things and would have broken those assertions.
+        //
+        // THE TWO REMAIN DISTINCT CODES with distinct statuses, which is the point: a shed request and a
+        // conflict are different events, and the legacy declares a separate member for each.
+        RetCode.E_RETRY => StatusCode.Aborted,
 
         // 🔴 THREE ADDITIONS TO THE CALLER-ERROR GROUP, EACH OF WHICH FELL TO Internal AND THEREFORE
         // REACHED A CALLER AS HTTP 500 FOR A MISTAKE OF THEIR OWN. An unresolvable DataObject name is the

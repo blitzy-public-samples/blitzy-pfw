@@ -608,9 +608,15 @@ summary of what a pair is *for*, not a second catalogue:
 - **The tri-state return algebra.** A prevention reads as a success; cancelled and null are **neither**
   succeeded nor failed. The boolean overloads make prevent and failed indistinguishable while the numeric
   forms keep them distinct — so a recording must carry the numeric code, never a boolean projection of it.
-- **The four-value item-change alphabet** `{0,1,2,3}`, where case 1 falls through to case 2, case 3
-  rewrites its result to 1, and the default arm coerces by column type and then **forcibly returns 2**. It
-  is its own alphabet and is never mapped onto the return-code algebra.
+- **The four-value item-change alphabet** `{0,1,2,3}`, four distinct arms: `case 1` is an **EMPTY arm that
+  does NOT fall through** [`se_cst_dw.sru:L212`] — PowerScript `choose case` is not a C `switch`, so `1`
+  returns with value and status **untouched** and the restore belongs to the `ItemValidationError` handler
+  that returning 1 raises; `case 2` restores value and status, but only if the earlier equality test held;
+  `case 3` keeps the value, does not move focus, and rewrites its result to 1; and the default arm coerces
+  by column type and then **forcibly returns 2**. It is its own alphabet and is never mapped onto the
+  return-code algebra. A recording that shows `1` restoring is a port that read the empty arm as a
+  fall-through — [`../docs/PARITY.md`](../docs/PARITY.md) §7 step 6 and
+  [`../docs/CONTRACTS.md`](../docs/CONTRACTS.md) §6.5 settle it the same way.
 - **The tri-valued broker veto** — prevent-once, prevent-deep, and continue — never flattened to a boolean,
   because flattening silently converts a deep prevention into a shallow one.
 - **The silent-passthrough localization fallback.** With no provider installed the text is returned

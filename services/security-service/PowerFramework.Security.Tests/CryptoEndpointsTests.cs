@@ -6420,10 +6420,56 @@ public sealed class CryptoRejectionArmTests
 }
 
 /// <summary>The log records one operation produced.</summary>
+/// <remarks>
+/// <para>
+/// <b>SYNCHRONISED, BECAUSE A RUNNING HOST WRITES TO IT AND A TEST READS IT.</b> This store is installed
+/// into in-process hosts (<c>IssuanceHostFactory</c> and the crypto factories), so records arrive on
+/// whichever thread handled the request, on framework threads that log connection and lifetime events, and
+/// on the test thread. An unsynchronised <see cref="List{T}"/> shared that way is a data race: the
+/// enumeration in a redaction scan threw <see cref="InvalidOperationException"/> - "Collection was modified"
+/// - when a framework record arrived mid-scan, which made a genuine assertion fail for a reason that had
+/// nothing to do with what it was asserting.
+/// </para>
+/// <para>
+/// <b>THE READ RETURNS A SNAPSHOT, WHICH IS THE HALF THAT MATTERS.</b> Locking only the append would leave
+/// every <c>foreach</c> and every LINQ query over this store racing a writer, so the property copies under
+/// the same lock and callers enumerate a list nothing else can touch. A scan that must see records written
+/// after it began reads the property again; that is the correct shape for an assertion, which is a
+/// statement about a moment rather than about a stream.
+/// </para>
+/// <para>
+/// Only the recorders a HOST writes to are synchronised. The recorders in <c>SigningKeyPolicyTests</c>,
+/// <c>SigningKeyRolloverTests</c> and <c>ClientCertificateAnchorAdoptionTests</c> are handed straight to a
+/// constructor on the test thread, with no timer and no host behind them, so they are left exactly as they
+/// are rather than given synchronisation they cannot need.
+/// </para>
+/// </remarks>
 internal sealed class CapturedRecords
 {
-    /// <summary>Every formatted record, in order.</summary>
-    public List<string> Records { get; } = [];
+    /// <summary>The records, guarded by its own monitor.</summary>
+    private readonly List<string> _records = [];
+
+    /// <summary>A snapshot of every formatted record, in arrival order.</summary>
+    public IReadOnlyList<string> Records
+    {
+        get
+        {
+            lock (_records)
+            {
+                return [.. _records];
+            }
+        }
+    }
+
+    /// <summary>Appends one formatted record.</summary>
+    /// <param name="record">The formatted record.</param>
+    public void Add(string record)
+    {
+        lock (_records)
+        {
+            _records.Add(record);
+        }
+    }
 }
 
 /// <summary>
@@ -6471,7 +6517,7 @@ internal sealed class CapturingLoggerProvider : ILoggerProvider
         {
             ArgumentNullException.ThrowIfNull(formatter);
 
-            _captured.Records.Add(formatter(state, exception));
+            _captured.Add(formatter(state, exception));
         }
     }
 }

@@ -873,6 +873,14 @@ paths:
           $ref: '#/components/responses/ScopeForbidden'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        # 🔴 DECLARED BECAUSE IT IS REACHABLE, AND IT WAS DECLARED NOWHERE. The handler cannot fail - it
+        # reads a clock - but this route is AUTHENTICATED, so the bearer handler runs first, and a fault
+        # inside the authentication middleware is answered by the exception handler as 500 with a problem
+        # document. Twenty other operations in this document already declare `ServerError`; this one
+        # produces it on the same terms and said nothing. `/health` declares no 500 and correctly does not:
+        # it is anonymous, and its own handler converts every fault into a degraded entry and a 503.
+        '500':
+          $ref: '#/components/responses/ServerError'
 
 
   # ================================================================================================

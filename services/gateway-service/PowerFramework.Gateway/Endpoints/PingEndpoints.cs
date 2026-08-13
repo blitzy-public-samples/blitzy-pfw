@@ -302,6 +302,16 @@ public static class PingEndpoints
     private const string UnauthorizedStatusKey = "401";
 
     /// <summary>
+    /// The status key of the rate-limited response in an OpenAPI responses map.
+    /// </summary>
+    private const string TooManyRequestsStatusKey = "429";
+
+    /// <summary>
+    /// The status key of the internal-failure response in an OpenAPI responses map.
+    /// </summary>
+    private const string InternalErrorStatusKey = "500";
+
+    /// <summary>
     /// The operation summary, verbatim from the contract.
     /// </summary>
     private const string OperationSummary =
@@ -320,6 +330,45 @@ public static class PingEndpoints
         "No token was presented, or the token presented is expired, malformed, or not valid for this " +
         "service. This response is part of the published contract rather than an implementation " +
         "detail: it is the standing proof that the boundary is authenticated (C-G).";
+
+    /// <summary>
+    /// The rate-limited response description.
+    /// </summary>
+    /// <remarks>
+    /// WORDED FOR THE INGRESS LIMITER RATHER THAN FOR A PROJECTED UPSTREAM. This probe projects no gRPC
+    /// method, so the shared <c>UpstreamBusy</c> prose - "the projected gRPC method returned
+    /// ResourceExhausted" - describes something that cannot happen here. The refusal a caller of this route
+    /// actually receives comes from the per-principal request bound in
+    /// <c>Composition/IngressHardening.cs</c>, which applies to every route except <c>/health</c>.
+    /// </remarks>
+    private const string TooManyRequestsResponseDescription =
+        "A capacity ceiling refused the request, and this is a refusal rather than a fault. Gateway's " +
+        "ingress bound counts requests per authenticated principal and sheds those over the configured " +
+        "limit; no upstream is contacted, so a refusal here costs nothing downstream. The body carries " +
+        "the legacy E_BUSY code, and the correct response is to slow down and retry rather than to " +
+        "change the request.";
+
+    /// <summary>
+    /// The internal-failure response description.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 DECLARED BECAUSE IT IS REACHABLE, WHICH IS NOT OBVIOUS FROM THE HANDLER. <see cref="Ping"/>
+    /// itself cannot fault - it falls back to <see cref="TimeProvider.System"/> rather than requiring a
+    /// registration. The reachable path is UPSTREAM OF THE HANDLER: this route is authenticated, and the
+    /// bearer handler must obtain the issuer's key set before it can validate anything. A retrieval that
+    /// fails with no last-known-good configuration cached - a cold start while Security is unreachable is
+    /// the ordinary case - faults inside the authentication middleware, which the exception handler
+    /// answers as <c>500</c> carrying <c>E_INTERNAL_ERROR</c>. That is precisely the condition
+    /// <c>Program.cs</c> keeps <c>UseLastKnownGoodConfiguration</c> enabled to survive, so its existence
+    /// is already recorded there.
+    /// </remarks>
+    private const string InternalErrorResponseDescription =
+        "Gateway failed while handling the request. The most likely cause on this route is not the " +
+        "handler, which cannot fail: it is the authentication layer being unable to obtain the issuer's " +
+        "key set with no last-known-good configuration cached, which is what a cold start against an " +
+        "unreachable Security service produces. The body is a problem document carrying " +
+        "E_INTERNAL_ERROR, and it never carries key material, a stack trace, a file path or a " +
+        "connection string.";
 
     /// <summary>
     /// The operation description, carried across from the contract so that the generated document and
@@ -407,8 +456,37 @@ public static class PingEndpoints
             // surface, which is what C-G forbids.
             .ProducesProblem(StatusCodes.Status403Forbidden, MediaTypeNames.Application.ProblemJson)
 
+            // 🔴 THE TWO STATUSES THIS ROUTE PRODUCES WITHOUT ANY CODE IN THIS FILE, AND BOTH WERE
+            // UNDECLARED HERE.
+            //
+            // 429 comes from the ingress request bound, which applies to every route but /health
+            // [Composition/IngressHardening.cs] - the authored contract already declared it on this
+            // operation, so the GENERATED document was the one disagreeing, and a consumer reading the two
+            // side by side saw a status appear and disappear depending on which it read.
+            //
+            // 500 was declared in NEITHER document, and it is reachable upstream of the handler: this route
+            // is authenticated, so the bearer handler must obtain the issuer's key set first, and a
+            // retrieval that fails with no last-known-good configuration cached faults inside the
+            // authentication middleware. The exception handler answers that as 500 with a problem document
+            // [Program.cs - UseExceptionHandler, ClassifyFailure]. /health declares no 500 and correctly
+            // does not: it is anonymous, so no key set is needed to reach it, and its own handler converts
+            // every fault into a degraded entry and a 503 rather than letting one escape.
+            //
+            // AND 503 IS DELIBERATELY NOT DECLARED HERE, which is the other half of the same rule. On a
+            // projected route 503 is a gRPC Unavailable - an upstream answering that it is not currently
+            // serving - and this operation calls no upstream. The ingress layer produces no 503 either: the
+            // limiter's rejection status is 429 and only 429. Declaring it would be this same defect with
+            // its sign reversed, a status a generated client must branch on and can never receive, so the
+            // closed set for this operation is {200, 401, 403, 429, 500}.
+            .ProducesProblem(
+                StatusCodes.Status429TooManyRequests,
+                MediaTypeNames.Application.ProblemJson)
+            .ProducesProblem(
+                StatusCodes.Status500InternalServerError,
+                MediaTypeNames.Application.ProblemJson)
+
             // The parts of the contract that endpoint metadata alone cannot express: the specification
-            // extension, the two response descriptions and the bearer security requirement.
+            // extension, the four response descriptions and the bearer security requirement.
             .AddOpenApiOperationTransformer(ApplyContractMetadataAsync);
 
         return endpoints;
@@ -539,6 +617,18 @@ public static class PingEndpoints
             && unauthorized is OpenApiResponse unauthorizedResponse)
         {
             unauthorizedResponse.Description = UnauthorizedResponseDescription;
+        }
+
+        if (operation.Responses.TryGetValue(TooManyRequestsStatusKey, out IOpenApiResponse? busy)
+            && busy is OpenApiResponse busyResponse)
+        {
+            busyResponse.Description = TooManyRequestsResponseDescription;
+        }
+
+        if (operation.Responses.TryGetValue(InternalErrorStatusKey, out IOpenApiResponse? internalError)
+            && internalError is OpenApiResponse internalErrorResponse)
+        {
+            internalErrorResponse.Description = InternalErrorResponseDescription;
         }
     }
 

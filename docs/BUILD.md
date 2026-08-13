@@ -390,7 +390,21 @@ or CI step defined in this document reads it as an input, writes to it, or requi
   reference. They are not edited, translated, re-encoded, renamed or link-rewritten. This document is
   purely additive alongside them.
 
-### 1.6 Deviations from the attached environment's setup instructions
+### 1.6 Deviation register
+
+**Everything the delivered build does differently from a document that governs it is listed in this one
+place.** Two documents govern it and they are not interchangeable, so the register is in two parts:
+§1.6.1 for the attached environment's setup instructions, and §1.6.2 for the frozen migration plan. A
+divergence recorded in neither is a divergence nobody signed off, which is exactly the failure mode this
+section exists to make impossible.
+
+**The test applied to every entry below, both parts.** A deviation is recorded when a document's
+instruction and a binding constraint cannot both be satisfied, or when the delivered artifact is
+demonstrably larger or safer than the frozen one. It is never recorded merely because another form was
+more convenient, and recording one is never a substitute for the sign-off it exists to prompt: each entry
+names what a human owner has to decide, where that decision is theirs.
+
+#### 1.6.1 Deviations from the attached environment's setup instructions
 
 The attached environment's setup instructions are **binding operational constraints** (C-L), so every
 place the delivered build departs from them is enumerated here rather than left for a reader to discover
@@ -412,9 +426,42 @@ directory and its install-and-run path (§9), and the read-only status of the le
 **Neither deviation is a choice this build made to be different.** Each is a consequence of a requirement
 the instructions and the plan both impose — RS256 with an anonymously published key set, and an
 authenticated transport on every new boundary (C-G) — so honouring the instruction literally would break
-the requirement it exists to serve. That is the test applied to both: a deviation is documented when the
-instruction and the constraint cannot both be satisfied, never merely because another form was more
-convenient.
+the requirement it exists to serve.
+
+#### 1.6.2 Deviations from the frozen migration plan
+
+The migration plan is **frozen** and is the authorization for this work, so the delivered tree is aligned
+to it rather than the other way round. Five places it is nevertheless not aligned are recorded here. Each
+is a case where the delivered artifact is **larger or safer than the plan's own figure**, not a case where
+a requirement was reinterpreted: no plan requirement is unmet by any entry below, and none of the five
+changes a behaviour the plan specifies.
+
+They are gathered here because the alternative was demonstrated: each of the five was individually
+justified **in the file that carries it** — in a `Directory.Packages.props` comment, in a
+`Directory.Build.props` header, in §16 of this document — and a reviewer reading the plan's register still
+had no way to see that the delivered set was not the approved set. An in-place justification tells you why
+a thing is defensible; only a register tells you that it is a deviation at all.
+
+| # | What the plan declares | What is delivered | Why, and what a human owner must decide |
+| --- | --- | --- | --- |
+| **D8** | §0.5.1 declares **15** NuGet packages, and the B1 review ordered the removal of a sixteenth | **16.** The extra is `Microsoft.OpenApi.YamlReader` 2.11.0, pinned centrally at `Directory.Packages.props:249` | It is the **regression guard on the mandatory `Microsoft.OpenApi` 2.11.0 pin** — the pin that fails restore if lowered (`NU1903`) and fails compilation if raised (`CS0200`, §11.1). Without a YAML reader, the two authored OpenAPI documents are parsed by no test and that pin has no guard. **The addition is bounded, and each bound is why it is safe:** referenced by exactly one project (`shared/PowerFramework.Contracts.Tests`), so it reaches no service and no container image; exactly version-locked to the mandatory pin, so it cannot move it in either direction; adds exactly one assembly, `SharpYaml`, carrying no advisory at this version. **Removal costs the validation and nothing else** — that is the trade an owner is choosing between. The earlier local `VersionOverride` was removed; this is a central pin, which is the mechanism §3.2 requires |
+| **D9** | §0.5.1 names SDK **10.0.302** and platform runtimes **10.0.10** | `global.json` pins SDK **10.0.303**; the **six** platform package pins are at **10.0.11**; the container base images carry the matching `10.0.11` tags | **10.0.11 is the 2026-08-11 security release, and the platform it fixes is 10.0.10** — so honouring the plan's figure would ship a knowingly vulnerable platform, which is CWE-1104. Advancing a patch level inside one feature band is maintenance rather than a change of dependency, and the three coordinates that carry a platform release move together or not at all (`Directory.Packages.props:57-70`). Verified rather than asserted: `dotnet list package --vulnerable` reports **20 of 20 projects clean**. The six pins are `Microsoft.AspNetCore.OpenApi`, `Microsoft.AspNetCore.Authentication.JwtBearer`, `Microsoft.EntityFrameworkCore.Sqlite`, `Microsoft.EntityFrameworkCore.Design`, `Microsoft.Data.Sqlite` and `Microsoft.AspNetCore.Mvc.Testing`. **The owner decides only whether to record the move, not whether to make it.** Separately, the three MSBuild behaviours `Directory.Build.props` records as measured were **re-measured on 10.0.303** and now name both SDKs, and its header no longer repeats an SDK version at all — `global.json` is the single authority, two files away |
+| **D10** | §0.5.1's npm table declares **one** devDependency, `@playwright/test 1.62.1`; §0.3.1 names seven `tests/e2e` paths | **Three** devDependencies — `@playwright/test 1.62.1`, `@types/node 22.20.1`, `typescript 5.9.3` — across **23** tracked files | The `typecheck` script runs `tsc --noEmit`, so **the compiler and the Node ambient declarations are what make the type-check gate exist at all**; without them the gate is a script that cannot run. All three are development-only — there is no `dependencies` block, so nothing reaches a container image — and all three are **exact pins** backed by the committed lockfile's integrity hashes. The 23 files are the plan's own entries expanded, not new categories: it writes `specs/*.spec.ts` (6 files), `fixtures/` (9), and the config, manifest, lockfile and README, to which the delivered tree adds `.gitignore`, `global-setup.ts`, `tsconfig.json` and one identity-provisioning script. **This declaration is enforced, not merely written:** `E2eManifestGuardTests.TheDevelopmentDependencySetIsExactlyTheApprovedThreeAndEachIsExactlyPinned` fails on a fourth dependency, on the removal of an approved one, and on any version that is not a bare exact pin |
+| **D11** | §0.2.1.1: root `README.md` is "**the single UPDATE in the entire refactor**"; §0.4.5.5: "**No `.gitignore` change is required**" | **Two** UPDATEs — `README.md` and `.gitignore`. Group 1 of §16.3 is consequently 9 files: 7 CREATE + 2 UPDATE | **The plan's claim was tested and is refuted by the checkout.** `bin/` and `obj/` were excluded only by `.git/info/exclude`, which is per-clone and is **not cloned**, so a fresh clone plus `dotnet build` left a **dirty** `git status` — contradicting C-I's clean-checkout premise and putting the `hygiene` job's `git diff --check` leg at the mercy of build output. `tests/e2e/.gitignore` already commits `node_modules/` for the npm side, so the .NET side was an omission rather than a policy. **The edit is purely additive**: every pre-existing pattern is preserved byte for byte and the new block is appended, so the pre-existing `/pack/*` inconsistency §0.4.5.5 describes is left exactly as it was. This is the one entry in this table that **changes a file the plan says not to change**, which is why it is stated as a refutation with its evidence rather than as a preference |
+| **D12** | A checkpoint manifest declares **338** targets (337 CREATE + 1 UPDATE, no DELETE) | **570** measured (568 CREATE + 2 UPDATE) — §16.2 | **The two artifacts count different things**: the manifest enumerates *files* while the plan enumerates *trees*, and the plan additionally requires a test project per shippable project (C-H's per-service coverage gate) and independent per-service builds (C-I). Those requirements have a file cost the manifest's list never enumerated. It is **not** scope creep, and that is measured rather than argued: every one of the 570 paths classifies into a group the plan declares, §16.3 reports **zero unclassified**, and none lies inside the read-only legacy tree. **Status: OPEN, and it is the one entry here that a document cannot close** — §16.7 sets out the two directions and what each forfeits. It is listed in this register because the largest divergence in the tree should not be visible only to a reader who reaches §16 |
+
+**Why CI does not catch D12, stated so nobody assumes it does.** The `hygiene` job's target-scope audit is
+**group-level**: it asserts *where* a file may live — nothing outside a declared group, nothing inside the
+legacy tree — and never *which* files were planned. That is deliberate, and §16.6 gives the reason: a
+pinned total would fail on the next legitimate file and would then be bumped or deleted without thought,
+which is how the 338 came to be stale in the first place. So the audit passing is not evidence that the
+inventory matches a manifest, and this register is the only place the difference is visible.
+
+**What is NOT in this register, and why that is not an omission.** Fixes that bring the tree back into
+compliance with the plan are not deviations from it — restoring strict JSON to the six `appsettings` files
+and `tests/e2e/tsconfig.json` (the plan requires pure JSON explicitly, §0.4.2.3), declaring on each
+projected operation every status its own mapping can produce, and gating identifier interpolation in the
+persistence write path all move the tree *toward* the plan. They are recorded where the code is, not here.
 
 ---
 
@@ -1752,6 +1799,16 @@ there are no private or internal feeds** in this refactor.
 | npmjs.org | `typescript` | 5.9.3 | The `npm run typecheck` gate — `tsc --noEmit`. **Deliberately the 5.x line, not `latest`**: 5.9.3 is the mature compiler, whereas the current `latest` is the 7.x native rewrite, which `@playwright/test` 1.62.1's own type definitions are not validated against |
 | npmjs.org | `@types/node` | 22.20.1 | Node globals for the type gate — the endpoint fixtures read `process.env`. **Deliberately the 22.x line to match the Node 22 runtime**; the 26.x line would type-check against APIs the runtime does not have |
 
+**Three entries above are larger than the frozen migration plan's dependency inventory, and all three are
+declared deviations.** The plan's §0.5.1 declares **15** NuGet packages and **one** npm entry; this table
+reports **16** and **three**. The extra NuGet package is `Microsoft.OpenApi.YamlReader`, which exists to give
+the mandatory `Microsoft.OpenApi` pin a regression guard — §1.6.2 **D8**. The two extra npm entries are
+`typescript` and `@types/node`, without which the `typecheck` gate is a script that cannot run — §1.6.2
+**D10**, which is additionally enforced by `E2eManifestGuardTests`. The SDK and platform patch level differ
+from the plan's 10.0.302/10.0.10 for the CVE reason stated at the head of this section — §1.6.2 **D9**. This
+paragraph is a cross-reference and not a second register: the reasons live in §1.6.2, so there is one place
+to read them and one place to keep current.
+
 **Container images:**
 
 | Stage | Image |
@@ -2280,11 +2337,19 @@ The distinction matters because the measurement and the authorization **do not c
 §16.7 states that disagreement as an open governance item rather than resolving it in prose. In outline:
 a checkpoint manifest declared **338** targets — 337 CREATE plus the one `README.md` UPDATE, and no
 DELETE — against a literal wildcard scope that already held **520** tracked ones, and the delivered tree
-now measures **534**. The gap is not a set of files that belong to nothing: every path below classifies
+now measures **570**. The gap is not a set of files that belong to nothing: every path below classifies
 into a group the migration plan declares, and §16.3 reports zero unclassified. It is the manifest
 enumerating files while the plan enumerates **trees**, so each test project and shared-library helper the
 build and the coverage gate depend on is inside the plan's scope and outside the manifest's list. That is
-a reconciliation a human owner has to make, in one of the two directions §16.7 sets out.
+a reconciliation a human owner has to make, in one of the two directions §16.7 sets out. The divergence is
+additionally carried in the deviation register as **D12** (§1.6.2), so that a reader who never reaches this
+section still sees it.
+
+**The UPDATE count is now two, not one, and that is its own declared deviation.** `README.md` is joined by
+`.gitignore`, which this refactor amends to commit the `bin/` and `obj/` exclusions that were previously
+carried only by a per-clone `.git/info/exclude` — so a fresh clone plus `dotnet build` no longer leaves a
+dirty tree. §1.6.2 **D11** records that against the plan's "single UPDATE" statement with the evidence that
+refuted it. Every pre-existing pattern in the file is preserved byte for byte.
 
 ### 16.1 How these numbers are produced
 
@@ -2298,7 +2363,7 @@ BASE=a80ac35
 # Operation counts against that baseline. A = CREATE, M = UPDATE, D = DELETE.
 git diff --name-status "$BASE" HEAD | awk '{print $1}' | sort | uniq -c
 
-# The one and only UPDATE in the whole refactor.
+# Every UPDATE in the whole refactor. There are two: README.md and .gitignore (1.6.2 D11).
 git diff --name-status "$BASE" HEAD | awk '$1=="M"{print $2}'
 
 # Files authored but not yet committed, excluding build output and scratch.
@@ -2315,15 +2380,19 @@ wrong by thousands of files. That is a property of this checkout worth stating r
 | Quantity | Count |
 | --- | ---: |
 | Tracked files at the pre-refactor baseline `a80ac35` | 934 |
-| Tracked files at `HEAD` | 1467 |
-| **CREATE** vs baseline | **533** |
-| **UPDATE** vs baseline — `README.md`, and nothing else | **1** |
+| Tracked files at `HEAD` | 1502 |
+| **CREATE** vs baseline | **568** |
+| **UPDATE** vs baseline — `README.md` and `.gitignore`, and nothing else | **2** |
 | **DELETE** vs baseline | **0** |
 | Authored, not yet committed | 0 |
-| **Total target files** | **534** |
+| **Total target files** | **570** |
 
-533 + 1 + 0 = 534, and 934 + 533 = 1467, so the operation counts and the tracked totals close against
+568 + 2 + 0 = 570, and 934 + 568 = 1502, so the operation counts and the tracked totals close against
 each other independently.
+
+**Both UPDATE paths are named in the row above rather than counted**, because an UPDATE touches a file that
+existed before this refactor and the plan authorizes exactly one of them. The second, `.gitignore`, is
+declared as deviation **D11** in §1.6.2 with the `git check-ignore` evidence that made it necessary.
 
 **`DELETE` is zero against the baseline, and that is the measurement that matters for constraint C-C**:
 the .NET tree is purely additive, created alongside the read-only legacy tree in the same checkout, and
@@ -2339,22 +2408,30 @@ for sign-off rather than as a decision this document took.
 
 | # | Group | Files | CREATE | UPDATE | Not yet committed |
 | ---: | --- | ---: | ---: | ---: | ---: |
-| 1 | Root build and solution plumbing | 8 | 7 | 1 | 0 |
-| 2 | Continuous integration | 1 | 1 | 0 | 0 |
+| 1 | Root build and solution plumbing | 9 | 7 | 2 | 0 |
+| 2 | Continuous integration | 2 | 2 | 0 | 0 |
 | 3 | Orchestration | 3 | 3 | 0 | 0 |
 | 4 | Documentation (authored) | 7 | 7 | 0 | 0 |
-| 5 | Shared libraries and contracts | 126 | 126 | 0 | 0 |
-| 6 | Gateway service | 46 | 46 | 0 | 0 |
-| 7 | DataServices service | 112 | 112 | 0 | 0 |
-| 8 | Persistence service | 126 | 126 | 0 | 0 |
-| 9 | Security service | 62 | 62 | 0 | 0 |
+| 5 | Shared libraries and contracts | 128 | 128 | 0 | 0 |
+| 6 | Gateway service | 52 | 52 | 0 | 0 |
+| 7 | DataServices service | 120 | 120 | 0 | 0 |
+| 8 | Persistence service | 133 | 133 | 0 | 0 |
+| 9 | Security service | 73 | 73 | 0 | 0 |
 | 10 | End-to-end tests | 23 | 23 | 0 | 0 |
 | 11 | Characterization | 20 | 20 | 0 | 0 |
-| | **Total** | **534** | **533** | **1** | **0** |
+| | **Total** | **570** | **568** | **2** | **0** |
 
-**Nothing is unclassified.** Every one of the 534 paths falls into exactly one group above, and every
+**Nothing is unclassified.** Every one of the 570 paths falls into exactly one group above, and every
 group corresponds to an entry in the migration plan's target structure. A path that matched no group would
 be reported as scope creep; the classifier finds none.
+
+**Group 1 is nine rather than eight, and group 2 is two rather than one.** Group 1 gained the `.gitignore`
+UPDATE of §1.6.2 D11. Group 2's second file is `.github/workflows/requirements/check-jsonschema.txt`, the
+**hash-locked** Python closure the `hygiene` job installs with `pip install --require-hashes` before it
+validates the characterization workflow definitions against their schema. Naming the tool inline pinned one
+distribution and let pip resolve fourteen more from whatever was current; the lock names every one with
+`==` and the SHA-256 of every file pip may select, which is the discipline `Directory.Packages.props`
+applies to NuGet applied to the one non-.NET tool CI runs.
 
 **No target path lies inside the read-only legacy tree.** `ws_objects/**`, `oldversion/125/**`, `pack/**`,
 `res/**`, `samples/**`, `sciter_control/**`, `tests/blink|sciter|webview/**` and the five pre-existing
@@ -2370,19 +2447,19 @@ buildable (constraint C-I).
 | Project | Files |
 | --- | ---: |
 | `services/gateway-service` (service root) | 2 |
-| `services/gateway-service/PowerFramework.Gateway` | 18 |
-| `services/gateway-service/PowerFramework.Gateway.Tests` | 26 |
+| `services/gateway-service/PowerFramework.Gateway` | 21 |
+| `services/gateway-service/PowerFramework.Gateway.Tests` | 29 |
 | `services/dataservices-service` (service root) | 2 |
-| `services/dataservices-service/PowerFramework.DataServices` | 44 |
-| `services/dataservices-service/PowerFramework.DataServices.Tests` | 66 |
+| `services/dataservices-service/PowerFramework.DataServices` | 49 |
+| `services/dataservices-service/PowerFramework.DataServices.Tests` | 69 |
 | `services/persistence-service` (service root) | 2 |
-| `services/persistence-service/PowerFramework.Persistence` | 58 |
-| `services/persistence-service/PowerFramework.Persistence.Tests` | 66 |
+| `services/persistence-service/PowerFramework.Persistence` | 62 |
+| `services/persistence-service/PowerFramework.Persistence.Tests` | 69 |
 | `services/security-service` (service root) | 2 |
-| `services/security-service/PowerFramework.Security` | 24 |
-| `services/security-service/PowerFramework.Security.Tests` | 36 |
+| `services/security-service/PowerFramework.Security` | 27 |
+| `services/security-service/PowerFramework.Security.Tests` | 44 |
 | `shared/PowerFramework.Contracts` | 6 |
-| `shared/PowerFramework.Contracts.Tests` | 29 |
+| `shared/PowerFramework.Contracts.Tests` | 31 |
 | `shared/PowerFramework.Shared.Kernel` | 10 |
 | `shared/PowerFramework.Shared.Kernel.Tests` | 10 |
 | `shared/PowerFramework.Shared.Diagnostics` | 6 |
@@ -2393,15 +2470,22 @@ buildable (constraint C-I).
 | `shared/PowerFramework.Shared.Localization.Tests` | 16 |
 | `shared/PowerFramework.Shared.Containers` | 3 |
 | `shared/PowerFramework.Shared.Containers.Tests` | 4 |
-| | **472** |
+| | **506** |
 
 This table is a breakdown of **groups 5–9 only** — the four services and the seven shared projects — and it
-sums to 472: Gateway 46, DataServices 112, Persistence 126, Security 62 and shared 126. Every remaining
-target file sits outside any .NET project: 8 root files, 1 CI workflow, 3 orchestration files, 7 authored
-documents, 23 end-to-end files and 20 characterization files, which is 62. 472 + 62 = **534**, closing
+sums to 506: Gateway 52, DataServices 120, Persistence 133, Security 73 and shared 128. Every remaining
+target file sits outside any .NET project: 9 root files, 2 CI files, 3 orchestration files, 7 authored
+documents, 23 end-to-end files and 20 characterization files, which is 64. 506 + 64 = **570**, closing
 against §16.2 and §16.3.
 
-### 16.5 The eight root files, named
+**In nine of the ten project pairs the test project carries more files than the production project it
+exercises.** That is the shape C-H's per-service 80% line-coverage gate produces, and it is worth reading as
+confirmation rather than as bloat. The single exception is `Shared.Kernel`, at 10 and 10: it is a small,
+pure-algebra library whose behaviour is exercised by table-driven theories rather than by one suite per
+subject. This ratio is also the mechanical reason the delivered inventory exceeds the manifest's 338 —
+§16.7 and §1.6.2 D12.
+
+### 16.5 The nine root files, named
 
 | File | Operation | Why it is a target |
 | --- | --- | --- |
@@ -2412,13 +2496,22 @@ against §16.2 and §16.3.
 | `.editorconfig` | CREATE | Carries the analyzer suppressions that let the legacy `SCREAMING_SNAKE` constant identifiers be preserved verbatim |
 | `.dockerignore` | CREATE | Layer hygiene that doubles as a secrets control — §7.3 |
 | `NOTICE` | CREATE | BSD-2-Clause, its four-condition Chinese restatement and the eleven upstream attributions |
-| `README.md` | **UPDATE** | The single UPDATE in the entire refactor. Its pre-existing licence text and Chinese restatement are preserved verbatim, whitespace included |
+| `README.md` | **UPDATE** | The plan's authorized UPDATE. Its pre-existing licence text and Chinese restatement are preserved verbatim, whitespace included |
+| `.gitignore` | **UPDATE** | The second UPDATE, and a declared deviation — §1.6.2 **D11**. A committed block appends `bin/`, `obj/`, `TestResults/` and the four npm and Playwright output directories, because those were excluded only by a per-clone `.git/info/exclude` that is not cloned. Every pre-existing pattern is preserved byte for byte, including the `/pack/*` rule the plan describes as an inconsistency to leave alone |
 
-**There is deliberately no ninth root file, and the eight above are the eight the migration plan
-enumerates.** The plan's target structure names the repository-root files one by one — the solution, the
-two `Directory.*` files, `global.json`, `.dockerignore`, `.editorconfig`, `NOTICE` and the `README.md`
-UPDATE — and that enumeration is exhaustive rather than illustrative. A root file the plan does not name
-is therefore not in scope, which is the standard the ninth file was judged against.
+**No root file is CREATED beyond the eight the migration plan enumerates.** The plan's target structure
+names the repository-root files one by one — the solution, the two `Directory.*` files, `global.json`,
+`.dockerignore`, `.editorconfig`, `NOTICE` and the `README.md` UPDATE — and that enumeration is exhaustive
+rather than illustrative. A root file the plan does not name is therefore not in scope, which is the standard
+the withdrawn ninth CREATE below was judged against.
+
+**`.gitignore` is the one root path this refactor touches that the plan's enumeration does not contain, and
+it is an UPDATE rather than a CREATE.** It existed before the refactor — it is a legacy-era file, and it is
+not inside the read-only boundary §1.5 draws — so amending it adds no root artifact and removes nothing.
+The plan states that no change to it is required; that statement was tested against the checkout and is
+refuted by `git check-ignore -v`, which reported the `obj/` exclusion coming from `.git/info/exclude` alone.
+§1.6.2 **D11** carries that as a declared deviation with the evidence, rather than this section carrying it
+as a rationale.
 
 **The withdrawal of `coverage.runsettings`, stated as the divergence it is rather than only as a design
 decision.** An earlier revision of this refactor created a `coverage.runsettings` at the repository root
@@ -2445,9 +2538,10 @@ and a later one removed it. Three facts about that, in the order a reviewer need
    rationale as the authorization.
 
 The answer to the 338/520 question is separate from all of the above: it is the **test projects and
-shared-library helpers** that made up the 182 — each either exercised by the build, required by the
-coverage gate, or required by C-I's "each service builds and tests independently from a clean checkout" —
-and not a root-level helper.
+shared-library helpers** that made up the 182 at the time that figure was taken — each either exercised by
+the build, required by the coverage gate, or required by C-I's "each service builds and tests independently
+from a clean checkout" — and not a root-level helper. The same explanation holds for the wider 338/570 gap
+§16.7 now measures, and §16.4's project pairs are where it is visible file by file.
 
 ### 16.6 What keeps this section honest
 
@@ -2484,9 +2578,9 @@ this section.
 
 | | Authorized | Delivered and measured |
 | --- | ---: | ---: |
-| Target files | **338** | **534** (§16.2) |
-| CREATE | 337 | 533 |
-| UPDATE | 1 (`README.md`) | 1 (`README.md`) |
+| Target files | **338** | **570** (§16.2) |
+| CREATE | 337 | 568 |
+| UPDATE | 1 (`README.md`) | **2** (`README.md`, `.gitignore` — §1.6.2 D11) |
 | DELETE | 0 | 0 against the pre-refactor baseline; **3** against an intermediate commit — enumerated below |
 
 **The three intra-refactor withdrawals, named with what justifies each.** All three were created by this
@@ -2504,7 +2598,7 @@ Two of the three are therefore themselves scope-alignment actions rather than sc
 surface that widened a frozen contract, and a suite whose subject was removed with it.
 
 **What is NOT the explanation.** Not scope creep, and that is measured rather than argued: every one of
-the 534 paths classifies into a group the migration plan declares, §16.3 reports **zero unclassified**, and
+the 570 paths classifies into a group the migration plan declares, §16.3 reports **zero unclassified**, and
 the `hygiene` job fails the build if that ever stops being true. No delivered file traces to a directory
 the plan does not describe, and none lies inside the read-only legacy tree.
 
@@ -2516,9 +2610,9 @@ So the two artifacts are counting different things, and neither is wrong about t
 
 **The two directions this can be closed in, both of which are a human's to choose:**
 
-- **Extend the manifest** to the plan's tree-level scope, recording 534 with the derivation of §16.1, and
-  amend it to record the one withdrawal of §16.5. This is the direction the delivered tree already assumes,
-  which is exactly why it needs explicit sign-off rather than silence.
+- **Extend the manifest** to the plan's tree-level scope, recording 570 with the derivation of §16.1, and
+  amend it to record the one withdrawal of §16.5 and the second UPDATE of §1.6.2 D11. This is the direction
+  the delivered tree already assumes, which is exactly why it needs explicit sign-off rather than silence.
 - **Reduce the tree to the 338 enumerated files.** This is stated as an option because it is one, not
   because it is free: the files outside the manifest's list are predominantly test projects and their
   helpers, so removing them would forfeit the per-service 80% coverage gate (C-H), break "each service

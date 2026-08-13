@@ -397,7 +397,34 @@ public sealed class KeyStoreReadinessTests
     private sealed class RecordingLoggerProvider : ILoggerProvider
     {
         /// <summary>Every record written through this provider, in order.</summary>
-        internal List<LogRecord> Records { get; } = [];
+        private readonly List<LogRecord> _records = [];
+
+        /// <summary>A snapshot of every record, in arrival order.</summary>
+        /// <remarks>
+        /// THE APPEND WAS ALREADY LOCKED AND THE READ WAS NOT, which leaves an enumeration racing a writer -
+        /// the half of the hazard that actually throws. This provider is installed into a running host, so
+        /// the read copies under the same monitor the append takes.
+        /// </remarks>
+        internal IReadOnlyList<LogRecord> Records
+        {
+            get
+            {
+                lock (_records)
+                {
+                    return [.. _records];
+                }
+            }
+        }
+
+        /// <summary>Appends one record.</summary>
+        /// <param name="record">The record to append.</param>
+        internal void Add(LogRecord record)
+        {
+            lock (_records)
+            {
+                _records.Add(record);
+            }
+        }
 
         /// <inheritdoc />
         public ILogger CreateLogger(string categoryName) => new RecordingLogger(this, categoryName);
@@ -430,10 +457,7 @@ public sealed class KeyStoreReadinessTests
             {
                 ArgumentNullException.ThrowIfNull(formatter);
 
-                lock (owner.Records)
-                {
-                    owner.Records.Add(new LogRecord(category, logLevel, formatter(state, exception)));
-                }
+                owner.Add(new LogRecord(category, logLevel, formatter(state, exception)));
             }
         }
     }

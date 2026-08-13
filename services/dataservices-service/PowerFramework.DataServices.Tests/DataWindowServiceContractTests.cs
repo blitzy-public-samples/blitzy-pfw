@@ -2269,7 +2269,13 @@ public sealed class DataWindowServiceContractTests
     [InlineData(WireRetCode.ENoSupport, StatusCode.Unimplemented)]
     [InlineData(WireRetCode.ENoImplementation, StatusCode.Unimplemented)]
     [InlineData(WireRetCode.ETimeOut, StatusCode.DeadlineExceeded)]
-    [InlineData(WireRetCode.ERetry, StatusCode.ResourceExhausted)]
+    // 🔴 E_RETRY IS Aborted AND NOT ResourceExhausted, and this row is where that was wrong. It sat in
+    // the capacity group beside E_BUSY, so one upstream code left this service as 429 here and as 409
+    // from the sibling BuildUpstreamFailure - two statuses for one event, decided by which helper
+    // happened to raise it. The published contract makes Aborted -> 409 the concurrency answer and
+    // E_BUSY -> 429 the capacity answer, and both projection suites already assert that pair, so the
+    // direction is the contract's rather than this row's.
+    [InlineData(WireRetCode.ERetry, StatusCode.Aborted)]
     [InlineData(WireRetCode.EOutOfMemory, StatusCode.ResourceExhausted)]
 
     // AND THE TWO THAT MUST STAY Internal, because the default arm's own reasoning applies to them: the

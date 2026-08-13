@@ -1004,6 +1004,63 @@ is a preference dressed as a rule.
 | **Nothing added to `PowerFramework.slnx`** | This is an npm and Playwright project, not an MSBuild one. The root solution correctly enumerates exactly **twenty** .NET projects and excludes this suite, mentioning it only in a comment noting that it is driven by its own tooling |
 | **`npm test` rather than `npx playwright test` in the documented path** | A supply-chain reason, recorded in [§3.2](#32-the-full-run--this-one-needs-a-running-stack-and-an-issuance-identity): `npx` will acquire a package when no local binary is present, which is exactly the state a failed install leaves behind |
 | **A separate `typecheck` script** | `--list` collects without type-checking, so the type check has to be its own gate. `npm run verify` runs both and is everything that can be verified with no stack running |
+| **`tsconfig.json` is strict RFC 8259 JSON, with no comments** | TypeScript reads JSONC, so comments there are legal and were used — and the repository now holds every committed JSON artifact to a strict parse with no carve-out, because a gate with one documented exception is a gate future files can hide behind. The rationale each flag carried moved here, to [§9.1](#91-the-type-check-gate-every-tsconfigjson-flag-and-why-it-is-set), which is where a contributor to this directory reads |
+
+### 9.1 The type-check gate: every `tsconfig.json` flag and why it is set
+
+**Without this file there is no type check of this directory at all.** `playwright test` transpiles each
+spec with Babel and **deliberately performs no type checking** — it strips the types and runs the
+JavaScript — so a spec that reads a misspelled export, passes a string where a number is required, or
+ignores a possibly-undefined value runs happily and fails, if at all, as a confusing runtime error against
+a live stack. `playwright test --list` does not close that gap either: it loads and collects the files,
+which catches a syntax error or a missing module, and catches nothing else. The type check is therefore a
+**separate gate**, run as `npm run typecheck`, and it is the only mechanism in this directory that reads
+the types the fixtures so carefully declare.
+
+**No emit, ever.** This project produces no JavaScript. Playwright owns the transform at run time, so a
+second compiled copy of every spec would be an untracked artifact that could drift from its source and be
+run by accident. `noEmit` is not a convenience — it is what keeps the transform in exactly one place.
+
+**Why every extra strictness flag is here.** The project has no user-specified rules — the rules document
+contains exactly one line stating that none were provided — so the enterprise-standard baseline applies in
+their place, and on the .NET side of this repository that baseline is `Nullable` enabled with
+`TreatWarningsAsErrors`. The nearest equivalent available here is `strict` plus the additional checks
+below, so this file is the TypeScript counterpart of that setting rather than a looser local choice.
+
+| Flag | The mistake it catches |
+| --- | --- |
+| `target: ES2023`, `lib: [ES2023]` | The runtime this suite actually runs on. Node 22 is an LTS line and is what `engines` in the sibling `package.json` requires, so targeting and libbing it means the type checker models the same platform the runner uses rather than a hypothetical older one |
+| `module`/`moduleResolution: NodeNext` | Node's own module resolution as Node 20+ implements it, which is what Playwright's loader uses. `nodenext` rather than `bundler` because there is no bundler anywhere in this suite |
+| `noEmit: true` | See above — a containment decision, not a convenience |
+| `types: ["node"]` | Node's platform types, which is what makes `process.env` a known symbol. Naming the set explicitly rather than letting every package under `node_modules/@types` load implicitly keeps the ambient surface auditable: only Node's types and whatever a spec imports by name are in scope |
+| `strict: true` | The whole strict family, matching the .NET side's nullable-plus-warnings-as-errors posture |
+| `noUncheckedIndexedAccess` | An indexed read yields `T \| undefined`. This is the flag that turns "the payload had no such field" from a silent `undefined` flowing onward into a compile error **at the point of the read** — the exact class of defect the capability fixture's own domain guard exists to catch at run time |
+| `noPropertyAccessFromIndexSignature` | A property read through an index signature must be written as one, so a misspelled dotted access cannot silently resolve to `any` |
+| `noUnusedLocals`, `noUnusedParameters` | A dead local or an unused parameter in a spec is nearly always a partly finished assertion, so both are errors rather than hints |
+| `noImplicitReturns`, `noFallthroughCasesInSwitch` | Every branch of a function that returns a value must return one, and a `switch` case may not fall through implicitly. Both are silent-wrong-answer bugs rather than crashes, which is what makes them worth failing the build over |
+| `noImplicitOverride` | `override` must be written where it applies, and a class field that shadows a base accessor is an error rather than a surprise |
+| `exactOptionalPropertyTypes` | An optional property may be absent, but it may not be explicitly `undefined` — so an absent field and a present-but-undefined field stay distinguishable. That distinction is load-bearing in this repository: the published contracts use an explicit "unspecified" marker precisely because absence and a zero value mean different things |
+| `useUnknownInCatchVariables` | A caught value is `unknown`, so an error has to be narrowed before its message is read. The fixtures already throw typed errors and the specs assert on them; this keeps that honest |
+| `isolatedModules` | Every file must be independently transformable. This is the flag that matches Playwright's actual mechanism: it hands each spec to Babel one file at a time with no whole-program knowledge, so a construct that needs cross-file type information to lower correctly — a re-export of something that turns out to be a type, say — would transpile to something subtly wrong. `isolatedModules` rejects exactly those constructs |
+| `forceConsistentCasingInFileNames` | Case-sensitive imports, matching the Linux container this runs in |
+| `esModuleInterop`, `allowSyntheticDefaultImports`, `resolveJsonModule`, `skipLibCheck` | Interop settings that let the CommonJS-shaped Playwright entry point be imported by name |
+
+**`verbatimModuleSyntax` is deliberately NOT set, and the reason is measured rather than assumed.** The
+sibling `package.json` declares no `"type": "module"`, so Node — and therefore TypeScript under
+`NodeNext` — treats every `.ts` file here as CommonJS. With `verbatimModuleSyntax` enabled, the
+`import`/`export` syntax these files are authored in becomes an error (TS1287 and TS1295, **31 of them**
+across the two fixtures and the runner config). That syntax is correct as written: Playwright transpiles
+each file to CommonJS at load time, which is its documented arrangement. The two ways to satisfy the flag
+would be to add `"type": "module"`, changing how the runner loads every file, or to rewrite the fixtures in
+CommonJS syntax — both are behavioural changes made to satisfy a stylistic check, so neither is done. Every
+other strict flag is on.
+
+**The read-only boundary (C-C) is enforced by `include` and `exclude`.** `include` names only this
+directory's own sources, and `exclude` names `node_modules` and the runner's artifact directories. The
+three sibling directories under `tests/` — `blink`, `sciter` and `webview` — hold read-only
+behavioural-oracle assets, and nothing here may reach them: this file lives inside `tests/e2e`, every path
+in it is relative to it, and no path ascends. **A `../` anywhere in that file would be the one way to break
+that containment by accident.**
 
 ---
 

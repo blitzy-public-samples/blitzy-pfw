@@ -545,9 +545,9 @@ What must appear here exactly as wrong as it appears in the master half:
 
 | Behaviour | What the recording has to show |
 | --- | --- |
-| The three fixture-versus-DDL type mismatches | `address` is `char(200)` in the DataWindow [`dw_sqlite.srd:L11`] against `ADDRESS CHAR(50)` in the DDL [`w_test_sqlite.srw:L467`]; `salary` is `decimal(2)` [`:L12`] against `SALARY REAL` [`:L468`]; `birth` is `date` [`:L13`] against `BIRTH TEXT` [`:L469`]. Reproduce; do not reconcile |
+| The **four** fixture-versus-DDL type mismatches | `name` is `char(100)` in the DataWindow [`dw_sqlite.srd:L9`] against an **unbounded** `NAME TEXT NOT NULL` in the DDL [`w_test_sqlite.srw:L465`], so the bound exists only in the DataWindow; `address` is `char(200)` [`:L11`] against `ADDRESS CHAR(50)` [`:L467`]; `salary` is `decimal(2)` [`:L12`] against `SALARY REAL` [`:L468`]; `birth` is `date` [`:L13`] against `BIRTH TEXT` [`:L469`]. Four of the six columns. Reproduce; do not reconcile |
 | The tri-state return algebra | A prevention reads as a **success**, and cancelled and null are **neither** succeeded nor failed. Record the **numeric** code: the boolean overloads make prevent and failed indistinguishable, so a boolean projection destroys the distinction the pair exists to prove |
-| The four-value item-change alphabet | `{0,1,2,3}`, where case 1 falls through to case 2, case 3 rewrites its result to 1, and the default arm coerces by column type and then **forcibly returns 2**. It is its own alphabet and is never mapped onto the return-code algebra |
+| The four-value item-change alphabet | `{0,1,2,3}`, **four distinct arms**. `case 1` is an EMPTY arm that does **not** fall through [`se_cst_dw.sru:L212`] — PowerScript `choose case` is not a C `switch` — so `1` returns with value and status **untouched**, and the restore belongs to the `ItemValidationError` handler that returning 1 raises. `case 2` restores value and status, but only if the earlier equality test held. `case 3` keeps the value, does not move focus, and rewrites its result to 1. The default arm coerces by column type and then **forcibly returns 2**. A recording in which `1` restores is a port that read the empty arm as a fall-through. It is its own alphabet and is never mapped onto the return-code algebra |
 | The tri-valued broker veto | Prevent-once, prevent-deep, and continue — never flattened to a boolean, because flattening silently converts a deep prevention into a shallow one |
 | The two localization mistranslations | Both reproduced from the resource table. The commented-out pre-resource table that holds the *correct* wording must not be revived — reviving it is the silent correction this rule exists to forbid |
 | The inverted Filter-buffer traversal | It runs **backwards**, because that buffer's row order is inverted relative to the source. It looks like a bug and is not: "correcting" the direction produces wrong identity data that a row-count assertion still passes |
@@ -556,13 +556,19 @@ What must appear here exactly as wrong as it appears in the master half:
 
 That table is the reviewer's summary of what a pair is *for*, not a second catalogue.
 [`docs/PARITY.md`](../../../docs/PARITY.md) §7 is the authoritative catalogue — twelve behaviour groups, each
-with its locators — and [`characterization/README.md`](../../README.md) §5.3 is the store-wide roster. Two
-notes where those authorities are wider than the row above, recorded rather than reconciled:
-[`docs/PARITY.md`](../../../docs/PARITY.md) §3.5 catalogues **four** preserved schema mismatches, adding
-`name` as `char(100)` [`dw_sqlite.srd:L9`] against an unbounded `NAME TEXT NOT NULL` [`w_test_sqlite.srw:L465`],
-where the bound exists only in the DataWindow; and the same section records a fifth row that is **not** a
-mismatch, `id` against `ID INTEGER PRIMARY KEY NOT NULL`, noting that the DDL carries no `AUTOINCREMENT`
-keyword, so rowids of deleted rows are reused and the identity round-trip must not assume monotonicity.
+with its locators — and [`characterization/README.md`](../../README.md) §5.3 is the store-wide roster. The
+rows above now agree with both on every count; where the authorities carry more than a summary row can, it
+is DETAIL rather than a different number, and §3.5 and §7 are where to read it.
+
+**One row the authorities carry that the table above deliberately does not: a fifth schema row that is
+*not* a mismatch.** `id` is `type=number key=yes identity=yes` in the DataWindow [`dw_sqlite.srd:L8`] against
+`ID INTEGER PRIMARY KEY NOT NULL`, and those agree — `INTEGER PRIMARY KEY` aliases the rowid, so SQLite
+assigns a value when none is supplied, which is what `identity=yes` expects. It is named here only because
+the DDL carries **no `AUTOINCREMENT` keyword** while the legacy's own comment beside the column reads
+自增列, "auto-increment column". Without the keyword, assignment follows largest-rowid-plus-one and therefore
+**reuses the rowids of deleted rows**, so a recording of the identity round-trip must not assume
+monotonicity. Adding it to the mismatch table would make the count five and would be wrong;
+[`docs/PARITY.md`](../../../docs/PARITY.md) §3.5 records it the same way, for the same reason.
 
 ---
 
