@@ -667,14 +667,34 @@ internal sealed class CommandTaskRegistry
     /// [<see cref="CommandTask.Dispose"/>], so an abandoned task's teardown is identical to a released
     /// one's - proxy before worker, because the proxy borrows the worker's commit signal.
     /// </remarks>
-    internal int ReclaimIdle(DateTimeOffset now, TimeSpan window)
+    internal int ReclaimIdle(
+        DateTimeOffset now,
+        TimeSpan window,
+        TimeSpan? uncommittedWorkWindow = null,
+        IReadOnlySet<string>? sessionIdsHoldingUncommittedWork = null)
     {
         long threshold = now.UtcTicks - window.Ticks;
+        long uncommittedThreshold = uncommittedWorkWindow is { } shorter
+            ? now.UtcTicks - shorter.Ticks
+            : threshold;
+
         int reclaimed = 0;
 
         foreach (CommandTask candidate in _tasks.Values)
         {
-            if (Volatile.Read(ref candidate.LastActivityTicks) > threshold
+            // WHICH WINDOW APPLIES IS DECIDED BY THE SESSION THIS TASK PINS, and a RUNNING task is exempt
+            // from the shorter one - a statement against a contended store can outrun two minutes, and this
+            // loop does not skip a running task. THIS IS THE HANDLE THE ABANDONED-WRITE CASE ACTUALLY
+            // TURNS ON: the probe's abandoned session was pinned by exactly one of these, so without this
+            // arm the session pass could not reach it until the generic window expired and the shorter
+            // window would have changed nothing at all.
+            long applicable =
+                !candidate.IsRunning
+                && sessionIdsHoldingUncommittedWork?.Contains(candidate.Session.SessionId) == true
+                    ? uncommittedThreshold
+                    : threshold;
+
+            if (Volatile.Read(ref candidate.LastActivityTicks) > applicable
                 || !TryRemove(candidate.TaskId, out CommandTask? removed)
                 || removed is null)
             {

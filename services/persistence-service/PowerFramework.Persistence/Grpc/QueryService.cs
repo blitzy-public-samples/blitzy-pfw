@@ -1222,15 +1222,33 @@ internal sealed class QueryTaskRegistry
     /// disposed here - which is what makes an abandoned task's teardown identical to a released one's.
     /// </para>
     /// </remarks>
-    internal int ReclaimIdle(DateTimeOffset now, TimeSpan window)
+    internal int ReclaimIdle(
+        DateTimeOffset now,
+        TimeSpan window,
+        TimeSpan? uncommittedWorkWindow = null,
+        IReadOnlySet<string>? sessionIdsHoldingUncommittedWork = null)
     {
         long threshold = now.UtcTicks - window.Ticks;
+        long uncommittedThreshold = uncommittedWorkWindow is { } shorter
+            ? now.UtcTicks - shorter.Ticks
+            : threshold;
+
         int reclaimed = 0;
 
         foreach (QueryTaskEntry candidate in _tasks.Values)
         {
+            // WHICH WINDOW APPLIES IS DECIDED BY THE SESSION THIS HANDLE PINS. A handle against a session
+            // holding uncommitted work is what keeps that session from being reclaimed, so leaving it in
+            // the generic window would defeat the shorter one entirely - the session pass cannot reach a
+            // pinned session however dirty it is. A running task is exempt either way: the guard below
+            // already skips one, and that is what keeps a legitimately long retrieval safe.
+            long applicable =
+                sessionIdsHoldingUncommittedWork?.Contains(candidate.SessionId) == true
+                    ? uncommittedThreshold
+                    : threshold;
+
             if (candidate.IsRunning
-                || Volatile.Read(ref candidate.LastActivityTicks) > threshold
+                || Volatile.Read(ref candidate.LastActivityTicks) > applicable
                 || !TryRemoveUnchecked(candidate.TaskId, out QueryTaskEntry? removed)
                 || removed is null)
             {

@@ -78,14 +78,15 @@
     <!-- Generates the OpenAPI document that describes this service's REST surface. -->
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
     <!--
-      Direct on purpose, and mandatory. Microsoft.AspNetCore.OpenApi pulls Microsoft.OpenApi
-      2.0.0 transitively, which trips NuGet audit advisory NU1903 (high severity). Advancing to
-      the 3.x line instead breaks the build: the 10.0.x OpenAPI source generator is compiled
-      against the 2.x object model and the generated XML-comment support file then fails to
-      compile with CS0200 on a read-only media-type example property. The centrally pinned
-      2.11.0, the highest published 2.x, is the only value that is both non-vulnerable and
-      compatible, and this direct reference is the mechanism that makes that pin win over the
-      transitive one.
+      Direct on purpose, and mandatory. The transitive floor is decided by
+      Microsoft.AspNetCore.OpenApi rather than here, and it has already sat inside the range NuGet
+      audit advisory NU1903 covers (high severity, every Microsoft.OpenApi at or below 2.7.4).
+      Advancing to the 3.x line instead breaks the build: the 10.0.x OpenAPI source generator is
+      compiled against the 2.x object model and the generated XML-comment support file then fails
+      to compile with CS0200 on a read-only media-type example property. The centrally pinned
+      2.12.0, the highest published 2.x, is the only value that is non-vulnerable, compatible AND
+      free of the upstream deprecation its lock-stepped YAML reader carries at 2.11.0, and this
+      direct reference is the mechanism that makes that pin win over the transitive one.
     -->
     <PackageReference Include="Microsoft.OpenApi" />
     <!-- Inbound JWT validation, on /v1/ping and on the authenticated cryptographic surface. -->

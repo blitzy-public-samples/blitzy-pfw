@@ -44,7 +44,8 @@
 //
 //  THE YAML PARSER, AND WHY NO PACKAGE IS ADDED FOR IT
 //    SharpYaml 2.1.4 is already in this project's compile closure: it is the single net assembly addition
-//    that Microsoft.OpenApi.YamlReader 2.11.0 brings, that reference is version locked, and both are
+//    that Microsoft.OpenApi.YamlReader 2.12.0 brings, that reference is centrally pinned in lock step with
+//    the Microsoft.OpenApi pin, and both are
 //    recorded in the root NOTICE - Directory.Packages.props documents exactly that. Reading YAML with the
 //    parser the project already resolves therefore adds nothing to the dependency graph, which is the
 //    only way this guard can exist at all: a new PackageReference has no central version and fails

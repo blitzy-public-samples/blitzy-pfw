@@ -101,7 +101,7 @@
 //  through ITestOutputHelper, so a passing run still records where the annotation was found.
 //
 //  A measured fact that makes this generous policy sound rather than loose: in Microsoft.OpenApi
-//  2.11.0 a $ref property is an OpenApiSchemaReference that PROXIES its target, so
+//  2.12.0 a $ref property is an OpenApiSchemaReference that PROXIES its target, so
 //  SymEncryptRequest.Properties["mode"].Description returns the CryptoSymCryptMode description
 //  verbatim. An annotation on the component schema is therefore genuinely reachable from the
 //  request property a caller fills in, not merely nearby.

@@ -106,12 +106,14 @@
 #      Coverage measured against a Debug build is not coverage of the artifact the job just produced,
 #      so every test step below states `-c Release` explicitly.
 #    * TWO PACKAGE PINS IN Directory.Packages.props ARE WHAT MAKE `dotnet restore` WARNING-FREE, and
-#      the restore step below depends on both. Microsoft.OpenApi is pinned to 2.11.0 because the 2.0.0
-#      that Microsoft.AspNetCore.OpenApi pulls transitively raises the NU1903 vulnerability advisory,
-#      while moving to the current major line breaks compilation inside the SDK's own generated
-#      OpenAPI support; and SQLitePCLRaw.bundle_e_sqlite3 is pinned to 3.0.5 because the native
-#      library the EF Core SQLite provider pulls transitively raises NU1903 as well. Warnings are
-#      errors repository-wide, so an unpinned tree fails restore outright.
+#      the restore step below depends on both. Microsoft.OpenApi is pinned to 2.12.0 - the highest
+#      published 2.x - because every version at or below 2.7.4 raises the NU1903 vulnerability
+#      advisory while moving to the current major line breaks compilation inside the SDK's own
+#      generated OpenAPI support, and because its lock-stepped partner Microsoft.OpenApi.YamlReader is
+#      DEPRECATED upstream at 2.11.0 and first clean at 2.12.0; and SQLitePCLRaw.bundle_e_sqlite3 is
+#      pinned to 3.0.5 because the native library the EF Core SQLite provider pulls transitively
+#      raises NU1903 as well. Warnings are errors repository-wide, so an unpinned tree fails restore
+#      outright. The deprecation gate below is what keeps the reader half of that pair honest.
 #      THE RULE THAT FOLLOWS FROM THAT: if this workflow ever needs `NoWarn`, an audit suppression or
 #      a restore-skipping trick to go green, the PINS are wrong and the pins get fixed - never this
 #      file. Nothing here suppresses a warning, and `-warnaserror` is deliberately not passed either,
@@ -248,7 +250,10 @@
 #    * Every published image now carries a BuildKit-generated SBOM and a max-mode provenance
 #      attestation, and the leg VERIFIES both are attached after the push rather than assuming the flag
 #      worked. The application dependency graphs are gated too - `dotnet list package --vulnerable
-#      --include-transitive` and `npm audit` both fail the run on any hit.
+#      --include-transitive`, `dotnet list package --deprecated --include-transitive` and `npm audit`
+#      all fail the run on any hit. The deprecation gate is the one a green restore cannot substitute
+#      for: NuGet audit raises NU1903 for a published VULNERABILITY only, so a package deprecated by
+#      its author restores silently at every audit level.
 #
 #  WHAT THIS SUPPLY-CHAIN POSTURE DOES NOT DO, stated so nobody reads more into it: it does not run a
 #  CVE scanner against the OS packages inside an image. It pins the base by content, gates on that
@@ -914,6 +919,48 @@ jobs:
           fi
 
           echo 'No package in the resolved graph carries a published vulnerability advisory.'
+
+      # ------------------------------------------------------------------------------------------
+      #  THE DEPENDENCY DEPRECATION POLICY GATE
+      #
+      #  A DEPRECATION IS NOT AN ADVISORY, WHICH IS WHY THE GATE ABOVE CANNOT SEE IT. NuGet audit
+      #  raises NU1903 for a published VULNERABILITY only; a package the author has marked deprecated -
+      #  for Legacy, CriticalBugs or Other - restores silently and warning-free at any audit level. So a
+      #  reader of a green restore learned nothing at all about deprecation, and the estate carried a
+      #  package deprecated for CriticalBugs while every other supply-chain control reported clean.
+      #
+      #  IT FAILS THE RUN RATHER THAN WARNING, and the two arguments for that are the same two the
+      #  vulnerability gate makes. A deprecation names a version the author has withdrawn support for,
+      #  and the remediation is a version move recorded in Directory.Packages.props - the same one place
+      #  every other version decision lives. And a gate that only warns is a gate nobody reads.
+      #
+      #  `--include-transitive` for the same reason as above: the deprecation this gate was added for
+      #  was on a DIRECT reference, but nothing makes the next one direct, and a direct-only listing
+      #  would report a clean graph while a transitive package carried the mark.
+      #
+      #  WHEN A DEPRECATION GENUINELY CANNOT BE CLEARED - the alternate the author recommends breaks the
+      #  build, as Microsoft.OpenApi.YamlReader's [3.10.0, ) does - the answer is NOT to relax this
+      #  step. It is to move to the highest version that is not deprecated on the compatible line and to
+      #  record why in the pin's own comment, which is what Directory.Packages.props does for that pair.
+      # ------------------------------------------------------------------------------------------
+      - name: Gate the resolved NuGet graph on upstream deprecations
+        run: |
+          set -euo pipefail
+
+          dotnet list PowerFramework.slnx package --deprecated --include-transitive \
+            > "${RUNNER_TEMP}/deprecated-packages.txt" 2>&1
+
+          cat "${RUNNER_TEMP}/deprecated-packages.txt"
+
+          if grep -qiE '(^| )> ' "${RUNNER_TEMP}/deprecated-packages.txt"; then
+            echo '::error::The resolved NuGet graph carries at least one package the author has' \
+                 'deprecated, listed above. Move the central pin in Directory.Packages.props to a' \
+                 'version that is not deprecated and record the reason in its comment - never relax' \
+                 'this gate, and never suppress the listing.'
+            exit 1
+          fi
+
+          echo 'No package in the resolved graph carries an upstream deprecation.'
 
       # Named individually rather than discovered, so a project silently dropped from the solution
       # cannot silently stop being tested. `-c Release` is stated because a bare `dotnet test` builds

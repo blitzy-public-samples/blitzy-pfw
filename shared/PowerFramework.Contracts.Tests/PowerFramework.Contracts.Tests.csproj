@@ -37,9 +37,11 @@
          measured from, when the test command collects XPlat Code Coverage. -->
     <PackageReference Include="coverlet.collector" />
 
-    <!-- Centrally pinned at 2.11.0, and that pin is mandatory: 2.0.0 carries NuGet advisory
+    <!-- Centrally pinned at 2.12.0, and that pin is mandatory: 2.0.0 carries NuGet advisory
          NU1903, while the 3.x line breaks the build because the 10.0.x OpenAPI source generator
-         is compiled against the 2.x object model and emits CS0200. This project is where that
+         is compiled against the 2.x object model and emits CS0200. Within the 2.x line the value
+         is 2.12.0 rather than 2.11.0 because the lock-stepped YAML reader below is deprecated
+         upstream at 2.11.0. This project is where that
          pin gets its regression guard, which is why it takes the reference directly. -->
     <PackageReference Include="Microsoft.OpenApi" />
 
@@ -52,19 +54,27 @@
 
       WHY THIS PACKAGE IS HERE, AND WHY ITS VERSION IS NOT WRITTEN IN THIS FILE.
 
-      Microsoft.OpenApi 2.11.0 ships JSON and YAML *writers* plus a JSON *reader* only. Its
+      Microsoft.OpenApi 2.12.0 ships JSON and YAML *writers* plus a JSON *reader* only. Its
       assembly exposes OpenApiJsonReader, OpenApiJsonWriter and OpenApiYamlWriter, and no YAML
       reader of any kind (verified by inspecting the published package). Both contract documents
       are YAML, so loading and validating them against the pinned object model is physically
       impossible without this reader. This project is its only consumer, because it is the only
       project that READS a contract document rather than serving one.
 
-      Microsoft.OpenApi.YamlReader publishes an exactly version locked 2.11.0 whose dependencies
-      are Microsoft.OpenApi 2.11.0, SharpYaml 2.1.4 and System.Text.Json 8.0.5, all MIT licensed.
-      Being locked to 2.11.0, it cannot drag the mandatory pin off that version. System.Text.Json
-      resolves to the net10.0 shared framework rather than to a package, so SharpYaml 2.1.4 is the
-      only net addition to the resolved graph. Neither carries a NuGet advisory at these versions,
-      so restore stays audit clean, which matters because warnings are errors.
+      Microsoft.OpenApi.YamlReader is pinned centrally at 2.12.0, and the version is not
+      interchangeable: 2.11.0 - and every version from 2.7.0 up to it - carries an UPSTREAM
+      DEPRECATION with reason CriticalBugs whose recommended alternate, [3.10.0, ), is the 3.x line
+      that breaks compilation. 2.12.0 is the first 2.x that carries no deprecation, so it is the only
+      remediation available on the compatible line, and it must move in step with the
+      Microsoft.OpenApi pin because it declares that version as its own dependency minimum.
+
+      Its dependencies at 2.12.0 are Microsoft.OpenApi [2.12.0, ), SharpYaml 2.1.4 and
+      System.Text.Json 8.0.5, all MIT licensed. The Microsoft.OpenApi range is a MINIMUM rather than
+      an exact lock - so it cannot pull the mandatory pin down, but it does not hold it either; the
+      central PackageVersion entry is what does that. System.Text.Json resolves to the net10.0 shared
+      framework rather than to a package, so SharpYaml 2.1.4 is the only net addition to the resolved
+      graph. Neither carries a NuGet advisory at these versions, so restore stays audit clean, which
+      matters because warnings are errors.
 
       THE VERSION LIVES CENTRALLY, LIKE EVERY OTHER ONE, and this reference is versionless in
       consequence. An earlier form of this file supplied the version here with VersionOverride, on

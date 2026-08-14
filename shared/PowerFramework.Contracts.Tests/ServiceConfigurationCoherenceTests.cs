@@ -515,14 +515,22 @@ public sealed class ServiceConfigurationCoherenceTests
         "Query:PageSize",
         "Query:Paged",
 
-        // The four bounds on server-held work handles. Declared rather than left to code defaults because
+        // The FIVE bounds on server-held work handles. Declared rather than left to code defaults because
         // they are the one part of this service's behaviour an operator may legitimately have to tune per
         // deployment: a ceiling too low refuses correct callers and one too high delays the discovery of a
-        // leak, and neither is visible from anywhere but the settings file. The section counts as four
+        // leak, and neither is visible from anywhere but the settings file. The section counts as five
         // leaves because every member is a scalar.
+        //
+        // 🔴 THE FIFTH IS THE SECOND IDLE WINDOW, AND IT IS PUBLISHED FOR THE SAME REASON THE FIRST IS.
+        // A session holding an OPEN, UNCOMMITTED transaction is holding a lock every other writer on the
+        // same file needs, so it is governed by a shorter window than a handle holding nothing - a runtime
+        // probe measured an abandoned uncommitted write denying every other writer for fourteen and a half
+        // minutes under the single generic window. It must not exceed IdleExpirySeconds, which the options
+        // validator enforces rather than this list; setting the two equal is the legible way to opt out.
         "Handles:MaxTotalPerRegistry",
         "Handles:MaxPerPrincipal",
         "Handles:IdleExpirySeconds",
+        "Handles:UncommittedWorkIdleExpirySeconds",
         "Handles:SweepIntervalSeconds",
 
         // The trust anchor this service's ONE outbound channel verifies Security against. The bearer
@@ -645,6 +653,51 @@ public sealed class ServiceConfigurationCoherenceTests
     /// statement-bearing category.
     /// </summary>
     private static readonly string[] PermittedStatementLogLevels = ["Warning", "Error", "Critical", "None"];
+
+    /// <summary>
+    /// Log categories whose records render the FULL request URL, including its query string, and which
+    /// therefore may never resolve below <c>Warning</c> in any environment.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>A BEARER TOKEN IN A QUERY PARAMETER WAS WRITTEN TO A CONTAINER LOG IN CLEARTEXT, AND THIS IS
+    /// THE CATEGORY THAT WROTE IT.</b> The hosting layer's "Request starting" and "Request finished"
+    /// records render the request URL whole. Every application-authored record in this estate uses
+    /// <c>Request.Path</c> or the route PATTERN and therefore carries no query string at all, so this
+    /// framework-emitted pair is the only channel by which a credential a caller put in a query parameter
+    /// reaches an operator's log - and it bypasses every application-level control exactly as the
+    /// statement-bearing categories above bypass the SQL redactor (CWE-532).
+    /// </para>
+    /// <para>
+    /// <b>THE SERVICE DOES NOT AND MUST NOT ACCEPT A TOKEN THAT WAY</b> - a query-parameter credential is
+    /// answered <c>401</c> on all four services, verified at runtime - so nothing here is about supporting
+    /// it. The exposure is that the value is RECORDED on the way to being refused, and a refused
+    /// credential is still a live credential until it expires.
+    /// </para>
+    /// <para>
+    /// ONE ENTRY, AND DELIBERATELY NOT A SPECULATIVE LIST. The HTTP-logging middleware would render a URL
+    /// too, but no composition root in this estate adds it and its category sits UNDER
+    /// <c>Microsoft.AspNetCore</c> - so naming it here would demand a suppression key in three settings
+    /// files for a sink that does not exist, which is the kind of inert declaration this suite refuses
+    /// elsewhere. This list names what actually emits a URL today.
+    /// </para>
+    /// </remarks>
+    private static readonly string[] UrlBearingLogCategories =
+    [
+        "Microsoft.AspNetCore.Hosting.Diagnostics",
+    ];
+
+    /// <summary>
+    /// Log levels that are at or above <c>Warning</c>, and are therefore permitted for a URL-bearing
+    /// category.
+    /// </summary>
+    /// <remarks>
+    /// The same four values as the statement-bearing set, and stated separately rather than shared
+    /// because the two rules are independent: one is about a generated SQL statement reaching a log and
+    /// the other about a request URL doing so. A future decision to permit <c>Information</c> for one of
+    /// them must not silently move the other.
+    /// </remarks>
+    private static readonly string[] PermittedUrlBearingLogLevels = ["Warning", "Error", "Critical", "None"];
 
     /// <summary>
     /// Property names that may never appear as a settings leaf anywhere, at any depth.
@@ -1339,6 +1392,163 @@ public sealed class ServiceConfigurationCoherenceTests
         }
 
         Assert.Empty(failures);
+    }
+
+    /// <summary>
+    /// Asserts that no service resolves a URL-bearing log category below <c>Warning</c>, in either the
+    /// deployed configuration or the developer one.
+    /// </summary>
+    /// <param name="serviceKey">The service whose configuration is under test.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>THE EFFECTIVE LEVEL IS RESOLVED, NOT THE DECLARED ONE, AND THAT IS THE WHOLE POINT.</b> The
+    /// defect this row exists for was not a category set too low - it was a category set NOWHERE, whose
+    /// level was therefore inherited from a PARENT the Development overlay raised to
+    /// <c>Information</c>. A check that only inspected declared keys would have read every settings file
+    /// in the estate as correct while three services logged bearer tokens. So this walks the same
+    /// longest-prefix rule the logging factory itself applies, over the merged document set the host
+    /// actually loads.
+    /// </para>
+    /// <para>
+    /// <b>BOTH ENVIRONMENTS ARE RESOLVED, IN LOAD ORDER.</b> The deployed configuration is the base
+    /// document alone; the developer configuration is the base document with the Development overlay
+    /// applied over it, key by key, exactly as the configuration builder composes them. Asserting only
+    /// the merged form would let a base document that leaks be masked by an overlay that does not, and
+    /// asserting only the base would miss the defect that actually occurred.
+    /// </para>
+    /// <para>
+    /// A service whose configuration names no matching category at all is NOT a pass by omission: the
+    /// <c>Default</c> rule is what the factory falls back to, so it is resolved here too - which is what
+    /// makes a bare <c>"Default": "Information"</c> with no <c>Microsoft.AspNetCore</c> entry fail rather
+    /// than slip through.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(AllServiceKeys))]
+    public void NoServiceResolvesAUrlBearingLogCategoryBelowWarning(string serviceKey)
+    {
+        ServiceProfile service = RequireService(serviceKey);
+
+        Dictionary<string, string> deployed = ReadLogLevelRules(service, BaseSettingsFileName);
+
+        Dictionary<string, string> developer = new(deployed, StringComparer.OrdinalIgnoreCase);
+
+        foreach ((string category, string level) in ReadLogLevelRules(service, DevelopmentSettingsFileName))
+        {
+            developer[category] = level;
+        }
+
+        List<string> failures = [];
+
+        foreach (string category in UrlBearingLogCategories)
+        {
+            Check("the deployed configuration", BaseSettingsFileName, deployed, category);
+            Check(
+                "a developer run",
+                $"{BaseSettingsFileName} + {DevelopmentSettingsFileName}",
+                developer,
+                category);
+        }
+
+        Assert.Empty(failures);
+
+        void Check(
+            string environment,
+            string documents,
+            Dictionary<string, string> rules,
+            string category)
+        {
+            (string? matched, string? level) = ResolveLogLevel(rules, category);
+
+            if (level is not null
+                && PermittedUrlBearingLogLevels.Contains(level, StringComparer.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            failures.Add(
+                $"{service.ProjectName}: in {environment} ({documents}), the log category '{category}' "
+                    + $"resolves to '{level ?? "<no rule and no Default>"}' through the rule "
+                    + $"'{matched ?? "<none>"}'. That category's records render the FULL request URL "
+                    + "including its query string, so a credential a caller placed in a query parameter "
+                    + "is written to the operator log in cleartext on its way to being refused. Permitted "
+                    + $"levels are {string.Join(", ", PermittedUrlBearingLogLevels)} - declare the "
+                    + "category itself rather than lowering its parent, so the rest of the parent's "
+                    + "diagnostics stay legible.");
+        }
+    }
+
+    /// <summary>
+    /// Reads one settings file's <c>Logging:LogLevel</c> rules as a category-to-level map.
+    /// </summary>
+    /// <param name="service">The service whose file is being read.</param>
+    /// <param name="fileName">The settings file.</param>
+    /// <returns>The rules, keyed case-insensitively as the logging factory keys them.</returns>
+    private static Dictionary<string, string> ReadLogLevelRules(ServiceProfile service, string fileName)
+    {
+        Dictionary<string, string> rules = new(StringComparer.OrdinalIgnoreCase);
+
+        if (LoadSettings(service, fileName)["Logging"] is not JsonObject logging
+            || logging["LogLevel"] is not JsonObject levels)
+        {
+            return rules;
+        }
+
+        foreach ((string category, JsonNode? level) in levels)
+        {
+            if (level is JsonValue declared)
+            {
+                rules[category] = declared.GetValue<string>();
+            }
+        }
+
+        return rules;
+    }
+
+    /// <summary>
+    /// Resolves one category's effective level under a rule set, the way the logging factory does.
+    /// </summary>
+    /// <param name="rules">The category-to-level rules.</param>
+    /// <param name="category">The category whose level is wanted.</param>
+    /// <returns>The rule that matched and the level it carries, or two nulls when nothing matched.</returns>
+    /// <remarks>
+    /// LONGEST PREFIX WINS, AND <c>Default</c> IS THE FALLBACK RATHER THAN A PREFIX. That is the
+    /// framework's own selection rule: a rule for <c>Microsoft.AspNetCore.Hosting.Diagnostics</c> beats
+    /// one for <c>Microsoft.AspNetCore</c>, which in turn beats <c>Default</c>. Comparison is
+    /// case-insensitive because the factory's own lookup is.
+    /// </remarks>
+    private static (string? Rule, string? Level) ResolveLogLevel(
+        Dictionary<string, string> rules,
+        string category)
+    {
+        string? matched = null;
+
+        foreach (string rule in rules.Keys)
+        {
+            if (string.Equals(rule, "Default", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!category.StartsWith(rule, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (matched is null || rule.Length > matched.Length)
+            {
+                matched = rule;
+            }
+        }
+
+        if (matched is not null)
+        {
+            return (matched, rules[matched]);
+        }
+
+        return rules.TryGetValue("Default", out string? fallback)
+            ? ("Default", fallback)
+            : (null, null);
     }
 
     // ----------------------------------------------------------------------------------------------

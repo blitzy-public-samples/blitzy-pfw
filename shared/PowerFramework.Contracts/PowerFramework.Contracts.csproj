@@ -114,15 +114,17 @@
       leaving the REST half of its own contract undeclared.
 
       Microsoft.OpenApi is the MANDATORY companion, and the reason is a security one rather than a
-      compile one (AAP 0.5.2). Microsoft.AspNetCore.OpenApi 10.0.11 pulls Microsoft.OpenApi 2.0.0
-      transitively, and 2.0.0 carries the high-severity advisory NU1903; warnings are errors
-      repository-wide, so restore fails outright. A DIRECT reference is the mechanism by which
-      central package management substitutes the 2.11.0 pin for that transitive version. Advancing to
-      the 3.x line instead breaks the build with two CS0200 "cannot assign, read only" errors raised
-      inside the SDK's own generated OpenAPI XML-comment support file, because the 10.0.x source
-      generator is compiled against the 2.x object model. 2.11.0, the highest published 2.x, is the
-      only value that is simultaneously non-vulnerable and compatible. Never suppress NU1903 and
-      never move this reference to a floating range.
+      compile one (AAP 0.5.2). Left transitive, its version is whichever one
+      Microsoft.AspNetCore.OpenApi names - a floor this repository does not own, and one that has
+      already sat inside the range the high-severity advisory NU1903 covers (every version at or
+      below 2.7.4); warnings are errors repository-wide, so restore fails outright on any version
+      inside it. A DIRECT reference is the mechanism by which central package management substitutes
+      the 2.12.0 pin for that transitive version. Advancing to the 3.x line instead breaks the build
+      with two CS0200 "cannot assign, read only" errors raised inside the SDK's own generated OpenAPI
+      XML-comment support file, because the 10.0.x source generator is compiled against the 2.x
+      object model. 2.12.0, the highest published 2.x, is the only value that is simultaneously
+      non-vulnerable, compatible and free of the upstream deprecation its lock-stepped YAML reader
+      carries at 2.11.0. Never suppress NU1903 and never move this reference to a floating range.
 
       WHAT THE PAIR DOES NOT DO, stated because it is the argument for removing them.
       Both flow onward to the four services that reach this project by ProjectReference,
@@ -134,7 +136,7 @@
       referencing it directly - a service calling AddOpenApi() on an inherited reference alone fails
       with CS9137, "the interceptors feature is not enabled in this namespace". The direct reference
       in each REST service is what makes that work, and the transitive arrival adds no API any
-      service consumes. Persistence gains two unused references and no advisory, because the 2.11.0
+      service consumes. Persistence gains two unused references and no advisory, because the 2.12.0
       pin travels with them.
 
       Versionless, like every PackageReference in this repository: Directory.Packages.props is the

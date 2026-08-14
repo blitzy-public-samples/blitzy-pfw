@@ -1011,25 +1011,58 @@ internal sealed class TransactionSessionRegistry
     /// <param name="pinnedSessionIds">
     /// The sessions a live query, update or command task still names. Never reclaimed regardless of age.
     /// </param>
+    /// <param name="uncommittedWorkWindow">
+    /// The shorter window that governs a session whose transaction is holding uncommitted work, or
+    /// <see langword="null"/> to govern every session by <paramref name="window"/> alone.
+    /// </param>
     /// <returns>How many sessions were reclaimed.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="pinnedSessionIds"/> is <see langword="null"/>.</exception>
     /// <remarks>
+    /// <para>
     /// A PINNED SESSION IS NOT MERELY SKIPPED - IT IS NOT IDLE. A task working against a session is using
     /// that session, and the fact that no C-08 call has named it recently says nothing about whether it is
     /// abandoned. Reclaiming one would hand its transaction back underneath a working task, which would
     /// turn a cleanup into data loss.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>TWO WINDOWS, AND WHICH ONE APPLIES IS DECIDED PER SESSION BY WHAT IT IS HOLDING.</b> A session
+    /// whose transaction reports <see cref="IPooledTransaction.HasUncommittedWork"/> is holding a lock every
+    /// other writer on the same file needs, so it is governed by the shorter window; every other session is
+    /// governed by the generic one, unchanged. The pin is still absolute in both cases - the task pass runs
+    /// first and applies the same distinction, so a dirty session's abandoned task is reclaimed on the pass
+    /// that unpins it and the session follows on the next one.
+    /// </para>
+    /// <para>
+    /// THE SHORTER WINDOW IS OPTIONAL SO THAT A CALLER MAY ASK FOR THE PREVIOUS BEHAVIOUR EXACTLY, which
+    /// is what every existing three-argument call site does.
+    /// </para>
     /// </remarks>
-    internal int ReclaimIdle(DateTimeOffset now, TimeSpan window, IReadOnlySet<string> pinnedSessionIds)
+    internal int ReclaimIdle(
+        DateTimeOffset now,
+        TimeSpan window,
+        IReadOnlySet<string> pinnedSessionIds,
+        TimeSpan? uncommittedWorkWindow = null)
     {
         ArgumentNullException.ThrowIfNull(pinnedSessionIds);
 
         long threshold = now.UtcTicks - window.Ticks;
+        long uncommittedThreshold = uncommittedWorkWindow is { } shorter
+            ? now.UtcTicks - shorter.Ticks
+            : threshold;
+
         int reclaimed = 0;
 
         foreach (TransactionSession candidate in _sessions.Values)
         {
-            if (pinnedSessionIds.Contains(candidate.SessionId)
-                || Volatile.Read(ref candidate.LastActivityTicks) > threshold
+            if (pinnedSessionIds.Contains(candidate.SessionId))
+            {
+                continue;
+            }
+
+            bool holdingWork = HoldsUncommittedWork(candidate);
+            long applicable = holdingWork ? uncommittedThreshold : threshold;
+
+            if (Volatile.Read(ref candidate.LastActivityTicks) > applicable
                 || !TryRemove(candidate.SessionId))
             {
                 continue;
@@ -1040,15 +1073,64 @@ internal sealed class TransactionSessionRegistry
 
             _logger?.LogWarning(
                 "Reclaimed an abandoned transaction session held by caller {Principal} against pool lease "
-                + "{PoolLease}; the pool release answered {ReturnCode}. The session handle value is "
-                + "deliberately not recorded.",
+                + "{PoolLease}; the pool release answered {ReturnCode}. It was holding uncommitted work: "
+                + "{HoldingUncommittedWork}, so the window applied was {IdleWindow}. The session handle "
+                + "value is deliberately not recorded.",
                 LogSafeText.Render(candidate.Principal),
                 candidate.Lease.Id,
-                code);
+                code,
+                holdingWork,
+                holdingWork && uncommittedWorkWindow is { } applied ? applied : window);
         }
 
         return reclaimed;
     }
+
+    /// <summary>
+    /// The sessions whose transaction is holding uncommitted work.
+    /// </summary>
+    /// <value>
+    /// A snapshot of the session identifiers, which the reclaim pass uses to decide which of its handles
+    /// are governed by the shorter idle window.
+    /// </value>
+    /// <remarks>
+    /// READ BY THE TASK REGISTRIES RATHER THAN BY THIS ONE, which is why it is exposed at all: a query,
+    /// update or command handle knows the identifier of the session it borrowed and nothing about that
+    /// session's transaction, and a dirty session cannot be reclaimed while such a handle pins it. So the
+    /// set travels to them. It is a snapshot taken once per pass, so a session that becomes dirty midway
+    /// through a pass is simply governed by the generic window until the next one.
+    /// </remarks>
+    internal IReadOnlySet<string> SessionIdsHoldingUncommittedWork
+    {
+        get
+        {
+            HashSet<string> dirty = new(StringComparer.Ordinal);
+
+            foreach (TransactionSession candidate in _sessions.Values)
+            {
+                if (HoldsUncommittedWork(candidate))
+                {
+                    _ = dirty.Add(candidate.SessionId);
+                }
+            }
+
+            return dirty;
+        }
+    }
+
+    /// <summary>
+    /// Reports whether one session's transaction is holding uncommitted work.
+    /// </summary>
+    /// <param name="session">The session to ask about.</param>
+    /// <returns><see langword="true"/> when it is.</returns>
+    /// <remarks>
+    /// A DESTROYED TRANSACTION IS NOT HOLDING ANYTHING, and asking it would be the one question its own
+    /// member answers without throwing - so the destroyed case is answered here rather than relied upon.
+    /// A closing session is likewise excluded: it is already on its way out through the path that rolls
+    /// back, and treating it as dirty would only shorten a window that no longer decides anything.
+    /// </remarks>
+    private static bool HoldsUncommittedWork(TransactionSession session) =>
+        !session.IsUnusable && session.Transaction.HasUncommittedWork;
 
     /// <summary>
     /// Removes and tears down every live session, whatever its age.

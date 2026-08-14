@@ -2797,6 +2797,18 @@ namespace PowerFramework.Persistence.Tasks
                     values[index] ?? DBNull.Value);
             }
 
+            // THE ONE WRITE PATH THAT DOES NOT GO THROUGH PooledTransaction.Exec, SO IT HAS TO SAY SO
+            // ITSELF. Every statement this helper runs is an insert, an update or a delete - its three
+            // callers are ApplyInsert, ApplyUpdate and ApplyDelete - and it issues them on a command taken
+            // from the engine capability rather than through the transaction's own statement member, which
+            // is where the outstanding-work marker is otherwise set. Without this line an abandoned C-06
+            // update would keep the storage engine's writer lock for the full generic idle window while
+            // the reclaim pass saw a session with nothing outstanding; see
+            // IPooledTransaction.HasUncommittedWork for the fourteen-and-a-half-minute measurement that
+            // put it there. Marked BEFORE execution and after the preview veto, so a statement the veto
+            // stopped marks nothing and one that fails part-way still does.
+            _bindings.GetTransaction(_store)?.MarkUncommittedWork();
+
             return command.ExecuteNonQuery();
         }
 

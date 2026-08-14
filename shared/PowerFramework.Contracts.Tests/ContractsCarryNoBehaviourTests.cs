@@ -2610,7 +2610,7 @@ public sealed class ContractsCarryNoBehaviourTests
     /// REST half of the published boundary - <c>OpenApi/gateway.v1.yaml</c> and
     /// <c>OpenApi/security.v1.yaml</c>, the source of truth for C-01, C-02, C-09 and C-10 - and the
     /// second of the two is the direct reference by which central package management substitutes the
-    /// mandatory <c>Microsoft.OpenApi</c> 2.11.0 pin for the vulnerable 2.0.0 the first pulls
+    /// mandatory <c>Microsoft.OpenApi</c> 2.12.0 pin for the vulnerable 2.0.0 the first pulls
     /// transitively (AAP 0.5.2). Naming either here would make this test contradict the project file
     /// it guards. <c>Microsoft.AspNetCore.Mvc.Core</c>, <c>Microsoft.AspNetCore.Mvc.Abstractions</c>
     /// and <c>System.Text.Json</c> arrive with that pair and are likewise not capabilities this project

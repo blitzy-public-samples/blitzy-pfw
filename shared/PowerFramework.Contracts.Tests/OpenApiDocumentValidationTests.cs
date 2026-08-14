@@ -14,26 +14,33 @@
 //  The third is what this file makes visible, here, rather than deep inside a service build where it
 //  would surface as an unexplained client-generation difference.
 //
-//  THE PIN IS 2.11.0, IN BOTH DIRECTIONS, AND IT IS MANDATORY  (AAP 0.5.2, constraint C-K)
+//  THE PIN IS 2.12.0, IN BOTH DIRECTIONS, AND IT IS MANDATORY  (AAP 0.5.2, constraint C-K)
 //  ------------------------------------------------------------------------------------------------
 //  Recorded here in full because a future reader who sees a row in this file fail will be tempted to
-//  "just upgrade", and both neighbouring versions are worse than the failure:
+//  "just upgrade", and both neighbouring directions are worse than the failure:
 //
-//    * BELOW the pin - 2.0.0 carries NuGet advisory NU1903, high severity. That is the version the
-//      stock web template on net10.0 pulls TRANSITIVELY through `Microsoft.AspNetCore.OpenApi`
-//      10.0.11, so it arrives without anybody asking for it. Restore reports it, and warnings are
-//      errors repository-wide, so it is a build failure rather than a warning.
+//    * BELOW the pin - every version at or below 2.7.4 carries NuGet advisory NU1903, high severity.
+//      The transitive floor is chosen by `Microsoft.AspNetCore.OpenApi` rather than by this
+//      repository, and it has sat inside that range before now, so it arrives without anybody asking
+//      for it. Restore reports it, and warnings are errors repository-wide, so it is a build failure
+//      rather than a warning.
 //
-//    * ABOVE the pin - the 3.x line BREAKS THE BUILD. 3.9.0 was tested directly during planning and
-//      produces two `error CS0200` diagnostics reporting that a media-type example property cannot be
+//    * ABOVE the pin - the 3.x line BREAKS THE BUILD. 3.9.0 and 3.10.0 were each tested directly and
+//      produce two `error CS0200` diagnostics reporting that a media-type example property cannot be
 //      assigned because it is read-only, raised inside the SDK's OWN generated OpenAPI XML-comment
 //      support file. The cause is not this repository's code: the 10.0.11 OpenAPI source generator is
 //      compiled against the 2.x object model, so nothing in the 3.x line can satisfy it.
 //
-//    * 2.11.0, the highest published 2.x, is therefore the ONLY value that is simultaneously
+//    * 2.12.0, the highest published 2.x, is therefore the ONLY value that is simultaneously
 //      non-vulnerable and compatible. Corroborated independently: the NuGet vulnerability index lists
 //      advisories for `Microsoft.OpenApi` covering only [2.0.0-preview.11, 2.7.4] and [3.0.0, 3.5.3],
-//      so 2.11.0 sits clear of both ranges.
+//      so 2.12.0 sits clear of both ranges.
+//
+//    * AND WITHIN the 2.x line the value is not free either. The pin moved from 2.11.0 to 2.12.0
+//      because its lock-stepped YAML reader below is DEPRECATED upstream at 2.11.0 - reason
+//      CriticalBugs, recommended alternate [3.10.0, ), which is the line that cannot compile - and
+//      2.12.0 is the first 2.x of the reader that carries no deprecation. Neither Microsoft.OpenApi
+//      2.11.0 nor 2.12.0 is vulnerable or deprecated itself; the reader is what forced the pair.
 //
 //  The version itself is NOT written in this file, and must not be. It lives once, centrally, in the
 //  repository-root Directory.Packages.props, and `Directory.Build.props` disables central version
@@ -43,12 +50,13 @@
 //
 //  THE YAML READER IS A SEPARATE PACKAGE, AND THAT IS NOT AN OVERSIGHT
 //  ------------------------------------------------------------------------------------------------
-//  The pinned `Microsoft.OpenApi` 2.11.0 assembly ships NO YAML READER. It has `OpenApiJsonReader`,
+//  The pinned `Microsoft.OpenApi` 2.12.0 assembly ships NO YAML READER. It has `OpenApiJsonReader`,
 //  `OpenApiJsonWriter` and `OpenApiYamlWriter` - and a writer cannot parse. Verified by inspecting the
 //  published package. Both contract documents are YAML, so YAML support comes from the separately
-//  published, exactly version-locked `Microsoft.OpenApi.YamlReader` 2.11.0, registered through
-//  `settings.AddYamlReader()`. Being locked to 2.11.0 it cannot drag the mandatory pin off that
-//  version.
+//  published `Microsoft.OpenApi.YamlReader` 2.12.0, registered through `settings.AddYamlReader()`. Its
+//  dependency on `Microsoft.OpenApi` is a MINIMUM range - [2.12.0, ) - rather than the exact lock an
+//  earlier note here claimed, so it cannot pull the mandatory pin DOWN but it does not hold it either;
+//  the central PackageVersion entry is what holds it, and the two must therefore be moved together.
 //
 //  `ContractTestContext.cs` OWNS that registration; this suite consumes its result. That division
 //  matters: the fixture parses each document exactly once for the whole assembly, and this file
@@ -190,7 +198,7 @@ public sealed class OpenApiDocumentValidationTests(OpenApiContractDocuments docu
 
     /// <summary>
     /// The format the reader must report. This is the assertion that proves the YAML reader from the
-    /// version-locked companion package was the reader actually used.
+    /// lock-stepped companion package was the reader actually used.
     /// </summary>
     private const string DeclaredFormat = "yaml";
 
@@ -404,8 +412,8 @@ public sealed class OpenApiDocumentValidationTests(OpenApiContractDocuments docu
 
         // THE FORMAT ASSERTION IS THE YAML READER'S REGRESSION GUARD.
         //
-        // `Microsoft.OpenApi` 2.11.0 registers exactly one reader out of the box, `json`. The fixture
-        // calls AddYamlReader() from the version-locked companion package, which takes the registration
+        // `Microsoft.OpenApi` 2.12.0 registers exactly one reader out of the box, `json`. The fixture
+        // calls AddYamlReader() from the lock-stepped companion package, which takes the registration
         // to three - `json`, `yaml`, `yml`. Asserting the reported format is `yaml` is how this suite
         // confirms the companion package is present and was the reader used, rather than inferring it
         // from the fact that parsing did not throw.

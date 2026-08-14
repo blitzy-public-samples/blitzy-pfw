@@ -1208,14 +1208,33 @@ internal sealed class UpdateTaskRegistry
     /// [<c>docs/PB多线程绕坑提示.md</c>]. The release/disposal handoff makes the reclaim identical to an
     /// explicit release: whichever of the two paths finishes last performs the teardown, exactly once.
     /// </remarks>
-    internal int ReclaimIdle(DateTimeOffset now, TimeSpan window)
+    internal int ReclaimIdle(
+        DateTimeOffset now,
+        TimeSpan window,
+        TimeSpan? uncommittedWorkWindow = null,
+        IReadOnlySet<string>? sessionIdsHoldingUncommittedWork = null)
     {
         long threshold = now.UtcTicks - window.Ticks;
+        long uncommittedThreshold = uncommittedWorkWindow is { } shorter
+            ? now.UtcTicks - shorter.Ticks
+            : threshold;
+
         int reclaimed = 0;
 
         foreach (UpdateTaskEntry candidate in _tasks.Values)
         {
-            if (Volatile.Read(ref candidate.LastActivityTicks) > threshold
+            // WHICH WINDOW APPLIES IS DECIDED BY THE SESSION THIS HANDLE PINS, and a RUNNING task is
+            // exempt from the shorter one. An update against a contended file-backed store can legitimately
+            // outrun a two-minute window, and this loop - unlike the query one - does not skip a running
+            // task, so the exemption has to be stated here or a long update would be reclaimed underneath
+            // itself. The generic window still governs it, exactly as before.
+            long applicable =
+                !candidate.IsRunning
+                && sessionIdsHoldingUncommittedWork?.Contains(candidate.SessionId) == true
+                    ? uncommittedThreshold
+                    : threshold;
+
+            if (Volatile.Read(ref candidate.LastActivityTicks) > applicable
                 || !TryRemove(candidate.TaskId, out UpdateTaskEntry? removed)
                 || removed is null)
             {

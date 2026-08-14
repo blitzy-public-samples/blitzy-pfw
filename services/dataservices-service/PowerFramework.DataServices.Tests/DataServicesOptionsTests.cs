@@ -2917,10 +2917,25 @@ public sealed class DataServicesSettingsDocumentTests
     /// deliberately - which is the point at which someone would notice it was behaviour.
     /// </para>
     /// <para>
-    /// Four log levels, one authority host, two upstream addresses and two session idle windows. Nothing
+    /// FIVE log levels, one authority host, two upstream addresses and two session idle windows. Nothing
     /// else, and in particular NO relaxation: not one of the four token-validation switches, not the
     /// audience, and not the metadata-transport requirement appears here, so an inbound credential is
     /// verified under Development exactly as strictly as it is deployed (constraint C-G).
+    /// </para>
+    /// <para>
+    /// 🔴 <b>THE FIFTH LOG LEVEL IS <c>Microsoft.AspNetCore.Hosting.Diagnostics</c>, AND IT IS THE ONE
+    /// ENTRY HERE THAT LOWERS RATHER THAN RAISES.</b> It was added because a runtime probe found a bearer
+    /// token in a query parameter written to the container log in cleartext, and traced it to this
+    /// overlay: raising the parent <c>Microsoft.AspNetCore</c> category to <c>Information</c> turns on the
+    /// hosting layer's "Request starting"/"Request finished" pair, which are the only records in this
+    /// service that render the FULL request URL - every application-authored record uses
+    /// <c>Request.Path</c>, and the projection's own refusal record carries only the route PATTERN. The
+    /// child category therefore returns to the deployed level while the rest of
+    /// <c>Microsoft.AspNetCore</c> - authentication, authorization, routing and Kestrel diagnostics -
+    /// stays at <c>Information</c> where a developer needs it. It does not violate the raise-never-silence
+    /// property asserted below: the base document declares <c>Microsoft.AspNetCore</c> at
+    /// <c>Warning</c>, so a deployed instance emits nothing for this category either, and the overlay
+    /// makes a developer run EQUAL to a deployed one rather than quieter than it.
     /// </para>
     /// </remarks>
     [Fact]
@@ -2938,6 +2953,7 @@ public sealed class DataServicesSettingsDocumentTests
             "DataServices:Sessions:ValidationSession:IdleTimeout",
             "Logging:LogLevel:Grpc",
             "Logging:LogLevel:Microsoft.AspNetCore",
+            "Logging:LogLevel:Microsoft.AspNetCore.Hosting.Diagnostics",
             "Logging:LogLevel:PowerFramework.DataServices",
             "Logging:LogLevel:System.Net.Http.HttpClient",
         ];

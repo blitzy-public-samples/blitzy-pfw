@@ -444,7 +444,7 @@ a thing is defensible; only a register tells you that it is a deviation at all.
 
 | # | What the plan declares | What is delivered | Why, and what a human owner must decide |
 | --- | --- | --- | --- |
-| **D8** | §0.5.1 declares **15** NuGet packages, and the B1 review ordered the removal of a sixteenth | **16.** The extra is `Microsoft.OpenApi.YamlReader` 2.11.0, pinned centrally at `Directory.Packages.props:249` | It is the **regression guard on the mandatory `Microsoft.OpenApi` 2.11.0 pin** — the pin that fails restore if lowered (`NU1903`) and fails compilation if raised (`CS0200`, §11.1). Without a YAML reader, the two authored OpenAPI documents are parsed by no test and that pin has no guard. **The addition is bounded, and each bound is why it is safe:** referenced by exactly one project (`shared/PowerFramework.Contracts.Tests`), so it reaches no service and no container image; exactly version-locked to the mandatory pin, so it cannot move it in either direction; adds exactly one assembly, `SharpYaml`, carrying no advisory at this version. **Removal costs the validation and nothing else** — that is the trade an owner is choosing between. The earlier local `VersionOverride` was removed; this is a central pin, which is the mechanism §3.2 requires |
+| **D8** | §0.5.1 declares **15** NuGet packages, and the B1 review ordered the removal of a sixteenth | **16.** The extra is `Microsoft.OpenApi.YamlReader` 2.12.0, pinned centrally in `Directory.Packages.props` | It is the **regression guard on the mandatory `Microsoft.OpenApi` 2.12.0 pin** — the pin that fails restore inside the advisory range (`NU1903`) and fails compilation on the 3.x line (`CS0200`, §11.1). Without a YAML reader, the two authored OpenAPI documents are parsed by no test and that pin has no guard. **The addition is bounded, and each bound is why it is safe:** referenced by exactly one project (`shared/PowerFramework.Contracts.Tests`), so it reaches no service and no container image; its dependency names the mandatory pin's own version as a **minimum**, so it cannot pull that pin down; adds exactly one assembly, `SharpYaml`, carrying no advisory at this version. **Removal costs the validation and nothing else** — that is the trade an owner is choosing between. The earlier local `VersionOverride` was removed; this is a central pin, which is the mechanism §3.2 requires. **It is also the package that forced the pin pair from 2.11.0 to 2.12.0**, because 2.11.0 of the reader is deprecated upstream for `CriticalBugs` and its recommended `[3.10.0, )` cannot compile |
 | **D9** | §0.5.1 names SDK **10.0.302** and platform runtimes **10.0.10** | `global.json` pins SDK **10.0.303**; the **six** platform package pins are at **10.0.11**; the container base images carry the matching `10.0.11` tags | **10.0.11 is the 2026-08-11 security release, and the platform it fixes is 10.0.10** — so honouring the plan's figure would ship a knowingly vulnerable platform, which is CWE-1104. Advancing a patch level inside one feature band is maintenance rather than a change of dependency, and the three coordinates that carry a platform release move together or not at all (`Directory.Packages.props:57-70`). Verified rather than asserted: `dotnet list package --vulnerable` reports **20 of 20 projects clean**. The six pins are `Microsoft.AspNetCore.OpenApi`, `Microsoft.AspNetCore.Authentication.JwtBearer`, `Microsoft.EntityFrameworkCore.Sqlite`, `Microsoft.EntityFrameworkCore.Design`, `Microsoft.Data.Sqlite` and `Microsoft.AspNetCore.Mvc.Testing`. **The owner decides only whether to record the move, not whether to make it.** Separately, the three MSBuild behaviours `Directory.Build.props` records as measured were **re-measured on 10.0.303** and now name both SDKs, and its header no longer repeats an SDK version at all — `global.json` is the single authority, two files away |
 | **D10** | §0.5.1's npm table declares **one** devDependency, `@playwright/test 1.62.1`; §0.3.1 names seven `tests/e2e` paths | **Three** devDependencies — `@playwright/test 1.62.1`, `@types/node 22.20.1`, `typescript 5.9.3` — across **23** tracked files | The `typecheck` script runs `tsc --noEmit`, so **the compiler and the Node ambient declarations are what make the type-check gate exist at all**; without them the gate is a script that cannot run. All three are development-only — there is no `dependencies` block, so nothing reaches a container image — and all three are **exact pins** backed by the committed lockfile's integrity hashes. The 23 files are the plan's own entries expanded, not new categories: it writes `specs/*.spec.ts` (6 files), `fixtures/` (9), and the config, manifest, lockfile and README, to which the delivered tree adds `.gitignore`, `global-setup.ts`, `tsconfig.json` and one identity-provisioning script. **This declaration is enforced, not merely written:** `E2eManifestGuardTests.TheDevelopmentDependencySetIsExactlyTheApprovedThreeAndEachIsExactlyPinned` fails on a fourth dependency, on the removal of an approved one, and on any version that is not a bare exact pin |
 | **D11** | §0.2.1.1: root `README.md` is "**the single UPDATE in the entire refactor**"; §0.4.5.5: "**No `.gitignore` change is required**" | **Two** UPDATEs — `README.md` and `.gitignore`. Group 1 of §16.3 is consequently 9 files: 7 CREATE + 2 UPDATE | **The plan's claim was tested and is refuted by the checkout.** `bin/` and `obj/` were excluded only by `.git/info/exclude`, which is per-clone and is **not cloned**, so a fresh clone plus `dotnet build` left a **dirty** `git status` — contradicting C-I's clean-checkout premise and putting the `hygiene` job's `git diff --check` leg at the mercy of build output. `tests/e2e/.gitignore` already commits `node_modules/` for the npm side, so the .NET side was an omission rather than a policy. **The edit is purely additive**: every pre-existing pattern is preserved byte for byte and the new block is appended, so the pre-existing `/pack/*` inconsistency §0.4.5.5 describes is left exactly as it was. This is the one entry in this table that **changes a file the plan says not to change**, which is why it is stated as a refutation with its evidence rather than as a preference |
@@ -1712,18 +1712,28 @@ without its rejected alternatives is a conclusion, not a decision.
 live in the repository-root `Directory.Packages.props` so that all four services inherit them from one
 place and none can drift (§3.2).
 
-#### `Microsoft.OpenApi` = 2.11.0
+#### `Microsoft.OpenApi` = 2.12.0
 
-- The stock web template on `net10.0` emits **`NU1903`** — a known **high-severity** advisory against the
-  **2.0.0** version pulled transitively by `Microsoft.AspNetCore.OpenApi` 10.0.11. Under the
-  warnings-as-errors gate of §3.1 that advisory is fatal, not advisory.
-- The obvious fix — moving forward to the current major line — **breaks the build.** Version **3.9.0** was
-  tested directly and produces **two `error CS0200` diagnostics**, reporting that a media-type example
-  property cannot be assigned because it is **read-only**. They are raised inside the SDK's *own generated
-  OpenAPI XML-comment support file*, not in repository code, so there is nothing local to fix.
+- **`NU1903`** — a known **high-severity** advisory, GHSA-v5pm-xwqc-g5wc / CVE-2026-49451 — covers every
+  `Microsoft.OpenApi` **at or below 2.7.4** and the **3.0.0–3.5.3** range. The transitive floor is chosen by
+  `Microsoft.AspNetCore.OpenApi` rather than by this repository and has sat inside that range before now, so
+  a direct pin is what keeps the resolved version a decision made here. Under the warnings-as-errors gate of
+  §3.1 that advisory is fatal, not advisory.
+- The obvious fix — moving forward to the current major line — **breaks the build.** Versions **3.9.0** and
+  **3.10.0** were each tested directly and produce **two `error CS0200` diagnostics**, reporting that a
+  media-type example property cannot be assigned because it is **read-only**. They are raised inside the
+  SDK's *own generated OpenAPI XML-comment support file*, not in repository code, so there is nothing local
+  to fix.
 - The cause is that the 10.0.11 source generator is compiled against the **2.x** object model.
-- **2.11.0 — the highest published 2.x — is therefore the only value that is simultaneously
+- **2.12.0 — the highest published 2.x — is therefore the only value that is simultaneously
   non-vulnerable and compatible.** Every REST service must respect this pin.
+- **The move from 2.11.0 to 2.12.0 was forced by the reader, not by this package.** Neither 2.11.0 nor
+  2.12.0 of `Microsoft.OpenApi` is vulnerable or deprecated; `Microsoft.OpenApi.YamlReader` **2.11.0** is
+  **deprecated upstream** for `CriticalBugs`, its recommended alternate `[3.10.0, )` is the line that cannot
+  compile, and **2.12.0 is the first 2.x of the reader that carries no deprecation**. The reader declares the
+  matching `Microsoft.OpenApi` version as its dependency **minimum**, so the pair moves together. A
+  deprecated package is invisible to the audit gate — `NU1903` covers vulnerabilities only — which is why CI
+  now also runs `dotnet list package --deprecated --include-transitive` as a failing gate (§10).
 
 #### `SQLitePCLRaw.bundle_e_sqlite3` = 3.0.5
 
@@ -1813,8 +1823,8 @@ there are no private or internal feeds** in this refactor.
 | --- | --- | --- | --- |
 | `Grpc.AspNetCore` | 2.83.0 | gRPC server, client and protocol-definition code generation. Pulls `Grpc.Tools` 2.83.0 and `Google.Protobuf` 3.31.1 transitively, so **neither needs an explicit reference** | Contracts, DataServices, Persistence, and the Gateway/DataServices client sides |
 | `Microsoft.AspNetCore.OpenApi` | 10.0.11 | OpenAPI document generation for the REST surfaces | Gateway, Security, DataServices REST projection |
-| `Microsoft.OpenApi` | **2.11.0 — mandatory pin** | OpenAPI object model (§11.1) | all REST services |
-| `Microsoft.OpenApi.YamlReader` | 2.11.0 | YAML reader for the object model above, which ships a JSON reader only. Version locked to the `Microsoft.OpenApi` release it pairs with, so it cannot drag the mandatory pin off 2.11.0 | `shared/PowerFramework.Contracts.Tests` only — the two contract definitions it loads are YAML |
+| `Microsoft.OpenApi` | **2.12.0 — mandatory pin** | OpenAPI object model (§11.1) | all REST services |
+| `Microsoft.OpenApi.YamlReader` | 2.12.0 | YAML reader for the object model above, which ships a JSON reader only. **2.11.0 is deprecated upstream (`CriticalBugs`); 2.12.0 is the first clean 2.x.** Its `Microsoft.OpenApi` dependency is a **minimum** range, so it cannot pull the mandatory pin down — the central entry is what holds it, and the pair moves together | `shared/PowerFramework.Contracts.Tests` only — the two contract definitions it loads are YAML |
 | `Microsoft.AspNetCore.Authentication.JwtBearer` | 10.0.11 | Inbound JWT validation on `/v1/ping` and every internal edge | all four services |
 | `Microsoft.IdentityModel.JsonWebTokens` | 8.22.0 | Token **minting** — **Security only**, because Security is the sole issuer | Security |
 | `Microsoft.EntityFrameworkCore.Sqlite` | 10.0.11 | EF Core provider for the only evidenced storage engine | Persistence |
@@ -1863,8 +1873,12 @@ per-package coverage table is written to the run's job summary instead. The sche
 its Python closure from `.github/workflows/requirements/check-jsonschema.txt` with `--require-hashes`, so
 all fifteen distributions are pinned and hashed rather than resolved at install time. Every pushed image
 carries a BuildKit SBOM and a max-mode provenance attestation, and the leg verifies both arrived. Both
-dependency graphs are gated: `dotnet list package --vulnerable --include-transitive` and
-`npm audit --audit-level=low` each fail the run on any hit. Section 9 of `ci.yml`'s own header records this
+dependency graphs are gated: `dotnet list package --vulnerable --include-transitive`,
+`dotnet list package --deprecated --include-transitive` and `npm audit --audit-level=low` each fail the run
+on any hit. The deprecation gate is the one a green restore cannot substitute for — NuGet audit raises
+`NU1903` for a published **vulnerability** only, so a package its author has deprecated restores silently at
+every audit level, which is exactly how a `CriticalBugs` deprecation came to sit in the resolved graph while
+every other supply-chain control reported clean. Section 9 of `ci.yml`'s own header records this
 in full, including what the posture does **not** do — it does not run a CVE scanner against OS packages
 inside an image; it pins the base by content, gates on that content still being current, and publishes an
 SBOM so a scanner outside this workflow can do that against the exact bits published.

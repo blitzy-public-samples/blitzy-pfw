@@ -2819,16 +2819,27 @@ different in kind — it may not have originated with this caller, and the gener
 literals — so identity crosses and values do not. Neither member is fabricated when the upstream reported
 no identity: absence keeps meaning "not told", never "told there was none".
 
-Only the `400` remains conditional, and only because three operations bind no request body at all. Both
-directions are now asserted rather than assumed — against the authored contract by
-**Two statuses remain conditional, and both for the same reason: three operations bind no request body at
-all.** The `400` reports a body that would not bind, and the `413` reports one refused at the ingress size
-bound before it was read - so an operation that reads no body can produce neither. That the 413 is genuinely
-unreachable there was measured rather than reasoned: a 9 MiB body sent to `POST /v1/datawindow/retrieve`
-answered `413`, and the same body sent to `DELETE /v1/datawindow/sessions/{sessionId}` answered `200`,
-because a body a route never reads is never measured against the bound. Declaring `413` on those three would
-publish a status they can never answer, which is the defect this section refuses in the other direction.
-Both directions are now asserted rather than assumed — against the authored contract by
+**Exactly one status remains conditional, and it is the `413` — on the three operations that bind no
+request body at all.** The `413` reports a body refused at the ingress size bound before it was read, so an
+operation that reads no body can never produce one. That this is genuinely unreachable there was measured
+rather than reasoned: a 9 MiB body sent to `POST /v1/datawindow/retrieve` answered `413`, and the same body
+sent to `DELETE /v1/datawindow/sessions/{sessionId}` answered `200`, because a body a route never reads is
+never measured against the bound. Declaring `413` on those three would publish a status they can never
+answer, which is the defect this section refuses in the other direction.
+
+🔴 **The `400` is NOT in that company, and an earlier revision of this section said it was.** It read that
+the `400` too was conditional "because three operations bind no request body at all", reasoning that a
+status which reports an unbindable body cannot arise where there is no body to bind. That reasoning is
+sound about *bodies* and wrong about *operations*: a bodiless operation still binds a **parameter**, and a
+parameter it declares `required` is one it can be asked without. All three of these operations carry
+`sessionId` — two in the path, one in the query — so all three have a refusal of their own to publish, and
+all three now declare it. The query-bound one is where the cost of the older reading was actually paid: a
+runtime probe of the deployed stack drove `GET /v1/datawindow/event-gate` with no query string and got a
+`500` out of the framework's own binder, because a document that declared no `400` had been implemented as
+though it could not need one. Both statuses are therefore stated the same way now — declared where the
+mapping can produce them, absent where it cannot — and the difference between them is that a route can
+decline to read a body and cannot decline to be missing a parameter. Both directions are asserted rather
+than assumed — against the authored contract by
 `GatewayContractTests.NoProjectedOperationDeclaresAStatusItCannotProduce`, and against each generated
 document by `DataServicesRouteCensusTests.EveryProjectedRoutePublishesExactlyTheStatusSurfaceItsMappingProduces`
 on Gateway and its counterpart on the DataServices projection.

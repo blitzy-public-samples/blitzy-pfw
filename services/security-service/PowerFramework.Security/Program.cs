@@ -830,11 +830,12 @@ builder.Services.AddScopeAuthorization();
 // built it, so this step can never overwrite an endpoint's deliberate classification with a status-code
 // approximation of it. The member name is read from the shared factory so that one spelling exists.
 //
-// Microsoft.OpenApi is pinned to 2.11.0 as a MANDATORY constraint held centrally at the repository root.
-// 2.0.0 raises the NU1903 advisory, and moving to the 3.x line breaks the build with two CS0200
-// "cannot assign, read only" errors inside the SDK's own generated OpenAPI support file, because the
-// 10.0.x source generator is compiled against the 2.x object model. 2.11.0, the highest published 2.x,
-// is the only value that is simultaneously non-vulnerable and compatible. Neither Swashbuckle nor
+// Microsoft.OpenApi is pinned to 2.12.0 as a MANDATORY constraint held centrally at the repository root.
+// Anything at or below 2.7.4 raises the NU1903 advisory, and moving to the 3.x line breaks the build with
+// two CS0200 "cannot assign, read only" errors inside the SDK's own generated OpenAPI support file,
+// because the 10.0.x source generator is compiled against the 2.x object model. 2.12.0, the highest
+// published 2.x, is the only value that is simultaneously non-vulnerable, compatible and free of the
+// upstream deprecation its lock-stepped YAML reader carries at 2.11.0. Neither Swashbuckle nor
 // Scalar is referenced: an interactive UI is not required, and the generator already produces the
 // document.
 // --------------------------------------------------------------------------------------------------

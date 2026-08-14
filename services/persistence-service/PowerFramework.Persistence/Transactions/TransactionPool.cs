@@ -1555,6 +1555,68 @@ internal interface IPooledTransaction : IDisposable
     bool IsDestroyed => false;
 
     /// <summary>
+    /// Whether a statement has been executed inside an explicit transaction that has since been neither
+    /// committed nor rolled back.
+    /// </summary>
+    /// <value>
+    /// <see langword="true"/> while this transaction may still be holding a lock on behalf of work nobody
+    /// has finished; <see langword="false"/> when it is not.
+    /// </value>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THIS EXISTS BECAUSE AN ABANDONED WRITE SESSION HELD THE STORAGE ENGINE'S WRITER LOCK FOR THE
+    /// WHOLE GENERIC IDLE WINDOW.</b> A runtime probe opened a session, executed an <c>INSERT</c> without
+    /// committing, and walked away. A second session on a DIVERGENT descriptor - which the pool answers
+    /// with a connection of its own rather than the same one - then failed every write with
+    /// <c>SQLite Error 5: 'database is locked'</c> for **fourteen and a half minutes**, until the handle
+    /// reclaim pass reached the abandoned session at the fifteen-minute idle bound and tore it down. The
+    /// reclaim path already rolls back on the way out, so nothing about the recovery was wrong except
+    /// WHEN it happened, and this member is how the reclaimer can tell which sessions are worth reaching
+    /// sooner.
+    /// </para>
+    /// <para>
+    /// <b>"WORK", NOT "WRITE", AND THE WIDER WORD IS THE ACCURATE ONE.</b> Deciding whether a statement
+    /// writes would mean parsing it, and the answer would still be wrong for the shapes that matter -
+    /// a statement arriving through C-07 is arbitrary text, and a <c>WITH</c> clause can carry an
+    /// <c>INSERT</c>. It is also unnecessary: under the rollback-journal mode this estate's connection
+    /// grammar defaults to, an open transaction that has only READ holds a shared lock that blocks another
+    /// connection's commit anyway. So the marker is set by any statement executed while auto-commit is
+    /// off, which is exactly the condition "this transaction is holding something a commit or a rollback
+    /// would release".
+    /// </para>
+    /// <para>
+    /// <b>NOTHING IS MARKED UNDER AUTO-COMMIT</b>, because each statement commits itself and retains no
+    /// lock - so a session that never opened an explicit transaction is never treated as one holding work.
+    /// </para>
+    /// <para>
+    /// <b>DEFAULTED TO <see langword="false"/>, EXACTLY AS <see cref="IsDestroyed"/> IS.</b> An
+    /// implementation that holds no transaction of its own - every test double - reports itself clean,
+    /// which is the truthful answer and keeps the member from being ceremony on collaborators that have
+    /// nothing to say about it.
+    /// </para>
+    /// </remarks>
+    bool HasUncommittedWork => false;
+
+    /// <summary>
+    /// Records that a statement is about to be executed inside this transaction.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// CALLED BEFORE THE STATEMENT RUNS RATHER THAN AFTER IT, because a statement that fails part-way can
+    /// still have taken a lock, and a marker set only on success would leave exactly that case in the
+    /// generic window. Setting it for a statement that turns out to affect nothing costs one early
+    /// reclaim of an idle session and no correctness.
+    /// </para>
+    /// <para>
+    /// IT IS A MEMBER OF THIS INTERFACE RATHER THAN A PRIVATE DETAIL BECAUSE ONE WRITE PATH DOES NOT GO
+    /// THROUGH <see cref="Exec(in SqlCommandText, CancellationToken)"/>. The update carrier's generated
+    /// insert, update and delete statements are issued on a command taken from the engine capability
+    /// directly, so that path has to say so itself.
+    /// </para>
+    /// </remarks>
+    void MarkUncommittedWork() { }
+
+    /// <summary>
     /// Clears the five SQL-state values. [<c>:L363-L368</c>]
     /// </summary>
     /// <remarks>
@@ -1804,6 +1866,19 @@ internal sealed class PooledTransaction : IPooledTransaction
     /// </summary>
     private bool _broken;
 
+    /// <summary>
+    /// Whether a statement has run inside an explicit transaction that has not since been committed or
+    /// rolled back - see <see cref="IPooledTransaction.HasUncommittedWork"/> for why this is tracked.
+    /// </summary>
+    /// <remarks>
+    /// READ AND WRITTEN THROUGH <see cref="Volatile"/> BECAUSE THE READER IS A DIFFERENT THREAD. The
+    /// handle reclaim pass runs on the hosted service's timer, not on the request that set the flag, so
+    /// the write has to be published rather than merely performed. It is a <see cref="bool"/> rather than
+    /// a counter deliberately: the question is "is anything outstanding", and a counter would have to be
+    /// balanced across paths that legitimately do not pair up.
+    /// </remarks>
+    private bool _hasUncommittedWork;
+
     /// <summary>Guards <see cref="Dispose"/> against a second call.</summary>
     private bool _disposed;
 
@@ -1887,6 +1962,13 @@ internal sealed class PooledTransaction : IPooledTransaction
 
         if (outcome.SqlCode >= 0)
         {
+            // EITHER DIRECTION ENDS THE TRANSACTION THE MARKER WAS ABOUT, so the successful arm clears it
+            // without asking which way it went. Turning auto-commit ON commits and releases the open
+            // transaction - the engine's own transition does that - and turning it OFF opens a fresh one
+            // that has executed nothing yet, so a marker carried across would describe a transaction that
+            // no longer exists.
+            Volatile.Write(ref _hasUncommittedWork, false);
+
             return RetCode.OK;
         }
 
@@ -1971,6 +2053,12 @@ internal sealed class PooledTransaction : IPooledTransaction
         // [:L119] The liveness tick is invalidated before anything else can consult it.
         _lastConnectionOkTicks = 0;
 
+        // AND SO IS THE OUTSTANDING-WORK MARKER. A connect discards whatever the previous connection was
+        // holding - the pre-emptive disconnect above is what discards it - so carrying the marker across
+        // would put a freshly connected transaction into the shorter reclaim window on the strength of
+        // work that no longer exists anywhere.
+        Volatile.Write(ref _hasUncommittedWork, false);
+
         // [:L120]
         ClearState();
 
@@ -2052,6 +2140,11 @@ internal sealed class PooledTransaction : IPooledTransaction
         if (_engine.DbHandle <= 0 || _broken)
         {
             _lastConnectionOkTicks = 0;
+
+            // A transaction with no handle is holding nothing, so the marker is cleared on this arm too
+            // rather than only on the arm that issues a statement.
+            Volatile.Write(ref _hasUncommittedWork, false);
+
             return RetCode.OK;
         }
 
@@ -2059,6 +2152,10 @@ internal sealed class PooledTransaction : IPooledTransaction
         _hooks.OnBeforeDisconnect();
         _state = _engine.Disconnect();
         _hooks.OnAfterDisconnect();
+
+        // A DISCONNECT ENDS ANY OPEN TRANSACTION, so nothing survives it to be reclaimed early for. The
+        // engine rolls back and releases on the way out, which is exactly what the reclaim path relies on.
+        Volatile.Write(ref _hasUncommittedWork, false);
 
         // [:L154] After the hooks, not before.
         _lastConnectionOkTicks = 0;
@@ -2171,6 +2268,11 @@ internal sealed class PooledTransaction : IPooledTransaction
 
             return RetCode.E_DB_ERROR;
         }
+
+        // THE COMMIT SUCCEEDED, SO WHATEVER IT WAS HOLDING IS RELEASED. Only on this arm: a commit that
+        // failed WITHOUT auto-rollback leaves the transaction open, and the failing arm above clears
+        // through CleanRollback when auto-rollback was asked for.
+        Volatile.Write(ref _hasUncommittedWork, false);
 
         // [:L256]
         return RetCode.OK;
@@ -2301,6 +2403,10 @@ internal sealed class PooledTransaction : IPooledTransaction
             // [:L225-L226] The same veto discrimination as Connect's.
             return _state.SqlCode != 0 ? RetCode.E_DB_ERROR : RetCode.CANCELLED;
         }
+
+        // BEFORE THE STATEMENT, because a statement that fails part-way can still have taken a lock. It
+        // no-ops under auto-commit, so this line marks nothing on a connection that commits per statement.
+        MarkUncommittedWork();
 
         // [:L229] BOUND, NOT SPLICED (AAP 0.6.4).
         _state = _engine.Execute(in command, cancellationToken);
@@ -2471,6 +2577,32 @@ internal sealed class PooledTransaction : IPooledTransaction
     /// guard here would throw the very exception the member exists to let callers avoid.
     /// </remarks>
     public bool IsDestroyed => _disposed;
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// NO DISPOSAL GUARD, FOR THE SAME REASON <see cref="IsDestroyed"/> CARRIES NONE. The reclaim pass
+    /// asks this of every session it is considering, and a session whose transaction has already been
+    /// destroyed is one of the cases it exists to sweep up - so throwing here would abort the pass that
+    /// was about to clean the object up.
+    /// </remarks>
+    public bool HasUncommittedWork => Volatile.Read(ref _hasUncommittedWork);
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Two conditions answer nothing rather than marking: a disposed transaction holds no lock and has no
+    /// reclaim decision left to inform, and an auto-commit connection retains nothing between statements.
+    /// The auto-commit test is read from the ENGINE rather than from a cached copy, because
+    /// <see cref="TrySetAutoCommit"/> can move it underneath a caller.
+    /// </remarks>
+    public void MarkUncommittedWork()
+    {
+        if (_disposed || _engine.AutoCommit)
+        {
+            return;
+        }
+
+        Volatile.Write(ref _hasUncommittedWork, true);
+    }
 
     /// <inheritdoc/>
     /// <remarks>
@@ -2742,6 +2874,13 @@ internal sealed class PooledTransaction : IPooledTransaction
         // [:L176-L180] THE RESTORE. Between the statement and the after-hook, exactly as measured.
         _state = preserved;
 
+        // THE ROLLBACK RELEASED WHATEVER WAS OUTSTANDING, whether it succeeded or not: a rollback that
+        // fails has still ended this transaction's claim as far as this object can act on it, and leaving
+        // the marker set would keep a clean session in the shorter reclaim window for ever. Cleared AFTER
+        // the restore and before the after-hook so a hook observing the object sees the state the oracle
+        // leaves and the marker the release implies.
+        Volatile.Write(ref _hasUncommittedWork, false);
+
         // [:L182] Observes the RESTORED state.
         _hooks.OnAfterRollback();
     }
@@ -2777,6 +2916,10 @@ internal sealed class PooledTransaction : IPooledTransaction
 
         // [:L517-L521] THE RESTORE, before the after-hook.
         _state = preserved;
+
+        // The same release the public disconnect performs, so the state-preserving path does not leave a
+        // marker the ordinary path would have cleared. The SQL state is what is preserved here, not this.
+        Volatile.Write(ref _hasUncommittedWork, false);
 
         // [:L523]
         _hooks.OnAfterDisconnect();

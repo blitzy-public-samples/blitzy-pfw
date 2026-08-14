@@ -965,7 +965,7 @@ public sealed class ReservedRouteMetadataTests(OpenApiContractDocuments document
             // both match on them. `-2001` is the legacy framework's own `E_NO_IMPLEMENTATION`
             // [ws_objects/pfw.shared.pbl.src/retcode.sru:L78] rather than a vocabulary invented for
             // this document, so a client that already branches on the return-code algebra needs no new
-            // case. Microsoft.OpenApi 2.11.0 models `const` as a string, hence the string comparands.
+            // case. Microsoft.OpenApi 2.12.0 models `const` as a string, hence the string comparands.
             Assert.Equal(NotImplementedStatus, schema.Properties["status"].Const);
             Assert.Equal(PhaseTwoMarker, schema.Properties["marker"].Const);
             Assert.Equal("-2001", schema.Properties["retCode"].Const);

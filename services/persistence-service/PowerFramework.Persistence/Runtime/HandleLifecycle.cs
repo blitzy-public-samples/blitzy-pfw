@@ -403,11 +403,22 @@ internal sealed class HandleReclaimer : BackgroundService
     internal int ReclaimOnce()
     {
         TimeSpan window = _options.Value.Handles.IdleExpiry;
+        TimeSpan uncommittedWorkWindow = _options.Value.Handles.UncommittedWorkIdleExpiry;
         DateTimeOffset now = _time.GetUtcNow();
 
-        int reclaimed = _queries.ReclaimIdle(now, window)
-            + _updates.ReclaimIdle(now, window)
-            + _commands.ReclaimIdle(now, window);
+        // 🔴 THE DIRTY SET IS TAKEN ONCE, BEFORE ANYTHING IS RECLAIMED, AND IT IS WHAT MAKES THE SHORTER
+        // WINDOW REACH THE CASE IT EXISTS FOR. An abandoned write session is PINNED by the task that wrote
+        // through it, and the session pass never touches a pinned session - so shortening the window on the
+        // session pass alone would have changed nothing. Passing the set to the three task registries lets
+        // them apply the same distinction to the handle doing the pinning, which unpins the session on this
+        // pass and lets the next one collect it. Taken before the task passes because a task reclaimed here
+        // takes its own session's dirtiness with it, and re-reading afterwards would then govern that
+        // session by the generic window for one more sweep.
+        IReadOnlySet<string> holdingUncommittedWork = _sessions.SessionIdsHoldingUncommittedWork;
+
+        int reclaimed = _queries.ReclaimIdle(now, window, uncommittedWorkWindow, holdingUncommittedWork)
+            + _updates.ReclaimIdle(now, window, uncommittedWorkWindow, holdingUncommittedWork)
+            + _commands.ReclaimIdle(now, window, uncommittedWorkWindow, holdingUncommittedWork);
 
         // The session pass runs LAST and is told which sessions are still spoken for, so a session whose
         // task survived this pass survives with it.
@@ -418,16 +429,19 @@ internal sealed class HandleReclaimer : BackgroundService
             .. _commands.LiveSessionIds,
         ];
 
-        reclaimed += _sessions.ReclaimIdle(now, window, pinned);
+        reclaimed += _sessions.ReclaimIdle(now, window, pinned, uncommittedWorkWindow);
 
         if (reclaimed > 0)
         {
             _logger?.LogWarning(
                 "Reclaimed {ReclaimedCount} abandoned work handles that had been idle for longer than "
-                + "{IdleWindow}. A reclaimed handle means a caller took one and never released it; the "
-                + "handle values are deliberately not recorded.",
+                + "{IdleWindow}, or longer than {UncommittedWorkIdleWindow} where the session was holding "
+                + "uncommitted work ({UncommittedWorkSessionCount} were). A reclaimed handle means a caller "
+                + "took one and never released it; the handle values are deliberately not recorded.",
                 reclaimed,
-                window);
+                window,
+                uncommittedWorkWindow,
+                holdingUncommittedWork.Count);
         }
 
         return reclaimed;

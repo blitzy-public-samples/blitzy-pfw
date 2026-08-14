@@ -514,6 +514,24 @@ public static class RestProjectionEndpoints
         + "a caller sent is never silently lost. The parser's own diagnostic is deliberately "
         + "withheld because it quotes the offending body, which is caller content.";
 
+    /// <summary>The detail for a session identifier the caller omitted entirely.</summary>
+    /// <remarks>
+    /// IT NAMES THE PARAMETER, and that is safe: the name is this projection's own and not caller content.
+    /// No caller VALUE appears in this detail or in the one below it - a caller already has the value it
+    /// sent, and a problem body is read by whoever holds the response rather than only by that caller.
+    /// </remarks>
+    private const string AbsentSessionIdDetail =
+        "This operation requires a sessionId and none was supplied. The parameter is declared required, so "
+        + "an omitted identifier is a client error rather than a fault of this service; it is answered "
+        + "identically to an empty one, because omitting a value and supplying an empty one are two "
+        + "spellings of the same mistake.";
+
+    /// <summary>The detail for an empty session identifier.</summary>
+    private const string EmptySessionIdDetail =
+        "The sessionId supplied is empty, so it can name no session. It is answered identically to an "
+        + "omitted one. An identifier that is present and non-empty is forwarded, and a session this "
+        + "service cannot resolve is reported as not found rather than as a malformed request.";
+
     /// <summary>The detail for <see cref="StatusCode.InvalidArgument"/>.</summary>
     private const string InvalidArgumentDetail =
         "An argument was rejected. The retCode member carries the legacy return code for the "
@@ -754,6 +772,24 @@ public static class RestProjectionEndpoints
         + "validation is identifiable rather than merely the HTTP class.";
 
     /// <summary>
+    /// The contract's <c>400</c> description for the three operations whose only argument is a session
+    /// identifier.
+    /// </summary>
+    /// <remarks>
+    /// <b>NAMED SEPARATELY BECAUSE THESE THREE OPERATIONS TAKE NO REQUEST BODY.</b> The shared wording
+    /// offers a consumer two candidate causes, one of which - a body this projection could not bind -
+    /// describes something that cannot happen on an operation that accepts none. Here the <c>400</c> is
+    /// entirely about the identifier: it was omitted, or it is empty. Both are answered identically with
+    /// <c>E_INVALID_ARGUMENT</c>, and neither echoes the value back.
+    /// </remarks>
+    private const string SessionIdConstraintDescription =
+        "The sessionId does not satisfy the parameter contract this operation publishes: it was omitted, "
+        + "or it is empty. This operation takes no request body, so its 400 can arise no other way - a "
+        + "present, non-empty identifier that names no session is reported as 404 carrying "
+        + "E_INVALID_HANDLE, not as a malformed request. retCode carries E_INVALID_ARGUMENT and the value "
+        + "is not echoed back.";
+
+    /// <summary>
     /// The contract's <c>400</c> description for the five operations on which a cross-session
     /// foreign-variable reference is a distinctive rejection reason.
     /// </summary>
@@ -869,11 +905,20 @@ public static class RestProjectionEndpoints
         + "content.";
 
     /// <summary>The allowlisted operator record written once per binding failure.</summary>
+    /// <remarks>
+    /// IT NAMES THE BODY <b>OR</b> A REQUIRED PARAMETER, because both refusals travel through this one
+    /// record. Saying "a request body" alone was accurate while every refusal came from a body, and became
+    /// untrue the moment the session-scoped operations - which accept no body at all - began refusing an
+    /// omitted or empty <c>sessionId</c> here rather than letting framework binding fault. An operator
+    /// reading the narrower wording on a bodiless operation would go looking for a body that was never
+    /// sent.
+    /// </remarks>
     private const string BindingFailureLogMessage =
-        "The /v1/datawindow REST projection rejected a request body before invoking the projected "
-        + "method and is answering {HttpStatus} with retCode {RetCode} for {HttpMethod} "
-        + "{RoutePattern}. Correlation {CorrelationId}. The parser diagnostic and the body itself "
-        + "are deliberately not recorded - the body is caller content and may carry anything.";
+        "The /v1/datawindow REST projection rejected a request body or a required parameter before "
+        + "invoking the projected method and is answering {HttpStatus} with retCode {RetCode} for "
+        + "{HttpMethod} {RoutePattern}. Correlation {CorrelationId}. The parser diagnostic, the body "
+        + "itself and the parameter value are deliberately not recorded - all three are caller content "
+        + "and may carry anything.";
 
     /// <summary>
     /// The logger category for the two records above, so an operator filters this projection's
@@ -1183,7 +1228,7 @@ public static class RestProjectionEndpoints
                 "Releases the session the paired open returned. Closing a session that does not exist "
                 + "is reported as 404 rather than silently succeeding, so a caller can detect a "
                 + "double close - which in the legacy would have been a use-after-destroy.",
-                BadRequest: BadRequestDeclaration.None),
+                BadRequest: BadRequestDeclaration.SessionIdConstraint),
             HttpMethods.Delete,
             static sessionId => new CloseValidationSessionRequest { SessionId = sessionId },
             static (service, request, context) => service.CloseValidationSession(request, context));
@@ -1223,7 +1268,7 @@ public static class RestProjectionEndpoints
                 + "that expressions stop recalculating too - before it does so rather than after. "
                 + "Splitting them would be a behaviour improvement, which the mandate forbids as "
                 + "firmly as it forbids a regression.",
-                BadRequest: BadRequestDeclaration.None),
+                BadRequest: BadRequestDeclaration.SessionIdConstraint),
             HttpMethods.Get,
             static sessionId => new GetEventGateRequest { SessionId = sessionId },
             static (service, request, context) => service.GetEventGate(request, context));
@@ -1406,7 +1451,7 @@ public static class RestProjectionEndpoints
                 "Releases the session the paired open returned, together with every DataWindow handle "
                 + "scoped to it. Closing a session that does not exist is reported as 404 rather than "
                 + "silently succeeding, so a caller can detect a double close.",
-                BadRequest: BadRequestDeclaration.None),
+                BadRequest: BadRequestDeclaration.SessionIdConstraint),
             HttpMethods.Delete,
             static sessionId => new CloseExpressionSessionRequest { SessionId = sessionId },
             static (service, request, context) => service.CloseExpressionSession(request, context));
@@ -1765,9 +1810,38 @@ public static class RestProjectionEndpoints
     /// <param name="buildRequest">Builds the request message from the identifier.</param>
     /// <param name="invoke">Invokes the projected method on a resolved service instance.</param>
     /// <remarks>
+    /// <para>
     /// The identifier is bound by the framework - from the path where the template names it and from
-    /// the query string where it does not - and it is declared as a non-nullable argument because the
-    /// contract declares the parameter REQUIRED. No request body is accepted, and none is declared.
+    /// the query string where it does not. No request body is accepted, and none is declared.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>THE PARAMETER IS BOUND NULLABLE, AND THAT IS THE WHOLE OF THE FIX RATHER THAN A RELAXATION
+    /// OF THE CONTRACT.</b> Declared non-nullable - which is what it was - an OMITTED query parameter is
+    /// a PARAMETER-BINDING failure raised by the framework BEFORE this route is entered:
+    /// <c>BadHttpRequestException: Required parameter "string sessionId" was not provided from query
+    /// string</c>. Nothing in this file can answer it, because nothing in this file has run yet, so it
+    /// escaped into the host's fault handling and reached the caller as <c>500</c> carrying
+    /// <c>E_INTERNAL_ERROR</c> under the Development overlay and a detail-less <c>400</c> under the
+    /// deployed one - while the same request with an EMPTY value answered a clean <c>400</c> with
+    /// <c>E_INVALID_ARGUMENT</c>. Two spellings of one client mistake, answered as a server fault and a
+    /// client error respectively, and the server-fault answer is the wrong one: nothing failed here
+    /// except the caller's request. Binding it nullable moves the decision INTO the route, where the
+    /// declared parameter contract can be applied and one answer produced for every violation of it.
+    /// </para>
+    /// <para>
+    /// <b>IT IS APPLIED HERE, ONCE, FOR EVERY SESSION-SCOPED OPERATION</b> - the two closes and the
+    /// event-gate read - rather than at the one route where the defect was observed. Only the event-gate
+    /// read binds from the query string today, so only it could reach the binding failure; a fourth
+    /// session-scoped operation declared without a path template would reintroduce it, and applying the
+    /// rule to the shared declaration is what makes that impossible rather than merely unlikely.
+    /// </para>
+    /// <para>
+    /// <b>THE PUBLISHED PARAMETER STAYS <c>required</c>.</b> Nullable binding is how the route becomes
+    /// able to REFUSE the omission; it is not a statement that the identifier is optional, and the
+    /// generator would otherwise infer exactly that from the signature and publish a document
+    /// contradicting both the operation and its own <c>400</c>. <see cref="DescribeSessionIdParameter"/>
+    /// re-asserts it.
+    /// </para>
     /// </remarks>
     private static void MapSessionScoped<TService, TRequest, TResponse>(
         RouteGroupBuilder group,
@@ -1782,17 +1856,128 @@ public static class RestProjectionEndpoints
         RouteHandlerBuilder route = group.MapMethods(
             operation.Route,
             [httpMethod],
-            (HttpContext httpContext, string sessionId) => ProjectAsync(
+            (HttpContext httpContext, string? sessionId) => ProjectSessionScopedAsync(
                 httpContext,
                 operation,
-                async (service, context) => Render(
-                    httpContext,
-                    await invoke(service, buildRequest(sessionId), context).ConfigureAwait(false)),
-                static services => ResolveService<TService>(services)));
+                sessionId,
+                buildRequest,
+                invoke));
 
         route.Produces<ProtoPayload>(StatusCodes.Status200OK, MediaTypeNames.Application.Json);
 
         Describe<TRequest, TResponse>(route, operation);
+    }
+
+    /// <summary>
+    /// Applies the session-identifier parameter contract and, once it is satisfied, projects the
+    /// operation.
+    /// </summary>
+    /// <typeparam name="TService">The gRPC service implementation the operation reaches.</typeparam>
+    /// <typeparam name="TRequest">The protobuf request message.</typeparam>
+    /// <typeparam name="TResponse">The protobuf response message.</typeparam>
+    /// <param name="httpContext">The current request.</param>
+    /// <param name="operation">The operation being projected, which names the gRPC method.</param>
+    /// <param name="sessionId">The identifier as it arrived, or <see langword="null"/> when omitted.</param>
+    /// <param name="buildRequest">Builds the request message from the accepted identifier.</param>
+    /// <param name="invoke">Invokes the projected method on a resolved service instance.</param>
+    /// <returns>The projected result, or the refusal.</returns>
+    /// <remarks>
+    /// <para>
+    /// THE PARAMETER CONTRACT IS APPLIED BEFORE ANYTHING IS RESOLVED OR INVOKED, so a request this
+    /// service can already answer never reaches an implementation, never opens a call context and never
+    /// touches a session table.
+    /// </para>
+    /// <para>
+    /// The refusal travels through the same <see cref="BindingRejection(string)"/> and
+    /// <see cref="RejectRequest"/> pair every body-binding refusal in this file uses, so an omitted
+    /// parameter and a malformed body are answered by one mechanism with one problem shape - status,
+    /// <c>retCode</c>, <c>traceId</c>, fixed prose, and no <c>upstream</c> member, because nothing was
+    /// sent anywhere.
+    /// </para>
+    /// </remarks>
+    private static Task<IResult> ProjectSessionScopedAsync<TService, TRequest, TResponse>(
+        HttpContext httpContext,
+        ProjectedOperation operation,
+        string? sessionId,
+        Func<string, TRequest> buildRequest,
+        Func<TService, TRequest, ServerCallContext, Task<TResponse>> invoke)
+        where TService : class
+        where TRequest : class, IMessage, new()
+        where TResponse : class, IMessage, new()
+    {
+        if (!TryAcceptSessionId(sessionId, out string accepted, out StatusProjection rejection))
+        {
+            return Task.FromResult(RejectRequest(httpContext, rejection));
+        }
+
+        return ProjectAsync(
+            httpContext,
+            operation,
+            async (service, context) => Render(
+                httpContext,
+                await invoke(service, buildRequest(accepted), context).ConfigureAwait(false)),
+            static services => ResolveService<TService>(services));
+    }
+
+    /// <summary>
+    /// Applies the two constraints that make an omitted session identifier answerable by this route.
+    /// </summary>
+    /// <param name="sessionId">The identifier as it arrived, or <see langword="null"/> when omitted.</param>
+    /// <param name="accepted">
+    /// The identifier to forward, when it is acceptable; <see cref="string.Empty"/> otherwise. It exists
+    /// so the caller forwards a non-nullable value WITHOUT a null-forgiving operator - the compiler
+    /// carries the guarantee rather than a reader having to trust it.
+    /// </param>
+    /// <param name="rejection">The refusal to answer with, when the identifier is not acceptable.</param>
+    /// <returns><see langword="true"/> when the identifier may be forwarded.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>EXACTLY TWO CONSTRAINTS, AND THE ABSENT SET IS AS DELIBERATE AS THE PRESENT ONE.</b> ABSENCE is
+    /// refused because the parameter is required and because the framework's own refusal for it is a
+    /// fault rather than an answer. EMPTINESS is refused because it is the same mistake spelled
+    /// differently, and answering the two identically is the property that makes the refusal predictable:
+    /// a caller correcting its request must not have to discover that one omission is a client error and
+    /// the other a server fault. Both were already <c>400</c>/<c>E_INVALID_ARGUMENT</c> for the empty
+    /// case, so the empty answer's status and code do not move - only its prose becomes this service's
+    /// own, and it now names the parameter.
+    /// </para>
+    /// <para>
+    /// <b>NOTHING ELSE IS JUDGED HERE, AND IN PARTICULAR NO LENGTH BOUND IS INVENTED.</b> Gateway
+    /// enforces <c>minLength</c> and <c>maxLength</c> because <c>gateway.v1.yaml</c> publishes them and
+    /// because a forwarded over-long identifier would make an UPSTREAM answer for a violation of
+    /// Gateway's own published bound. Neither reason holds here: this projection's document declares no
+    /// length, and this service IS the session owner - an identifier it cannot resolve genuinely names no
+    /// session, so <c>404</c> is its truthful answer rather than a misattribution. Whitespace is likewise
+    /// forwarded: <c>ValidationSessionRegistry.Resolve</c> and its expression-side twin already judge a
+    /// blank identifier as <c>E_INVALID_ARGUMENT</c>, so re-deciding it here would put one rule in two
+    /// places.
+    /// </para>
+    /// </remarks>
+    private static bool TryAcceptSessionId(
+        string? sessionId,
+        out string accepted,
+        out StatusProjection rejection)
+    {
+        if (sessionId is null)
+        {
+            accepted = string.Empty;
+            rejection = BindingRejection(AbsentSessionIdDetail);
+
+            return false;
+        }
+
+        if (sessionId.Length == 0)
+        {
+            accepted = string.Empty;
+            rejection = BindingRejection(EmptySessionIdDetail);
+
+            return false;
+        }
+
+        accepted = sessionId;
+        rejection = default;
+
+        return true;
     }
 
     /// <summary>
@@ -1972,6 +2157,11 @@ public static class RestProjectionEndpoints
             .WithSummary(operation.Summary)
             .WithDescription(operation.Description);
 
+        // EVERY OPERATION REACHES THIS TODAY, because no operation declares BadRequestDeclaration.None any
+        // longer - the three that did are the session-scoped ones, and their session-identifier parameter
+        // always could fail its own declared contract. The gate is kept for the operation that genuinely
+        // binds neither a body nor a constrained parameter, not as a switch to reach for; see the member's
+        // own remarks.
         if (operation.BadRequest != BadRequestDeclaration.None)
         {
             route.ProducesProblem(
@@ -3113,9 +3303,18 @@ public static class RestProjectionEndpoints
 
         Describe(
             StatusCodes.Status400BadRequest,
-            operation.BadRequest == BadRequestDeclaration.CrossSessionReferenceBlocked
-                ? CrossSessionReferenceBlockedDescription
-                : BadRequestDescription);
+            operation.BadRequest switch
+            {
+                BadRequestDeclaration.CrossSessionReferenceBlocked =>
+                    CrossSessionReferenceBlockedDescription,
+
+                // NAMED SEPARATELY BECAUSE THESE THREE OPERATIONS TAKE NO REQUEST BODY, so the shared
+                // wording - half of which is about a body this projection could not bind - would describe
+                // something that cannot happen on them.
+                BadRequestDeclaration.SessionIdConstraint => SessionIdConstraintDescription,
+
+                _ => BadRequestDescription,
+            });
 
         Describe(StatusCodes.Status401Unauthorized, UnauthorizedDescription);
         Describe(StatusCodes.Status403Forbidden, ForbiddenDescription);
@@ -3139,9 +3338,19 @@ public static class RestProjectionEndpoints
 
     /// <summary>
     /// Carries the authored contract's description onto the session-identifier parameter, wherever the
-    /// framework bound it from.
+    /// framework bound it from, and re-asserts that the parameter is required.
     /// </summary>
     /// <param name="openApiOperation">The operation being described.</param>
+    /// <remarks>
+    /// <b>THE <c>required</c> ASSERTION IS NOT DECORATION - IT REPAIRS AN INFERENCE THE GENERATOR MAKES
+    /// FROM THE HANDLER SIGNATURE.</b> <see cref="MapSessionScoped"/> binds the identifier as a NULLABLE
+    /// argument so that an omitted one can be refused by the route with a bound <c>400</c> instead of
+    /// escaping as a framework binding fault; from that signature alone the generator concludes the query
+    /// parameter is optional and publishes a document saying so. It is not optional: every one of these
+    /// operations needs it, and each declares the <c>400</c> that answers its absence. A path parameter is
+    /// required by the specification in any case, so one assignment is correct for both shapes and neither
+    /// is special-cased.
+    /// </remarks>
     private static void DescribeSessionIdParameter(OpenApiOperation openApiOperation)
     {
         if (openApiOperation.Parameters is null)
@@ -3155,6 +3364,7 @@ public static class RestProjectionEndpoints
                 && parameter is OpenApiParameter concrete)
             {
                 concrete.Description = SessionIdParameterDescription;
+                concrete.Required = true;
             }
         }
     }
@@ -3526,8 +3736,33 @@ public static class RestProjectionEndpoints
         /// <summary>The shared description.</summary>
         Standard,
 
-        /// <summary>No <c>400</c> is declared, because the operation binds no body.</summary>
+        /// <summary>No <c>400</c> is declared at all.</summary>
+        /// <remarks>
+        /// 🔴 <b>NO MEMBER CARRIES THIS TODAY, AND THE THREE THAT USED TO WERE WRONG TO.</b> Its stated
+        /// premise was that an operation binding no body has nothing for this projection's own binding to
+        /// reject - which overlooks the session-identifier PARAMETER the two closes and the event-gate read
+        /// do carry. Those three could always answer <c>400</c>: an empty identifier reached
+        /// <c>E_INVALID_ARGUMENT</c> from the session registry long before an omitted one became
+        /// answerable here, so the suppression published a document that was already untruthful by
+        /// omission - a declared <c>required</c> parameter with no declared response for violating it is a
+        /// promise no generated client can branch on. It is RETAINED rather than deleted because it
+        /// remains the correct declaration for a future operation that takes neither a body nor a
+        /// parameter with declared constraints; it is not a suppression to reach for on an operation that
+        /// merely has no body. See <see cref="SessionIdConstraint"/>.
+        /// </remarks>
         None,
+
+        /// <summary>
+        /// The operation declares the <c>400</c> raised by its own session-identifier parameter contract:
+        /// an omitted or empty identifier.
+        /// </summary>
+        /// <remarks>
+        /// DISTINCT FROM <see cref="Standard"/> BECAUSE THE REASON IS DIFFERENT AND THE PROSE SHOULD SAY
+        /// SO. These three operations accept no request body, so their <c>400</c> can only ever be about
+        /// the identifier, and the shared wording's alternative cause would describe something that cannot
+        /// happen on them.
+        /// </remarks>
+        SessionIdConstraint,
 
         /// <summary>
         /// The variant recording that a cross-session foreign-variable reference is BLOCKED, which is

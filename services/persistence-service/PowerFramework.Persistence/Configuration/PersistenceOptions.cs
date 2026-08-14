@@ -1671,6 +1671,44 @@ public sealed class HandleLifecycleOptions
     public const int DefaultSweepIntervalSeconds = 60;
 
     /// <summary>
+    /// The idle lifetime of an untouched handle whose session is holding UNCOMMITTED WORK, when nothing is
+    /// configured, in seconds.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>ONE HUNDRED AND TWENTY SECONDS, AND THE SECOND WINDOW EXISTS BECAUSE ONE WINDOW COST EVERY
+    /// OTHER WRITER FOURTEEN AND A HALF MINUTES.</b> A runtime probe opened a transaction session,
+    /// executed an <c>INSERT</c> without committing and abandoned it. A second session on a divergent
+    /// descriptor - which the pool answers with a connection of its own - then failed every write with
+    /// <c>SQLite Error 5: 'database is locked'</c> until the reclaim pass reached the abandoned session at
+    /// <see cref="DefaultIdleExpirySeconds"/> and tore it down, which the probe measured at t+870 s. The
+    /// recovery itself was correct: the reclaim path rolls back on its way out. What was wrong was that a
+    /// session holding a lock every other writer needs waited exactly as long as one holding nothing.
+    /// </para>
+    /// <para>
+    /// <b>WHY THIS IS NOT SIMPLY A SHORTER <see cref="DefaultIdleExpirySeconds"/>.</b> The generic window is
+    /// deliberately generous because reclaiming a handle a caller still intends to use is the worse fault,
+    /// and that reasoning is untouched here - it applies to every handle that is holding nothing. A session
+    /// with an open, uncommitted transaction is the case where the calculation inverts: the cost of
+    /// waiting falls on OTHER callers rather than on the one that walked away. So the generous default
+    /// stays generous and only the contended case is shortened.
+    /// </para>
+    /// <para>
+    /// <b>WHAT THE NUMBER IS DERIVED FROM.</b> It is eight times the sweep interval, so the window is
+    /// still coarse against the sweep's resolution and cannot be mistaken for a per-statement deadline;
+    /// and it leaves worst-case recovery at this window plus one sweep - 180 s against the 870 s measured.
+    /// It is NOT a latency budget and no performance objective is claimed of it: the repository publishes
+    /// none (AAP 0.8.5). It is a bound on how long one abandoned caller may deny writes to the rest.
+    /// </para>
+    /// <para>
+    /// <b>A LEGITIMATELY LONG WRITE IS NOT AT RISK FROM IT.</b> The shorter window is applied only to a
+    /// handle whose operation is not running, so a statement still in flight is exempt however long it
+    /// takes - which is the same protection the generic window already relied on.
+    /// </para>
+    /// </remarks>
+    public const int DefaultUncommittedWorkIdleExpirySeconds = 120;
+
+    /// <summary>
     /// The maximum number of live handles one registry may hold. Defaults to
     /// <see cref="DefaultMaxTotalPerRegistry"/>.
     /// </summary>
@@ -1715,11 +1753,35 @@ public sealed class HandleLifecycleOptions
     [Range(1, int.MaxValue, ErrorMessage = "must be at least 1 second.")]
     public int SweepIntervalSeconds { get; set; } = DefaultSweepIntervalSeconds;
 
+    /// <summary>
+    /// How long a handle survives without being named by any call WHEN ITS SESSION IS HOLDING UNCOMMITTED
+    /// WORK, in SECONDS. Defaults to <see cref="DefaultUncommittedWorkIdleExpirySeconds"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE SHORTER OF THE TWO WINDOWS, AND IT APPLIES TO A NARROW POPULATION: a transaction session whose
+    /// transaction reports <c>HasUncommittedWork</c>, and the query, update and command handles pinning
+    /// such a session. Everything else is governed by <see cref="IdleExpirySeconds"/> exactly as before.
+    /// </para>
+    /// <para>
+    /// IT MAY NOT EXCEED <see cref="IdleExpirySeconds"/>, and that is enforced by the options validator
+    /// rather than documented here - a value above the generic window would be a setting that could never
+    /// take effect, which is the kind of configuration that reads as tuned and does nothing.
+    /// </para>
+    /// </remarks>
+    [Range(1, int.MaxValue, ErrorMessage = "must be at least 1 second.")]
+    public int UncommittedWorkIdleExpirySeconds { get; set; } =
+        DefaultUncommittedWorkIdleExpirySeconds;
+
     /// <summary>The idle lifetime as a <see cref="TimeSpan"/>.</summary>
     public TimeSpan IdleExpiry => TimeSpan.FromSeconds(IdleExpirySeconds);
 
     /// <summary>The sweep interval as a <see cref="TimeSpan"/>.</summary>
     public TimeSpan SweepInterval => TimeSpan.FromSeconds(SweepIntervalSeconds);
+
+    /// <summary>The uncommitted-work idle lifetime as a <see cref="TimeSpan"/>.</summary>
+    public TimeSpan UncommittedWorkIdleExpiry =>
+        TimeSpan.FromSeconds(UncommittedWorkIdleExpirySeconds);
 }
 
 
@@ -1936,6 +1998,7 @@ public sealed class PersistenceOptionsValidator : IValidateOptions<PersistenceOp
         {
             AppendAnnotationFailures(options.Handles, path, failures);
             AppendHandleCeilingFailure(options.Handles, path, failures);
+            AppendHandleWindowOrderFailure(options.Handles, path, failures);
         }
 
         // --- Schema: NO RULE, AND NONE MAY BE ADDED -------------------------------------------------
@@ -1978,6 +2041,38 @@ public sealed class PersistenceOptionsValidator : IValidateOptions<PersistenceOp
                 "{0}:MaxPerPrincipal must not exceed {0}:MaxTotalPerRegistry, because a per-caller "
                 + "ceiling above the total can never be the limit that refuses and an operator would "
                 + "believe it applied.",
+                configurationPath));
+        }
+    }
+
+    /// <summary>
+    /// Appends a failure when the uncommitted-work idle window exceeds the generic one.
+    /// </summary>
+    /// <param name="handles">The bound handle-lifecycle settings.</param>
+    /// <param name="configurationPath">The section's configuration path, for the message.</param>
+    /// <param name="failures">The failure list to append to.</param>
+    /// <remarks>
+    /// THE SECOND RULE ABOUT A PAIR, AND IT FAILS FOR THE SAME REASON THE FIRST DOES. The shorter window
+    /// is only ever consulted for a handle the generic window has NOT yet expired, so a value above the
+    /// generic window can never be the bound that selects - and an operator who set it would believe an
+    /// abandoned write session was being reclaimed sooner while nothing had changed. Equality is permitted:
+    /// it is the legible way to say "treat a session holding work exactly like any other", which is a
+    /// position a deployment is entitled to hold and which restores the pre-existing behaviour exactly.
+    /// </remarks>
+    private static void AppendHandleWindowOrderFailure(
+        HandleLifecycleOptions handles,
+        string configurationPath,
+        List<string> failures)
+    {
+        if (handles.UncommittedWorkIdleExpirySeconds > handles.IdleExpirySeconds)
+        {
+            failures.Add(string.Format(
+                CultureInfo.InvariantCulture,
+                "{0}:UncommittedWorkIdleExpirySeconds must not exceed {0}:IdleExpirySeconds, because the "
+                + "shorter window is only consulted for a handle the generic window has not already "
+                + "expired - so a larger value can never select and an operator would believe an "
+                + "abandoned write session was reclaimed sooner than it is. Set the two equal to opt out "
+                + "of the shorter window.",
                 configurationPath));
         }
     }

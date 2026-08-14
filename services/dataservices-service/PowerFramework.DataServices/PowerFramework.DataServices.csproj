@@ -101,16 +101,18 @@
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
 
     <!--
-      Required AS A DIRECT REFERENCE, and it is not redundant. Microsoft.AspNetCore.OpenApi
-      10.0.11 pulls Microsoft.OpenApi 2.0.0 transitively, which raises the high severity NuGet
-      audit advisory NU1903 (GHSA-v5pm-xwqc-g5wc); the direct reference is what allows the root
-      Directory.Packages.props pin of 2.11.0 to take effect and clear the audit. VERIFIED BY
-      REMOVING IT: with this line deleted, `dotnet restore` does not merely warn, it FAILS, because
-      the inherited warnings as errors setting promotes NU1903 to an error. Restoring the line
-      returns the restore to zero NuGet warnings. Do NOT modernise this to the 3.x line: 3.9.0 was
-      tested and produces two CS0200 errors inside the SDK's own generated OpenAPI XML comment
-      support file, because the 10.0.11 source generator is compiled against the 2.x object model.
-      2.11.0 is the only value that is simultaneously non vulnerable and compatible.
+      Required AS A DIRECT REFERENCE, and it is not redundant. The Microsoft.OpenApi version is
+      decided TRANSITIVELY by Microsoft.AspNetCore.OpenApi unless a direct reference overrides it,
+      and that transitive floor has already sat inside the range the high severity NuGet audit
+      advisory NU1903 (GHSA-v5pm-xwqc-g5wc / CVE-2026-49451) covers - every version at or below
+      2.7.4. The direct reference is what allows the root Directory.Packages.props pin of 2.12.0 to
+      take effect. VERIFIED BY PINNING A VULNERABLE VERSION: `dotnet restore` does not merely warn,
+      it FAILS, because the inherited warnings as errors setting promotes NU1903 to an error. Do NOT
+      modernise this to the 3.x line: 3.9.0 and 3.10.0 were both tested and each produces two CS0200
+      errors inside the SDK's own generated OpenAPI XML comment support file, because the 10.0.11
+      source generator is compiled against the 2.x object model. 2.12.0 - the highest published 2.x -
+      is the only value that is simultaneously non vulnerable, compatible and free of the upstream
+      deprecation its lock-stepped YAML reader carries at 2.11.0.
     -->
     <PackageReference Include="Microsoft.OpenApi" />
 

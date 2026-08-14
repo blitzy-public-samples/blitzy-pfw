@@ -172,18 +172,29 @@
       each half rules out one of the two obvious "helpful" edits:
 
       (a) It must not be left to transitive resolution, and must not be lower.
-          Microsoft.AspNetCore.OpenApi 10.0.11 pulls Microsoft.OpenApi 2.0.0 transitively, and the
-          stock net10.0 web template therefore emits NU1903 at restore, a KNOWN HIGH SEVERITY
-          advisory. An explicit direct pin is what overrides that and clears the audit.
-          Reproduced on this repository by omitting the pin. Verbatim:
+          The advisory is GHSA-v5pm-xwqc-g5wc / CVE-2026-49451, a KNOWN HIGH SEVERITY uncontrolled
+          recursion (CWE-674) affecting every Microsoft.OpenApi at or below 2.7.4 and the 3.0.0 to
+          3.5.3 range. Reproduced on this repository by pinning a version inside that range. Verbatim:
             error NU1903: Warning As Error: Package 'Microsoft.OpenApi' 2.0.0 has a known high
             severity vulnerability, https://github.com/advisories/GHSA-v5pm-xwqc-g5wc
           Note that it arrives as an ERROR, not a warning, because Directory.Build.props sets
-          TreatWarningsAsErrors, so removing this pin fails the restore outright.
+          TreatWarningsAsErrors, so a pin inside the vulnerable range fails the restore outright.
 
-      (b) It must not be higher either, because moving forward to the current major line BREAKS
-          THE BUILD. Version 3.9.0 was tested directly and produces exactly two CS0200
-          diagnostics. Verbatim, at lines 399 and 461 of the generated file:
+          A CORRECTION TO WHAT THIS NOTE USED TO CLAIM, kept rather than quietly edited because a
+          reviewer may have read the earlier wording. It said the STOCK TEMPLATE emits NU1903 because
+          Microsoft.AspNetCore.OpenApi pulls Microsoft.OpenApi 2.0.0 transitively. That is no longer
+          reproducible: Microsoft.AspNetCore.OpenApi 10.0.11 now resolves the PATCHED 2.7.5
+          transitively, so an unpinned project restores clean. The pin's first half therefore stands
+          on a narrower and more durable statement than "the template is broken": the transitive
+          floor is decided by a package this repository does not own, it has already sat inside the
+          vulnerable range once, and an explicit direct pin is the only mechanism that keeps the
+          resolved version a decision made HERE rather than one inherited. The (b) half below is the
+          binding constraint and reproduces exactly as written.
+
+      (b) It must not cross into the 3.x line either, because moving forward to the current major
+          line BREAKS THE BUILD. Versions 3.9.0 and 3.10.0 were both tested directly and each
+          produces exactly two CS0200 diagnostics. Verbatim, at lines 399 and 461 of the generated
+          file:
             error CS0200: Property or indexer 'IOpenApiMediaType.Example' cannot be assigned to
             (it is read only)
           Critically, they are raised inside the SDK's OWN generated file,
@@ -196,25 +207,52 @@
           media type Example property is settable, and cannot be satisfied by a 3.x assembly, in
           which IOpenApiMediaType exposes it as read only.
 
-      2.11.0 is the highest published 2.x, and is therefore the only value that is simultaneously
-      non vulnerable AND compatible. Every REST service in this solution must respect it.
+      2.12.0 is the highest published 2.x, and the 2.x line is therefore the only place a value can
+      be simultaneously non vulnerable AND compatible. Every REST service in this solution must
+      respect it.
+
+      WHY 2.12.0 RATHER THAN 2.11.0, WHICH IS WHAT THIS PIN USED TO SAY. 2.11.0 is not vulnerable and
+      is not itself deprecated, so the move is not a security fix for THIS package - it is forced by
+      the lock-stepped reader below, whose 2.11.0 IS deprecated upstream for CriticalBugs and whose
+      first non-deprecated 2.x is 2.12.0. Since that reader declares a minimum dependency on the
+      matching Microsoft.OpenApi version, the pair moves together or not at all. Both were verified
+      against the NuGet registration metadata before the move: 2.12.0 of each carries no deprecation
+      and no advisory. Keep the two entries on the same version.
     -->
-    <PackageVersion Include="Microsoft.OpenApi" Version="2.11.0" />
+    <PackageVersion Include="Microsoft.OpenApi" Version="2.12.0" />
 
     <!--
       LOCK STEPPED TO THE PIN ABOVE, and consumed by PowerFramework.Contracts.Tests ONLY.
 
-      Microsoft.OpenApi 2.11.0 ships JSON and YAML WRITERS plus a JSON READER, and no YAML reader of
+      Microsoft.OpenApi 2.12.0 ships JSON and YAML WRITERS plus a JSON READER, and no YAML reader of
       any kind: its assembly exposes OpenApiJsonReader, OpenApiJsonWriter and OpenApiYamlWriter.
       Both published REST contract documents, OpenApi/security.v1.yaml and OpenApi/gateway.v1.yaml,
       are YAML, so loading them back and validating them against the pinned object model is
       physically impossible without this reader. That validation is the regression guard on the pin
       itself, which is why the package exists at all rather than being convenience.
 
-      The version is 2.11.0 because Microsoft.OpenApi.YamlReader publishes an EXACTLY VERSION LOCKED
-      dependency on Microsoft.OpenApi 2.11.0, alongside SharpYaml 2.1.4 and System.Text.Json 8.0.5,
-      all MIT licensed. Being locked, it cannot drag the mandatory pin above off 2.11.0 in either
-      direction, and System.Text.Json 8.0.5 already sits inside Microsoft.OpenApi's own closure, so
+      THE VERSION IS 2.12.0 BECAUSE 2.11.0 IS DEPRECATED UPSTREAM, AND THAT IS THE WHOLE REASON THIS
+      PAIR MOVED. The registration metadata for Microsoft.OpenApi.YamlReader 2.11.0 carries a
+      deprecation with reason CriticalBugs, message
+      https://github.com/microsoft/OpenAPI.NET/security/advisories/GHSA-7pxr-59rr-hqj2 and alternate
+      range [3.10.0, ). It carries ZERO vulnerabilities, it is referenced by exactly one TEST project
+      and it is absent from all four container images - but a deprecated package in the resolved graph
+      is a supply-chain finding whether or not it ships, and the deprecation listing NuGet publishes
+      reported it as the only one in the solution. The vendor's own recommended [3.10.0, ) is NOT
+      adoptable: it requires Microsoft.OpenApi 3.10.0, which is the CS0200 compilation break recorded
+      on the pin above. 2.12.0 is the first 2.x that carries no deprecation, which makes it the only
+      remediation available on the compatible line.
+
+      A SECOND CORRECTION, FOR THE SAME REASON THE PIN ABOVE CARRIES ONE. This note used to state that
+      the reader publishes an EXACTLY VERSION LOCKED dependency on Microsoft.OpenApi. The registration
+      metadata shows a MINIMUM range - [2.12.0, ) at this version, as it was [2.11.0, ) at the last -
+      so the dependency cannot pull the pin above DOWN and cannot force it up beyond the version it
+      names, but it does not by itself hold that pin to one value. What holds it is the explicit
+      PackageVersion entry above, which is why the two must be moved together by hand and why this
+      note says so rather than relying on the graph to enforce it.
+
+      Alongside Microsoft.OpenApi the reader brings SharpYaml 2.1.4 and System.Text.Json 8.0.5, both
+      MIT licensed. System.Text.Json 8.0.5 already sits inside Microsoft.OpenApi's own closure, so
       SharpYaml is the only net addition to the graph. None of the three carries a NuGet advisory at
       these versions, so restore stays audit clean, which matters because warnings are errors.
 
@@ -233,18 +271,18 @@
       It is the one direct reference in this file that no line of that inventory names, and it is
       recorded here as an addition rather than left to be discovered as an unexplained entry. The need
       is file level and arose from a decision the inventory itself forces: the plan mandates
-      Microsoft.OpenApi at exactly 2.11.0 and publishes both REST contracts as YAML, and 2.11.0 ships
-      no YAML reader, so validating those two documents against the pinned object model has no other
+      Microsoft.OpenApi on the 2.x line and publishes both REST contracts as YAML, and no 2.x ships a
+      YAML reader, so validating those two documents against the pinned object model has no other
       mechanism. The alternative was to not validate them, which would leave the mandatory pin with no
-      regression guard - the pin that, per the two findings above, fails restore if lowered and fails
-      compilation if raised.
+      regression guard - the pin that, per the two findings above, fails restore inside the vulnerable
+      range and fails compilation on the 3.x line.
 
       THE ADDITION IS BOUNDED, AND EACH BOUND IS WHY IT IS SAFE TO ADD. It is referenced by exactly one
       project, PowerFramework.Contracts.Tests, so it reaches no service and no container image; its
-      dependency on the mandatory pin is exactly version locked, so it cannot move that pin in either
-      direction; and it adds exactly one assembly to the graph, SharpYaml, which carries no advisory at
-      this version. No service behaviour depends on it, so removing it would cost the validation and
-      nothing else.
+      dependency on the mandatory pin names that pin's own version as a minimum, so it cannot pull it
+      down; and it adds exactly one assembly to the graph, SharpYaml, which carries no advisory at this
+      version. No service behaviour depends on it, so removing it would cost the validation and nothing
+      else.
 
       IT IS ALSO A DECLARED DEVIATION, AND THIS PARAGRAPH IS NOT THE DECLARATION. Agent Action Plan
       0.5.1 approves fifteen NuGet packages; this file pins sixteen. The justification above says why
@@ -254,7 +292,7 @@
       move (D9) that the header of this file explains. Removing this package means removing that
       register entry with it.
     -->
-    <PackageVersion Include="Microsoft.OpenApi.YamlReader" Version="2.11.0" />
+    <PackageVersion Include="Microsoft.OpenApi.YamlReader" Version="2.12.0" />
   </ItemGroup>
 
   <!-- ============================================================================================

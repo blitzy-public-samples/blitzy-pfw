@@ -185,7 +185,7 @@ WORKDIR /src
 #                               referenced output ever arrives from another configuration. Found by
 #                               directory walk-up, which is why the layout below is preserved.
 #   Directory.Packages.props    the single source of truth for every package version, including the
-#                               two mandatory security pins (Microsoft.OpenApi 2.11.0 and
+#                               two mandatory security pins (Microsoft.OpenApi 2.12.0 and
 #                               SQLitePCLRaw.bundle_e_sqlite3 3.0.5). Every PackageReference in this
 #                               build graph is versionless, so without this file restore fails
 #                               outright rather than quietly choosing a version.

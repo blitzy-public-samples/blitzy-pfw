@@ -1099,17 +1099,21 @@ public sealed class OpenApiContractDocuments : IAsyncLifetime
     /// <remarks>
     /// <para>
     /// <b>Why <c>AddYamlReader()</c> has to be called at all.</b> The pinned
-    /// <c>Microsoft.OpenApi</c> 2.11.0 assembly ships NO YAML reader - it has
+    /// <c>Microsoft.OpenApi</c> 2.12.0 assembly ships NO YAML reader - it has
     /// <c>OpenApiJsonReader</c>, <c>OpenApiJsonWriter</c> and <c>OpenApiYamlWriter</c>, and a writer
     /// cannot parse. Measured rather than assumed: a fresh
     /// <see cref="OpenApiReaderSettings"/> registers exactly one reader, <c>json</c>, and after this
     /// call registers three, <c>json</c>, <c>yaml</c> and <c>yml</c>. Both contract documents are YAML,
     /// so without the call every load fails at the format lookup. The reader arrives from the
-    /// separately published, exactly version-locked <c>Microsoft.OpenApi.YamlReader</c> 2.11.0, which
-    /// this test project references directly and versionlessly; being locked to 2.11.0 it cannot drag
-    /// the mandatory <c>Microsoft.OpenApi</c> pin off that version. The pin itself is mandatory in both
+    /// separately published <c>Microsoft.OpenApi.YamlReader</c> 2.12.0, which this test project
+    /// references directly and versionlessly. Its dependency on <c>Microsoft.OpenApi</c> is the range
+    /// <c>[2.12.0, )</c> - a MINIMUM, not an exact lock - so it cannot pull the mandatory pin DOWN, but
+    /// neither does it hold it in place; the central <c>PackageVersion</c> entry is the only thing that
+    /// does, and the two must be moved together. The pin itself is mandatory in both
     /// directions (AAP 0.5.2): 2.0.0 carries advisory NU1903, and the 3.x line breaks the build with
     /// CS0200 because the 10.0.x OpenAPI source generator is compiled against the 2.x object model.
+    /// 2.12.0 rather than 2.11.0 because every YamlReader from 2.7.0 through 2.11.0 carries an upstream
+    /// deprecation whose recommended alternate is that unbuildable 3.x line.
     /// </para>
     /// <para>
     /// <b>Why loading is pinned offline.</b> <c>LoadExternalRefs</c> is set to false explicitly even
@@ -1161,7 +1165,7 @@ public sealed class OpenApiContractDocuments : IAsyncLifetime
         {
             throw FailException.ForFailure(
                 $"The OpenAPI reader returned no diagnostic for '{path}'. "
-                + "Microsoft.OpenApi 2.11.0 always produces one, so this indicates the reader API "
+                + "Microsoft.OpenApi 2.12.0 always produces one, so this indicates the reader API "
                 + "changed under the central pin.");
         }
 
