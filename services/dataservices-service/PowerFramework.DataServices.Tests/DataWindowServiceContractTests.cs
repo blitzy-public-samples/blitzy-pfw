@@ -572,6 +572,17 @@ internal sealed class C03ChainFactory : IDataWindowEventChainFactory
     internal const string Column = "age";
 
     /// <summary>
+    /// A SECOND column the golden-master fixture also serves, for the multi-column sort cases.
+    /// </summary>
+    /// <remarks>
+    /// TAKEN FROM THE SAME FIXTURE AS <see cref="Column"/>, which is the COMPANY DataWindow
+    /// [<c>ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14</c>]. A name the fixture does not serve would
+    /// be refused by the apply's own unknown-column pre-pass, so a multi-column case needs a real second
+    /// column rather than an invented one.
+    /// </remarks>
+    internal const string SecondColumn = "salary";
+
+    /// <summary>
     /// A handle the MODEL provider serves but this factory refuses.
     /// </summary>
     /// <remarks>
@@ -4594,18 +4605,50 @@ public sealed class DataWindowServiceContractTests
     }
 
     /// <summary>
-    /// A full apply succeeds and reports the MODEL'S OWN state, which is not the same thing as the sort now
-    /// on the DataWindow - and the difference is deliberate. The legacy service publishes four read-only
-    /// observation seams, of which the current sort and the sort entries are two, and BOTH are accumulated
-    /// by its header-click cycle [<c>n_cst_dwsvc_columnsort.sru:L112-L132</c>] rather than by applying a
-    /// clause. So after an apply the entries are legitimately empty while the clause has gone to the
-    /// DataWindow. Reading the host's own <c>DataWindow.Table.Sort</c> here instead would report a value
-    /// this SERVICE does not hold, and is exactly the "fix" a future reader must not make.
+    /// A full apply ESTABLISHES the requested sort in the model, so the apply response and a SEPARATE
+    /// later read both report it.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THIS TEST PREVIOUSLY ASSERTED THE OPPOSITE, AND THE ASSERTION WAS THE DEFECT WEARING A
+    /// RATIONALE. It required both observation seams to be EMPTY after a full apply, on the ground that
+    /// the legacy accumulates them "by its header-click cycle rather than by applying a clause". The
+    /// premise is right and the conclusion inverted: in the legacy the accumulation IS the apply - the
+    /// click writes <c>SortDatas</c> and then calls <c>_of_Sort()</c>, which composes <c>_sSort</c> from
+    /// that store and applies it [<c>n_cst_dwsvc_columnsort.sru:L108-L163</c>, <c>:L169-L214</c>] - so a
+    /// completed apply always leaves both seams populated. What the service was actually doing was
+    /// calling <c>of_update</c>, which writes the remembered ORIGINAL sort and returns early
+    /// [<c>:L269</c>, <c>:L276</c>], so the request touched neither seam and the operation reported OK
+    /// for a sort that had not happened.
+    /// </para>
+    /// <para>
+    /// THE CLAIM THE ORIGINAL TEST WAS RIGHT ABOUT IS KEPT: the response still reports the MODEL'S state
+    /// and never reads the host's own <c>DataWindow.Table.Sort</c>, which is a value this service does not
+    /// hold. That is why the expected expression below is taken from the EXPRESSION-ONLY path for the
+    /// identical request rather than from the host or from a literal - it pins the two paths to one
+    /// composer without asserting a clause text that belongs to the fixture's Describe stubs.
+    /// </para>
+    /// </remarks>
     [Fact]
-    public async Task AFullApplyReportsTheModelsOwnStateAndNotTheDataWindowsLiveSort()
+    public async Task AFullApplyEstablishesTheRequestedSortAndASeparateReadReportsIt()
     {
         C03Fixture fixture = new();
+
+        ApplyColumnSortRequest composed = new() { DatawindowHandle = "dw-1", ExpressionOnly = true };
+        composed.Columns.Add(new ColumnSortState.Types.ColumnSort
+        {
+            ColumnName = C03ChainFactory.Column,
+            Direction = ColumnSortState.Types.Direction.SortAsc,
+        });
+
+        ApplyColumnSortResponse expressionOnly =
+            await fixture.Service.ApplyColumnSort(composed, fixture.Context);
+
+        Assert.Equal(WireRetCode.Ok, expressionOnly.RetCode);
+        Assert.NotEmpty(expressionOnly.State.SortExpression);
+
+        // The expression-only path composes without mutating, so nothing is established by it.
+        Assert.Empty(expressionOnly.State.Columns);
 
         ApplyColumnSortRequest request = new() { DatawindowHandle = "dw-1" };
         request.Columns.Add(new ColumnSortState.Types.ColumnSort
@@ -4618,13 +4661,89 @@ public sealed class DataWindowServiceContractTests
 
         Assert.Equal(WireRetCode.Ok, applied.RetCode);
 
+        ColumnSortState.Types.ColumnSort appliedEntry = Assert.Single(applied.State.Columns);
+        Assert.Equal(C03ChainFactory.Column, appliedEntry.ColumnName);
+        Assert.Equal(ColumnSortState.Types.Direction.SortAsc, appliedEntry.Direction);
+        Assert.Equal(expressionOnly.State.SortExpression, applied.State.SortExpression);
+
         GetColumnSortStateResponse read = await fixture.Service.GetColumnSortState(
             new GetColumnSortStateRequest { DatawindowHandle = "dw-1" },
             fixture.Context);
 
         Assert.Equal(WireRetCode.Ok, read.RetCode);
-        Assert.Empty(read.State.Columns);
-        Assert.Empty(read.State.SortExpression);
+
+        ColumnSortState.Types.ColumnSort readEntry = Assert.Single(read.State.Columns);
+        Assert.Equal(C03ChainFactory.Column, readEntry.ColumnName);
+        Assert.Equal(ColumnSortState.Types.Direction.SortAsc, readEntry.Direction);
+        Assert.Equal(expressionOnly.State.SortExpression, read.State.SortExpression);
+    }
+
+    /// <summary>
+    /// A multi-column apply keeps the caller's precedence order in both the entries and the composed
+    /// expression, and a directionless entry is visited and then dropped rather than retained.
+    /// </summary>
+    /// <remarks>
+    /// THE UNSORTED ENTRY IS THE POINT. <c>_of_Sort</c> visits every store entry unconditionally so an
+    /// unsorted column's indicator is CLEARED [<c>n_cst_dwsvc_columnsort.sru:L193</c>], and the oracle
+    /// then removes it from the store once the click completes [<c>:L134-L143</c>, <c>:L153-L160</c>]. So
+    /// it must contribute no clause and must not survive in the reported state - which is a different
+    /// assertion from never having been accepted.
+    /// </remarks>
+    [Fact]
+    public async Task AMultiColumnApplyKeepsPrecedenceOrderAndDropsTheDirectionlessEntry()
+    {
+        C03Fixture fixture = new();
+
+        ApplyColumnSortRequest request = new() { DatawindowHandle = "dw-1" };
+        request.Columns.Add(new ColumnSortState.Types.ColumnSort
+        {
+            ColumnName = C03ChainFactory.Column,
+            Direction = ColumnSortState.Types.Direction.SortDesc,
+        });
+        request.Columns.Add(new ColumnSortState.Types.ColumnSort
+        {
+            ColumnName = C03ChainFactory.SecondColumn,
+            Direction = ColumnSortState.Types.Direction.SortNone,
+        });
+
+        ApplyColumnSortResponse applied = await fixture.Service.ApplyColumnSort(request, fixture.Context);
+
+        Assert.Equal(WireRetCode.Ok, applied.RetCode);
+
+        ColumnSortState.Types.ColumnSort survivor = Assert.Single(applied.State.Columns);
+        Assert.Equal(C03ChainFactory.Column, survivor.ColumnName);
+        Assert.Equal(ColumnSortState.Types.Direction.SortDesc, survivor.Direction);
+        Assert.DoesNotContain(
+            ColumnSortModel.ClauseSeparator,
+            applied.State.SortExpression,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An apply that names no column CLEARS the sort, which is the state the oracle reaches when its own
+    /// store empties itself [<c>n_cst_dwsvc_columnsort.sru:L155-L156</c>].
+    /// </summary>
+    [Fact]
+    public async Task AnApplyNamingNoColumnClearsAnEstablishedSort()
+    {
+        C03Fixture fixture = new();
+
+        ApplyColumnSortRequest established = new() { DatawindowHandle = "dw-1" };
+        established.Columns.Add(new ColumnSortState.Types.ColumnSort
+        {
+            ColumnName = C03ChainFactory.Column,
+            Direction = ColumnSortState.Types.Direction.SortAsc,
+        });
+
+        _ = await fixture.Service.ApplyColumnSort(established, fixture.Context);
+
+        ApplyColumnSortResponse cleared = await fixture.Service.ApplyColumnSort(
+            new ApplyColumnSortRequest { DatawindowHandle = "dw-1" },
+            fixture.Context);
+
+        Assert.Equal(WireRetCode.Ok, cleared.RetCode);
+        Assert.Empty(cleared.State.Columns);
+        Assert.Empty(cleared.State.SortExpression);
     }
 
     [Theory]

@@ -113,7 +113,9 @@ public sealed class PublishedSchemaFidelityTests
             compared++;
         }
 
-        Assert.Equal(35, compared);
+        // THIRTY-SIX PUBLISHED SCHEMAS. The thirty-sixth is ReleaseRsaKeyRequest, which the release
+        // operation acquired when its reference moved out of the request path into a request body.
+        Assert.Equal(36, compared);
     }
 
     /// <summary>
@@ -152,7 +154,7 @@ public sealed class PublishedSchemaFidelityTests
             }
         }
 
-        Assert.Equal(33, closed);
+        Assert.Equal(34, closed);
         Assert.Equal(2, open);
     }
 
@@ -238,10 +240,11 @@ public sealed class PublishedSchemaFidelityTests
             }
         }
 
-        // Thirty-two of the thirty-five published schemas declare a required list, and the members across them
-        // come to seventy-nine. Asserted so that a document publishing no requiredness at all - the original
+        // Thirty-three of the thirty-six published schemas declare a required list, and the members across them
+        // come to eighty - the eightieth being the release request's single reference member. Asserted so that
+        // a document publishing no requiredness at all - the original
         // defect, which left sixteen request shapes with no list - cannot pass the loop by inspecting nothing.
-        Assert.Equal(79, inspected);
+        Assert.Equal(80, inspected);
     }
 
     /// <summary>
@@ -436,7 +439,9 @@ internal static class AuthoredContract
             }
         }
 
-        Assert.Equal(49, declarations.Count);
+        // FIFTY AUTHORED SCHEMAS. The fiftieth is ReleaseRsaKeyRequest, which the release operation
+        // acquired when its reference moved out of the request path into a request body.
+        Assert.Equal(50, declarations.Count);
 
         return declarations.ToDictionary(
             static entry => entry.Key,

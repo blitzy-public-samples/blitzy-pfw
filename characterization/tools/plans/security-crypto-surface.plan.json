@@ -1,0 +1,1860 @@
+{
+  "planVersion": "1",
+  "workflowId": "security-crypto-surface",
+  "targetService": "security-service",
+  "newlineConvention": "lf",
+  "notes": "Target-side capture plan for the C-02 cryptographic surface. Every one of the workflow definition's 37 observedOutputs has exactly one step here, named identically, and a guard test in shared/PowerFramework.Contracts.Tests asserts that agreement in both directions. No key, vector, passphrase or credential appears anywhere in this file: every one is an OPAQUE key-store reference placeholder the driver resolves from its command line, which is what docs/CONTRACTS.md section 5.2 requires of every C-02 caller. The per-request traceId the refusal bodies carry is deliberately never captured - it differs on every request and would surface as a difference where no behaviour changed.",
+  "artifacts": [
+    {
+      "name": "hashing.json",
+      "description": "Unkeyed and keyed digests over a text value and over the read-only root framework binary."
+    },
+    {
+      "name": "encoding.json",
+      "description": "Base64 and hexadecimal conversion in both directions."
+    },
+    {
+      "name": "symmetric.json",
+      "description": "The three cipher families in chained-block mode, the mode-omitting default, the block repetition it leaks, and the raw-key-bytes case."
+    },
+    {
+      "name": "asymmetric.json",
+      "description": "Key generation shape, encryption, decryption, signing and verification including the weakest legal digest."
+    },
+    {
+      "name": "random.json",
+      "description": "The three random generators, recorded as shape, character classes and formatting rather than as values."
+    },
+    {
+      "name": "rejections.json",
+      "description": "The refusals that are first-class declared outputs: two size bounds, the unrepresentable padding, and the tampered ciphertext that raises no integrity failure."
+    },
+    {
+      "name": "identifier-sets.json",
+      "description": "The preserved legacy identifier spellings and values in force, recorded so a silent renaming or renumbering surfaces as a difference."
+    }
+  ],
+  "steps": [
+    {
+      "output": "hash.text.sha256",
+      "artifact": "hashing.json",
+      "observes": "The digest of a fixed text value under the SHA-256 identifier, with the identifier that selected it.",
+      "calls": [
+        {
+          "name": "hash",
+          "method": "POST",
+          "path": "/v1/crypto/hash",
+          "body": {
+            "data": "PowerFramework",
+            "payloadForm": "STRING",
+            "hashType": 2
+          },
+          "capture": [
+            "digest"
+          ]
+        }
+      ],
+      "derive": [
+        {
+          "name": "digestHex",
+          "kind": "hexOfBase64",
+          "value": "${call:hash:digest}",
+          "observes": "The same digest rendered as lower-case hexadecimal, which is the rendering the legacy fixture displays."
+        }
+      ],
+      "record": {
+        "hashType": 2,
+        "hashTypeIdentifier": "CRYPTO_HASH_SHA256",
+        "payloadForm": "STRING",
+        "input": "PowerFramework",
+        "digestRendering": "base64 as the contract returns it, plus a hexadecimal derivation"
+      }
+    },
+    {
+      "output": "hash.file.crc32",
+      "artifact": "hashing.json",
+      "observes": "The checksum of the read-only root framework binary under the CRC-32 identifier.",
+      "notes": "The strongest capture input on the surface: the file is version-controlled and never edited, so the expected value is fixed for all time, and no key or credential is involved in producing it.",
+      "calls": [
+        {
+          "name": "hashFile",
+          "method": "POST",
+          "path": "/v1/crypto/hash-file",
+          "body": {
+            "fileRef": "${fileRef}",
+            "hashType": 5
+          },
+          "capture": [
+            "digest"
+          ]
+        }
+      ],
+      "derive": [
+        {
+          "name": "digestHex",
+          "kind": "hexOfBase64",
+          "value": "${call:hashFile:digest}",
+          "observes": "The checksum as lower-case hexadecimal."
+        }
+      ],
+      "record": {
+        "hashType": 5,
+        "hashTypeIdentifier": "CRYPTO_HASH_CRC32",
+        "fileRef": "${fileRef}",
+        "fileRole": "the version-controlled, never-edited root framework binary pfw.dll, mounted read-only"
+      }
+    },
+    {
+      "output": "hash.file.sha1",
+      "artifact": "hashing.json",
+      "observes": "The digest of the same read-only binary under the SHA-1 identifier.",
+      "notes": "Captured separately from the checksum because it exercises a different family over an identical input, which is what makes the pair able to distinguish an input divergence from an algorithm one.",
+      "calls": [
+        {
+          "name": "hashFile",
+          "method": "POST",
+          "path": "/v1/crypto/hash-file",
+          "body": {
+            "fileRef": "${fileRef}",
+            "hashType": 1
+          },
+          "capture": [
+            "digest"
+          ]
+        }
+      ],
+      "derive": [
+        {
+          "name": "digestHex",
+          "kind": "hexOfBase64",
+          "value": "${call:hashFile:digest}",
+          "observes": "The digest as lower-case hexadecimal."
+        }
+      ],
+      "record": {
+        "hashType": 1,
+        "hashTypeIdentifier": "CRYPTO_HASH_SHA1",
+        "fileRef": "${fileRef}"
+      }
+    },
+    {
+      "output": "hmac.text.sha256",
+      "artifact": "hashing.json",
+      "observes": "The keyed digest of a fixed text value under the SHA-256 identifier, produced with the injected key.",
+      "notes": "The fixture hardcodes a key literal at its own call site; that literal is a secret site recorded in docs/SECRETS.md, is not used here, and is not recorded. What is compared is the digest under the injected key, which is identical on both sides because the same injected key is bound on both.",
+      "calls": [
+        {
+          "name": "hmac",
+          "method": "POST",
+          "path": "/v1/crypto/hmac",
+          "body": {
+            "data": "PowerFramework",
+            "payloadForm": "STRING",
+            "keyRef": "${ref:hmac}",
+            "hashType": 2
+          },
+          "capture": [
+            "digest"
+          ]
+        }
+      ],
+      "derive": [
+        {
+          "name": "digestHex",
+          "kind": "hexOfBase64",
+          "value": "${call:hmac:digest}",
+          "observes": "The keyed digest as lower-case hexadecimal."
+        }
+      ],
+      "record": {
+        "hashType": 2,
+        "hashTypeIdentifier": "CRYPTO_HASH_SHA256",
+        "keyRef": "${ref:hmac}",
+        "keyMaterial": "not recorded - the reference is recorded, the material it resolves to never is"
+      }
+    },
+    {
+      "output": "encoding.base64.encode",
+      "artifact": "encoding.json",
+      "observes": "Base64 rendering of a byte sequence, taken through the blob-to-string direction.",
+      "calls": [
+        {
+          "name": "encode",
+          "method": "POST",
+          "path": "/v1/crypto/encoding/blob-to-string",
+          "body": {
+            "data": "YWJj",
+            "encoding": 0
+          },
+          "capture": [
+            "value"
+          ]
+        }
+      ],
+      "record": {
+        "encoding": 0,
+        "encodingIdentifier": "CRYPTO_ENCODING_BASE64",
+        "direction": "blob-to-string",
+        "inputByteLength": 3
+      }
+    },
+    {
+      "output": "encoding.base64.decode",
+      "artifact": "encoding.json",
+      "observes": "The byte sequence recovered from a base64 string, taken through the string-to-blob direction.",
+      "notes": "Captured separately from the encode direction because they are separate entry points on the legacy surface, and a difference here with a matching encode output localises the divergence to the decoder.",
+      "calls": [
+        {
+          "name": "decode",
+          "method": "POST",
+          "path": "/v1/crypto/encoding/string-to-blob",
+          "body": {
+            "data": "YWJj",
+            "encoding": 0
+          },
+          "capture": [
+            "data"
+          ]
+        }
+      ],
+      "derive": [
+        {
+          "name": "decodedHex",
+          "kind": "hexOfBase64",
+          "value": "${call:decode:data}",
+          "observes": "The recovered bytes as lower-case hexadecimal, which is how the pair is compared."
+        }
+      ],
+      "record": {
+        "encoding": 0,
+        "encodingIdentifier": "CRYPTO_ENCODING_BASE64",
+        "direction": "string-to-blob"
+      }
+    },
+    {
+      "output": "encoding.hex.encode",
+      "artifact": "encoding.json",
+      "observes": "Hexadecimal rendering of a byte sequence through the blob-to-string direction, letter case included.",
+      "calls": [
+        {
+          "name": "encode",
+          "method": "POST",
+          "path": "/v1/crypto/encoding/blob-to-string",
+          "body": {
+            "data": "YWJj",
+            "encoding": 1
+          },
+          "capture": [
+            "value"
+          ]
+        }
+      ],
+      "record": {
+        "encoding": 1,
+        "encodingIdentifier": "CRYPTO_ENCODING_HEX",
+        "direction": "blob-to-string",
+        "letterCase": "recorded verbatim, because the case the surface emits is itself observable"
+      }
+    },
+    {
+      "output": "encoding.hex.decode",
+      "artifact": "encoding.json",
+      "observes": "The byte sequence recovered from a hexadecimal string through the string-to-blob direction.",
+      "calls": [
+        {
+          "name": "decode",
+          "method": "POST",
+          "path": "/v1/crypto/encoding/string-to-blob",
+          "body": {
+            "data": "616263",
+            "encoding": 1
+          },
+          "capture": [
+            "data"
+          ]
+        }
+      ],
+      "derive": [
+        {
+          "name": "decodedHex",
+          "kind": "hexOfBase64",
+          "value": "${call:decode:data}",
+          "observes": "The recovered bytes as lower-case hexadecimal."
+        }
+      ],
+      "record": {
+        "encoding": 1,
+        "encodingIdentifier": "CRYPTO_ENCODING_HEX",
+        "direction": "string-to-blob"
+      }
+    },
+    {
+      "output": "symmetric.des.cbc.roundTrip",
+      "artifact": "symmetric.json",
+      "observes": "Encryption then decryption of a fixed plaintext through the CRYPTO_SYMCRYPT_TYPE_DES cipher in chained-block mode.",
+      "notes": "Captured per family rather than once, because the three families are separate identifier values reaching separate implementations and a divergence in one says nothing about the others.",
+      "calls": [
+        {
+          "name": "encrypt",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/encrypt",
+          "body": {
+            "data": "PowerFrameworkCharacterization",
+            "payloadForm": "STRING",
+            "keyRef": "${keyRef}",
+            "ivRef": "${ivRef}",
+            "cipherType": 0,
+            "mode": 1
+          },
+          "capture": [
+            "payloadForm",
+            "data"
+          ]
+        },
+        {
+          "name": "decrypt",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/decrypt",
+          "body": {
+            "data": "${call:encrypt:data}",
+            "payloadForm": "STRING",
+            "keyRef": "${keyRef}",
+            "ivRef": "${ivRef}",
+            "cipherType": 0,
+            "mode": 1
+          },
+          "capture": [
+            "payloadForm",
+            "data"
+          ]
+        }
+      ],
+      "derive": [
+        {
+          "name": "cipherHex",
+          "kind": "hexOfBase64",
+          "value": "${call:encrypt:data}",
+          "observes": "The ciphertext as lower-case hexadecimal. Deterministic under a pinned key and vector, so it is compared rather than masked."
+        },
+        {
+          "name": "roundTrip",
+          "kind": "equals",
+          "value": "${call:decrypt:data}",
+          "other": "PowerFrameworkCharacterization",
+          "observes": "Whether the decrypted plaintext equals the original byte for byte, which is the round trip itself."
+        }
+      ],
+      "record": {
+        "cipherType": 0,
+        "cipherTypeIdentifier": "CRYPTO_SYMCRYPT_TYPE_DES",
+        "mode": 1,
+        "modeIdentifier": "CRYPTO_SYMCRYPT_MODE_CBC",
+        "blockBytes": 8,
+        "plaintext": "PowerFrameworkCharacterization",
+        "plaintextByteLength": 30,
+        "keyRef": "${keyRef}",
+        "ivRef": "${ivRef}"
+      }
+    },
+    {
+      "output": "symmetric.des.cbc.decrypt",
+      "artifact": "symmetric.json",
+      "observes": "The decrypt half of the CRYPTO_SYMCRYPT_TYPE_DES round trip, captured as its own output.",
+      "notes": "Its own output because the legacy exposes it as its own call site and a decrypt-only divergence is a different finding from a round-trip divergence.",
+      "calls": [
+        {
+          "name": "encrypt",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/encrypt",
+          "body": {
+            "data": "PowerFrameworkCharacterization",
+            "payloadForm": "STRING",
+            "keyRef": "${keyRef}",
+            "ivRef": "${ivRef}",
+            "cipherType": 0,
+            "mode": 1
+          },
+          "capture": [
+            "data"
+          ],
+          "notes": "Produces the ciphertext this output decrypts. Recorded because the decrypt output is only meaningful beside the input that produced it."
+        },
+        {
+          "name": "decrypt",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/decrypt",
+          "body": {
+            "data": "${call:encrypt:data}",
+            "payloadForm": "STRING",
+            "keyRef": "${keyRef}",
+            "ivRef": "${ivRef}",
+            "cipherType": 0,
+            "mode": 1
+          },
+          "capture": [
+            "payloadForm",
+            "data"
+          ]
+        }
+      ],
+      "record": {
+        "cipherType": 0,
+        "cipherTypeIdentifier": "CRYPTO_SYMCRYPT_TYPE_DES",
+        "mode": 1,
+        "modeIdentifier": "CRYPTO_SYMCRYPT_MODE_CBC",
+        "keyRef": "${keyRef}",
+        "ivRef": "${ivRef}"
+      }
+    },
+    {
+      "output": "symmetric.3des.cbc.roundTrip",
+      "artifact": "symmetric.json",
+      "observes": "Encryption then decryption of a fixed plaintext through the CRYPTO_SYMCRYPT_TYPE_3DES cipher in chained-block mode.",
+      "notes": "Captured per family rather than once, because the three families are separate identifier values reaching separate implementations and a divergence in one says nothing about the others.",
+      "calls": [
+        {
+          "name": "encrypt",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/encrypt",
+          "body": {
+            "data": "PowerFrameworkCharacterization",
+            "payloadForm": "STRING",
+            "keyRef": "${keyRef}",
+            "ivRef": "${ivRef}",
+            "cipherType": 1,
+            "mode": 1
+          },
+          "capture": [
+            "payloadForm",
+            "data"
+          ]
+        },
+        {
+          "name": "decrypt",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/decrypt",
+          "body": {
+            "data": "${call:encrypt:data}",
+            "payloadForm": "STRING",
+            "keyRef": "${keyRef}",
+            "ivRef": "${ivRef}",
+            "cipherType": 1,
+            "mode": 1
+          },
+          "capture": [
+            "payloadForm",
+            "data"
+          ]
+        }
+      ],
+      "derive": [
+        {
+          "name": "cipherHex",
+          "kind": "hexOfBase64",
+          "value": "${call:encrypt:data}",
+          "observes": "The ciphertext as lower-case hexadecimal. Deterministic under a pinned key and vector, so it is compared rather than masked."
+        },
+        {
+          "name": "roundTrip",
+          "kind": "equals",
+          "value": "${call:decrypt:data}",
+          "other": "PowerFrameworkCharacterization",
+          "observes": "Whether the decrypted plaintext equals the original byte for byte, which is the round trip itself."
+        }
+      ],
+      "record": {
+        "cipherType": 1,
+        "cipherTypeIdentifier": "CRYPTO_SYMCRYPT_TYPE_3DES",
+        "mode": 1,
+        "modeIdentifier": "CRYPTO_SYMCRYPT_MODE_CBC",
+        "blockBytes": 8,
+        "plaintext": "PowerFrameworkCharacterization",
+        "plaintextByteLength": 30,
+        "keyRef": "${keyRef}",
+        "ivRef": "${ivRef}"
+      }
+    },
+    {
+      "output": "symmetric.3des.cbc.decrypt",
+      "artifact": "symmetric.json",
+      "observes": "The decrypt half of the CRYPTO_SYMCRYPT_TYPE_3DES round trip, captured as its own output.",
+      "notes": "Its own output because the legacy exposes it as its own call site and a decrypt-only divergence is a different finding from a round-trip divergence.",
+      "calls": [
+        {
+          "name": "encrypt",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/encrypt",
+          "body": {
+            "data": "PowerFrameworkCharacterization",
+            "payloadForm": "STRING",
+            "keyRef": "${keyRef}",
+            "ivRef": "${ivRef}",
+            "cipherType": 1,
+            "mode": 1
+          },
+          "capture": [
+            "data"
+          ],
+          "notes": "Produces the ciphertext this output decrypts. Recorded because the decrypt output is only meaningful beside the input that produced it."
+        },
+        {
+          "name": "decrypt",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/decrypt",
+          "body": {
+            "data": "${call:encrypt:data}",
+            "payloadForm": "STRING",
+            "keyRef": "${keyRef}",
+            "ivRef": "${ivRef}",
+            "cipherType": 1,
+            "mode": 1
+          },
+          "capture": [
+            "payloadForm",
+            "data"
+          ]
+        }
+      ],
+      "record": {
+        "cipherType": 1,
+        "cipherTypeIdentifier": "CRYPTO_SYMCRYPT_TYPE_3DES",
+        "mode": 1,
+        "modeIdentifier": "CRYPTO_SYMCRYPT_MODE_CBC",
+        "keyRef": "${keyRef}",
+        "ivRef": "${ivRef}"
+      }
+    },
+    {
+      "output": "symmetric.aes256.cbc.roundTrip",
+      "artifact": "symmetric.json",
+      "observes": "Encryption then decryption of a fixed plaintext through the CRYPTO_SYMCRYPT_TYPE_AES256 cipher in chained-block mode.",
+      "notes": "Captured per family rather than once, because the three families are separate identifier values reaching separate implementations and a divergence in one says nothing about the others.",
+      "calls": [
+        {
+          "name": "encrypt",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/encrypt",
+          "body": {
+            "data": "PowerFrameworkCharacterization",
+            "payloadForm": "STRING",
+            "keyRef": "${keyRef}",
+            "ivRef": "${ivRef}",
+            "cipherType": 4,
+            "mode": 1
+          },
+          "capture": [
+            "payloadForm",
+            "data"
+          ]
+        },
+        {
+          "name": "decrypt",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/decrypt",
+          "body": {
+            "data": "${call:encrypt:data}",
+            "payloadForm": "STRING",
+            "keyRef": "${keyRef}",
+            "ivRef": "${ivRef}",
+            "cipherType": 4,
+            "mode": 1
+          },
+          "capture": [
+            "payloadForm",
+            "data"
+          ]
+        }
+      ],
+      "derive": [
+        {
+          "name": "cipherHex",
+          "kind": "hexOfBase64",
+          "value": "${call:encrypt:data}",
+          "observes": "The ciphertext as lower-case hexadecimal. Deterministic under a pinned key and vector, so it is compared rather than masked."
+        },
+        {
+          "name": "roundTrip",
+          "kind": "equals",
+          "value": "${call:decrypt:data}",
+          "other": "PowerFrameworkCharacterization",
+          "observes": "Whether the decrypted plaintext equals the original byte for byte, which is the round trip itself."
+        }
+      ],
+      "record": {
+        "cipherType": 4,
+        "cipherTypeIdentifier": "CRYPTO_SYMCRYPT_TYPE_AES256",
+        "mode": 1,
+        "modeIdentifier": "CRYPTO_SYMCRYPT_MODE_CBC",
+        "blockBytes": 16,
+        "plaintext": "PowerFrameworkCharacterization",
+        "plaintextByteLength": 30,
+        "keyRef": "${keyRef}",
+        "ivRef": "${ivRef}"
+      }
+    },
+    {
+      "output": "symmetric.aes256.cbc.decrypt",
+      "artifact": "symmetric.json",
+      "observes": "The decrypt half of the CRYPTO_SYMCRYPT_TYPE_AES256 round trip, captured as its own output.",
+      "notes": "Its own output because the legacy exposes it as its own call site and a decrypt-only divergence is a different finding from a round-trip divergence.",
+      "calls": [
+        {
+          "name": "encrypt",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/encrypt",
+          "body": {
+            "data": "PowerFrameworkCharacterization",
+            "payloadForm": "STRING",
+            "keyRef": "${keyRef}",
+            "ivRef": "${ivRef}",
+            "cipherType": 4,
+            "mode": 1
+          },
+          "capture": [
+            "data"
+          ],
+          "notes": "Produces the ciphertext this output decrypts. Recorded because the decrypt output is only meaningful beside the input that produced it."
+        },
+        {
+          "name": "decrypt",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/decrypt",
+          "body": {
+            "data": "${call:encrypt:data}",
+            "payloadForm": "STRING",
+            "keyRef": "${keyRef}",
+            "ivRef": "${ivRef}",
+            "cipherType": 4,
+            "mode": 1
+          },
+          "capture": [
+            "payloadForm",
+            "data"
+          ]
+        }
+      ],
+      "record": {
+        "cipherType": 4,
+        "cipherTypeIdentifier": "CRYPTO_SYMCRYPT_TYPE_AES256",
+        "mode": 1,
+        "modeIdentifier": "CRYPTO_SYMCRYPT_MODE_CBC",
+        "keyRef": "${keyRef}",
+        "ivRef": "${ivRef}"
+      }
+    },
+    {
+      "output": "symmetric.modeOmitted.ecbDefault",
+      "artifact": "symmetric.json",
+      "observes": "Encryption through the arity that carries neither a mode nor a vector, so the default mode is reached.",
+      "notes": "ADDED CASE, NOT SUPPLIED BY THE ORACLE. Every one of the fixture's six symmetric call sites passes the chained-block mode explicitly, so no oracle call reaches the default at all; without this case the default that provesDefects item 1 pins would go entirely uncharacterized.",
+      "calls": [
+        {
+          "name": "encrypt",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/encrypt",
+          "body": {
+            "data": "PowerFrameworkCharacterization",
+            "payloadForm": "STRING",
+            "keyRef": "${keyRef}",
+            "cipherType": 4
+          },
+          "capture": [
+            "payloadForm",
+            "data"
+          ]
+        }
+      ],
+      "derive": [
+        {
+          "name": "cipherHex",
+          "kind": "hexOfBase64",
+          "value": "${call:encrypt:data}",
+          "observes": "The ciphertext the default mode produced, as lower-case hexadecimal."
+        }
+      ],
+      "record": {
+        "cipherType": 4,
+        "cipherTypeIdentifier": "CRYPTO_SYMCRYPT_TYPE_AES256",
+        "modeMemberOmitted": true,
+        "modeInForce": 0,
+        "modeInForceIdentifier": "CRYPTO_SYMCRYPT_MODE_ECB",
+        "vectorMemberOmitted": true,
+        "defaultAlias": "CRYPTO_SYMCRYPT_MODE_DEFAULT is declared equal to CRYPTO_SYMCRYPT_MODE_ECB"
+      }
+    },
+    {
+      "output": "symmetric.ecb.blockRepetition",
+      "artifact": "symmetric.json",
+      "observes": "A plaintext built from a repeated block, encrypted under the unchained default mode.",
+      "notes": "The weakness itself made visible, compared rather than masked - the determinism is the point. A target that hid it would be a parity failure rather than a hardening.",
+      "calls": [
+        {
+          "name": "encrypt",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/encrypt",
+          "body": {
+            "data": "QUJDREVGR0hBQkNERUZHSEFCQ0RFRkdIQUJDREVGR0g=",
+            "payloadForm": "BLOB",
+            "keyRef": "${keyRef}",
+            "cipherType": 0,
+            "mode": 0
+          },
+          "capture": [
+            "payloadForm",
+            "data"
+          ]
+        }
+      ],
+      "derive": [
+        {
+          "name": "cipherBlocks",
+          "kind": "hexBlockRepetition",
+          "value": "${call:encrypt:data}",
+          "blockBytes": 8,
+          "observes": "The ciphertext split into cipher blocks, with the repetition count. Identical plaintext blocks produce identical ciphertext blocks, so plaintext structure survives into the ciphertext."
+        }
+      ],
+      "record": {
+        "cipherType": 0,
+        "cipherTypeIdentifier": "CRYPTO_SYMCRYPT_TYPE_DES",
+        "mode": 0,
+        "modeIdentifier": "CRYPTO_SYMCRYPT_MODE_ECB",
+        "blockBytes": 8,
+        "plaintextBlock": "ABCDEFGH",
+        "plaintextBlockRepetitions": 4,
+        "plaintextByteLength": 32
+      }
+    },
+    {
+      "output": "symmetric.rawKeyBytes.noDerivation",
+      "artifact": "symmetric.json",
+      "observes": "A short passphrase supplied where key material is expected, consumed as raw key bytes.",
+      "notes": "The recorded behaviour is that a four-byte passphrase is accepted and padded rather than derived from. The passphrase itself is a key-store reference here, so its material never crosses the wire.",
+      "calls": [
+        {
+          "name": "encrypt",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/encrypt",
+          "body": {
+            "data": "PowerFrameworkCharacterization",
+            "payloadForm": "STRING",
+            "keyRef": "${ref:passphrase}",
+            "ivRef": "${ivRef}",
+            "cipherType": 4,
+            "mode": 1
+          },
+          "capture": [
+            "payloadForm",
+            "data"
+          ]
+        }
+      ],
+      "derive": [
+        {
+          "name": "cipherHex",
+          "kind": "hexOfBase64",
+          "value": "${call:encrypt:data}",
+          "observes": "The ciphertext produced from the padded passphrase, as lower-case hexadecimal."
+        }
+      ],
+      "record": {
+        "cipherType": 4,
+        "cipherTypeIdentifier": "CRYPTO_SYMCRYPT_TYPE_AES256",
+        "mode": 1,
+        "modeIdentifier": "CRYPTO_SYMCRYPT_MODE_CBC",
+        "keyRef": "${ref:passphrase}",
+        "suppliedMaterialByteLength": 4,
+        "cipherKeyLengthBytes": 32,
+        "derivationApplied": false,
+        "derivationFunctionsReachable": "none - no PBKDF2, scrypt, bcrypt or Argon2 is reachable on this surface and no salt concept exists",
+        "treatment": "padded to the cipher's key length rather than stretched"
+      }
+    },
+    {
+      "output": "symmetric.tamperedCipher.noDetection",
+      "artifact": "rejections.json",
+      "observes": "A ciphertext altered by one byte, then decrypted, to record that no integrity failure is raised.",
+      "notes": "A target that reported an integrity failure here would be a parity failure, not an improvement. The traceId member of the refusal is deliberately NOT captured: it is per-request and would surface as a difference on every comparison.",
+      "calls": [
+        {
+          "name": "encrypt",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/encrypt",
+          "body": {
+            "data": "PowerFrameworkCharacterization",
+            "payloadForm": "STRING",
+            "keyRef": "${keyRef}",
+            "ivRef": "${ivRef}",
+            "cipherType": 4,
+            "mode": 1
+          },
+          "capture": [
+            "data"
+          ],
+          "notes": "Produces the ciphertext the next call alters."
+        },
+        {
+          "name": "decryptTampered",
+          "method": "POST",
+          "path": "/v1/crypto/symmetric/decrypt",
+          "body": {
+            "data": "${tamperLastByte:encrypt:data}",
+            "payloadForm": "BLOB",
+            "keyRef": "${keyRef}",
+            "ivRef": "${ivRef}",
+            "cipherType": 4,
+            "mode": 1
+          },
+          "expectStatus": 400,
+          "capture": [
+            "title",
+            "status",
+            "retCode",
+            "messageSeverity"
+          ],
+          "notes": "The low bit of the final ciphertext byte is flipped. The outcome is a padding-level refusal."
+        }
+      ],
+      "record": {
+        "cipherType": 4,
+        "cipherTypeIdentifier": "CRYPTO_SYMCRYPT_TYPE_AES256",
+        "mode": 1,
+        "modeIdentifier": "CRYPTO_SYMCRYPT_MODE_CBC",
+        "alteration": "the low bit of the final ciphertext byte",
+        "integrityFailureRaised": false,
+        "outcomeClassification": "a padding-level processing refusal, not an integrity failure",
+        "authenticatedModesAvailable": "none - no GCM, CCM or Poly1305 exists on this surface, so the ciphertext carries no integrity tag"
+      }
+    },
+    {
+      "output": "rsa.sizeLimit.rejection.pkcs1",
+      "artifact": "rejections.json",
+      "observes": "A plaintext one byte past the PKCS#1 bound, refused under the default padding.",
+      "notes": "A first-class rejection outcome, not an incidental error. The generated key is released by this plan's teardown, so the run leaves no registered key behind.",
+      "calls": [
+        {
+          "name": "generate",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys",
+          "body": {
+            "bits": 1024,
+            "pemFormat": true
+          },
+          "captureShape": [
+            "bits"
+          ],
+          "captureOpaque": [
+            "keyRef"
+          ]
+        },
+        {
+          "name": "encrypt",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/encrypt",
+          "body": {
+            "data": "${bytes:Z:118}",
+            "payloadForm": "BLOB",
+            "keyRef": "${call:generate:keyRef}",
+            "padding": 0
+          },
+          "expectStatus": 400,
+          "capture": [
+            "title",
+            "status",
+            "retCode",
+            "messageSeverity"
+          ]
+        }
+      ],
+      "record": {
+        "bits": 1024,
+        "modulusBytes": 128,
+        "padding": 0,
+        "paddingIdentifier": "CRYPTO_RSA_PADDING_PKCS1",
+        "bound": "at most modulus minus 11 bytes, which is 117",
+        "offeredByteLength": 118,
+        "outcomeClassification": "refused"
+      },
+      "teardown": [
+        {
+          "name": "releaseGeneratedKey",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys/release",
+          "body": {
+            "keyRef": "${call:generate:keyRef}"
+          },
+          "expectStatus": 204,
+          "notes": "Releases the key this step generated, so the run leaves no registered key behind."
+        }
+      ]
+    },
+    {
+      "output": "rsa.sizeLimit.rejection.oaep",
+      "artifact": "rejections.json",
+      "observes": "A plaintext one byte past the OAEP bound, refused, at a bound the PKCS#1 form still accepts.",
+      "notes": "Captured separately because the two bounds are different numbers, and a port that applied one bound to both paddings would pass a single-case check. The accepted PKCS#1 call at the identical length is what turns that from an assertion into evidence.",
+      "calls": [
+        {
+          "name": "generate",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys",
+          "body": {
+            "bits": 1024,
+            "pemFormat": true
+          },
+          "captureShape": [
+            "bits"
+          ],
+          "captureOpaque": [
+            "keyRef"
+          ]
+        },
+        {
+          "name": "acceptedUnderPkcs1",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/encrypt",
+          "body": {
+            "data": "${bytes:Z:87}",
+            "payloadForm": "BLOB",
+            "keyRef": "${call:generate:keyRef}",
+            "padding": 0
+          },
+          "captureShape": [
+            "data"
+          ],
+          "notes": "The SAME 87-byte payload under PKCS#1, which accepts it. This is what makes the OAEP refusal a bound rather than a general size limit."
+        },
+        {
+          "name": "encrypt",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/encrypt",
+          "body": {
+            "data": "${bytes:Z:87}",
+            "payloadForm": "BLOB",
+            "keyRef": "${call:generate:keyRef}",
+            "padding": 1
+          },
+          "expectStatus": 400,
+          "capture": [
+            "title",
+            "status",
+            "retCode",
+            "messageSeverity"
+          ]
+        }
+      ],
+      "record": {
+        "bits": 1024,
+        "modulusBytes": 128,
+        "padding": 1,
+        "paddingIdentifier": "CRYPTO_RSA_PADDING_OAEP",
+        "bound": "at most modulus minus 42 bytes, which is 86",
+        "offeredByteLength": 87,
+        "outcomeClassification": "refused",
+        "pkcs1BoundAtTheSameLength": "accepted, because the PKCS#1 bound is 117"
+      },
+      "teardown": [
+        {
+          "name": "releaseGeneratedKey",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys/release",
+          "body": {
+            "keyRef": "${call:generate:keyRef}"
+          },
+          "expectStatus": 204,
+          "notes": "Releases the key this step generated, so the run leaves no registered key behind."
+        }
+      ]
+    },
+    {
+      "output": "rsa.noPadding.rejection",
+      "artifact": "rejections.json",
+      "observes": "A third padding value requested, to record that no-padding is unrepresentable as well as refused.",
+      "notes": "The refusal is the legacy's own rather than a hardening decision taken by the port: the legacy declares no constant for no-padding, so there is nothing to select.",
+      "calls": [
+        {
+          "name": "generate",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys",
+          "body": {
+            "bits": 1024,
+            "pemFormat": true
+          },
+          "captureShape": [
+            "bits"
+          ],
+          "captureOpaque": [
+            "keyRef"
+          ]
+        },
+        {
+          "name": "encrypt",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/encrypt",
+          "body": {
+            "data": "PowerFramework",
+            "payloadForm": "STRING",
+            "keyRef": "${call:generate:keyRef}",
+            "padding": 2
+          },
+          "expectStatus": 400,
+          "capture": [
+            "title",
+            "status",
+            "retCode",
+            "messageSeverity"
+          ]
+        }
+      ],
+      "record": {
+        "declaredPaddingIdentifiers": {
+          "CRYPTO_RSA_PADDING_PKCS1": 0,
+          "CRYPTO_RSA_PADDING_OAEP": 1
+        },
+        "requestedValue": 2,
+        "outcomeClassification": "refused",
+        "unrepresentable": true,
+        "reason": "the declared padding set has exactly two members, so there is no value to select no-padding with"
+      },
+      "teardown": [
+        {
+          "name": "releaseGeneratedKey",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys/release",
+          "body": {
+            "keyRef": "${call:generate:keyRef}"
+          },
+          "expectStatus": 204,
+          "notes": "Releases the key this step generated, so the run leaves no registered key behind."
+        }
+      ]
+    },
+    {
+      "output": "rsa.keyGeneration.shape",
+      "artifact": "asymmetric.json",
+      "observes": "Key generation at the legacy-legal small key size, recorded as SHAPE only.",
+      "notes": "Neither half's value is recorded. The public half is reduced to its shape and the reference is captured opaquely - chainable, screened, and recorded only as a shape - because a keyRef is credential-equivalent under docs/CONTRACTS.md section 5.2.",
+      "calls": [
+        {
+          "name": "generate",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys",
+          "body": {
+            "bits": 1024,
+            "pemFormat": true
+          },
+          "captureShape": [
+            "publicKey",
+            "bits",
+            "pemFormat"
+          ],
+          "captureOpaque": [
+            "keyRef"
+          ]
+        }
+      ],
+      "record": {
+        "bits": 1024,
+        "bitsIdentifier": "CRYPTO_RSA_BITS_1024",
+        "pemFormat": true,
+        "publicHalfProduced": true,
+        "privateHalfProduced": true,
+        "privateHalfReturnedToCaller": false,
+        "privateHalfAccess": "reachable only through the opaque key reference; the value is never returned by this contract"
+      },
+      "teardown": [
+        {
+          "name": "releaseGeneratedKey",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys/release",
+          "body": {
+            "keyRef": "${call:generate:keyRef}"
+          },
+          "expectStatus": 204,
+          "notes": "Releases the key this step generated, so the run leaves no registered key behind."
+        }
+      ]
+    },
+    {
+      "output": "rsa.encrypt",
+      "artifact": "asymmetric.json",
+      "observes": "Asymmetric encryption through the padding-omitting arity, verified by decrypting back.",
+      "calls": [
+        {
+          "name": "generate",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys",
+          "body": {
+            "bits": 1024,
+            "pemFormat": true
+          },
+          "captureShape": [
+            "bits"
+          ],
+          "captureOpaque": [
+            "keyRef"
+          ]
+        },
+        {
+          "name": "encrypt",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/encrypt",
+          "body": {
+            "data": "PowerFramework",
+            "payloadForm": "STRING",
+            "keyRef": "${call:generate:keyRef}"
+          },
+          "notes": "The ciphertext is captured OPAQUELY: chainable into the decrypt call, never recorded, because the default padding is randomized so the bytes differ per run and comparing them would fail on every pair. Its shape is recorded in its place.",
+          "captureShape": [
+            "payloadForm"
+          ],
+          "captureOpaque": [
+            "data"
+          ]
+        },
+        {
+          "name": "decrypt",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/decrypt",
+          "body": {
+            "data": "${call:encrypt:data}",
+            "payloadForm": "STRING",
+            "keyRef": "${call:generate:keyRef}"
+          },
+          "capture": [
+            "data"
+          ]
+        }
+      ],
+      "derive": [
+        {
+          "name": "ciphertextByteLength",
+          "kind": "byteLengthOfBase64",
+          "value": "${call:encrypt:data}",
+          "observes": "The ciphertext byte length, which is fixed by the modulus and is compared in place of the randomized bytes."
+        },
+        {
+          "name": "decryptable",
+          "kind": "equals",
+          "value": "${call:decrypt:data}",
+          "other": "PowerFramework",
+          "observes": "Whether the ciphertext decrypts back to the original plaintext, which is what is compared in place of the randomized bytes."
+        }
+      ],
+      "record": {
+        "paddingMemberOmitted": true,
+        "paddingInForce": 0,
+        "paddingInForceIdentifier": "CRYPTO_RSA_PADDING_PKCS1",
+        "defaultAlias": "CRYPTO_RSA_PADDING_DEFAULT is declared equal to CRYPTO_RSA_PADDING_PKCS1",
+        "plaintext": "PowerFramework",
+        "ciphertextComparison": "shape only, because the default padding is randomized"
+      },
+      "teardown": [
+        {
+          "name": "releaseGeneratedKey",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys/release",
+          "body": {
+            "keyRef": "${call:generate:keyRef}"
+          },
+          "expectStatus": 204,
+          "notes": "Releases the key this step generated, so the run leaves no registered key behind."
+        }
+      ]
+    },
+    {
+      "output": "rsa.decrypt",
+      "artifact": "asymmetric.json",
+      "observes": "Asymmetric decryption under the private half, reached through the opaque reference.",
+      "calls": [
+        {
+          "name": "generate",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys",
+          "body": {
+            "bits": 1024,
+            "pemFormat": true
+          },
+          "captureShape": [
+            "bits"
+          ],
+          "captureOpaque": [
+            "keyRef"
+          ]
+        },
+        {
+          "name": "encrypt",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/encrypt",
+          "body": {
+            "data": "PowerFramework",
+            "payloadForm": "STRING",
+            "keyRef": "${call:generate:keyRef}",
+            "padding": 0
+          },
+          "captureOpaque": [
+            "data"
+          ],
+          "notes": "Produces the ciphertext this output decrypts. Captured opaquely: chainable, never recorded, because PKCS#1 v1.5 encryption is randomized."
+        },
+        {
+          "name": "decrypt",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/decrypt",
+          "body": {
+            "data": "${call:encrypt:data}",
+            "payloadForm": "STRING",
+            "keyRef": "${call:generate:keyRef}",
+            "padding": 0
+          },
+          "capture": [
+            "payloadForm",
+            "data"
+          ]
+        }
+      ],
+      "record": {
+        "padding": 0,
+        "paddingIdentifier": "CRYPTO_RSA_PADDING_PKCS1",
+        "keyRefHandling": "recorded as a placeholder only; the private half is never present in this recording in any form"
+      },
+      "teardown": [
+        {
+          "name": "releaseGeneratedKey",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys/release",
+          "body": {
+            "keyRef": "${call:generate:keyRef}"
+          },
+          "expectStatus": 204,
+          "notes": "Releases the key this step generated, so the run leaves no registered key behind."
+        }
+      ]
+    },
+    {
+      "output": "rsa.sign.sha256",
+      "artifact": "asymmetric.json",
+      "observes": "A signature over fixed data under the SHA-256 identifier.",
+      "calls": [
+        {
+          "name": "generate",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys",
+          "body": {
+            "bits": 1024,
+            "pemFormat": true
+          },
+          "captureShape": [
+            "bits"
+          ],
+          "captureOpaque": [
+            "keyRef"
+          ]
+        },
+        {
+          "name": "sign",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/sign",
+          "body": {
+            "data": "PowerFramework",
+            "payloadForm": "STRING",
+            "keyRef": "${call:generate:keyRef}",
+            "hashType": 2
+          },
+          "captureShape": [
+            "payloadForm"
+          ],
+          "captureOpaque": [
+            "data"
+          ],
+          "notes": "The signature is captured opaquely: chainable into the verification, never recorded, because the signing padding is randomized and the bytes differ per run."
+        }
+      ],
+      "derive": [
+        {
+          "name": "signatureByteLength",
+          "kind": "byteLengthOfBase64",
+          "value": "${call:sign:data}",
+          "observes": "The signature's byte length, which is fixed by the modulus and is what is compared in place of the bytes."
+        },
+        {
+          "name": "produced",
+          "kind": "characterLength",
+          "value": "${call:sign:data}",
+          "observes": "That a signature was produced at all, as its rendered length."
+        }
+      ],
+      "record": {
+        "hashType": 2,
+        "hashTypeIdentifier": "CRYPTO_HASH_SHA256",
+        "bits": 1024,
+        "expectedSignatureByteLength": 128,
+        "signatureComparison": "length and verifiability, not bytes, because the signing padding is randomized"
+      },
+      "teardown": [
+        {
+          "name": "releaseGeneratedKey",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys/release",
+          "body": {
+            "keyRef": "${call:generate:keyRef}"
+          },
+          "expectStatus": 204,
+          "notes": "Releases the key this step generated, so the run leaves no registered key behind."
+        }
+      ]
+    },
+    {
+      "output": "rsa.verify.sha256",
+      "artifact": "asymmetric.json",
+      "observes": "Verification of a signature under the same hash identifier, in both a valid and an altered case.",
+      "notes": "Both cases are captured because a verification that succeeded on both would be indistinguishable from one that always succeeds.",
+      "calls": [
+        {
+          "name": "generate",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys",
+          "body": {
+            "bits": 1024,
+            "pemFormat": true
+          },
+          "captureShape": [
+            "bits"
+          ],
+          "captureOpaque": [
+            "keyRef"
+          ]
+        },
+        {
+          "name": "sign",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/sign",
+          "body": {
+            "data": "PowerFramework",
+            "payloadForm": "STRING",
+            "keyRef": "${call:generate:keyRef}",
+            "hashType": 2
+          },
+          "captureShape": [
+            "payloadForm"
+          ],
+          "captureOpaque": [
+            "data"
+          ]
+        },
+        {
+          "name": "verifyValid",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/verify",
+          "body": {
+            "data": "PowerFramework",
+            "payloadForm": "STRING",
+            "signature": "${call:sign:data}",
+            "keyRef": "${call:generate:keyRef}",
+            "hashType": 2
+          },
+          "capture": [
+            "valid"
+          ]
+        },
+        {
+          "name": "verifyAltered",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/verify",
+          "body": {
+            "data": "PowerFrameworX",
+            "payloadForm": "STRING",
+            "signature": "${call:sign:data}",
+            "keyRef": "${call:generate:keyRef}",
+            "hashType": 2
+          },
+          "capture": [
+            "valid"
+          ],
+          "notes": "The same signature over data altered in its final character."
+        }
+      ],
+      "record": {
+        "hashType": 2,
+        "hashTypeIdentifier": "CRYPTO_HASH_SHA256",
+        "validCase": {
+          "data": "PowerFramework",
+          "expected": true
+        },
+        "alteredCase": {
+          "data": "PowerFrameworX",
+          "expected": false
+        }
+      },
+      "teardown": [
+        {
+          "name": "releaseGeneratedKey",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys/release",
+          "body": {
+            "keyRef": "${call:generate:keyRef}"
+          },
+          "expectStatus": 204,
+          "notes": "Releases the key this step generated, so the run leaves no registered key behind."
+        }
+      ]
+    },
+    {
+      "output": "rsa.sign.md5.accepted",
+      "artifact": "asymmetric.json",
+      "observes": "A signature under the weakest digest identifier in the hash set, and its verification.",
+      "notes": "This case exists because the declaring comment names the hash set's consumers as the hash operation AND the signing and verification operations, so the whole set is a legal signature-hash selector. That is provesDefects item 8. A target that rejected the weak digest would be a parity failure rather than a hardening, because refusing it would refuse input the legacy accepts.",
+      "calls": [
+        {
+          "name": "generate",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys",
+          "body": {
+            "bits": 1024,
+            "pemFormat": true
+          },
+          "captureShape": [
+            "bits"
+          ],
+          "captureOpaque": [
+            "keyRef"
+          ]
+        },
+        {
+          "name": "sign",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/sign",
+          "body": {
+            "data": "PowerFramework",
+            "payloadForm": "STRING",
+            "keyRef": "${call:generate:keyRef}",
+            "hashType": 0
+          },
+          "captureShape": [
+            "payloadForm"
+          ],
+          "captureOpaque": [
+            "data"
+          ]
+        },
+        {
+          "name": "verify",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/verify",
+          "body": {
+            "data": "PowerFramework",
+            "payloadForm": "STRING",
+            "signature": "${call:sign:data}",
+            "keyRef": "${call:generate:keyRef}",
+            "hashType": 0
+          },
+          "capture": [
+            "valid"
+          ]
+        }
+      ],
+      "derive": [
+        {
+          "name": "signatureByteLength",
+          "kind": "byteLengthOfBase64",
+          "value": "${call:sign:data}",
+          "observes": "The signature's byte length."
+        }
+      ],
+      "record": {
+        "hashType": 0,
+        "hashTypeIdentifier": "CRYPTO_HASH_MD5",
+        "outcomeClassification": "accepted",
+        "expectedVerification": true,
+        "collisionResistance": "broken for this digest, and it remains a legal signature-hash selector"
+      },
+      "teardown": [
+        {
+          "name": "releaseGeneratedKey",
+          "method": "POST",
+          "path": "/v1/crypto/rsa/keys/release",
+          "body": {
+            "keyRef": "${call:generate:keyRef}"
+          },
+          "expectStatus": 204,
+          "notes": "Releases the key this step generated, so the run leaves no registered key behind."
+        }
+      ]
+    },
+    {
+      "output": "random.blob.shape",
+      "artifact": "random.json",
+      "observes": "Random byte generation, recorded as shape because the bytes are a masked seam.",
+      "calls": [
+        {
+          "name": "produce",
+          "method": "POST",
+          "path": "/v1/crypto/random/blob",
+          "body": {
+            "size": 32
+          },
+          "captureOpaque": [
+            "data"
+          ],
+          "notes": "The bytes are captured opaquely: never recorded, because they are the masked seam itself."
+        }
+      ],
+      "derive": [
+        {
+          "name": "producedByteLength",
+          "kind": "byteLengthOfBase64",
+          "value": "${call:produce:data}",
+          "observes": "The produced byte count. A length mismatch is a behavioural difference even though the value is not."
+        }
+      ],
+      "record": {
+        "requestedByteCount": 32,
+        "encoding": 0,
+        "encodingIdentifier": "CRYPTO_ENCODING_BASE64",
+        "valueRecorded": false,
+        "seam": "IEntropySource, substituted by a deterministic double in the target's own tests"
+      }
+    },
+    {
+      "output": "random.string.characterClasses",
+      "artifact": "random.json",
+      "observes": "Random string generation with the number, alphabet and symbol classes combined, sampled repeatedly so the classes the generator draws from are observed rather than the classes one sample happens to carry.",
+      "calls": [
+        {
+          "name": "produce1",
+          "method": "POST",
+          "path": "/v1/crypto/random/string",
+          "body": {
+            "size": 256,
+            "flags": 7
+          },
+          "captureOpaque": [
+            "value"
+          ],
+          "notes": "The characters are captured opaquely and never recorded; the classes present in them are."
+        },
+        {
+          "name": "produce2",
+          "method": "POST",
+          "path": "/v1/crypto/random/string",
+          "body": {
+            "size": 256,
+            "flags": 7
+          },
+          "captureOpaque": [
+            "value"
+          ],
+          "notes": "The characters are captured opaquely and never recorded; the classes present in them are."
+        },
+        {
+          "name": "produce3",
+          "method": "POST",
+          "path": "/v1/crypto/random/string",
+          "body": {
+            "size": 256,
+            "flags": 7
+          },
+          "captureOpaque": [
+            "value"
+          ],
+          "notes": "The characters are captured opaquely and never recorded; the classes present in them are."
+        },
+        {
+          "name": "produce4",
+          "method": "POST",
+          "path": "/v1/crypto/random/string",
+          "body": {
+            "size": 256,
+            "flags": 7
+          },
+          "captureOpaque": [
+            "value"
+          ],
+          "notes": "The characters are captured opaquely and never recorded; the classes present in them are."
+        }
+      ],
+      "derive": [
+        {
+          "name": "observedClasses",
+          "kind": "characterClasses",
+          "value": "${call:produce1:value}",
+          "values": [
+            "${call:produce2:value}",
+            "${call:produce3:value}",
+            "${call:produce4:value}"
+          ],
+          "observes": "Which character classes the generator actually draws from, as the union across every sample, plus the per-sample figures the union is built from. A generator that silently dropped the symbol class would produce perfectly plausible strings and would be caught only here."
+        }
+      ],
+      "record": {
+        "requestedLength": 256,
+        "flags": 7,
+        "flagsIdentifiers": "CRYPTO_RNDSTRING_NUMBER (1) + CRYPTO_RNDSTRING_ALPHABET (2) + CRYPTO_RNDSTRING_SYMBOL (4)",
+        "sampleCount": 4,
+        "expectedUnion": {
+          "digits": true,
+          "letters": true,
+          "symbols": true
+        },
+        "valueRecorded": false,
+        "comparisonBasis": "the UNION of classes across the samples, not the classes of any one of them. Measured, not assumed: two runs of a single 24-character sample under these same flags disagreed on whether a digit was present, because the presence of a class in one short sample is a property of the sample rather than of the generator. A class absent from the alphabet can never be observed, so the union only ever gains classes that are genuinely there.",
+        "seam": "IEntropySource, substituted by a deterministic double in the target's own tests"
+      },
+      "notes": "Both halves of a pair must request the same length and the same sample count for the comparison to mean anything; the plan records both so a legacy-side capture can match them."
+    },
+    {
+      "output": "random.guid.formatting",
+      "artifact": "random.json",
+      "observes": "Identifier generation across all four bracket-and-separator flag combinations, plus the flag-omitting arity.",
+      "notes": "The value is masked, but the FORMATTING is behaviour and is compared - bracket presence, separator presence and separator positions, per flag combination.",
+      "calls": [
+        {
+          "name": "neither",
+          "method": "POST",
+          "path": "/v1/crypto/random/guid",
+          "body": {
+            "flags": 0
+          },
+          "captureOpaque": [
+            "value"
+          ]
+        },
+        {
+          "name": "bracketOnly",
+          "method": "POST",
+          "path": "/v1/crypto/random/guid",
+          "body": {
+            "flags": 1
+          },
+          "captureOpaque": [
+            "value"
+          ]
+        },
+        {
+          "name": "separatorOnly",
+          "method": "POST",
+          "path": "/v1/crypto/random/guid",
+          "body": {
+            "flags": 2
+          },
+          "captureOpaque": [
+            "value"
+          ]
+        },
+        {
+          "name": "both",
+          "method": "POST",
+          "path": "/v1/crypto/random/guid",
+          "body": {
+            "flags": 3
+          },
+          "captureOpaque": [
+            "value"
+          ]
+        },
+        {
+          "name": "flagsOmitted",
+          "method": "POST",
+          "path": "/v1/crypto/random/guid",
+          "body": {},
+          "captureOpaque": [
+            "value"
+          ],
+          "notes": "The flag-omitting arity, so the default formatting is actually reached."
+        }
+      ],
+      "derive": [
+        {
+          "name": "neitherFormatting",
+          "kind": "guidFormatting",
+          "value": "${call:neither:value}",
+          "observes": "Formatting with neither flag: no bracket, no separator."
+        },
+        {
+          "name": "bracketOnlyFormatting",
+          "kind": "guidFormatting",
+          "value": "${call:bracketOnly:value}",
+          "observes": "Formatting with the bracket flag alone."
+        },
+        {
+          "name": "separatorOnlyFormatting",
+          "kind": "guidFormatting",
+          "value": "${call:separatorOnly:value}",
+          "observes": "Formatting with the separator flag alone, including the separator positions."
+        },
+        {
+          "name": "bothFormatting",
+          "kind": "guidFormatting",
+          "value": "${call:both:value}",
+          "observes": "Formatting with both flags."
+        },
+        {
+          "name": "flagsOmittedFormatting",
+          "kind": "guidFormatting",
+          "value": "${call:flagsOmitted:value}",
+          "observes": "Formatting the flag-omitting arity produced, which is what the default resolves to."
+        }
+      ],
+      "record": {
+        "combinations": {
+          "neither": 0,
+          "bracketOnly": 1,
+          "separatorOnly": 2,
+          "both": 3
+        },
+        "flagsIdentifiers": "CRYPTO_GUID_INCLUDE_BRACKET (1), CRYPTO_GUID_INCLUDE_SEPARATOR (2)",
+        "defaultAlias": "CRYPTO_GUID_DEFAULT is declared as bracket plus separator",
+        "valueRecorded": false
+      }
+    },
+    {
+      "output": "hash.typeIdentifiers",
+      "artifact": "identifier-sets.json",
+      "observes": "The complete hash-type identifier set, spellings and values alike.",
+      "record": {
+        "identifiers": {
+          "CRYPTO_HASH_MD5": 0,
+          "CRYPTO_HASH_SHA1": 1,
+          "CRYPTO_HASH_SHA256": 2,
+          "CRYPTO_HASH_SHA384": 3,
+          "CRYPTO_HASH_SHA512": 4,
+          "CRYPTO_HASH_CRC32": 5
+        },
+        "declarationOrder": [
+          "CRYPTO_HASH_MD5",
+          "CRYPTO_HASH_SHA1",
+          "CRYPTO_HASH_SHA256",
+          "CRYPTO_HASH_SHA384",
+          "CRYPTO_HASH_SHA512",
+          "CRYPTO_HASH_CRC32"
+        ],
+        "legacyLocator": "ws_objects/pfw.shared.pbl.src/enums.sru:L928-L933"
+      }
+    },
+    {
+      "output": "encoding.identifiers",
+      "artifact": "identifier-sets.json",
+      "observes": "The encoding identifier set as declared.",
+      "record": {
+        "identifiers": {
+          "CRYPTO_ENCODING_BASE64": 0,
+          "CRYPTO_ENCODING_HEX": 1
+        },
+        "declarationOrder": [
+          "CRYPTO_ENCODING_BASE64",
+          "CRYPTO_ENCODING_HEX"
+        ],
+        "legacyLocator": "ws_objects/pfw.shared.pbl.src/enums.sru:L924-L925"
+      }
+    },
+    {
+      "output": "symmetric.cipherIdentifiers",
+      "artifact": "identifier-sets.json",
+      "observes": "The symmetric cipher identifier set as declared.",
+      "notes": "Five identifiers across the three cipher families the surface offers.",
+      "record": {
+        "identifiers": {
+          "CRYPTO_SYMCRYPT_TYPE_DES": 0,
+          "CRYPTO_SYMCRYPT_TYPE_3DES": 1,
+          "CRYPTO_SYMCRYPT_TYPE_AES128": 2,
+          "CRYPTO_SYMCRYPT_TYPE_AES192": 3,
+          "CRYPTO_SYMCRYPT_TYPE_AES256": 4
+        },
+        "declarationOrder": [
+          "CRYPTO_SYMCRYPT_TYPE_DES",
+          "CRYPTO_SYMCRYPT_TYPE_3DES",
+          "CRYPTO_SYMCRYPT_TYPE_AES128",
+          "CRYPTO_SYMCRYPT_TYPE_AES192",
+          "CRYPTO_SYMCRYPT_TYPE_AES256"
+        ],
+        "legacyLocator": "ws_objects/pfw.shared.pbl.src/enums.sru:L936-L940"
+      }
+    },
+    {
+      "output": "symmetric.modeIdentifiers",
+      "artifact": "identifier-sets.json",
+      "observes": "The symmetric mode identifier set, including the default alias.",
+      "notes": "The default alias is recorded as the identifier it resolves to rather than as a number, because that is the whole evidence for provesDefects item 1. All three modes are enumerated even though the feedback mode is not exercised as a case, for the reason blockedBehaviours records.",
+      "record": {
+        "identifiers": {
+          "CRYPTO_SYMCRYPT_MODE_ECB": 0,
+          "CRYPTO_SYMCRYPT_MODE_CBC": 1,
+          "CRYPTO_SYMCRYPT_MODE_CFB": 2,
+          "CRYPTO_SYMCRYPT_MODE_DEFAULT": "CRYPTO_SYMCRYPT_MODE_ECB"
+        },
+        "declarationOrder": [
+          "CRYPTO_SYMCRYPT_MODE_ECB",
+          "CRYPTO_SYMCRYPT_MODE_CBC",
+          "CRYPTO_SYMCRYPT_MODE_CFB",
+          "CRYPTO_SYMCRYPT_MODE_DEFAULT"
+        ],
+        "legacyLocator": "ws_objects/pfw.shared.pbl.src/enums.sru:L943-L946"
+      }
+    },
+    {
+      "output": "rsa.paddingIdentifiers",
+      "artifact": "identifier-sets.json",
+      "observes": "The asymmetric padding identifier set, including the default alias.",
+      "notes": "Simultaneously the evidence for provesDefects item 2, whose default alias it records, and for item 3, whose unrepresentability it establishes by having no third member.",
+      "record": {
+        "identifiers": {
+          "CRYPTO_RSA_PADDING_PKCS1": 0,
+          "CRYPTO_RSA_PADDING_OAEP": 1,
+          "CRYPTO_RSA_PADDING_DEFAULT": "CRYPTO_RSA_PADDING_PKCS1"
+        },
+        "declarationOrder": [
+          "CRYPTO_RSA_PADDING_PKCS1",
+          "CRYPTO_RSA_PADDING_OAEP",
+          "CRYPTO_RSA_PADDING_DEFAULT"
+        ],
+        "legacyLocator": "ws_objects/pfw.shared.pbl.src/enums.sru:L949-L951"
+      }
+    },
+    {
+      "output": "rsa.keySizeIdentifiers",
+      "artifact": "identifier-sets.json",
+      "observes": "The declared asymmetric key-size set.",
+      "notes": "The small size is a first-class declared value alongside the other two, which is the evidence for provesDefects item 7, and it is recorded so that its removal from the accepted set would surface as a difference.",
+      "record": {
+        "identifiers": {
+          "CRYPTO_RSA_BITS_1024": 1024,
+          "CRYPTO_RSA_BITS_2048": 2048,
+          "CRYPTO_RSA_BITS_4096": 4096
+        },
+        "declarationOrder": [
+          "CRYPTO_RSA_BITS_1024",
+          "CRYPTO_RSA_BITS_2048",
+          "CRYPTO_RSA_BITS_4096"
+        ],
+        "legacyLocator": "ws_objects/pfw.shared.pbl.src/enums.sru:L965-L967"
+      }
+    },
+    {
+      "output": "random.identifiers",
+      "artifact": "identifier-sets.json",
+      "observes": "The two flag identifier sets as declared, with their default aliases.",
+      "notes": "Each default alias is recorded as the combination it resolves to, because a caller reaching the flag-omitting arity gets those and nothing else.",
+      "record": {
+        "identifiers": {
+          "CRYPTO_RNDSTRING_NUMBER": 1,
+          "CRYPTO_RNDSTRING_ALPHABET": 2,
+          "CRYPTO_RNDSTRING_SYMBOL": 4,
+          "CRYPTO_RNDSTRING_DEFAULT": "CRYPTO_RNDSTRING_NUMBER + CRYPTO_RNDSTRING_ALPHABET",
+          "CRYPTO_GUID_INCLUDE_BRACKET": 1,
+          "CRYPTO_GUID_INCLUDE_SEPARATOR": 2,
+          "CRYPTO_GUID_DEFAULT": "CRYPTO_GUID_INCLUDE_BRACKET + CRYPTO_GUID_INCLUDE_SEPARATOR"
+        },
+        "declarationOrder": [
+          "CRYPTO_RNDSTRING_NUMBER",
+          "CRYPTO_RNDSTRING_ALPHABET",
+          "CRYPTO_RNDSTRING_SYMBOL",
+          "CRYPTO_RNDSTRING_DEFAULT",
+          "CRYPTO_GUID_INCLUDE_BRACKET",
+          "CRYPTO_GUID_INCLUDE_SEPARATOR",
+          "CRYPTO_GUID_DEFAULT"
+        ],
+        "legacyLocator": "ws_objects/pfw.shared.pbl.src/enums.sru:L954-L962"
+      }
+    }
+  ]
+}

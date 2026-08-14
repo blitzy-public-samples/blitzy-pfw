@@ -266,6 +266,11 @@ characterization/
 ├── workflows/                  15 definitions, one per workflow, each carrying its own mask
 │   ├── README.md               the canonical roster and the correction register
 │   └── workflow.schema.json    the schema every definition validates against
+├── tools/                      the TARGET-SIDE capture driver - the half of the store that runs
+│   ├── PowerFramework.Characterization.Capture/       the driver itself
+│   ├── PowerFramework.Characterization.Capture.Tests/ its guards, exercised offline
+│   ├── plans/                  one capture plan per workflow whose outputs are REST-reachable
+│   └── README.md               the command line, and what the driver refuses to do
 └── README.md                   this file
 ```
 
@@ -274,7 +279,15 @@ characterization/
 | [`workflows/`](workflows) | The 15 workflow definitions, each **with** its determinism mask, plus the schema they validate against and the roster readme |
 | [`recordings/legacy/`](recordings/legacy) `<workflowId>/` | The PowerBuilder oracle's output for that workflow — the golden master. The parent exists; no `<workflowId>` directory does |
 | [`recordings/dotnet/`](recordings/dotnet) `<workflowId>/` | The target-side output for the same workflow — the candidate. Likewise |
+| [`tools/`](tools) | The target-side capture driver, its test project, and the capture plans. Two MSBuild projects and a directory of JSON; enumerated by the root `PowerFramework.slnx`, which is the only solution that reaches the test project |
 | `characterization/README.md` | This document |
+
+**The store can now take a capture, and that is new.** Until the driver landed, this store specified
+captures and had no way to perform one — a state in which the only route to a recording was to write one by
+hand, which is the one thing a golden-master store must never accept. [`tools/README.md`](tools/README.md)
+carries the command line. What has **not** changed is the pair state: the driver produces the target half,
+the legacy half needs the Appeon PowerBuilder virtual machine, and `--pair-state` reports that rather than
+working around it.
 
 **The 15 workflows, and how they distribute.** Six characterize DataServices, five Persistence, one Gateway,
 one Security, and two the shared libraries — `shared-diagnostics-assert-payload` and
@@ -305,14 +318,26 @@ window with that window's underscores rendered as hyphens. The 15 roster identif
 [`workflows/README.md`](workflows/README.md) all conform, and **that roster is the only source of a
 directory name in this store.**
 
-The one divergence is a test constant.
-`services/dataservices-service/PowerFramework.DataServices.Tests/PinyinFirstLetterMatcherTests.cs` pins
-`WorkflowId` to the oracle window's own name, `w_test_dwsvc_dropdownsearch`, and derives its two recording
-paths from it — a spelling the schema pattern rejects, because it carries underscores. **The roster
-identifier `dataservices-dwsvc-dropdownsearch` is canonical**; the correction register in
-[`workflows/README.md`](workflows/README.md) owns the reconciliation and records when the constant changes,
-which is the moment a real recording lands rather than now, because renaming a pairing key that no recording
-uses yet buys nothing and renaming one that a recording *does* use orphans both halves silently.
+**That divergence has been reconciled, and the reasoning that deferred it was wrong.**
+`services/dataservices-service/PowerFramework.DataServices.Tests/PinyinFirstLetterMatcherTests.cs` used to
+pin `WorkflowId` to the oracle window's own name, `w_test_dwsvc_dropdownsearch`, and derive its two
+recording paths from it. It now pins the roster identifier, `dataservices-dwsvc-dropdownsearch`.
+
+The earlier position here was that the constant should change at the moment a real recording lands, on the
+ground that renaming a pairing key no recording uses buys nothing. Two facts overturn it:
+
+- **The old spelling could never have named a valid directory at all.** The schema pattern
+  `^[a-z][a-z0-9]*(-[a-z0-9]+)*$` rejects underscores, so the hook was watching a path that no conforming
+  workflow could ever produce — not a path that would become correct once a capture existed.
+- **The rename is only safe *before* a recording exists.** The schema states an identifier is never renamed
+  once a recording sits under it, because that orphans both halves of every pair already captured and
+  nothing reports it. So the moment the earlier text nominated — when a recording lands — is precisely the
+  moment the change becomes unsafe. Doing it now is the only window there was.
+
+`PinyinOracleCharacterizationHookTests.TheWorkflowIdentifierAgreesWithTheStoresRoster` now pins both halves
+mechanically: the constant must match the pattern **read from the schema**, and it must name a definition
+that exists on disk and declares that same identifier in its own text. Traceability to the oracle window is
+kept where it belongs — in the definition's `oracleFixtures` and in the test file's header.
 
 That same test class is still the worked example of how paths into this store are resolved: the repository
 root is located by walking up to the `PowerFramework.slnx` marker, and the two directories are spelled with

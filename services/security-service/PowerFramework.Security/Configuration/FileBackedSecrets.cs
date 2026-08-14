@@ -21,6 +21,15 @@
 //  and, for each, honours a sibling `<KEY>_FILE`. The environment-variable form keeps working
 //  unchanged, so the documented bring-up is not broken by this being here.
 //
+//  🔴 AND THE C-02 KEY STORE IS ONE OF THOSE DECLARED NAMES, WHICH IT WAS NOT. The declared set was the
+//  two signing keys plus the client-secret roster - so the ONE class of material a CALLER can ask this
+//  service to use was the one class with no file-backed form. A sweep of a running deployment found a
+//  configured key reference's exact material in the `docker compose config` render, in `docker inspect`
+//  and in `/proc/1/environ` at once: the mechanism above existed and simply did not cover it. The
+//  declared set is DERIVED, so covering it is a derivation change rather than a new mechanism -
+//  `<ConfigurationKeyPrefix><keyRef>_FILE` now projects a reference's material exactly as
+//  `SECURITY_JWT_SIGNING_KEY_FILE` projects the signing key, under the same three rules.
+//
 //  THREE RULES, AND EACH REFUSES RATHER THAN GUESSES.
 //    1. `<KEY>_FILE` set and readable  ->  its trimmed content becomes `<KEY>`.
 //    2. `<KEY>` and `<KEY>_FILE` BOTH carry a value  ->  REFUSE. Two sources for one secret means the
@@ -29,6 +38,20 @@
 //    3. `<KEY>_FILE` set but missing, unreadable, or empty once trimmed  ->  REFUSE. Falling back to
 //       the environment value would substitute a DIFFERENT credential for the one the operator
 //       deployed, which is worse than not starting.
+//    4. IN PRODUCTION ONLY: a permitted C-02 key reference carrying an INLINE value and no file form
+//       ->  REFUSE. The inline form is the exposed one, and a production deployment that has been given
+//       the projected alternative and did not use it is a deployment leaking key material into three
+//       surfaces at once. Development and every other environment keep the inline form, so the
+//       documented bring-up is unchanged.
+//
+//  WHY RULE 4 DOES NOT TRY TO TELL A KEY FROM A FILE PATH. A permitted reference resolves EITHER to key
+//  material (the keyed operations) OR to a filesystem path (the two file-hashing operations), and the
+//  configuration declares no difference between the two - so a refusal that applied only to "real key
+//  material" would have to GUESS which kind a value is, from its shape. A guess that guesses wrong in the
+//  permissive direction leaks the exact material this rule exists to protect. So the rule is uniform, the
+//  refusal message names the file-path case explicitly, and the remedy is identical for both: project the
+//  value. A projected file holding a path is not absurd - it is one line, and it is the only reading that
+//  cannot mis-classify.
 //
 //  Refusal is `InvalidOperationException` from the composition root, which is this service's
 //  established posture for a structural fault [ws_objects/pfw.pbl.src/pfw.sra:L111-L144, HALT CLOSE at
@@ -77,6 +100,14 @@ internal static class FileBackedSecrets
             File.ReadAllText,
             File.Exists);
 
+        // RULE 4, EVALUATED BEFORE THE RESOLVED VALUES ARE MERGED, so it reads the deployment's own
+        // configuration rather than this method's output. The environment is the host's, not a setting:
+        // a deployment that could relax the rule by writing a configuration key would be a deployment
+        // that could opt out of it.
+        RefuseInlineKeyStoreMaterial(
+            builder.Configuration,
+            builder.Environment.IsProduction());
+
         if (resolved.Count > 0)
         {
             // LAST SOURCE WINS in the configuration chain, which is what lets a projected file override
@@ -103,6 +134,22 @@ internal static class FileBackedSecrets
     /// a client added to the roster becomes file-backable with no change here. A hand-maintained list
     /// would drift away from the roster silently, and the failure would be a secret that quietly kept
     /// using its environment-variable form after an operator had moved it to a file.
+    /// </para>
+    /// <para>
+    /// 🔴 THE C-02 KEY STORE IS DERIVED HERE TOO, AND ITS ABSENCE WAS THE DEFECT. Each permitted
+    /// reference in <c>Security:KeyStore:PermittedKeyRefs</c> is appended to
+    /// <c>Security:KeyStore:ConfigurationKeyPrefix</c> - the SAME concatenation the endpoint performs when
+    /// it resolves a caller's reference - so the flat key a deployment supplies material under acquires a
+    /// <c>_FILE</c> companion like every other secret-bearing key. Deriving it from the permitted set is
+    /// what makes a reference added to that set file-backable with no change here; a hand-kept list would
+    /// leave the newest reference on the exposed form, which is precisely the failure this whole file
+    /// exists to prevent.
+    /// </para>
+    /// <para>
+    /// A BLANK PREFIX YIELDS NOTHING RATHER THAN THE BARE REFERENCE NAMES. A permitted reference with no
+    /// prefix to resolve against is unresolvable configuration and the options validator already refuses
+    /// that combination at startup; emitting the bare names here would additionally invent flat keys the
+    /// endpoint never reads.
     /// </para>
     /// <para>
     /// The enumeration deliberately does NOT scan for arbitrary <c>*_FILE</c> variables. Several
@@ -132,7 +179,144 @@ internal static class FileBackedSecrets
             }
         }
 
+        foreach (string keyStoreKey in DeclaredKeyStoreKeys(configuration))
+        {
+            _ = keys.Add(keyStoreKey);
+        }
+
         return keys;
+    }
+
+    /// <summary>
+    /// Enumerates the flat configuration keys the C-02 key store resolves permitted references against.
+    /// </summary>
+    /// <param name="configuration">The configuration to read the key-store declaration from.</param>
+    /// <returns>
+    /// One key per permitted reference, spelled exactly as the endpoint composes it, or nothing when no
+    /// reference is permitted or no prefix is configured.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="configuration"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// THE COMPOSITION IS THE ENDPOINT'S OWN, RESTATED IN ONE PLACE RATHER THAN TWO. Resolution at the
+    /// endpoint is <c>configuration[ConfigurationKeyPrefix + keyRef]</c>; this method must produce the
+    /// identical spelling or a projected file would satisfy a key nothing reads. That is also why the
+    /// reference is read from the section's own children rather than through a bound options instance:
+    /// this runs BEFORE the options graph is built, exactly as the client-secret derivation above does.
+    /// </para>
+    /// <para>
+    /// NO VALUE IS READ HERE, ONLY NAMES. The method cannot see key material, which is what keeps it
+    /// usable from a diagnostic path.
+    /// </para>
+    /// </remarks>
+    internal static IEnumerable<string> DeclaredKeyStoreKeys(IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        IConfigurationSection keyStore =
+            configuration.GetSection($"{SecurityOptions.SectionName}:KeyStore");
+
+        string? prefix = keyStore["ConfigurationKeyPrefix"];
+
+        if (string.IsNullOrWhiteSpace(prefix))
+        {
+            yield break;
+        }
+
+        prefix = prefix.Trim();
+
+        foreach (IConfigurationSection reference in keyStore.GetSection("PermittedKeyRefs").GetChildren())
+        {
+            string? declared = reference.Value;
+
+            if (!string.IsNullOrWhiteSpace(declared))
+            {
+                yield return prefix + declared.Trim();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Refuses a production deployment that supplies C-02 key-store material inline instead of through a
+    /// projected file.
+    /// </summary>
+    /// <param name="configuration">The deployment's configuration, read for names and presence only.</param>
+    /// <param name="enforce">
+    /// Whether the rule applies. The caller passes the host's production determination; the parameter
+    /// exists so the rule is drivable from a test without a host.
+    /// </param>
+    /// <exception cref="ArgumentNullException"><paramref name="configuration"/> is <see langword="null"/>.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// A permitted reference carries an inline value and names no file.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// 🔴 RULE 4. The inline form is the EXPOSED form: it is rendered in cleartext by
+    /// <c>docker compose config</c>, returned in full by <c>docker inspect</c>, and readable from
+    /// <c>/proc/&lt;pid&gt;/environ</c> by any process in the container. A sweep of a running deployment
+    /// found a configured reference's exact material in all three at once. With the projected form now
+    /// available for these keys, a production deployment still using the inline one is leaking material it
+    /// has been given a way not to leak.
+    /// </para>
+    /// <para>
+    /// PRODUCTION ONLY, AND THAT IS A DELIBERATE BOUND RATHER THAN A LOOPHOLE. The documented bring-up and
+    /// every parity capture run under Development and supply their fixtures inline; refusing those would
+    /// break the documented commands to protect a development container from itself. What the rule
+    /// protects is the deployment where the exposure matters, and it is decided by the HOST's environment
+    /// rather than by a configuration key, so a deployment cannot opt out of it by writing a setting.
+    /// </para>
+    /// <para>
+    /// IT REFUSES BEFORE THE FIRST REQUEST RATHER THAN WARNING. A warning about key material in the
+    /// environment is a record in the same log an operator is reading when they run out of time, and the
+    /// service would answer its readiness probe and gate three dependents behind that answer regardless.
+    /// This service's posture for a structural fault is to refuse to start
+    /// [ws_objects/pfw.pbl.src/pfw.sra:L111-L144, HALT CLOSE at :L143].
+    /// </para>
+    /// <para>
+    /// NO VALUE APPEARS IN THE MESSAGE. It names the KEY, the companion key and the remedy, and states the
+    /// file-path case explicitly so an operator whose reference names a file rather than a key is not left
+    /// guessing whether the rule applies to them. It does not report a length, a prefix or a sample.
+    /// </para>
+    /// </remarks>
+    internal static void RefuseInlineKeyStoreMaterial(IConfiguration configuration, bool enforce)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        if (!enforce)
+        {
+            return;
+        }
+
+        foreach (string key in DeclaredKeyStoreKeys(configuration))
+        {
+            if (string.IsNullOrWhiteSpace(configuration[key]))
+            {
+                // Either nothing is configured for this reference - which is a permitted state, answered
+                // 404 at the endpoint - or the value arrived through the projected file, which is the
+                // shape this rule exists to require.
+                continue;
+            }
+
+            string fileKey = key + FileSuffix;
+
+            if (!string.IsNullOrWhiteSpace(configuration[fileKey]))
+            {
+                // Both forms carry a value. That is rule 2's refusal, raised by Resolve with the message
+                // written for it, and duplicating it here would report the wrong problem first.
+                continue;
+            }
+
+            throw new InvalidOperationException(
+                $"'{key}' carries an inline value in a production deployment. Material supplied that way "
+                    + "is rendered in cleartext by 'docker compose config', returned in full by "
+                    + "'docker inspect', and readable from /proc/<pid>/environ by any process in the "
+                    + $"container. Write the value into a file the container can read and name that file "
+                    + $"in '{fileKey}' instead, leaving '{key}' unset. IF THIS REFERENCE NAMES A FILE PATH "
+                    + "rather than key material - the two file-hashing operations resolve a reference to a "
+                    + "path - the same projection applies: put the path in the projected file. This "
+                    + "service cannot tell the two apart, and guessing from the value's shape would leak "
+                    + "the material this rule protects whenever the guess went the permissive way.");
+        }
     }
 
     /// <summary>

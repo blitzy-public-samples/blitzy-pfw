@@ -1379,6 +1379,18 @@ public sealed class SecurityKeyStoreOptions
     /// the host. A deployment that permits no reference uses no prefix, and failing it for a value it
     /// has no use for would be a fabricated requirement.
     /// </para>
+    /// <para>
+    /// 🔴 <b>EACH COMPOSED KEY ACCEPTS A PROJECTED FILE, AND IN PRODUCTION IT MUST USE ONE.</b>
+    /// <c>&lt;ConfigurationKeyPrefix&gt;&lt;keyRef&gt;_FILE</c> names a file whose trimmed content becomes
+    /// the material, exactly as the signing key's own companion does
+    /// [<c>Configuration/FileBackedSecrets.cs</c>]. That companion did not used to cover these keys, so
+    /// the one class of material a CALLER can ask this service to use was the one class with no projected
+    /// form - and a sweep of a running deployment found a configured reference's exact material rendered
+    /// by <c>docker compose config</c>, returned by <c>docker inspect</c> and readable from
+    /// <c>/proc/&lt;pid&gt;/environ</c> at once. A production deployment supplying such a value inline is
+    /// now REFUSED at startup; every other environment keeps the inline form, so the documented bring-up
+    /// and the parity captures are unchanged.
+    /// </para>
     /// </remarks>
     public string ConfigurationKeyPrefix { get; set; } = string.Empty;
 

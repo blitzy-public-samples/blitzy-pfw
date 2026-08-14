@@ -835,7 +835,7 @@ public interface ICryptoServiceClient
 
     /// <summary>
     /// Releases a retained generated private key by its reference.
-    /// <c>DELETE /v1/crypto/rsa/keys/{keyRef}</c>.
+    /// <c>POST /v1/crypto/rsa/keys/release</c>, with the reference in the request body.
     /// </summary>
     /// <param name="keyRef">
     /// The opaque reference <see cref="GenerateRsaKeyAsync"/> returned. The published schema declares
@@ -2132,17 +2132,33 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     private static readonly Uri RsaVerifyPath = new("/v1/crypto/rsa/verify", UriKind.Relative);
 
     /// <summary>
-    /// The C-02 RSA key collection path, as text, because the release operation appends a path segment
-    /// to it.
+    /// The C-02 RSA key collection path, as text, so that the release path is composed from one spelling
+    /// of the collection rather than from a second literal.
     /// </summary>
     /// <remarks>
-    /// ONE SPELLING FOR BOTH OPERATIONS. Generation posts to this collection and release deletes a member
-    /// of it, so declaring the path twice would let the two drift apart on the first contract change.
+    /// ONE SPELLING FOR BOTH OPERATIONS. Generation posts to this collection and release posts to a fixed
+    /// action under it, so declaring the path twice would let the two drift apart on the first contract
+    /// change. Both composed values are FULLY DETERMINED HERE: nothing a caller supplies reaches either
+    /// path.
     /// </remarks>
     private const string RsaKeysPathText = "/v1/crypto/rsa/keys";
 
     /// <summary>The C-02 RSA key generation path.</summary>
     private static readonly Uri RsaKeysPath = new(RsaKeysPathText, UriKind.Relative);
+
+    /// <summary>The C-02 retained-key release path.</summary>
+    /// <remarks>
+    /// 🔴 A FIXED PATH, WHICH IS THE POINT. The operation was published as
+    /// <c>DELETE /v1/crypto/rsa/keys/{keyRef}</c>, so this client composed a member path from the
+    /// caller's reference and escaped it into one segment. That escaping was correct and was never the
+    /// exposure: a request line is recorded by the SERVER's own request scope and by every proxy between
+    /// the two services, so the reference reached diagnostics this client does not own. The reference now
+    /// travels in the request body, and this path carries no caller-supplied text at all - which is why
+    /// the escaping helper that used to sit beside it is gone rather than merely unused.
+    /// </remarks>
+    private static readonly Uri RsaKeyReleasePath = new(
+        RsaKeysPathText + "/release",
+        UriKind.Relative);
 
     /// <summary>The C-02 random bytes path.</summary>
     private static readonly Uri RandomBlobPath = new("/v1/crypto/random/blob", UriKind.Relative);
@@ -2713,18 +2729,21 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     // ==============================================================================================
     //  C-02 - security.v1.CryptoService, 18 operations under /v1/crypto/**
     //
-    //  SEVENTEEN OF THE EIGHTEEN ARE A POST, including the ones that read like queries. That is the
+    //  ALL EIGHTEEN ARE A POST, including the ones that read like queries. That is the
     //  published contract and it is deliberate: a GET with the payload in the query string would place
     //  plaintext, ciphertext and digests into request lines, and therefore into access logs, proxy caches
     //  and browser history - none of which the in-process legacy had. The three generators are not
     //  idempotent in any useful sense either, since each returns a different result per call by
     //  definition.
     //
-    //  THE EIGHTEENTH IS A DELETE, AND IT IS THE ONE EXCEPTION TO EVERY GENERALISATION IN THIS BANNER.
-    //  The key release is published as DELETE /v1/crypto/rsa/keys/{keyRef}: it carries no request body and
-    //  no response body, and it is the only operation on either contract whose PATH carries a
-    //  caller-supplied value. Its reference is therefore escaped into a single path segment and is never
-    //  logged - see BuildRsaKeyReleasePath and DeleteAsync for both halves of that.
+    //  🔴 THE EIGHTEENTH IS STILL THE ONE EXCEPTION TO ONE GENERALISATION, BUT NO LONGER TO THE METHOD.
+    //  The key release is published as POST /v1/crypto/rsa/keys/release: it carries a request body and NO
+    //  response body, which is why it needs a sender of its own. It was published as
+    //  DELETE /v1/crypto/rsa/keys/{keyRef} and was then the only operation on either contract whose PATH
+    //  carried a caller-supplied value; this client escaped that value into a single path segment and
+    //  never logged it, and neither measure could help, because a request line is recorded by the SERVER's
+    //  request scope and by every proxy in between. NO PATH IN THIS FILE NOW CARRIES CALLER-SUPPLIED TEXT
+    //  - see RsaKeyReleasePath and PostWithoutResponseBodyAsync.
     //
     //  NO REQUEST BODY AND NO RESPONSE BODY IS LOGGED BY ANY MEMBER BELOW. The only record any of them
     //  writes is the published operation identifier, which carries nothing.
@@ -3061,8 +3080,11 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
         // would be indistinguishable from a genuine "not held".
         ArgumentException.ThrowIfNullOrWhiteSpace(keyRef);
 
-        System.Net.HttpStatusCode statusCode = await DeleteAsync(
-                BuildRsaKeyReleasePath(keyRef),
+        ReleaseRsaKeyRequestBody body = new() { KeyRef = keyRef };
+
+        System.Net.HttpStatusCode statusCode = await PostWithoutResponseBodyAsync(
+                RsaKeyReleasePath,
+                body,
                 "releaseRsaKey",
                 System.Net.HttpStatusCode.NotFound,
                 cancellationToken)
@@ -3323,31 +3345,6 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
         };
     }
 
-    /// <summary>
-    /// Builds the release operation's path by appending the reference as a single path segment.
-    /// </summary>
-    /// <param name="keyRef">The reference to release. Already checked non-empty by the caller.</param>
-    /// <returns>The relative path the published operation is declared at.</returns>
-    /// <remarks>
-    /// <para>
-    /// <b>THE REFERENCE IS ESCAPED, AND THAT IS NECESSARY RATHER THAN DEFENSIVE.</b> The published
-    /// <c>KeyReference</c> schema constrains the value to a non-empty string and declares NO pattern, so
-    /// the contract itself permits a reference containing a slash, a question mark or a fragment marker.
-    /// Concatenating such a value unescaped would forge extra path segments or a query string, and the
-    /// request would then reach a different route - or no route - carrying part of the reference where the
-    /// service never looks. <see cref="Uri.EscapeDataString"/> percent-encodes every reserved character
-    /// INCLUDING the separator, so whatever the reference contains arrives as exactly one segment.
-    /// </para>
-    /// <para>
-    /// This is the ONLY operation on either contract whose path carries caller-supplied text. The other
-    /// seventeen name a fixed route and place every value in a request body, which is why no equivalent
-    /// escaping appears anywhere else in this file.
-    /// </para>
-    /// </remarks>
-    private static Uri BuildRsaKeyReleasePath(string keyRef) => new(
-        string.Concat(RsaKeysPathText, "/", Uri.EscapeDataString(keyRef)),
-        UriKind.Relative);
-
     // ==============================================================================================
     //  TRANSPORT - the one place a request is actually sent
     // ==============================================================================================
@@ -3369,9 +3366,10 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// <para>
     /// THIS OVERLOAD IS THE AUTHENTICATED ONE, AND IT IS THE ONE EVERY C-02 OPERATION CARRYING A REQUEST
     /// BODY USES - seventeen of the eighteen. It obtains a bearer credential for Security's own audience
-    /// and attaches it to the request before sending. The eighteenth, the bodiless key release, obtains its
-    /// credential the same way through <see cref="DeleteAsync"/>, so all eighteen are authenticated and
-    /// only the shape of the exchange differs. Every C-02 operation inherits the document-level bearer requirement in the published
+    /// and attaches it to the request before sending. The eighteenth, the key release, carries a request
+    /// body and no response body and obtains its credential the same way through
+    /// <see cref="PostWithoutResponseBodyAsync"/>, so all eighteen are authenticated and only the shape of
+    /// the exchange differs. Every C-02 operation inherits the document-level bearer requirement in the published
     /// contract, so an unauthenticated crypto call is not merely unwise - once Security enforces its own
     /// contract, every one of them answers 401 and the entire cryptographic surface is unreachable.
     /// </para>
@@ -3421,9 +3419,12 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     }
 
     /// <summary>
-    /// Sends one bodiless <c>DELETE</c> and reports the status it was answered with.
+    /// Sends one request carrying a body and expecting NO response body, reporting the status it was
+    /// answered with.
     /// </summary>
-    /// <param name="path">The published relative path, with any path parameter already escaped.</param>
+    /// <typeparam name="TRequest">The request body type for the operation.</typeparam>
+    /// <param name="path">The published relative path. It carries no caller-supplied text.</param>
+    /// <param name="body">The request body.</param>
     /// <param name="operationId">
     /// The published operation identifier, carried into the diagnostic and onto the failure type exactly
     /// as it is on the request/response path.
@@ -3437,12 +3438,19 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// <remarks>
     /// <para>
     /// <b>A SEPARATELY NAMED SENDER RATHER THAN A METHOD FLAG ON THE EXISTING ONE.</b>
-    /// <see cref="SendAsync{TRequest, TResponse}"/> serializes a request body and deserializes a response
-    /// body, and BOTH are absent here - the release carries no body in either direction. Passing a method
-    /// and two nulls through that path would make every one of its callers read as though a body were
-    /// optional, when for the other seventeen operations it is required. The file already expresses the
-    /// credential split as two differently named senders for the same reason, and this is the same rule
-    /// applied to the shape of the exchange.
+    /// <see cref="SendAsync{TRequest, TResponse}"/> serializes a request body AND deserializes a response
+    /// body, and the second half is absent here - the release answers 204 with nothing in it. Passing a
+    /// throwaway response type through that path would make it deserialize an empty body and report a
+    /// malformed answer for the one status the contract declares as success. The file already expresses
+    /// the credential split as two differently named senders for the same reason, and this is the same
+    /// rule applied to the shape of the exchange.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>IT WAS A BODILESS <c>DELETE</c> SENDER, AND THE OPERATION IT SERVES MOVED FOR A SECURITY
+    /// REASON RATHER THAN A STYLISTIC ONE.</b> The release used to address its key by a path segment, so
+    /// a credential-like reference sat in a request line that the server's own request scope - and every
+    /// proxy between the two services - records. It now travels in the body, so this sender serializes
+    /// one where its predecessor sent none.
     /// </para>
     /// <para>
     /// <b>ONE NON-SUCCESS STATUS IS RETURNED AND EVERY OTHER ONE IS RAISED.</b> Which status that is comes
@@ -3450,20 +3458,21 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
     /// operation publishes as an answer is handed back, and everything else goes through the same
     /// <see cref="CreateFailureAsync"/> the request/response path uses, carrying the operation identifier,
     /// the status and the problem body's members. Nothing is retried here, on the same terms as the
-    /// request/response path - and the resilience pipeline will not retry it either, because
-    /// <c>DELETE</c> is not a safe method and no Security path is on the replay-safe table.
+    /// request/response path - and the resilience pipeline will not retry it either: <c>POST</c> is
+    /// neither safe nor admitted by the method gate, and no Security path is on the replay-safe table.
     /// </para>
     /// <para>
-    /// The single diagnostic carries the operation identifier and nothing else. IN PARTICULAR IT DOES NOT
-    /// CARRY THE PATH, which on this one operation embeds a caller-supplied reference the contract states
-    /// is never logged - so the omission is a requirement rather than a convention here.
+    /// The single diagnostic carries the operation identifier and nothing else - no path, no body and no
+    /// reference, exactly as on the request/response path.
     /// </para>
     /// </remarks>
-    private async Task<System.Net.HttpStatusCode> DeleteAsync(
+    private async Task<System.Net.HttpStatusCode> PostWithoutResponseBodyAsync<TRequest>(
         Uri path,
+        TRequest body,
         string operationId,
         System.Net.HttpStatusCode declaredAbsentStatus,
         CancellationToken cancellationToken)
+        where TRequest : class
     {
         // Obtained through the same cached public path every C-02 operation uses, so a release shares the
         // one issuance with the rest of the surface rather than minting its own credential.
@@ -3473,9 +3482,12 @@ public sealed class SecurityClient : IServiceTokenProvider, ICryptoServiceClient
         EnsureBaseAddress(operationId);
         _logger.LogDebug("Invoking the Security service operation {OperationId}.", operationId);
 
-        // No Content at all, deliberately: the operation publishes no request body, and an empty one would
-        // still carry a Content-Length and a Content-Type the document does not declare.
-        using HttpRequestMessage request = new(HttpMethod.Delete, path);
+        // Serialized through the SAME options instance the request/response path uses, so a release cannot
+        // be encoded differently from the seventeen operations beside it.
+        using HttpRequestMessage request = new(HttpMethod.Post, path)
+        {
+            Content = JsonContent.Create(body, mediaType: null, WireJson),
+        };
 
         // Assigned rather than added, on the same terms as the request/response path.
         request.Headers.Authorization =
@@ -4693,6 +4705,24 @@ internal sealed class GenRsaKeyRequestBody
     /// </summary>
     [JsonPropertyName("pemFormat")]
     public bool? PemFormat { get; init; }
+}
+
+/// <summary>
+/// The request body of <c>POST /v1/crypto/rsa/keys/release</c>. Contract <b>C-02</b>.
+/// </summary>
+/// <remarks>
+/// 🔴 IT EXISTS BECAUSE THE REFERENCE MOVED OUT OF THE REQUEST PATH. The release was published as
+/// <c>DELETE /v1/crypto/rsa/keys/{keyRef}</c>, and this client escaped the reference into a single path
+/// segment and never logged it - neither measure could help, because a request line is recorded by the
+/// SERVER's own request scope and by every proxy between the two services. A <c>keyRef</c> is a
+/// credential-like handle to a retained private key, so it travels in a body like every other reference
+/// on this contract.
+/// </remarks>
+internal sealed class ReleaseRsaKeyRequestBody
+{
+    /// <summary>The opaque reference to release. Carries no key material of any kind.</summary>
+    [JsonPropertyName("keyRef")]
+    public required string KeyRef { get; init; }
 }
 
 /// <summary>The request body of <c>POST /v1/crypto/random/blob</c>. Contract <b>C-02</b>.</summary>

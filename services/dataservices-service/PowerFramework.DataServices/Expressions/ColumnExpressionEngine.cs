@@ -238,6 +238,68 @@ using PowerFramework.Shared.Kernel;
 namespace PowerFramework.DataServices.Expressions;
 
 /// <summary>
+/// Told whenever a <see cref="ColumnExpressionEngine"/> RAISES one of the three events it declares on
+/// itself - <c>onitemchanged</c> [n_cst_dwsvc_columnexp.sru:L86], <c>ondoitemchanged</c> [:L87] and
+/// <c>onvarchanged</c> [:L88].
+/// </summary>
+/// <remarks>
+/// <para>
+/// THE ENGINE'S RAISE POINTS ARE INSIDE THE ENGINE, WHICH IS WHY THE SEAM IS AN INTERFACE ON THIS SIDE
+/// RATHER THAN A WRAPPER ON THE OTHER. Four of the raises are internal to the calculation cascade - the
+/// deferred item event from the item event [:L224], the per-row deferred event from the variable cascade
+/// [:L343], and the variable event on a PEER engine from both fan-out sites [:L324, :L355] - so they are
+/// unreachable to anything that only wraps the outermost call. See
+/// <see cref="ColumnExpressionEngine.EventObserver"/> for the defect that produced this seam.
+/// </para>
+/// <para>
+/// EVERY MEMBER TAKES THE RAISING ENGINE, because the peer fan-out raises on a DIFFERENT engine than the
+/// one the caller addressed, and an observer that assumed otherwise would attribute a peer's event to
+/// the origin's identity. The engine carries both halves of the routing key - its
+/// <see cref="ColumnExpressionEngine.Session"/> and its <see cref="ColumnExpressionEngine.Handle"/>.
+/// </para>
+/// <para>
+/// IMPLEMENTATIONS MUST NOT THROW AND MUST NOT BLOCK. These are called on the calculation path, so a
+/// throwing observer fails a calculation the legacy would have completed and a blocking one stalls it.
+/// </para>
+/// </remarks>
+public interface IColumnExpressionEventObserver
+{
+    /// <summary>
+    /// <c>onitemchanged(long row, dwobject dwo)</c> [:L86] was raised.
+    /// </summary>
+    /// <param name="engine">The engine the event was raised on.</param>
+    /// <param name="row">The ONE-BASED row ordinal.</param>
+    /// <param name="dwo">The column object that changed.</param>
+    void ItemChangedRaised(ColumnExpressionEngine engine, long row, IDataWindowObject dwo);
+
+    /// <summary>
+    /// <c>ondoitemchanged(long row, string colname, long colid, boolean frominput)</c> [:L87] was raised.
+    /// </summary>
+    /// <param name="engine">The engine the event was raised on.</param>
+    /// <param name="row">The ONE-BASED row ordinal.</param>
+    /// <param name="columnName">The column's name.</param>
+    /// <param name="columnId">The column's ONE-BASED DataWindow ordinal.</param>
+    /// <param name="fromInput">
+    /// Whether the change came from user input, which selects the relative-input column set rather than
+    /// the relative column set.
+    /// </param>
+    void DoItemChangedRaised(
+        ColumnExpressionEngine engine,
+        long row,
+        string? columnName,
+        long columnId,
+        bool fromInput);
+
+    /// <summary>
+    /// <c>onvarchanged(integer index, boolean forcecalc)</c> [:L88] was raised.
+    /// </summary>
+    /// <param name="engine">The engine the event was raised on.</param>
+    /// <param name="index">The ONE-BASED index into the global variable table.</param>
+    /// <param name="forceCalc">Whether the recalculation it drives ignores the dirty state.</param>
+    void VarChangedRaised(ColumnExpressionEngine engine, int index, bool forceCalc);
+}
+
+/// <summary>
 /// The tri-state column calculation cache - the port of <c>CLC_UNKNOWN</c>, <c>CLC_YES</c> and
 /// <c>CLC_NO</c> [n_cst_dwsvc_columnexp.sru:L113-L115], and the counterpart of
 /// <c>dataservices.v1.ColumnData.Types.CalcFlag</c>.
@@ -1211,6 +1273,46 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
     /// this contract that could not be serialized (AAP section 0.6.2.3).
     /// </summary>
     public DataWindowHandle Handle => _handle;
+
+    /// <summary>
+    /// The observer told whenever one of this engine's three declared events is RAISED, or
+    /// <see langword="null"/> when nothing is observing.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE SEAM EXISTS BECAUSE THE THREE EVENTS ARE RAISED FROM INSIDE THIS FILE, AND THAT IS WHERE
+    /// A SUBSCRIBER HAS TO BE TOLD.</b> The engine declares <c>onitemchanged</c> [:L86],
+    /// <c>ondoitemchanged</c> [:L87] and <c>onvarchanged</c> [:L88], and its OWN members raise all three:
+    /// <c>of_setvarexp</c> raises the variable event when <c>recalc</c> is set [:L1770],
+    /// <c>onitemchanged</c> raises the deferred one [:L224], the variable cascade raises it per row
+    /// [:L343], and the peer fan-out raises the variable event on another engine [:L324, :L355]. A
+    /// publisher that wraps only the outermost entry point therefore sees none of those, which is exactly
+    /// how the wire's event stream came to carry nothing: every relay method that published had no
+    /// production caller, while every production mutation reached the event handlers directly.
+    /// </para>
+    /// <para>
+    /// <b>NOTIFICATION IS AT THE RAISE, NOT AFTER THE WORK</b>, because that is what the oracle's
+    /// <c>Event X(...)</c> dispatch is. Each handler body then applies its own guards and may do nothing -
+    /// <c>onvarchanged</c> returns immediately while a row pass is in progress [:L335] and on an empty
+    /// DataWindow, and <c>onitemchanged</c> returns on a disabled service [:L214] - and in the legacy the
+    /// event was still RAISED in every one of those cases. Publishing after the body would make an event
+    /// that fired indistinguishable from one that never did, and would silently drop the whole class of
+    /// raises whose handler no-ops.
+    /// </para>
+    /// <para>
+    /// A HOST THAT DECIDES NOT TO RAISE AT ALL STILL PUBLISHES NOTHING, which is the other half of the
+    /// same rule and is enforced by the caller rather than here: <c>se_cst_dw</c> tests the item-change
+    /// gate [se_cst_dw.sru:L182] and this service's <c>#Enabled</c> [:L313] BEFORE calling, so a refusal
+    /// there means no call, no raise and no publication.
+    /// </para>
+    /// <para>
+    /// AN IMPLEMENTATION MUST NOT THROW AND MUST NOT BLOCK. It is invoked on the calculation path, so a
+    /// throwing observer would fail a calculation that the legacy would have completed and a blocking one
+    /// would stall it. The shipped implementation writes to a bounded, oldest-dropping channel, which
+    /// does neither.
+    /// </para>
+    /// </remarks>
+    public IColumnExpressionEventObserver? EventObserver { get; set; }
 
     /// <summary>
     /// The expression evaluator, available once <see cref="OnInit(DataWindowServiceHost)"/> has run.
@@ -4421,6 +4523,11 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
     {
         ArgumentNullException.ThrowIfNull(dwo);
 
+        // THE RAISE IS OBSERVABLE HERE, AHEAD OF THE GUARD BELOW, because being called IS being raised -
+        // see EventObserver's remarks for why publication after the body would lose every raise whose
+        // handler no-ops.
+        EventObserver?.ItemChangedRaised(this, row, dwo);
+
         // :L214 - the disabled guard on this event RETURNS VOID. Four other entry points answer
         // RetCode.FAILED for the same condition [:L1158, :L1201, :L1976, :L2087]; an event has no return
         // value to carry a code, so the asymmetry is structural rather than a choice.
@@ -4506,6 +4613,9 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
         DataWindowServiceHost host = RequireHost();
         string columnName = colname ?? string.Empty;
         int nColId = (int)colid;
+
+        // The raise, ahead of the row guard, for the reason EventObserver's remarks give.
+        EventObserver?.DoItemChangedRaised(this, row, colname, colid, frominput);
 
         // :L232 - a row guard, and note there is NO #Enabled guard on this event: it is reachable only from
         // onitemchanged, which has one, and from the calculation path, which has its own.
@@ -4763,6 +4873,10 @@ public sealed class ColumnExpressionEngine : DataWindowServiceBase, IExpressionS
         bool forcecalc,
         CancellationToken cancellationToken = default)
     {
+        // The raise, ahead of every guard below - including the row-pass suppression at :L335, which is
+        // precisely a case where the legacy raised the event and its handler did nothing.
+        EventObserver?.VarChangedRaised(this, index, forcecalc);
+
         // :L334 - void return again; see the note on OnItemChangedAsync.
         if (!Enabled)
         {

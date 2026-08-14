@@ -115,7 +115,7 @@ record of every measured number, and repeating one here is how the last set of t
 each other across six documents.
 
 1. **Present and verified — the build and test path.** `dotnet restore` (audit-clean), the whole-solution
-   Release build, and every one of the ten test projects. Counts, coverage rates and the exact commands are
+   Release build, and every one of the eleven test projects. Counts, coverage rates and the exact commands are
    in [§1.3](#13-the-canonical-verification-record).
 2. **Present and verified — the container path.** All four images build, and the four-service Compose
    bring-up reached full health with its ordered readiness gates observed. [§1.3](#13-the-canonical-verification-record)
@@ -224,22 +224,26 @@ says so itself:
 
 ```json
 {
-  "recordVersion": 2,
-  "measuredOn": "2026-08-13",
+  "recordVersion": 3,
+  "measuredOn": "2026-08-14",
   "provenance": {
-    "environment": "Re-measured at recordVersion 2: `dotnet --version`, `dotnet --list-runtimes`, and the framework description a net10.0 process reports at run time.",
-    "build": "Re-measured at recordVersion 2 by running the command in the group below.",
-    "tests": "Re-measured at recordVersion 2 by `dotnet test PowerFramework.slnx -c Release --no-build` after that build.",
-    "coverage": "Re-measured at recordVersion 2 by the four per-service collect runs, each parsed for its OWN Cobertura package.",
-    "containers": "NOT re-measured at recordVersion 2. This group transcribes the figures of the single bring-up that orchestration/README.md section 10 records gate by gate; that section owns whether anything ran, and this group carries no execution claim of its own.",
-    "recordVersion1Corrections": "recordVersion 1 dated itself to the day it was read while carrying an SDK and runtime level that had already advanced, a token-scheme list that counted a configured scheme as an exercised one, and a fail-fast result that the startup schema step had made unreachable. All three are corrected below; per-group provenance exists so the combination cannot recur silently."
+    "environment": "Re-measured at recordVersion 3: `dotnet --version`, `dotnet --list-runtimes`, the framework description a net10.0 process reports at run time, and `docker --version` / `docker compose version --short` / `docker info --format '{{.Driver}}'`.",
+    "build": "Re-measured at recordVersion 3 by running the command in the group below from a clean tree, together with `dotnet list package --vulnerable` and `--deprecated` across every project.",
+    "tests": "Re-measured at recordVersion 3 by the four documented per-service legs plus `dotnet test PowerFramework.slnx -c Release --no-build`. The project count rose from ten to eleven at this version - `characterization/tools/PowerFramework.Characterization.Capture.Tests` is new - which is also why a toolingSubtotalPassed member appears here for the first time.",
+    "coverage": "Re-measured at recordVersion 3 by the four per-service collect runs, each parsed for its OWN Cobertura package. The parse sums class-level <lines> only: <method> elements carry <line> children too, and counting both double-counts every covered line.",
+    "containers": "Re-measured at recordVersion 3. A full bring-up by the documented path was exercised from this working tree, all five readiness gates were driven, and the gRPC observation below was taken by enumerating the distinct service/method paths each container's OWN log records. orchestration/README.md section 10 remains the authority on execution STATUS; this group carries that run's figures and, where the two could be read as disagreeing, section 10 wins.",
+    "recordVersion1Corrections": "recordVersion 1 dated itself to the day it was read while carrying an SDK and runtime level that had already advanced, a token-scheme list that counted a configured scheme as an exercised one, and a fail-fast result that the startup schema step had made unreachable. All three were corrected at recordVersion 2; per-group provenance exists so the combination cannot recur silently.",
+    "recordVersion2Corrections": "recordVersion 2 published 'projects: 20' and ten test projects against a tree that now carries twenty-two and eleven, and its notVerified list still declared a full end-to-end run and any cross-container gRPC call unexercised after both had in fact been performed. Those figures were not wrong when written; they were not re-read when the tree moved under them, which is the failure per-group provenance exists to make visible."
   },
   "environment": {
     "dotnetSdk": "10.0.303",
     "dotnetSdkPinnedBy": "global.json, with rollForward latestFeature",
     "netCoreAppRuntime": "10.0.11",
     "aspNetCoreAppRuntime": "10.0.11",
-    "runtimePatchesInstalled": ["10.0.10", "10.0.11"],
+    "runtimePatchesInstalled": [
+      "10.0.10",
+      "10.0.11"
+    ],
     "runtimeSelectionNote": "Two patches are installed side by side and a net10.0 process rolls forward to the higher one: a process started by the test command above reports `.NET 10.0.11`. 10.0.10 is present and is not what executed, which is why the runtime figures name one level rather than the pair. Section 11.3 pins the same 10.0.11 platform level in the three files that must move together.",
     "targetFramework": "net10.0",
     "containerImages": {
@@ -256,77 +260,251 @@ says so itself:
     "result": "Build succeeded.",
     "warnings": 0,
     "errors": 0,
-    "projects": 20
+    "projects": 22,
+    "auditAtRestore": "22 of 22 projects report no vulnerable package and no deprecated package. The two mandatory pins of section 4 are what keep the first of those true."
   },
   "tests": {
     "commandPerService": "cd services/<service-name> && dotnet test -c Release --collect:\"XPlat Code Coverage\"",
     "commandPerSharedProject": "cd shared/<project>.Tests && dotnet test -c Release",
     "projects": [
-      { "project": "shared/PowerFramework.Shared.Kernel.Tests",                      "passed": 1750, "skipped": 0, "failed": 0 },
-      { "project": "shared/PowerFramework.Shared.Diagnostics.Tests",                 "passed":  637, "skipped": 0, "failed": 0 },
-      { "project": "shared/PowerFramework.Shared.Eventful.Tests",                    "passed":  777, "skipped": 0, "failed": 0 },
-      { "project": "shared/PowerFramework.Shared.Localization.Tests",                "passed":  526, "skipped": 0, "failed": 0 },
-      { "project": "shared/PowerFramework.Shared.Containers.Tests",                  "passed":  202, "skipped": 0, "failed": 0 },
-      { "project": "shared/PowerFramework.Contracts.Tests",                          "passed": 4726, "skipped": 0, "failed": 0 },
-      { "project": "services/gateway-service/PowerFramework.Gateway.Tests",          "passed": 1095, "skipped": 0, "failed": 0 },
-      { "project": "services/dataservices-service/PowerFramework.DataServices.Tests","passed": 5814, "skipped": 0, "failed": 0 },
-      { "project": "services/persistence-service/PowerFramework.Persistence.Tests",  "passed": 4581, "skipped": 0, "failed": 0 },
-      { "project": "services/security-service/PowerFramework.Security.Tests",        "passed": 2162, "skipped": 0, "failed": 0 }
+      {
+        "project": "shared/PowerFramework.Shared.Kernel.Tests",
+        "passed": 1750,
+        "skipped": 0,
+        "failed": 0
+      },
+      {
+        "project": "shared/PowerFramework.Shared.Diagnostics.Tests",
+        "passed": 637,
+        "skipped": 0,
+        "failed": 0
+      },
+      {
+        "project": "shared/PowerFramework.Shared.Eventful.Tests",
+        "passed": 777,
+        "skipped": 0,
+        "failed": 0
+      },
+      {
+        "project": "shared/PowerFramework.Shared.Localization.Tests",
+        "passed": 526,
+        "skipped": 0,
+        "failed": 0
+      },
+      {
+        "project": "shared/PowerFramework.Shared.Containers.Tests",
+        "passed": 202,
+        "skipped": 0,
+        "failed": 0
+      },
+      {
+        "project": "shared/PowerFramework.Contracts.Tests",
+        "passed": 4739,
+        "skipped": 0,
+        "failed": 0
+      },
+      {
+        "project": "services/gateway-service/PowerFramework.Gateway.Tests",
+        "passed": 1224,
+        "skipped": 0,
+        "failed": 0
+      },
+      {
+        "project": "services/dataservices-service/PowerFramework.DataServices.Tests",
+        "passed": 5932,
+        "skipped": 0,
+        "failed": 0
+      },
+      {
+        "project": "services/persistence-service/PowerFramework.Persistence.Tests",
+        "passed": 4792,
+        "skipped": 0,
+        "failed": 0
+      },
+      {
+        "project": "services/security-service/PowerFramework.Security.Tests",
+        "passed": 2300,
+        "skipped": 0,
+        "failed": 0
+      },
+      {
+        "project": "characterization/tools/PowerFramework.Characterization.Capture.Tests",
+        "passed": 79,
+        "skipped": 0,
+        "failed": 0
+      }
     ],
-    "sharedSubtotalPassed": 8618,
-    "serviceSubtotalPassed": 13652,
-    "totalPassed": 22270,
+    "sharedSubtotalPassed": 8631,
+    "serviceSubtotalPassed": 14248,
+    "totalPassed": 22958,
     "totalSkipped": 0,
     "totalFailed": 0,
-    "skipReason": "None. NOTHING SKIPS. The pinyin oracle characterization hooks used to skip unless a paired legacy recording existed, which meant they protected nothing on the shipped tree; they now assert an equivalence true in both worlds - characterized if and only if recorded - so they execute on every run and assert today's BLOCKED state, and they fail the day a recording lands without being wired in."
+    "skipReason": "None. NOTHING SKIPS. The pinyin oracle characterization hooks used to skip unless a paired legacy recording existed, which meant they protected nothing on the shipped tree; they now assert an equivalence true in both worlds - characterized if and only if recorded - so they execute on every run and assert today's BLOCKED state, and they fail the day a recording lands without being wired in.",
+    "commandPerToolingProject": "cd characterization/tools/PowerFramework.Characterization.Capture.Tests && dotnet test -c Release",
+    "toolingSubtotalPassed": 79
   },
   "coverage": {
     "gate": "0.80 line rate, per service, from that service's own coverage.cobertura.xml",
     "scopedBy": "the gate selects this service's own package from the report by assembly name, inline in .github/workflows/ci.yml; no settings file exists anywhere in this repository",
     "perService": [
-      { "service": "gateway-service",      "assembly": "PowerFramework.Gateway",      "lineRate": 0.8897, "linesCovered":  4509, "linesValid":  5068, "branchRate": 0.7354, "packagesInReport": 5 },
-      { "service": "dataservices-service", "assembly": "PowerFramework.DataServices", "lineRate": 0.9309, "linesCovered": 18798, "linesValid": 20193, "branchRate": 0.8342, "packagesInReport": 7 },
-      { "service": "persistence-service",  "assembly": "PowerFramework.Persistence",  "lineRate": 0.9119, "linesCovered": 13030, "linesValid": 14288, "branchRate": 0.8273, "packagesInReport": 6 },
-      { "service": "security-service",     "assembly": "PowerFramework.Security",     "lineRate": 0.9196, "linesCovered":  4771, "linesValid":  5188, "branchRate": 0.8209, "packagesInReport": 3 }
+      {
+        "service": "gateway-service",
+        "assembly": "PowerFramework.Gateway",
+        "lineRate": 0.8797,
+        "linesCovered": 6000,
+        "linesValid": 6820,
+        "branchRate": 0.7414,
+        "packagesInReport": 5
+      },
+      {
+        "service": "dataservices-service",
+        "assembly": "PowerFramework.DataServices",
+        "lineRate": 0.9221,
+        "linesCovered": 24217,
+        "linesValid": 26262,
+        "branchRate": 0.8332,
+        "packagesInReport": 7
+      },
+      {
+        "service": "persistence-service",
+        "assembly": "PowerFramework.Persistence",
+        "lineRate": 0.9091,
+        "linesCovered": 17874,
+        "linesValid": 19661,
+        "branchRate": 0.8236,
+        "packagesInReport": 6
+      },
+      {
+        "service": "security-service",
+        "assembly": "PowerFramework.Security",
+        "lineRate": 0.9048,
+        "linesCovered": 6188,
+        "linesValid": 6839,
+        "branchRate": 0.8201,
+        "packagesInReport": 3
+      }
     ],
     "allFourClearTheFloor": true,
-    "lineCountsAreNotIdenticalBetweenRuns": "linesValid is stable per assembly, but linesCovered moves by a handful of lines between runs on the two services whose suites drive timing-dependent paths - persistence-service moved by four lines between recordVersion 1 and 2 with no source change on that path. The gate reads the RATE and the floor is 0.80, so a few lines cannot decide it; the exact counts are recorded because a large move in linesValid is how an instrumentation-scope change announces itself."
+    "lineCountsAreNotIdenticalBetweenRuns": "linesValid is stable per assembly between runs with no source change, and it moved substantially on all four services at recordVersion 3 because source was ADDED: the outbound gRPC circuit breaker, the unknown-kid revalidation hook and the body-carried key-release shape all landed between versions. Every rate stayed above the floor while every line count rose, which is the shape a change that brings its own tests makes. The gate reads the RATE and the floor is 0.80, so a handful of lines cannot decide it; the exact counts are recorded because a large move in linesValid with NO corresponding source change is how an instrumentation-scope change announces itself instead."
   },
   "containers": {
     "imageBuildCommand": "docker build -f services/<service-name>/Dockerfile -t <tag> .",
-    "imagesBuilt": ["security-service", "persistence-service", "dataservices-service", "gateway-service"],
+    "imagesBuilt": [
+      "security-service",
+      "persistence-service",
+      "dataservices-service",
+      "gateway-service"
+    ],
     "imagesBuiltCount": 4,
     "bringUpCommand": "docker compose -f orchestration/docker-compose.yml --env-file <file outside the working tree> up -d",
     "bringUpOperatorPrecondition": "The manifest declares nine top-level Compose secrets - a certificate and key per service, sourced from <SERVICE>_TLS_CERTIFICATE_PATH and <SERVICE>_TLS_CERTIFICATE_KEY_PATH, plus the one shared INTERNAL_TLS_CA_PATH anchor - and projects each read-only at /run/secrets/internal-tls/{server.crt,server.key,ca.crt} in the service it belongs to; all nine sources carry the :? form, so an unset or absent path aborts bring-up by name. The persistence-db volume needs no operator step - the schema provisioner applies pending migrations at startup.",
     "allFourReachedDockerHealthy": true,
-    "healthOrderObserved": ["security-service", "persistence-service", "dataservices-service", "gateway-service"],
+    "healthOrderObserved": [
+      "security-service",
+      "persistence-service",
+      "dataservices-service",
+      "gateway-service"
+    ],
     "portsObservedOn": "The port numbers below are the CONTAINER ports, which are also the manifest's default host ports. This run published them to alternate host ports through the *_HOST_PORT variables - the parallel-stack pattern the manifest documents at its own foot - so that it could not collide with another stack on the same host. Nothing about the observations depends on the host mapping.",
     "observed": {
-      "healthAnonymous200": [5101, 5102, 5104, 5105],
-      "pingWithoutToken401": [5101, 5102, 5104, 5105],
-      "pingWithToken200": [5101, 5102, 5104, 5105],
+      "healthAnonymous200": [
+        5101,
+        5102,
+        5104,
+        5105
+      ],
+      "pingWithoutToken401": [
+        5101,
+        5102,
+        5104,
+        5105
+      ],
+      "pingWithToken200": [
+        5101,
+        5102,
+        5104,
+        5105
+      ],
       "pingWithToken200By": "One token per service, each minted for the audience that service accepts and by a caller Security's grant matrix permits: pfw-e2e-suite -> powerframework-gateway scope ping (5105), powerframework-gateway -> powerframework-dataservices (5102), powerframework-dataservices -> powerframework-persistence (5101), powerframework-dataservices -> powerframework-security scope ping (5104). Record version 1 published [5102, 5105] because only those two were tried, not because the other two refused.",
       "scopeEnforcedWithinAValidToken": "A ping-scoped token valid for powerframework-gateway is refused 403 by /v1/capabilities, which requires the capabilities scope. Authentication and authorization are therefore observably separate on the same token.",
-      "gatewayAggregateNamedUpstreamsHealthy": ["persistence", "dataservices", "security"],
-      "tokenMintedByScheme": ["clientCredential"],
-      "tokenSchemeConfiguredButNotExercised": ["mutualTls"],
+      "gatewayAggregateNamedUpstreamsHealthy": [
+        "persistence",
+        "dataservices",
+        "security"
+      ],
+      "tokenMintedByScheme": [
+        "clientCredential"
+      ],
+      "tokenSchemeConfiguredButNotExercised": [
+        "mutualTls"
+      ],
       "tokenSchemeNote": "POST /v1/tokens declares both schemes and either satisfies it. Only the shared-secret scheme minted a token during the bring-up, which left every *_MTLS_* path empty - the supported fail-closed posture. The certificate arm's refusals are covered in-process against a stubbed TLS feature; the handshake is not. docs/ARCHITECTURE.md section 9.3.1 part 3 carries the single status statement and lists the four observations that would promote it, and orchestration/README.md section 10.2 records the gap from the execution side.",
       "outOfRosterAudienceRefused": 403,
       "jwksAndDiscoveryAnonymous200": true,
-      "deferredRoutes501": ["/v1/design/**", "/v1/documents/**", "/v1/integration/**", "/v1/scripting/**"],
+      "deferredRoutes501": [
+        "/v1/design/**",
+        "/v1/documents/**",
+        "/v1/integration/**",
+        "/v1/scripting/**"
+      ],
       "deferredRoutes501Body": "Each answer carries the deferred service by name, the marker \"reserved for Phase 2\" and retCode -2001 (E_NO_IMPLEMENTATION): /v1/design/theme -> DesignSystem, /v1/documents/json -> Documents, /v1/integration/http -> Integration, /v1/scripting/eval -> ScriptBridge.",
       "failFastConfirmed": [
-        "An unreadable client-CA made Security refuse to start, with a names-only message publishing no path."
+        "An unreadable client-CA made Security refuse to start, with a names-only message publishing no path.",
+        "Naming a HOST path in SECURITY_MTLS_CLIENT_CA_PATH - a container-path variable this manifest injects verbatim - produced that same refusal, which is the failure .env.example predicts for that variable rather than a separate one.",
+        "An inline value in a SECURITY_KEYSTORE_<ref> variable made Security refuse to start under ASPNETCORE_ENVIRONMENT=Production and did NOT under Development, from the same image with only that one variable differing. The refusal names the variable and the three surfaces that would expose it, and echoes no value."
       ],
-      "failFastNoLongerObservable": "recordVersion 1 also recorded a fresh persistence-db volume making Persistence answer 503 naming an unprovisioned database until a migration was applied from outside the container. That transition is no longer reachable on the documented bring-up: the service now applies pending migrations in-process before reporting ready, and the bring-up observed a brand-new volume reaching healthy with no operator step at all. The dependency chain still holds DataServices and Gateway behind Persistence - what changed is who performs the provisioning, not whether readiness gates on it."
+      "failFastNoLongerObservable": "recordVersion 1 also recorded a fresh persistence-db volume making Persistence answer 503 naming an unprovisioned database until a migration was applied from outside the container. That transition is no longer reachable on the documented bring-up: the service now applies pending migrations in-process before reporting ready, and the bring-up observed a brand-new volume reaching healthy with no operator step at all. The dependency chain still holds DataServices and Gateway behind Persistence - what changed is who performs the provisioning, not whether readiness gates on it.",
+      "grpcContractsInvokedAcrossContainerBoundaries": {
+        "measuredBy": "Enumerating the distinct gRPC service/method paths each container's OWN log records, so a call is attributed to the container that SERVED it rather than to the one that made it.",
+        "C-03 dataservices.v1.DataWindowService": [
+          "Retrieve",
+          "Update",
+          "ApplyColumnSort",
+          "GetColumnSortState",
+          "OpenValidationSession",
+          "CloseValidationSession",
+          "GetEventGate",
+          "DisableEvent",
+          "EnableEvent"
+        ],
+        "C-04 dataservices.v1.ColumnExpressionService": [
+          "OpenExpressionSession",
+          "CloseExpressionSession",
+          "SetEnabled",
+          "AddVariable",
+          "SetVariable",
+          "AddExpression",
+          "CalcAll",
+          "SetTrace",
+          "EventStream"
+        ],
+        "C-05 persistence.v1.QueryService": [
+          "CreateQueryTask",
+          "Query",
+          "ReleaseQueryTask"
+        ],
+        "C-06 persistence.v1.UpdateService": [
+          "CreateUpdateTask",
+          "PrepareUpdate",
+          "Update",
+          "ReleaseUpdateTask"
+        ],
+        "C-08 persistence.v1.TransactionService": [
+          "BeginSession",
+          "EndSession"
+        ],
+        "C-07 persistence.v1.CommandService": "NOT INVOKED. No route on Gateway's published ingress reaches it and DataServices calls no method on it, so nothing in the documented bring-up can drive it. Its listener answers on the same port the three invoked Persistence contracts do, which is evidence about the transport and not about the methods.",
+        "streamingCoveredToo": "Retrieve and EventStream are server-streaming, so gRPC STREAM setup across a container boundary is covered and not only unary call setup."
+      },
+      "optimisticConcurrencyConflictObserved": "A stale-original update over /v1/datawindow/update answered HTTP 409 with retCode -28 and a conflict member carrying current row state; the refused attempt changed nothing, and a refresh-and-retry then applied. C-06's gRPC Aborted to HTTP 409 projection is therefore observed across the boundary rather than only unit-tested.",
+      "endToEndSuite": "tests/e2e `npm test` in its own STRICT mode: 29 passed, 0 skipped, 0 failed, exit 0, across all six specs (health-readiness, authentication, capability-gating, deferred-routes, datawindow-workflow, concurrency-conflict)."
     }
   },
   "notVerified": [
-    "Behavioural parity against the PowerBuilder oracle. characterization/recordings/ is empty on both sides; the oracle needs the PowerBuilder runtime, which this environment does not have.",
-    "The CI workflow as a pipeline. .github/workflows/ci.yml is authored and its gate is expressed, but it has not run on a GitHub-hosted runner; the gate's arithmetic was checked by running the same commands locally.",
-    "A full Playwright end-to-end run, which needs an issuance identity provisioned against a live stack.",
-    "Any gRPC RPC across a container boundary. Every listener was proven reachable at the TLS layer from its legitimate in-network caller and no further, so no C-03 to C-08 call has crossed the boundary.",
-    "The certificate arm of POST /v1/tokens end to end, per tokenSchemeNote above.",
+    "Behavioural parity against the PowerBuilder oracle. characterization/recordings/ is empty on both sides; the oracle needs the PowerBuilder runtime, which this environment does not have. characterization/tools/ can now produce the TARGET half on demand, which does not change this verdict - a half-store is not a pair.",
+    "The CI workflow as a pipeline. .github/workflows/ci.yml is authored and its gates are expressed, but it has not run on a GitHub-hosted runner; each gate's arithmetic was checked by running the same commands locally.",
+    "C-07, persistence.v1.CommandService, across a container boundary - see grpcContractsInvokedAcrossContainerBoundaries above for why nothing in the documented bring-up can reach it.",
+    "The CALLER half of mutual TLS in Gateway and DataServices. The ISSUANCE arm of POST /v1/tokens has been exercised; what has not is either service presenting its OWN configured pair, because the documented bring-up leaves the four GATEWAY_MTLS_* / DATASERVICES_MTLS_* paths empty.",
     "This list is not the authority on execution status: orchestration/README.md section 10.2 is, and it is the one to extend when a gap closes."
   ]
 }
@@ -358,10 +536,21 @@ nothing.
 through `WebApplicationFactory` or a test host, so handler behaviour, status translation, the capability
 gate, the reserved routes and token issuance are covered by passing tests — but an in-process host performs
 no TLS handshake, no ALPN negotiation, no real gRPC channel setup and no client-certificate exchange.
-**The container evidence above closes two of those four and leaves two open**, and which two matters more
-than the total: the handshake is closed, ALPN is closed for HTTP/1.1 only, and **real gRPC channel setup
-and client-certificate exchange are both still open** — no gRPC RPC has been invoked across a container
-boundary and the bring-up left every `*_MTLS_*` path empty.
+**The container evidence above now closes three of those four and leaves one open**, and which one matters
+more than the total: the handshake is closed, ALPN is closed for HTTP/2 as well as HTTP/1.1 because real
+gRPC channels were established, **real gRPC channel setup is closed — five of the six gRPC contracts have
+been invoked across a container boundary, server-streaming ones among them** — and **the caller half of
+client-certificate exchange is the one still open**, because the documented bring-up leaves the four
+`GATEWAY_MTLS_*` / `DATASERVICES_MTLS_*` paths empty.
+
+🔴 **An earlier revision of this paragraph said the opposite, and the error is worth naming rather than
+quietly overwriting.** It read “real gRPC channel setup and client-certificate exchange are both still
+open — no gRPC RPC has been invoked across a container boundary”, which was true when written and stayed in
+the document after a bring-up had invoked C-03, C-04, C-05, C-06 and C-08 for real. A claim that
+UNDERSTATES what has been proven is not the safe direction of error it looks like: it invites the next
+reader to redo work that is already done, and it makes every other claim in the same paragraph harder to
+trust. `grpcContractsInvokedAcrossContainerBoundaries` in the record above names the methods and records
+how they were counted — from each container's own log — so the claim is checkable rather than assertable.
 [`PARITY.md`](PARITY.md) §6.1 carries that split row by row and
 [`../orchestration/README.md` §10.2](../orchestration/README.md#102-what-has-not-been-exercised-and-none-of-it-is-glossed)
 owns the underlying verdicts; neither is restated further here. The distinction is worth keeping in both
@@ -445,10 +634,10 @@ a thing is defensible; only a register tells you that it is a deviation at all.
 | # | What the plan declares | What is delivered | Why, and what a human owner must decide |
 | --- | --- | --- | --- |
 | **D8** | §0.5.1 declares **15** NuGet packages, and the B1 review ordered the removal of a sixteenth | **16.** The extra is `Microsoft.OpenApi.YamlReader` 2.12.0, pinned centrally in `Directory.Packages.props` | It is the **regression guard on the mandatory `Microsoft.OpenApi` 2.12.0 pin** — the pin that fails restore inside the advisory range (`NU1903`) and fails compilation on the 3.x line (`CS0200`, §11.1). Without a YAML reader, the two authored OpenAPI documents are parsed by no test and that pin has no guard. **The addition is bounded, and each bound is why it is safe:** referenced by exactly one project (`shared/PowerFramework.Contracts.Tests`), so it reaches no service and no container image; its dependency names the mandatory pin's own version as a **minimum**, so it cannot pull that pin down; adds exactly one assembly, `SharpYaml`, carrying no advisory at this version. **Removal costs the validation and nothing else** — that is the trade an owner is choosing between. The earlier local `VersionOverride` was removed; this is a central pin, which is the mechanism §3.2 requires. **It is also the package that forced the pin pair from 2.11.0 to 2.12.0**, because 2.11.0 of the reader is deprecated upstream for `CriticalBugs` and its recommended `[3.10.0, )` cannot compile |
-| **D9** | §0.5.1 names SDK **10.0.302** and platform runtimes **10.0.10** | `global.json` pins SDK **10.0.303**; the **six** platform package pins are at **10.0.11**; the container base images carry the matching `10.0.11` tags | **10.0.11 is the 2026-08-11 security release, and the platform it fixes is 10.0.10** — so honouring the plan's figure would ship a knowingly vulnerable platform, which is CWE-1104. Advancing a patch level inside one feature band is maintenance rather than a change of dependency, and the three coordinates that carry a platform release move together or not at all (`Directory.Packages.props:57-70`). Verified rather than asserted: `dotnet list package --vulnerable` reports **20 of 20 projects clean**. The six pins are `Microsoft.AspNetCore.OpenApi`, `Microsoft.AspNetCore.Authentication.JwtBearer`, `Microsoft.EntityFrameworkCore.Sqlite`, `Microsoft.EntityFrameworkCore.Design`, `Microsoft.Data.Sqlite` and `Microsoft.AspNetCore.Mvc.Testing`. **The owner decides only whether to record the move, not whether to make it.** Separately, the three MSBuild behaviours `Directory.Build.props` records as measured were **re-measured on 10.0.303** and now name both SDKs, and its header no longer repeats an SDK version at all — `global.json` is the single authority, two files away |
+| **D9** | §0.5.1 names SDK **10.0.302** and platform runtimes **10.0.10** | `global.json` pins SDK **10.0.303**; the **six** platform package pins are at **10.0.11**; the container base images carry the matching `10.0.11` tags | **10.0.11 is the 2026-08-11 security release, and the platform it fixes is 10.0.10** — so honouring the plan's figure would ship a knowingly vulnerable platform, which is CWE-1104. Advancing a patch level inside one feature band is maintenance rather than a change of dependency, and the three coordinates that carry a platform release move together or not at all (`Directory.Packages.props:57-70`). Verified rather than asserted: `dotnet list package --vulnerable` reports **22 of 22 projects clean**, and `--deprecated` reports the same. The six pins are `Microsoft.AspNetCore.OpenApi`, `Microsoft.AspNetCore.Authentication.JwtBearer`, `Microsoft.EntityFrameworkCore.Sqlite`, `Microsoft.EntityFrameworkCore.Design`, `Microsoft.Data.Sqlite` and `Microsoft.AspNetCore.Mvc.Testing`. **The owner decides only whether to record the move, not whether to make it.** Separately, the three MSBuild behaviours `Directory.Build.props` records as measured were **re-measured on 10.0.303** and now name both SDKs, and its header no longer repeats an SDK version at all — `global.json` is the single authority, two files away |
 | **D10** | §0.5.1's npm table declares **one** devDependency, `@playwright/test 1.62.1`; §0.3.1 names seven `tests/e2e` paths | **Three** devDependencies — `@playwright/test 1.62.1`, `@types/node 22.20.1`, `typescript 5.9.3` — across **23** tracked files | The `typecheck` script runs `tsc --noEmit`, so **the compiler and the Node ambient declarations are what make the type-check gate exist at all**; without them the gate is a script that cannot run. All three are development-only — there is no `dependencies` block, so nothing reaches a container image — and all three are **exact pins** backed by the committed lockfile's integrity hashes. The 23 files are the plan's own entries expanded, not new categories: it writes `specs/*.spec.ts` (6 files), `fixtures/` (9), and the config, manifest, lockfile and README, to which the delivered tree adds `.gitignore`, `global-setup.ts`, `tsconfig.json` and one identity-provisioning script. **This declaration is enforced, not merely written:** `E2eManifestGuardTests.TheDevelopmentDependencySetIsExactlyTheApprovedThreeAndEachIsExactlyPinned` fails on a fourth dependency, on the removal of an approved one, and on any version that is not a bare exact pin |
 | **D11** | §0.2.1.1: root `README.md` is "**the single UPDATE in the entire refactor**"; §0.4.5.5: "**No `.gitignore` change is required**" | **Two** UPDATEs — `README.md` and `.gitignore`. Group 1 of §16.3 is consequently 9 files: 7 CREATE + 2 UPDATE | **The plan's claim was tested and is refuted by the checkout.** `bin/` and `obj/` were excluded only by `.git/info/exclude`, which is per-clone and is **not cloned**, so a fresh clone plus `dotnet build` left a **dirty** `git status` — contradicting C-I's clean-checkout premise and putting the `hygiene` job's `git diff --check` leg at the mercy of build output. `tests/e2e/.gitignore` already commits `node_modules/` for the npm side, so the .NET side was an omission rather than a policy. **The edit is purely additive**: every pre-existing pattern is preserved byte for byte and the new block is appended, so the pre-existing `/pack/*` inconsistency §0.4.5.5 describes is left exactly as it was. This is the one entry in this table that **changes a file the plan says not to change**, which is why it is stated as a refutation with its evidence rather than as a preference |
-| **D12** | A checkpoint manifest declares **338** targets (337 CREATE + 1 UPDATE, no DELETE) | **570** measured (568 CREATE + 2 UPDATE) — §16.2 | **The two artifacts count different things**: the manifest enumerates *files* while the plan enumerates *trees*, and the plan additionally requires a test project per shippable project (C-H's per-service coverage gate) and independent per-service builds (C-I). Those requirements have a file cost the manifest's list never enumerated. It is **not** scope creep, and that is measured rather than argued: every one of the 570 paths classifies into a group the plan declares, §16.3 reports **zero unclassified**, and none lies inside the read-only legacy tree. **Status: OPEN, and it is the one entry here that a document cannot close** — §16.7 sets out the two directions and what each forfeits. It is listed in this register because the largest divergence in the tree should not be visible only to a reader who reaches §16 |
+| **D12** | A checkpoint manifest declares **338** targets (337 CREATE + 1 UPDATE, no DELETE) | **616** measured (614 CREATE + 2 UPDATE) — §16.2 | **The two artifacts count different things**: the manifest enumerates *files* while the plan enumerates *trees*, and the plan additionally requires a test project per shippable project (C-H's per-service coverage gate) and independent per-service builds (C-I). Those requirements have a file cost the manifest's list never enumerated. It is **not** scope creep, and that is measured rather than argued: every one of the 616 paths classifies into a group the plan declares, §16.3 reports **zero unclassified**, and none lies inside the read-only legacy tree. **Status: OPEN, and it is the one entry here that a document cannot close** — §16.7 sets out the two directions and what each forfeits. It is listed in this register because the largest divergence in the tree should not be visible only to a reader who reaches §16 |
 
 **Why CI does not catch D12, stated so nobody assumes it does.** The `hygiene` job's target-scope audit is
 **group-level**: it asserts *where* a file may live — nothing outside a declared group, nothing inside the
@@ -598,7 +787,7 @@ verbatim form does.
 
 Three components make the single command of §5 work. Each is load-bearing; none is stylistic.
 
-### 3.1 Repository-root `Directory.Build.props` — one settings source for all twenty projects
+### 3.1 Repository-root `Directory.Build.props` — one settings source for all twenty-two projects
 
 MSBuild imports this file automatically into every project in the tree — **all twenty of them,
 application and test projects alike** — so the per-service command inherits identical settings with no
@@ -933,7 +1122,7 @@ expected to cover and which values are masked for determinism, see [`docs/PARITY
 
 ### 5.5 What has actually been run in this repository
 
-**All ten test projects build and pass, and the per-project counts live in the canonical record of
+**All eleven test projects build and pass, and the per-project counts live in the canonical record of
 [§1.3](#13-the-canonical-verification-record) rather than here.** That is the one deliberate omission in
 this subsection: a table of ten counts restated at its point of use is a table that drifts from the record
 the moment either is edited, and this document set has already published three mutually contradictory
@@ -1009,6 +1198,7 @@ ready until the `COMPANY` table exists; every C-05 through C-08 verb then answer
 than a fabricated success. Applying the migration is then a deployment step, and this is the command:
 
 ```bash
+dotnet tool restore
 cd services/persistence-service/PowerFramework.Persistence
 dotnet build -c Release
 dotnet ef database update \
@@ -1018,8 +1208,22 @@ dotnet ef database update \
   --connection "Data Source=<data-directory>/<database-file-name>"
 ```
 
-Four things about it are not optional, and each is a property of this repository rather than a preference:
+**`dotnet tool restore` is the first line for a reason, and omitting it is why an earlier revision of this
+command could not run as written.** `dotnet ef` is not part of the SDK: without a restored tool the shell
+answers *"Could not execute because the specified command or file was not found"*, and the reader's likely
+next move — `dotnet tool install --global dotnet-ef` — resolves whatever version is current rather than the
+one this repository's EF Core packages are pinned to. This repository therefore commits a **local** tool
+manifest, `.config/dotnet-tools.json`, pinning `dotnet-ef` to **10.0.11** with `rollForward: false` — the
+same version as the `Microsoft.EntityFrameworkCore.*` pins in `Directory.Packages.props`. `dotnet tool
+restore` reads that manifest, so the command above resolves the pinned tool from any directory inside the
+repository and needs no global install and no version argument. CI asserts the two pins are equal and then
+runs this exact command twice, requiring the second run to report the database already up to date; §11
+carries that step. `orchestration/README.md` §2 and §3.4.1 repeat the restore where an operator meets it.
 
+Five things about the command are not optional, and each is a property of this repository rather than a
+preference:
+
+- **`dotnet tool restore` must precede it**, per the paragraph above.
 - **`--connection` is mandatory.** `PowerFrameworkDbContextFactory.CreateDbContext` calls `UseSqlite()`
   with no connection string on purpose — a design-time factory that embedded one would put a storage path
   in source. Supply the same directory and file name the service is configured with
@@ -1046,8 +1250,9 @@ disappear.
 
 ## 6. Whole-solution build — a developer convenience
 
-The repository-root `PowerFramework.slnx` enumerates **twenty projects**: six shared libraries, their six
-sibling test projects, the four service applications and their four test projects.
+The repository-root `PowerFramework.slnx` enumerates **twenty-two projects**: six shared libraries, their
+six sibling test projects, the four service applications, their four test projects, and the characterization
+capture driver with its own test project.
 
 | # | Project | Kind |
 | --- | --- | --- |
@@ -1071,6 +1276,8 @@ sibling test projects, the four service applications and their four test project
 | 18 | `services/dataservices-service/PowerFramework.DataServices.Tests` | tests |
 | 19 | `services/persistence-service/PowerFramework.Persistence.Tests` | tests |
 | 20 | `services/security-service/PowerFramework.Security.Tests` | tests |
+| 21 | `characterization/tools/PowerFramework.Characterization.Capture` | tooling — the target-side capture driver |
+| 22 | `characterization/tools/PowerFramework.Characterization.Capture.Tests` | tests |
 
 From the repository root:
 
@@ -2045,8 +2252,8 @@ carries its own copy of a number is how a claim and its evidence drift apart:
   result for these four services.
 - **In this repository today**, restore is audit-clean and **the whole solution builds** with zero
   warnings and zero errors — the six shared libraries, the contracts project, all four service
-  applications and all ten test projects. Measured with `dotnet build PowerFramework.slnx -c Release`.
-- **All ten test projects run, all pass, and nothing skips.** The pinyin oracle characterization hooks
+  applications and all eleven test projects. Measured with `dotnet build PowerFramework.slnx -c Release`.
+- **All eleven test projects run, all pass, and nothing skips.** The pinyin oracle characterization hooks
   used to skip unless a paired legacy recording existed; they now assert an equivalence true in both
   worlds — characterized if and only if recorded — so they execute on every run and assert today's BLOCKED
   state instead of standing aside from it. Counts per project, and the shared-versus-service split, are
@@ -2390,7 +2597,7 @@ The distinction matters because the measurement and the authorization **do not c
 §16.7 states that disagreement as an open governance item rather than resolving it in prose. In outline:
 a checkpoint manifest declared **338** targets — 337 CREATE plus the one `README.md` UPDATE, and no
 DELETE — against a literal wildcard scope that already held **520** tracked ones, and the delivered tree
-now measures **570**. The gap is not a set of files that belong to nothing: every path below classifies
+now measures **616**. The gap is not a set of files that belong to nothing: every path below classifies
 into a group the migration plan declares, and §16.3 reports zero unclassified. It is the manifest
 enumerating files while the plan enumerates **trees**, so each test project and shared-library helper the
 build and the coverage gate depend on is inside the plan's scope and outside the manifest's list. That is
@@ -2414,10 +2621,13 @@ precisely how such a divergence arises, so the derivation is given for any reade
 BASE=a80ac35
 
 # Operation counts against that baseline. A = CREATE, M = UPDATE, D = DELETE.
-git diff --name-status "$BASE" HEAD | awk '{print $1}' | sort | uniq -c
+# NOTE the absent second revision: the diff runs baseline -> WORKING TREE, not baseline -> HEAD, so the
+# figures are the same before and after the work is committed. Naming HEAD made every count in this
+# section jump the moment a commit landed, which is indistinguishable from the tree having changed.
+git diff --name-status "$BASE" | awk '{print $1}' | sort | uniq -c
 
 # Every UPDATE in the whole refactor. There are two: README.md and .gitignore (1.6.2 D11).
-git diff --name-status "$BASE" HEAD | awk '$1=="M"{print $2}'
+git diff --name-status "$BASE" | awk '$1=="M"{print $2}'
 
 # Files authored but not yet committed, excluding build output and scratch.
 git status --porcelain --untracked-files=all \
@@ -2425,23 +2635,38 @@ git status --porcelain --untracked-files=all \
   | grep -vE '/(bin|obj)/|^blitzy_adhoc_test'
 ```
 
-`bin/` and `obj/` are **not** git-ignored in this repository, so any count taken without excluding them is
-wrong by thousands of files. That is a property of this checkout worth stating rather than discovering.
+`bin/` and `obj/` **are** git-ignored in this repository — `.gitignore:44` and `:45` — which is exactly what
+the `.gitignore` UPDATE of §1.6.2 **D11** landed. The exclusion is nevertheless kept in the command above,
+because `--untracked-files=all` is answered from the working tree and a stale `bin/` left by a build run
+under an older checkout would still be counted otherwise.
+
+🔴 **An earlier revision of this paragraph asserted the opposite in the present tense** — "`bin/` and `obj/`
+are **not** git-ignored in this repository" — and it was describing the very problem the same refactor had
+already fixed. It is corrected here rather than silently swapped because the two statements have different
+consequences for a reader: the old one tells them every count in this section is suspect unless they
+re-derive it, which would have been a reasonable thing to do and a waste of their time.
 
 ### 16.2 The reconciliation
 
 | Quantity | Count |
 | --- | ---: |
 | Tracked files at the pre-refactor baseline `a80ac35` | 934 |
-| Tracked files at `HEAD` | 1502 |
-| **CREATE** vs baseline | **568** |
+| Tracked files now | 1548 |
+| **CREATE** vs baseline | **614** |
 | **UPDATE** vs baseline — `README.md` and `.gitignore`, and nothing else | **2** |
 | **DELETE** vs baseline | **0** |
-| Authored, not yet committed | 0 |
-| **Total target files** | **570** |
+| **Total target files** | **616** |
 
-568 + 2 + 0 = 570, and 934 + 568 = 1502, so the operation counts and the tracked totals close against
-each other independently.
+614 + 2 + 0 = 616, and 934 + 614 = 1548, so the operation counts and the tracked totals close against
+each other independently. **Both identities are asserted by a test rather than by this paragraph** —
+`DocumentationCoherenceTests.TheBuildDocumentsTargetFileInventoryAgreesWithGit` derives every figure in
+this section from `git diff --name-status a80ac35` and `git ls-files` and fails if the document and the
+tree disagree, so a stale count here is a red build rather than a reader's problem.
+
+**The row that used to sit between DELETE and the total is gone, and its absence is the point.** It read
+"Authored, not yet committed" and was structurally always zero: the derivation counts tracked files, and
+an uncommitted file is invisible to `git ls-files`, so the row could never have reported anything else. A
+column that cannot vary does not measure — it reassures, which is worse than saying nothing.
 
 **Both UPDATE paths are named in the row above rather than counted**, because an UPDATE touches a file that
 existed before this refactor and the plan authorizes exactly one of them. The second, `.gitignore`, is
@@ -2459,27 +2684,39 @@ for sign-off rather than as a decision this document took.
 
 ### 16.3 Per-group counts
 
-| # | Group | Files | CREATE | UPDATE | Not yet committed |
+| # | Group | Files | CREATE | UPDATE | DELETE |
 | ---: | --- | ---: | ---: | ---: | ---: |
 | 1 | Root build and solution plumbing | 9 | 7 | 2 | 0 |
-| 2 | Continuous integration | 2 | 2 | 0 | 0 |
-| 3 | Orchestration | 3 | 3 | 0 | 0 |
-| 4 | Documentation (authored) | 7 | 7 | 0 | 0 |
-| 5 | Shared libraries and contracts | 128 | 128 | 0 | 0 |
-| 6 | Gateway service | 52 | 52 | 0 | 0 |
-| 7 | DataServices service | 120 | 120 | 0 | 0 |
-| 8 | Persistence service | 133 | 133 | 0 | 0 |
-| 9 | Security service | 73 | 73 | 0 | 0 |
-| 10 | End-to-end tests | 23 | 23 | 0 | 0 |
-| 11 | Characterization | 20 | 20 | 0 | 0 |
-| | **Total** | **570** | **568** | **2** | **0** |
+| 2 | Local tool manifest | 1 | 1 | 0 | 0 |
+| 3 | Continuous integration | 2 | 2 | 0 | 0 |
+| 4 | Orchestration | 3 | 3 | 0 | 0 |
+| 5 | Documentation (authored) | 7 | 7 | 0 | 0 |
+| 6 | Shared libraries and contracts | 128 | 128 | 0 | 0 |
+| 7 | Gateway service | 61 | 61 | 0 | 0 |
+| 8 | DataServices service | 131 | 131 | 0 | 0 |
+| 9 | Persistence service | 141 | 141 | 0 | 0 |
+| 10 | Security service | 74 | 74 | 0 | 0 |
+| 11 | End-to-end tests | 23 | 23 | 0 | 0 |
+| 12 | Characterization | 36 | 36 | 0 | 0 |
+| | **Total** | **616** | **614** | **2** | **0** |
 
-**Nothing is unclassified.** Every one of the 570 paths falls into exactly one group above, and every
+**Nothing is unclassified.** Every one of the 616 paths falls into exactly one group above, and every
 group corresponds to an entry in the migration plan's target structure. A path that matched no group would
-be reported as scope creep; the classifier finds none.
+be reported as scope creep; the classifier finds none. The guard test named in §16.2 sums this table by
+locating its header row rather than by line number, so the total and the twelve rows cannot drift apart.
 
-**Group 1 is nine rather than eight, and group 2 is two rather than one.** Group 1 gained the `.gitignore`
-UPDATE of §1.6.2 D11. Group 2's second file is `.github/workflows/requirements/check-jsonschema.txt`, the
+**The fourth column changed from "Not yet committed" to DELETE**, for the reason §16.2 gives about the row
+it retired: the old column was always zero because it could not be anything else. `DELETE` is a real
+operation this refactor contracts to keep at zero, the guard test asserts it, and a non-zero entry would
+mean constraint C-C had been breached — so the column now carries a claim that could fail.
+
+**Group 2 is the `.config/dotnet-tools.json` manifest**, which §5.6 explains: it pins `dotnet-ef` to the
+same version as the EF Core packages so the migration command this document publishes resolves a tool at
+all. It is its own group rather than a root-plumbing file because it is the only path under `.config/`,
+and CI's scope audit claims that prefix explicitly.
+
+**Group 1 is nine rather than eight, and group 3 is two rather than one.** Group 1 gained the `.gitignore`
+UPDATE of §1.6.2 D11. Group 3's second file is `.github/workflows/requirements/check-jsonschema.txt`, the
 **hash-locked** Python closure the `hygiene` job installs with `pip install --require-hashes` before it
 validates the characterization workflow definitions against their schema. Naming the tool inline pinned one
 distribution and let pip resolve fourteen more from whatever was current; the lock names every one with
@@ -2493,24 +2730,24 @@ rather than asserted.
 
 ### 16.4 Per-project counts
 
-The four services and the seven shared projects, each with its sibling test project. A service's
-"service root" is its `Dockerfile` and its per-service `.slnx` — the two files that make it independently
-buildable (constraint C-I).
+The four services, the six shared projects and the one characterization tooling project, each with its
+sibling test project — eleven pairs, twenty-two projects. A service's "service root" is its `Dockerfile`
+and its per-service `.slnx` — the two files that make it independently buildable (constraint C-I).
 
 | Project | Files |
 | --- | ---: |
 | `services/gateway-service` (service root) | 2 |
-| `services/gateway-service/PowerFramework.Gateway` | 21 |
-| `services/gateway-service/PowerFramework.Gateway.Tests` | 29 |
+| `services/gateway-service/PowerFramework.Gateway` | 24 |
+| `services/gateway-service/PowerFramework.Gateway.Tests` | 35 |
 | `services/dataservices-service` (service root) | 2 |
-| `services/dataservices-service/PowerFramework.DataServices` | 49 |
-| `services/dataservices-service/PowerFramework.DataServices.Tests` | 69 |
+| `services/dataservices-service/PowerFramework.DataServices` | 53 |
+| `services/dataservices-service/PowerFramework.DataServices.Tests` | 76 |
 | `services/persistence-service` (service root) | 2 |
-| `services/persistence-service/PowerFramework.Persistence` | 62 |
-| `services/persistence-service/PowerFramework.Persistence.Tests` | 69 |
+| `services/persistence-service/PowerFramework.Persistence` | 64 |
+| `services/persistence-service/PowerFramework.Persistence.Tests` | 75 |
 | `services/security-service` (service root) | 2 |
 | `services/security-service/PowerFramework.Security` | 27 |
-| `services/security-service/PowerFramework.Security.Tests` | 44 |
+| `services/security-service/PowerFramework.Security.Tests` | 45 |
 | `shared/PowerFramework.Contracts` | 6 |
 | `shared/PowerFramework.Contracts.Tests` | 31 |
 | `shared/PowerFramework.Shared.Kernel` | 10 |
@@ -2523,27 +2760,33 @@ buildable (constraint C-I).
 | `shared/PowerFramework.Shared.Localization.Tests` | 16 |
 | `shared/PowerFramework.Shared.Containers` | 3 |
 | `shared/PowerFramework.Shared.Containers.Tests` | 4 |
-| | **506** |
+| `characterization/tools/PowerFramework.Characterization.Capture` | 11 |
+| `characterization/tools/PowerFramework.Characterization.Capture.Tests` | 3 |
+| | **549** |
 
-This table is a breakdown of **groups 5–9 only** — the four services and the seven shared projects — and it
-sums to 506: Gateway 52, DataServices 120, Persistence 133, Security 73 and shared 128. Every remaining
-target file sits outside any .NET project: 9 root files, 2 CI files, 3 orchestration files, 7 authored
-documents, 23 end-to-end files and 20 characterization files, which is 64. 506 + 64 = **570**, closing
-against §16.2 and §16.3.
+This table is a breakdown of the twenty-two projects only, and it sums to 549: Gateway 61, DataServices 131,
+Persistence 141, Security 74, shared 128 and the 14 files of the two characterization tooling projects.
+Every remaining target file sits outside any .NET project: 9 root files, the 1 tool manifest, 2 CI files,
+3 orchestration files, 7 authored documents, 23 end-to-end files and the 22 characterization files that are
+store and definition rather than code, which is 67. 549 + 67 = **616**, closing against §16.2 and §16.3.
 
-**In nine of the ten project pairs the test project carries more files than the production project it
+**In nine of the eleven project pairs the test project carries more files than the production project it
 exercises.** That is the shape C-H's per-service 80% line-coverage gate produces, and it is worth reading as
-confirmation rather than as bloat. The single exception is `Shared.Kernel`, at 10 and 10: it is a small,
-pure-algebra library whose behaviour is exercised by table-driven theories rather than by one suite per
-subject. This ratio is also the mechanical reason the delivered inventory exceeds the manifest's 338 —
-§16.7 and §1.6.2 D12.
+confirmation rather than as bloat. There are two exceptions and they are exceptions for opposite reasons.
+`Shared.Kernel` is level at 10 and 10: a small, pure-algebra library whose behaviour is exercised by
+table-driven theories rather than by one suite per subject. `Characterization.Capture` inverts the ratio
+outright at 11 and 3, and that is what a **tool** looks like rather than a shipped service — it is not
+inside any service's coverage gate, its three test files carry 79 rows between them, and the property they
+protect is that the driver refuses an unsound capture rather than that every branch of it is walked. This
+ratio is also the mechanical reason the delivered inventory exceeds the manifest's 338 — §16.7 and
+§1.6.2 D12.
 
 ### 16.5 The nine root files, named
 
 | File | Operation | Why it is a target |
 | --- | --- | --- |
 | `PowerFramework.slnx` | CREATE | The repository solution. `.slnx` is the .NET 10 format — see §2, Finding 1 |
-| `Directory.Build.props` | CREATE | One settings source for all twenty projects — §3.1 |
+| `Directory.Build.props` | CREATE | One settings source for all twenty-two projects — §3.1 |
 | `Directory.Packages.props` | CREATE | Central package management, which is what forces the two mandatory pins — §3.2, §11.1 |
 | `global.json` | CREATE | The SDK pin |
 | `.editorconfig` | CREATE | Carries the analyzer suppressions that let the legacy `SCREAMING_SNAKE` constant identifiers be preserved verbatim |
@@ -2593,7 +2836,7 @@ and a later one removed it. Three facts about that, in the order a reviewer need
 The answer to the 338/520 question is separate from all of the above: it is the **test projects and
 shared-library helpers** that made up the 182 at the time that figure was taken — each either exercised by
 the build, required by the coverage gate, or required by C-I's "each service builds and tests independently
-from a clean checkout" — and not a root-level helper. The same explanation holds for the wider 338/570 gap
+from a clean checkout" — and not a root-level helper. The same explanation holds for the wider 338/616 gap
 §16.7 now measures, and §16.4's project pairs are where it is visible file by file.
 
 ### 16.6 What keeps this section honest
@@ -2631,8 +2874,8 @@ this section.
 
 | | Authorized | Delivered and measured |
 | --- | ---: | ---: |
-| Target files | **338** | **570** (§16.2) |
-| CREATE | 337 | 568 |
+| Target files | **338** | **616** (§16.2) |
+| CREATE | 337 | 614 |
 | UPDATE | 1 (`README.md`) | **2** (`README.md`, `.gitignore` — §1.6.2 D11) |
 | DELETE | 0 | 0 against the pre-refactor baseline; **3** against an intermediate commit — enumerated below |
 
@@ -2651,7 +2894,7 @@ Two of the three are therefore themselves scope-alignment actions rather than sc
 surface that widened a frozen contract, and a suite whose subject was removed with it.
 
 **What is NOT the explanation.** Not scope creep, and that is measured rather than argued: every one of
-the 570 paths classifies into a group the migration plan declares, §16.3 reports **zero unclassified**, and
+the 616 paths classifies into a group the migration plan declares, §16.3 reports **zero unclassified**, and
 the `hygiene` job fails the build if that ever stops being true. No delivered file traces to a directory
 the plan does not describe, and none lies inside the read-only legacy tree.
 
@@ -2663,7 +2906,7 @@ So the two artifacts are counting different things, and neither is wrong about t
 
 **The two directions this can be closed in, both of which are a human's to choose:**
 
-- **Extend the manifest** to the plan's tree-level scope, recording 570 with the derivation of §16.1, and
+- **Extend the manifest** to the plan's tree-level scope, recording 616 with the derivation of §16.1, and
   amend it to record the one withdrawal of §16.5 and the second UPDATE of §1.6.2 D11. This is the direction
   the delivered tree already assumes, which is exactly why it needs explicit sign-off rather than silence.
 - **Reduce the tree to the 338 enumerated files.** This is stated as an option because it is one, not

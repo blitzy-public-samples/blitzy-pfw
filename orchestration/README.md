@@ -177,10 +177,25 @@ explicitly initialized is unusable **and its DLL need not be shipped** [`../docs
 which is exactly the property that lets these images ship without native material at all.
 
 **Only if you opt out of automatic schema provisioning** — the manual route of
-[§3.4.1](#341-the-manual-route-for-a-stack-that-has-opted-out) — do you additionally need the .NET SDK and
-the `dotnet-ef` tool on the host, because the runtime image deliberately carries neither. The default
-bring-up needs neither: Persistence applies its own pending migrations at startup. [`../docs/BUILD.md`](../docs/BUILD.md) §4 lists the toolchain and §5.6 gives
-the migration command; both are host-side concerns and neither is needed to *start* the stack.
+[§3.4.1](#341-the-manual-route-for-a-stack-that-has-opted-out) — do you additionally need the .NET SDK on the
+host and the `dotnet-ef` tool, because the runtime image deliberately carries neither. The default bring-up
+needs neither: Persistence applies its own pending migrations at startup.
+[`../docs/BUILD.md`](../docs/BUILD.md) §4 lists the toolchain and §5.6 gives the migration command; both are
+host-side concerns and neither is needed to *start* the stack.
+
+**`dotnet-ef` is not installed by anything — you restore it, and the version comes from the repository.** It
+is a NuGet tool rather than part of the SDK, so `dotnet ef` is not a command until
+[`../.config/dotnet-tools.json`](../.config/dotnet-tools.json) has been restored:
+
+```bash
+# From the repository root, once per clone.
+dotnet tool restore
+```
+
+The manifest pins it to the same version as the EF Core packages in the repository-root
+`Directory.Packages.props`, so the tool and the runtime it generates migrations for cannot drift apart. Do
+**not** reach for `dotnet tool install --global dotnet-ef`: a global install picks whatever version is
+current on the machine, which is precisely the drift the manifest removes.
 
 **`openssl` on the host**, for generating the local signing identity and certificate set in
 [§3.2](#32-step-2--generate-the-local-material). The generation recipe is not duplicated here — it lives in
@@ -530,6 +545,11 @@ set -euo pipefail
 PROVISION="$HOME/.config/powerframework/provision"
 install -d -m 700 "$PROVISION"
 
+# 0. Materialise the pinned dotnet-ef from .config/dotnet-tools.json. Once per clone; `dotnet ef` is
+#    not a command until this has run, and this is what keeps the tool's version equal to the EF
+#    Core packages the service is built against.
+dotnet tool restore
+
 # 1. Generate the schema on the host, per docs/BUILD.md section 5.6. Idempotent and non-destructive.
 cd services/persistence-service/PowerFramework.Persistence
 dotnet build -c Release
@@ -803,8 +823,18 @@ worth recording because two of them are commonly assumed to be safe when they ar
   mitigation applied after `exec`, not a guarantee, and it never covered `-H` at all.
 - **Shell tracing.** Under `set -x` both `-u` and `-H` are echoed **in full, after expansion**, so
   taking the value from an environment variable does not help. A heredoc body is not traced, so the
-  form below emits only `+ curl -sf --config - ...`.
+  form below emits only `+ curl -sS ... --config - <url>` and nothing else. Measured on this
+  repository: with the header on the command line the trace carries the whole token; with the heredoc
+  it carries the URL and the flags and no credential at all.
 - **Shell history and command capture**, for the same reason: there is no credential on the line.
+
+**A PRIVATE TEMPORARY FILE IS NOT AN EQUIVALENT, AND AN EARLIER FORM OF THIS BLOCK USED ONE.** Writing the
+directives to a `mktemp` file under `umask 077` with a removal trap does close the argv channel — but the
+`printf` that fills it is itself a shell command, so under `set -x` the expanded secret is echoed by the
+write rather than by curl. The stdin form closes all three channels with no file to create, secure, trap or
+clean up, which is why it is the form published here. The heredoc delimiters are deliberately unquoted so
+the shell expands the variables inside them; that expansion happens on a pipe, not in an argument vector
+and not in a trace.
 
 ```bash
 set -euo pipefail
@@ -823,16 +853,13 @@ PFW_AUDIENCE="powerframework-gateway"
 # SECURITY_CLIENT_SECRET, which is the configuration key Security's roster names for this subject.
 : "${SECURITY_CLIENT_SECRET:?export SECURITY_CLIENT_SECRET from your environment file first}"
 
-# 1. THE CREDENTIAL GOES IN A FILE, NOT ON THE COMMAND LINE. `-u user:secret` publishes the secret in the
-#    process's argv, where `ps` shows it to every account on the host and shell history keeps it. curl's
-#    --config file is read privately; `umask 077` creates it unreadable to anyone else, and the trap
-#    removes it on every exit path including a failure under `set -e`.
-CURLRC="$(umask 077 && mktemp)"
-trap 'rm -f "$CURLRC"' EXIT
-printf 'user = "%s:%s"\n' "$PFW_CALLER" "$SECURITY_CLIENT_SECRET" > "$CURLRC"
-
-# 2. Obtain a token from the sole issuer (contract C-01). A caller cannot present a bearer token to obtain
+# 1. Obtain a token from the sole issuer (contract C-01). A caller cannot present a bearer token to obtain
 #    its first one, which is why this one operation authenticates with a shared secret.
+#
+#    THE CREDENTIAL GOES ON STANDARD INPUT, NOT ON THE COMMAND LINE. `-u user:secret` publishes the
+#    secret in the process's argv, where `ps` shows it to every account on the host and shell history
+#    keeps it; `--config -` reads the same directive from a pipe, which no other process can read and
+#    `set -x` does not trace. There is no temporary file, so there is nothing to secure or clean up.
 #
 #    THE BODY IS THE EXACT TokenRequest SHAPE: `subject`, `audience` and `scopes`, all three REQUIRED, and
 #    `additionalProperties: false` - so an extra member is a 400 rather than an ignored field. The
@@ -842,16 +869,18 @@ printf 'user = "%s:%s"\n' "$PFW_CALLER" "$SECURITY_CLIENT_SECRET" > "$CURLRC"
 #    thing that says WHY - would be swallowed with it. As a condition, `set -e` is suspended, the body is
 #    still captured because `--fail-with-body` writes it to stdout, and the failure is reported with it.
 if ! TOKEN_RESPONSE="$(
-  curl -sS --fail-with-body --cacert "$CA" --config "$CURLRC" \
+  curl -sS --fail-with-body --cacert "$CA" --config - \
        -H 'content-type: application/json' \
        --data "{\"subject\":\"$PFW_CALLER\",\"audience\":\"$PFW_AUDIENCE\",\"scopes\":[\"ping\"]}" \
-       "https://localhost:${SECURITY_HOST_PORT:-5104}/v1/tokens"
+       "https://localhost:${SECURITY_HOST_PORT:-5104}/v1/tokens" <<CURLCFG
+user = "$PFW_CALLER:$SECURITY_CLIENT_SECRET"
+CURLCFG
 )"; then
   printf 'Issuance refused the request. Response body:\n%s\n' "$TOKEN_RESPONSE" >&2
   exit 1
 fi
 
-# 3. CAPTURE THE TOKEN AND PROVE IT IS THERE BEFORE USING IT. A JWT contains no double quote, so the
+# 2. CAPTURE THE TOKEN AND PROVE IT IS THERE BEFORE USING IT. A JWT contains no double quote, so the
 #    field can be lifted without a JSON parser; `jq -r .access_token` is the equivalent where jq is
 #    installed. The trailing `|| true` is required rather than defensive: `grep` exits 1 when it matches
 #    nothing, and under the `pipefail` this block declares that would abort the script one line before the
@@ -868,20 +897,28 @@ if [ -z "$PFW_TOKEN" ]; then
   exit 1
 fi
 
-# 4. Present it. Without it, every one of the four /v1/ping endpoints answers 401 - that is the point of
-#    the endpoint. `-o /dev/null -w` prints the status rather than the body, so nothing echoes the token.
-curl -sS --cacert "$CA" -o /dev/null -w '/v1/ping -> %{http_code}\n' \
-     -H "authorization: Bearer $PFW_TOKEN" \
-     "https://localhost:${GATEWAY_HOST_PORT:-5105}/v1/ping"
+# 3. Present it, THROUGH THE SAME STDIN CHANNEL. A bearer token is a credential for its whole lifetime,
+#    so it is subject to the rule above exactly as the shared secret is - `-H "authorization: Bearer
+#    $PFW_TOKEN"` would publish the whole token in argv, and curl does not redact headers. Measured on
+#    this repository: with the header on the command line /proc/<pid>/cmdline carries the token in full;
+#    through the config channel the same request's argv carries only the flags and the URL.
+#    Without a token, every one of the four /v1/ping endpoints answers 401 - that is the point of the
+#    endpoint. `-o /dev/null -w` prints the status rather than the body, so nothing echoes the token.
+curl -sS --cacert "$CA" -o /dev/null -w '/v1/ping -> %{http_code}\n' --config - \
+     "https://localhost:${GATEWAY_HOST_PORT:-5105}/v1/ping" <<CURLCFG
+header = "authorization: Bearer $PFW_TOKEN"
+CURLCFG
 
-# 5. And the negative half, which is the assertion rather than an afterthought: the same address with no
-#    credential must answer 401.
+# 4. And the negative half, which is the assertion rather than an afterthought: the same address with no
+#    credential must answer 401. This one carries no credential by definition, so it needs no config
+#    channel - the absence is the assertion.
 curl -sS --cacert "$CA" -o /dev/null -w 'unauthenticated /v1/ping -> %{http_code}\n' \
      "https://localhost:${GATEWAY_HOST_PORT:-5105}/v1/ping"
 ```
 
-**The token is a bearer credential for its whole lifetime**, so it is held in a shell variable and never
-written to a file, never echoed, and never passed as a URL parameter. `--fail-with-body` rather than `-f` on
+**The token is a bearer credential for its whole lifetime**, so it is held in a shell variable, presented
+through the same private stdin channel as the shared secret, and never written to a file, never echoed,
+never passed as a URL parameter and never placed in an argument vector. `--fail-with-body` rather than `-f` on
 the issuance call is deliberate: `-f` discards the response body on an error status, which is exactly the
 body the guard in step 3 needs to print.
 
@@ -1397,12 +1434,26 @@ compromise, that leaves the compromised key as the sole signer under a fresh nam
    header of a freshly minted token and check its `kid` is the new one:
    `... /v1/tokens | jq -r .access_token | cut -d. -f1 | base64 -d | jq -r .kid`.
 
-   **A `401` on the first authenticated request after this step is expected and clears itself**, so do not
-   read it as a failed rollover. A verifier holds a cached key set that does not yet carry the new `kid`; the
-   unknown identifier is what makes it request a refresh, and the next request succeeds. Measured on this
-   stack: refused immediately after the restart, `200` fifteen seconds later with no further action. It is
-   the mirror image of the window step 6 exists for — that one protects tokens minted under the OLD key, this
-   one is the short wait for the NEW key to become known.
+   **The first authenticated request after this step no longer costs a `401`, and that changed — the
+   paragraph here used to say the refusal was expected.** It was: a verifier holds a cached key set that
+   does not yet carry the new `kid`, and while the unknown identifier is what makes the handler request a
+   refresh, the refresh is for the NEXT request's benefit — the one that provoked it had already been
+   refused. Measured on this stack before the change: the first request after the restart was refused
+   `401` at Gateway, DataServices **and** Persistence, and the immediately following one succeeded.
+
+   Each verifier now waits, bounded, for that refresh to land and then validates the token once more
+   against the refreshed key set, so a correctly signed token minted seconds earlier by the sole issuer is
+   admitted on its **first** presentation. Measured on this stack after the change, with the same
+   rotation: `200` at all three verifiers on the first request, in 47–58 ms, and one `Information` record
+   per verifier under `PowerFramework.<Service>.Authorization.UnknownSigningKeyRevalidation` naming the new
+   `kid` — with **no** refusal recorded anywhere. Nothing about validation is relaxed to achieve it: the
+   signature, issuer, audience and lifetime checks all still run, the keys still come only from the key set
+   this service published, and a `kid` that is genuinely unknown is still refused `401`.
+
+   Two things this does **not** replace. It is not a reason to skip the overlap in step 6 — that window
+   protects tokens already minted under the OLD key, which is a different problem in the opposite
+   direction. And it does not make a rollover invisible: the per-verifier record above is how you confirm
+   each one actually met and absorbed the new key.
 6. **Wait out the overlap.** At least `Security:TokenLifetime` (five minutes as shipped) **plus** the 30-second
    clock skew the verifiers allow **plus** however long a verifier's cached key set may remain stale
    (`MetadataAutomaticRefreshInterval`, five minutes as shipped — the library's own floor). Ten to fifteen
@@ -1682,7 +1733,7 @@ to Docker health status `healthy`.** The readiness chain converged in the docume
 | The same anchor path naming a file that is **not** there | Security **exited instead of serving**. Its own message names only the configuration key and states that the path is deliberately withheld; the inner framework `FileNotFoundException` in the same log does print it, so the withholding is a property of this service's message rather than of the log |
 | The complete `tests/e2e` suite, run with `npm ci && npm test` from [`../tests/e2e`](../tests/e2e) against this stack | **29 of 29 passed**, and the harness selected **`STRICT` mode** of its own accord after probing all four services — which is the mode that runs the stack-dependent assertions rather than skipping them. The six groups it reports are health and readiness, authentication, capability gating, the four reserved deferred routes, the DataWindow retrieve/validate/update workflow, and the optimistic-concurrency conflict. The suite needs **both** halves of an issuance credential: supplying `SECURITY_CLIENT_SECRET` without `SECURITY_CLIENT_ID` is refused before any spec runs, by name and without echoing either value, rather than silently degrading to the no-token subset |
 | The four reserved deferred-capability routes of [§5.1](#51-the-map), each with a valid token | `501` on all four, each body naming its own deferred service — `DesignSystem`, `Documents`, `Integration`, `ScriptBridge`. Nothing is served behind any of them |
-| **C-03, C-05 and C-06 invoked across container boundaries**, not merely probed at the TLS layer | `POST /v1/datawindow/retrieve` answered `200` carrying the DataWindow chunk sequence, and an insert and an update both applied — each one traversing Gateway → DataServices over gRPC and DataServices → Persistence over gRPC, with a JWT validated at every hop. A stale-original update was refused `409` and changed nothing. A `NOT NULL` violation was refused `400 application/problem+json` whose `dbError` member named `COMPANY.AGE` while carrying an empty `sqlsyntax` and none of the caller's own column values |
+| **C-03, C-04, C-05, C-06 and C-08 invoked across container boundaries**, not merely probed at the TLS layer | `POST /v1/datawindow/retrieve` answered `200` carrying the DataWindow chunk sequence, and an insert and an update both applied — each one traversing Gateway → DataServices over gRPC and DataServices → Persistence over gRPC, with a JWT validated at every hop. A stale-original update was refused `409` and changed nothing. A `NOT NULL` violation was refused `400 application/problem+json` whose `dbError` member named `COMPANY.AGE` while carrying an empty `sqlsyntax` and none of the caller's own column values. A later run added the two contracts this row used to omit: driving an expression session end to end reached **C-04** (`OpenExpressionSession`, `SetEnabled`, `AddVariable`, `SetVariable`, `AddExpression`, `CalcAll`, `SetTrace`, `EventStream`, `CloseExpressionSession`), and the update path was observed opening and closing **C-08** (`BeginSession`, `EndSession`) around every write. **The attribution is measured, not inferred**: the distinct gRPC service/method paths were enumerated from *each container's own* log, so a call is credited to the container that served it. `Retrieve` and `EventStream` are server-streaming, so gRPC stream setup across the boundary is covered too, not only unary calls |
 | Teardown with a plain `down` | Containers and network removed, **and the named volume survived** — the property [§7.2](#72-decision-2--the-persistence-db-volume-rename)'s capture rule depends on. Re-running `up -d` on that surviving volume returned all four to `healthy` and a re-retrieve answered the **same three rows** the suite had left behind, so the volume carries data across a restart rather than merely existing across one |
 
 **The build and test path has been run, and its FIGURES are not restated here.** `dotnet build
@@ -1727,13 +1778,17 @@ package it loaded and is therefore not the gate and must never be read as one.
   paths empty, so neither Gateway nor DataServices has presented **its own** configured pair to Security.
   A deployment choosing that arm must project its own anchor — [`.env.example`](.env.example) carries the
   shape, and setting a *host* path there refuses startup, which is measured rather than predicted.
-- **Three of the six gRPC contracts have now been invoked across container boundaries; the other three have
-  not.** §10.1 records which: retrieve, insert, update, the `409` conflict and the `NOT NULL` refusal all
-  traverse Gateway → DataServices → Persistence, so **C-03**, **C-05** and **C-06** have been called for real
-  rather than probed at the TLS layer. **C-04** (the column-expression service), **C-07** (command execution)
-  and **C-08** (the transaction service) have **not** — no caller in the documented bring-up reaches them, and
-  the end-to-end suite drives none of them. Their listeners are reachable on the same ports the invoked
-  contracts answer on, which is evidence about the transport and not about the methods.
+- **Five of the six gRPC contracts have now been invoked across container boundaries; exactly one has not,
+  and it is the one nothing can reach.** §10.1 records which and how they were counted. **C-03**, **C-05**
+  and **C-06** are driven by retrieve, insert, update, the `409` conflict and the `NOT NULL` refusal;
+  **C-04** is driven by an expression session end to end; and **C-08** turns out to be exercised by every
+  write, because the update path opens and closes a transaction session around it — which is worth noting as
+  a correction rather than an addition, since an earlier revision of this bullet listed C-08 as unreached on
+  the assumption that only an explicit transaction call would reach it.
+  **C-07** (command execution) has **not** been invoked, and that is structural rather than an untried case:
+  no route on Gateway's published ingress reaches it and DataServices calls no method on it, so nothing in
+  the documented bring-up *can* drive it. Its listener is reachable on the same port the three invoked
+  Persistence contracts answer on, which is evidence about the transport and not about the methods.
 - **CI has not run on a hosted runner from this working tree.**
   [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) exists and defines the four-service matrix;
   what is reported above was run on a developer host.

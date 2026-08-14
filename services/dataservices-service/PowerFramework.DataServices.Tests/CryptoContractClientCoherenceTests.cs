@@ -5,8 +5,8 @@
 //  ------------------------------------------------------------------------------------------------
 //  WHY THIS SUITE EXISTS, STATED AS THE DEFECT IT CATCHES
 //    shared/PowerFramework.Contracts/OpenApi/security.v1.yaml published eighteen C-02 operations while
-//    Clients/SecurityClient.cs implemented seventeen. The missing one was DELETE
-//    /v1/crypto/rsa/keys/{keyRef} - the release for a generated private key - so a key obtained through
+//    Clients/SecurityClient.cs implemented seventeen. The missing one was the release at
+//    /v1/crypto/rsa/keys/release - the release for a generated private key - so a key obtained through
 //    generateRsaKey had NO release path from its only consumer, and the published contract carried an
 //    operation nothing in the system could reach. Neither half was wrong on its own terms: the document
 //    declared a coherent operation and the client implemented a coherent subset. The defect lived
@@ -185,28 +185,38 @@ public sealed class CryptoContractClientCoherenceTests
     }
 
     /// <summary>
-    /// The release operation is the one C-02 operation that is not a <c>POST</c>.
+    /// Every C-02 operation, the authored release included, is declared under <c>POST</c>.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// TWO THINGS TURN ON THE METHOD, which is why it is asserted rather than assumed. The transport
-    /// itself: the client's request/response sender hard-codes <c>POST</c> and serializes a body in both
-    /// directions, so a bodiless <c>DELETE</c> needed a sender of its own. And replay safety: a release
-    /// must never be retried, and <c>Clients/OutboundCallPolicy.cs</c>'s admission is a property of the
-    /// method - <c>OutboundCallPolicyTests</c> asserts that half against the production predicate.
+    /// 🔴 THIS ROW ASSERTED THE OPPOSITE, AND THE CHANGE IS A SECURITY CORRECTION. The release was
+    /// published as <c>DELETE /v1/crypto/rsa/keys/{keyRef}</c>, and the reason it was a DELETE was that it
+    /// addressed its key by a PATH SEGMENT - which the server's own request scope records, and which every
+    /// proxy, ingress and trace upstream of the service records too. A sweep of a running deployment found
+    /// a freshly generated <c>keyRef</c> in four records of its own release window. A <c>keyRef</c> is a
+    /// credential-like handle to a retained private key, so the reference moved into a request body and the
+    /// operation became a POST beside its generation counterpart.
     /// </para>
     /// <para>
-    /// The remaining seventeen are asserted to be <c>POST</c> in the same breath, so a future operation
-    /// published under another method cannot slip past the sender that assumes one.
+    /// WHY A POST RATHER THAN A BODY-CARRYING DELETE: HTTP assigns a <c>DELETE</c> body no semantics, so an
+    /// intermediary may drop it - which would turn a release into a request naming nothing, answered
+    /// <c>404</c>, indistinguishable from "no such key".
+    /// </para>
+    /// <para>
+    /// THE METHOD STILL MATTERS AND IS STILL ASSERTED. The transport: the client's request/response sender
+    /// hard-codes <c>POST</c> and deserializes a response body, and the release has none - so it keeps a
+    /// sender of its own, which now serializes a body and reads no response. And replay safety: a release
+    /// must never be retried, and <c>Clients/OutboundCallPolicy.cs</c>'s admission is exactly the four safe
+    /// methods, so <c>POST</c> is excluded on the same terms <c>DELETE</c> was -
+    /// <c>OutboundCallPolicyTests</c> asserts that half against the production predicate.
     /// </para>
     /// </remarks>
     [Fact]
-    public void OnlyTheKeyReleaseIsDeclaredUnderAMethodOtherThanPost()
+    public void EveryOperationIncludingTheAuthoredReleaseIsDeclaredUnderPost()
     {
-        Assert.Equal("delete", CryptoContract.MethodOf("releaseRsaKey"));
+        Assert.Equal("post", CryptoContract.MethodOf("releaseRsaKey"));
 
         string[] notPost = CryptoContract.PublishedOperationIds
-            .Where(operationId => !string.Equals(operationId, "releaseRsaKey", StringComparison.Ordinal))
             .Where(operationId => !string.Equals(
                 CryptoContract.MethodOf(operationId),
                 "post",

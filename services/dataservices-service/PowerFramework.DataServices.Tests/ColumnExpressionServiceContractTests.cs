@@ -1415,6 +1415,96 @@ public sealed class ColumnExpressionServiceContractTests
         }
     }
 
+    /// <summary>
+    /// A PUBLISHED MUTATION PUBLISHES. <c>SetVariable</c> with <c>recalc</c> raises
+    /// <c>onvarchanged</c> [<c>n_cst_dwsvc_columnexp.sru:L1770</c>], and a subscriber on
+    /// <c>EventStream</c> must see exactly that event, once, at sequence 1, under the SEQUENCED
+    /// discipline.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THIS IS THE TEST THAT WAS MISSING, AND ITS ABSENCE IS WHY THE STREAM SHIPPED DEAD. Every event
+    /// assertion in this file drove the relay's <c>Raise*Async</c> methods directly - and NO PRODUCTION
+    /// CALLER EVER REACHED THEM, because every published mutation on this contract calls the engine, which
+    /// raises its own events. So the stream answered an empty collection to every poll while a suite of
+    /// green tests asserted that publication worked. A test may only drive a PUBLIC RPC here, which is
+    /// what makes it capable of catching that.
+    /// </para>
+    /// <para>
+    /// EXACTLY ONE EVENT IS THE ASSERTION, not "at least one". <c>of_setvar</c> delegates to
+    /// <c>of_setvarexp</c> [<c>:L1778</c>] and that raises ONCE; a second record would mean something is
+    /// publishing twice, which is precisely the fault a relay that both published and delegated would
+    /// introduce.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task EventStream_PublishesAVariableChangeDrivenThroughThePublicRpc()
+    {
+        Harness h = NewHarness();
+        (string session, IReadOnlyList<string> handles) = await OpenAsync(h.Service, "dwA");
+        string dw = handles[0];
+        await EnableAsync(h.Service, session, dw);
+        C04CallContext ctx = new();
+
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await h.Service.AddVariable(
+                new AddVariableRequest
+                {
+                    SessionId = session,
+                    DatawindowHandle = dw,
+                    Name = "vLong",
+                    Value = new VarValue { LongValue = 1L },
+                },
+                ctx)).RetCode);
+
+        C04StreamWriter<EventStreamResponse> events = new();
+
+        using CancellationTokenSource life = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+
+        Task stream = h.Service.EventStream(
+            new EventStreamRequest { SessionId = session, DatawindowHandle = dw },
+            events,
+            new C04CallContext(cancellationToken: life.Token));
+
+        await WaitUntilAsync(() => h.Relay.SubscriptionCount == 1);
+
+        // THE PUBLIC RPC, and nothing else. No relay method is touched by this test.
+        Assert.Equal(
+            WireRetCode.Ok,
+            (await h.Service.SetVariable(
+                new SetVariableRequest
+                {
+                    SessionId = session,
+                    DatawindowHandle = dw,
+                    Name = "vLong",
+                    Value = new VarValue { LongValue = 7L },
+                    Recalc = true,
+                    Force = true,
+                },
+                ctx)).RetCode);
+
+        await WaitUntilAsync(() => events.Written.Count >= 1);
+
+        EventStreamResponse published = Assert.Single(events.Written);
+
+        Assert.NotNull(published.Event?.VarChanged);
+        Assert.True(published.Event.VarChanged.ForceCalc);
+        Assert.Equal(1L, published.Sequence);
+        Assert.Equal(OrderingDiscipline.Sequenced, published.Discipline);
+
+        await life.CancelAsync();
+
+        try
+        {
+            await stream;
+        }
+        catch (OperationCanceledException)
+        {
+            // Ending the stream is the whole of the correct response.
+        }
+    }
+
     // =================================================================================================
     //  8. THE SEVEN TYPED VARIABLE FAMILIES, IN THE LEGACY DECLARATION ORDER
     //     of_addvar has ONE arity per type (7 members) and of_setvar has THREE per type (21 members)

@@ -426,7 +426,7 @@ public sealed class SecurityClientCryptoTests
     // ==============================================================================================
     //  GROUP 3b - THE AUTHORED KEY RELEASE  [no legacy counterpart]
     //  ----------------------------------------------------------------------------------------------
-    //  DELETE /v1/crypto/rsa/keys/{keyRef} is the ONE C-02 operation that has no legacy overload behind
+    //  POST /v1/crypto/rsa/keys/release is the ONE C-02 operation that has no legacy overload behind
     //  it. The legacy GenRSAKey [n_crypto.sru:L19-L20] hands the private half straight back through a
     //  `ref` parameter, so nothing is retained and there is nothing to release; retaining it on the
     //  service side is what makes the generation response safe across a boundary, and a retained thing
@@ -434,12 +434,18 @@ public sealed class SecurityClientCryptoTests
     //  one would be a new feature - what these rows pin is the published shape and the published status
     //  handling, which is exactly what a consumer depends on.
     //
-    //  IT IS ALSO THE ONE OPERATION ON EITHER CONTRACT WHOSE PATH CARRIES A CALLER VALUE, and the only
-    //  one that is not a POST, so the rows below are the only place those two properties are checked.
+    //  🔴 IT USED TO BE THE ONE OPERATION ON EITHER CONTRACT WHOSE PATH CARRIED A CALLER VALUE, published
+    //  as DELETE /v1/crypto/rsa/keys/{keyRef}. This client escaped the reference into exactly one path
+    //  segment and never logged it, and a row below asserted that escaping - yet a request line is recorded
+    //  by the SERVER's own request scope and by every proxy between the two services, and a sweep of a
+    //  running deployment found a freshly generated reference in four records of its own release window. A
+    //  keyRef is a credential-like handle to a retained private key, so the reference moved into the
+    //  request body and the escaping row became a row asserting the opposite property: THE PATH IS FIXED
+    //  AND CARRIES NO CALLER TEXT AT ALL.
     // ==============================================================================================
 
     [Fact]
-    public async Task ReleaseRsaKeyAsync_DeletesThePublishedMemberPathAndAnswersTrueOnTheDeclared204()
+    public async Task ReleaseRsaKeyAsync_PostsTheFixedActionPathAndAnswersTrueOnTheDeclared204()
     {
         RecordingHandler handler = new RecordingHandler().Enqueue(HttpStatusCode.NoContent, json: null);
         (SecurityClient client, _) = CreateClient(handler);
@@ -449,13 +455,16 @@ public sealed class SecurityClientCryptoTests
             TestContext.Current.CancellationToken);
 
         Assert.True(released);
-        Assert.Equal(HttpMethod.Delete, handler.Requests[0].Method);
-        Assert.Equal("/v1/crypto/rsa/keys/" + FakeKeyRef, Path(handler));
+        Assert.Equal(HttpMethod.Post, handler.Requests[0].Method);
 
-        // NO REQUEST BODY AT ALL, not an empty one: an empty body would still carry a Content-Length and
-        // a Content-Type the document does not declare.
-        Assert.Null(handler.Requests[0].Content);
-        Assert.Equal(string.Empty, handler.Bodies[0]);
+        // 🔴 THE PATH IS FIXED. It does not contain the reference, and it cannot: no caller value reaches
+        // it. This is the assertion that would have failed against the shape that put the reference in the
+        // request line.
+        Assert.Equal("/v1/crypto/rsa/keys/release", Path(handler));
+        Assert.DoesNotContain(FakeKeyRef, Path(handler), StringComparison.Ordinal);
+
+        // THE REFERENCE IS IN THE BODY, which is the other half of the same property.
+        Assert.Equal("{\"keyRef\":\"" + FakeKeyRef + "\"}", handler.Bodies[0]);
     }
 
     [Fact]
@@ -496,27 +505,38 @@ public sealed class SecurityClientCryptoTests
     }
 
     [Theory]
-    [InlineData("gen/../../v1/tokens", "gen%2F..%2F..%2Fv1%2Ftokens")]
-    [InlineData("ref?audience=other", "ref%3Faudience%3Dother")]
-    [InlineData("ref#fragment", "ref%23fragment")]
-    [InlineData("ref with space", "ref%20with%20space")]
-    [InlineData("already%2Fencoded", "already%252Fencoded")]
-    public async Task ReleaseRsaKeyAsync_EscapesTheReferenceIntoExactlyOnePathSegment(
-        string keyRef,
-        string expectedSegment)
+    [InlineData("gen/../../v1/tokens")]
+    [InlineData("ref?audience=other")]
+    [InlineData("ref#fragment")]
+    [InlineData("ref with space")]
+    [InlineData("already%2Fencoded")]
+    public async Task ReleaseRsaKeyAsync_NeverPutsTheReferenceInTheRequestLineWhateverItContains(
+        string keyRef)
     {
-        // THE SCHEMA DECLARES minLength 1 AND NO PATTERN, so the contract itself permits a reference
-        // carrying a separator, a query marker or a fragment marker. Concatenated unescaped, each of the
-        // rows above would reach a different route - or none - carrying part of the reference somewhere the
-        // service never looks. The last row proves the escaping is not double-decoded on the way out: an
-        // already-percent-encoded reference is escaped again, so what the service receives decodes back to
-        // exactly what the caller passed.
+        // 🔴 THIS ROW REPLACES ONE THAT ASSERTED THE ESCAPING OF A PATH SEGMENT, AND THE REPLACEMENT IS THE
+        // POINT. The schema declares minLength 1 and NO pattern, so the contract permits a reference
+        // carrying a separator, a query marker or a fragment marker - each of the values above. While the
+        // reference was a path segment, the best available answer was to percent-encode it so it could not
+        // forge a route; that was correct and was never sufficient, because the escaped value still
+        // travelled in a request line the server and every proxy record. Now none of these values reaches
+        // the path OR the query at all, whatever it contains, so there is no escaping to get right.
         RecordingHandler handler = new RecordingHandler().Enqueue(HttpStatusCode.NoContent, json: null);
         (SecurityClient client, _) = CreateClient(handler);
 
         await client.ReleaseRsaKeyAsync(keyRef, TestContext.Current.CancellationToken);
 
-        Assert.Equal("/v1/crypto/rsa/keys/" + expectedSegment, Path(handler));
+        Assert.Equal("/v1/crypto/rsa/keys/release", Path(handler));
+        Assert.True(
+            string.IsNullOrEmpty(handler.Requests[0].RequestUri?.Query),
+            "The release request carries no query string: a reference placed there would reach a request "
+                + "line exactly as a path segment does.");
+
+        // The reference is carried whole, in the body, with no transformation - so the service resolves
+        // exactly what the caller named.
+        Assert.Contains(
+            JsonSerializer.Serialize(keyRef),
+            handler.Bodies[0],
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -643,9 +663,15 @@ public sealed class SecurityClientCryptoTests
 
         Assert.True(released);
         Assert.Equal("/v1/crypto/rsa/keys", Path(handler));
-        Assert.Equal("/v1/crypto/rsa/keys/" + issued, Path(handler, 1));
+        Assert.Equal("/v1/crypto/rsa/keys/release", Path(handler, 1));
         Assert.Equal(HttpMethod.Post, handler.Requests[0].Method);
-        Assert.Equal(HttpMethod.Delete, handler.Requests[1].Method);
+        Assert.Equal(HttpMethod.Post, handler.Requests[1].Method);
+
+        // 🔴 THE ISSUED REFERENCE APPEARS IN THE RELEASE BODY AND IN NEITHER REQUEST LINE. That is the
+        // generate-then-release round trip stated as the property the correction established: a
+        // credential-like handle never reaches a path.
+        Assert.DoesNotContain(issued, Path(handler, 1), StringComparison.Ordinal);
+        Assert.Contains(issued, handler.Bodies[1], StringComparison.Ordinal);
     }
 
     // ==============================================================================================
@@ -1233,8 +1259,11 @@ public sealed class SecurityClientCryptoTests
             .Where(type => type.Namespace == "PowerFramework.DataServices.Clients")
             .Where(type => type.Name.EndsWith("RequestBody", StringComparison.Ordinal));
 
-        // The sixteen published request schemas, so a future deletion cannot make this test vacuous.
-        Assert.Equal(16, requestTypes.Count());
+        // The seventeen published request schemas, so a future deletion cannot make this test vacuous. The
+        // seventeenth is the release body, which the operation acquired when its credential-like reference
+        // moved out of the request path - and it is covered by the scan below for the same reason the other
+        // sixteen are.
+        Assert.Equal(17, requestTypes.Count());
 
         foreach (Type type in requestTypes)
         {
@@ -1344,7 +1373,7 @@ public sealed class SecurityClientCryptoTests
             .Where(type => type.Name.EndsWith("RequestBody", StringComparison.Ordinal)
                 || type.Name.EndsWith("ResponseBody", StringComparison.Ordinal));
 
-        Assert.Equal(26, wireTypes.Count());
+        Assert.Equal(27, wireTypes.Count());
 
         foreach (Type type in wireTypes)
         {

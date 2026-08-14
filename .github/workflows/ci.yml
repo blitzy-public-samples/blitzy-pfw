@@ -653,7 +653,7 @@ jobs:
           legacy_docs='^docs/(README|Blink交互|PB多线程绕坑提示|Sciter交互|n_cst_dwsvc_columnexp)\.md$'
 
           # The declared target groups of docs/BUILD.md section 16.3.
-          groups='^(services/|shared/|orchestration/|characterization/|tests/e2e/|\.github/|docs/)'
+          groups='^(services/|shared/|orchestration/|characterization/|tests/e2e/|\.github/|docs/|\.config/)'
           root_targets='^(PowerFramework\.slnx|Directory\.Build\.props|Directory\.Packages\.props|global\.json|\.editorconfig|\.dockerignore|NOTICE|README\.md)$'
 
           # core.quotePath=false is REQUIRED, not cosmetic: by default `git ls-files` renders a
@@ -966,7 +966,7 @@ jobs:
       # cannot silently stop being tested. `-c Release` is stated because a bare `dotnet test` builds
       # Debug even immediately after a Release build; no build-skipping argument is passed, so each
       # project is proved to build and test from the documented command shape alone.
-      - name: Test the shared libraries and the published contracts
+      - name: Test the shared libraries, the published contracts and the capture driver
         run: |
           set -euo pipefail
           for project in \
@@ -975,11 +975,95 @@ jobs:
             shared/PowerFramework.Shared.Eventful.Tests \
             shared/PowerFramework.Shared.Localization.Tests \
             shared/PowerFramework.Shared.Containers.Tests \
-            shared/PowerFramework.Contracts.Tests ; do
+            shared/PowerFramework.Contracts.Tests \
+            characterization/tools/PowerFramework.Characterization.Capture.Tests ; do
             echo "::group::${project}"
             dotnet test "${project}" -c Release
             echo "::endgroup::"
           done
+
+      # ------------------------------------------------------------------------------------------
+      #  THE PAIR-STATE REPORT, RUN AS A GATE.
+      #
+      #  Needs no service, no plan and no credential: it reads the store off disk, establishes which
+      #  half of each pair exists, and exits non-zero when a workflow holds EXACTLY ONE half. That is
+      #  the one state a reader could mistake for a comparison - characterization/README.md section
+      #  3.2 states that a recording whose identifier does not exist on the other side is not a
+      #  partial comparison but no comparison at all, and must not be reported as a pass.
+      #
+      #  A workflow with NEITHER half is not a failure. It is exactly what its declared
+      #  executionStatus says it is, and this gate says so out loud rather than treating an honest
+      #  gap as a defect. The report is printed either way, so the store's real state is visible in
+      #  every build log rather than having to be asked for.
+      # ------------------------------------------------------------------------------------------
+      - name: Report and gate the characterization pair state
+        run: |
+          set -euo pipefail
+
+          dotnet run --project characterization/tools/PowerFramework.Characterization.Capture \
+            -c Release --no-launch-profile -- --pair-state
+
+      # ------------------------------------------------------------------------------------------
+      #  THE DOCUMENTED MIGRATION COMMAND IS EXECUTED, NOT MERELY DOCUMENTED.
+      #
+      #  docs/BUILD.md section 5.6 and orchestration/README.md section 3.4.1 both publish a
+      #  `dotnet ef database update` command as the manual provisioning route. `dotnet ef` is NOT part
+      #  of the SDK - it is a NuGet tool - so before .config/dotnet-tools.json existed neither command
+      #  could be run from a clean checkout at all: `dotnet ef` answered "Could not execute because the
+      #  specified command or file was not found", and a reader had to discover both that a tool
+      #  install was needed and which version to install.
+      #
+      #  This step is what turns that documentation into a claim the build proves. It restores the
+      #  pinned tool, asserts the pin EQUALS the EF Core package pin in Directory.Packages.props - the
+      #  tool and the runtime it generates migrations for must not drift, and a globally installed tool
+      #  is exactly how they do - and then runs the published command verbatim against a throwaway
+      #  database under RUNNER_TEMP.
+      #
+      #  NOTHING PERSISTENT IS TOUCHED. The connection names a file under RUNNER_TEMP, never a volume
+      #  and never a path any characterization capture reads, so this step cannot violate the
+      #  same-volume capture rule. The command is additive and idempotent by construction - it is
+      #  Database.Migrate and nothing else - and it is run TWICE here precisely to prove that: the
+      #  second run must report that the database is already up to date.
+      # ------------------------------------------------------------------------------------------
+      - name: Restore the pinned tool and execute the documented migration command
+        run: |
+          set -euo pipefail
+
+          dotnet tool restore
+
+          tool=$(python3 -c "import json;print(json.load(open('.config/dotnet-tools.json'))['tools']['dotnet-ef']['version'])")
+          packages=$(grep -oP 'Include="Microsoft\.EntityFrameworkCore\.[A-Za-z.]+" Version="\K[^"]+' \
+            Directory.Packages.props | sort -u | tr '\n' ' ')
+
+          echo "dotnet-ef manifest pin : ${tool}"
+          echo "EF Core package pins   : ${packages}"
+
+          if [ "${packages}" != "${tool} " ]; then
+            echo "::error::The dotnet-ef tool pin in .config/dotnet-tools.json (${tool}) does not equal" \
+                 "the single EF Core package version in Directory.Packages.props (${packages}). The tool" \
+                 "and the runtime it generates migrations for must move together; reconcile both files."
+            exit 1
+          fi
+
+          dotnet ef --version
+
+          cd services/persistence-service/PowerFramework.Persistence
+          dotnet build -c Release
+          dotnet ef database update --no-build --configuration Release \
+            -c PowerFrameworkDbContext \
+            --connection "Data Source=${RUNNER_TEMP}/migration-check.db"
+
+          dotnet ef database update --no-build --configuration Release \
+            -c PowerFrameworkDbContext \
+            --connection "Data Source=${RUNNER_TEMP}/migration-check.db" \
+            | tee "${RUNNER_TEMP}/migration-rerun.txt"
+
+          if ! grep -q 'already up to date' "${RUNNER_TEMP}/migration-rerun.txt"; then
+            echo "::error::Re-running the documented migration command did not report the database as" \
+                 "already up to date, so the idempotence docs/BUILD.md section 5.6 claims - and that the" \
+                 "startup provisioning path relies on - does not hold."
+            exit 1
+          fi
 
   # ================================================================================================
   #  THE PER-SERVICE LEG - four independent builds, four independent coverage gates

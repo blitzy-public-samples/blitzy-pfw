@@ -25,10 +25,20 @@
 //  list would drift, and the failure mode is silent: the secret keeps using its environment form after an
 //  operator has moved it to a file.
 //
+//  🔴 AND THE C-02 KEY STORE IS PART OF THAT DERIVED LIST, WHICH IT WAS NOT
+//  The derived set was the two signing keys plus the client roster - so the one class of material a CALLER
+//  can ask this service to USE was the one class with no projected form. A sweep of a running deployment
+//  found a configured reference's exact material in the `docker compose config` render, in
+//  `docker inspect` and in `/proc/1/environ` at once. The rows below assert the derivation for the key
+//  store on the same terms as for the roster, and assert the production refusal that makes the projection
+//  the only shape a production deployment can use.
+//
 //  WHAT IS DELIBERATELY NOT HERE
-//  No row asserts that a file form is REQUIRED. It must not be: the environment-variable form still works,
-//  because making it fail would break the documented bring-up (C-I) and every deployment that had not
-//  migrated. The projection is what the shipped manifest does; the fallback is what the contract allows.
+//  No row asserts that a file form is REQUIRED OUTSIDE PRODUCTION. It must not be: the
+//  environment-variable form still works there, because making it fail would break the documented
+//  bring-up (C-I), every parity capture and every deployment that had not migrated. The projection is what
+//  the shipped manifest does; the fallback is what the contract allows - and in production, for key-store
+//  material only, the fallback is refused.
 // ======================================================================================================
 
 using Microsoft.Extensions.Configuration;
@@ -233,6 +243,161 @@ public sealed class FileBackedSecretTests
             static _ => throw new InvalidOperationException("no path should be probed"));
 
         Assert.Empty(resolved);
+    }
+
+    [Fact]
+    public void TheDeclaredKeysCoverEveryPermittedKeyStoreReferenceUnderItsComposedName()
+    {
+        // 🔴 THE DERIVATION THAT WAS MISSING. Resolution at the endpoint is
+        // `configuration[ConfigurationKeyPrefix + keyRef]`, so the projected file has to satisfy exactly
+        // that composed spelling - a companion named anything else would be read by nothing and the
+        // material would silently keep coming from the environment. The reference set is read from the
+        // permitted list rather than restated, so a reference added by a deployment becomes file-backable
+        // with no code change, which is the same property the client roster has.
+        IConfiguration configuration = Build(
+            ("Security:KeyStore:ConfigurationKeyPrefix", "SECURITY_KEYSTORE_"),
+            ("Security:KeyStore:PermittedKeyRefs:0", "signing-fixture"),
+            ("Security:KeyStore:PermittedKeyRefs:1", "report-file"));
+
+        string[] declared = [.. FileBackedSecrets.DeclaredSecretKeys(configuration).Order(StringComparer.Ordinal)];
+
+        Assert.Equal(
+            (string[])
+            [
+                SecurityOptions.RetiringSigningKeyEnvironmentVariableName,
+                SecurityOptions.SigningKeyEnvironmentVariableName,
+                "SECURITY_KEYSTORE_report-file",
+                "SECURITY_KEYSTORE_signing-fixture",
+            ],
+            declared);
+    }
+
+    [Fact]
+    public void AKeyStoreReferenceResolvesFromItsProjectedFileLikeAnyOtherSecret()
+    {
+        // THE WHOLE POINT OF THE DERIVATION, EXERCISED THROUGH THE PRODUCTION RESOLVER. The composed key
+        // acquires the same three rules as the signing key, including the trim - and the resolved entry is
+        // keyed by the flat name the endpoint reads, not by the `_FILE` companion.
+        const string composed = "SECURITY_KEYSTORE_signing-fixture";
+
+        IConfiguration configuration = Build(
+            ("Security:KeyStore:ConfigurationKeyPrefix", "SECURITY_KEYSTORE_"),
+            ("Security:KeyStore:PermittedKeyRefs:0", "signing-fixture"),
+            (composed + "_FILE", "/run/secrets/keystore-signing-fixture"));
+
+        IReadOnlyDictionary<string, string> resolved = FileBackedSecrets.Resolve(
+            configuration,
+            FileBackedSecrets.DeclaredSecretKeys(configuration),
+            static _ => Material + "\n",
+            static _ => true);
+
+        Assert.Equal(Material, Assert.Contains(composed, resolved));
+    }
+
+    [Fact]
+    public void NoPrefixOrNoPermittedReferenceYieldsNoKeyStoreKeyRatherThanABareName()
+    {
+        // TWO STATES THAT MUST CONTRIBUTE NOTHING. A permitted reference with no prefix is unresolvable
+        // configuration the options validator already refuses, and emitting the bare reference name here
+        // would invent a flat key the endpoint never reads - so a projected file named after it would be a
+        // secret nothing consumes, which is worse than no support at all because it looks like support. A
+        // prefix with no permitted reference names nothing to compose.
+        Assert.Empty(FileBackedSecrets.DeclaredKeyStoreKeys(Build(
+            ("Security:KeyStore:PermittedKeyRefs:0", "orphan"))));
+
+        Assert.Empty(FileBackedSecrets.DeclaredKeyStoreKeys(Build(
+            ("Security:KeyStore:ConfigurationKeyPrefix", "SECURITY_KEYSTORE_"))));
+
+        Assert.Empty(FileBackedSecrets.DeclaredKeyStoreKeys(Build(
+            ("Security:KeyStore:ConfigurationKeyPrefix", "SECURITY_KEYSTORE_"),
+            ("Security:KeyStore:PermittedKeyRefs:0", "   "))));
+    }
+
+    [Fact]
+    public void AProductionDeploymentSupplyingKeyStoreMaterialInlineIsRefusedAtStartup()
+    {
+        // 🔴 RULE 4. The inline form is the exposed one: rendered by `docker compose config`, returned by
+        // `docker inspect`, readable from /proc/<pid>/environ. With the projected form available for these
+        // keys, a production deployment still using the inline one is leaking material it has been given a
+        // way not to leak - so the host refuses to start, which is this service's posture for a structural
+        // fault rather than a warning nobody reads.
+        IConfiguration configuration = Build(
+            ("Security:KeyStore:ConfigurationKeyPrefix", "SECURITY_KEYSTORE_"),
+            ("Security:KeyStore:PermittedKeyRefs:0", "signing-fixture"),
+            ("SECURITY_KEYSTORE_signing-fixture", Material));
+
+        InvalidOperationException failure = Assert.Throws<InvalidOperationException>(
+            () => FileBackedSecrets.RefuseInlineKeyStoreMaterial(configuration, enforce: true));
+
+        // THE KEY AND THE REMEDY ARE NAMED AND THE VALUE IS NOT. A diagnostic that quoted the material
+        // would put it in the same log the rule exists to keep it out of.
+        Assert.Contains("SECURITY_KEYSTORE_signing-fixture", failure.Message, StringComparison.Ordinal);
+        Assert.Contains(
+            "SECURITY_KEYSTORE_signing-fixture_FILE",
+            failure.Message,
+            StringComparison.Ordinal);
+
+        Assert.DoesNotContain(Material, failure.Message, StringComparison.Ordinal);
+
+        // THE FILE-PATH CASE IS STATED RATHER THAN LEFT TO BE INFERRED, because a reference may name a path
+        // for the two file-hashing operations and the service cannot tell the two kinds apart.
+        Assert.Contains("FILE PATH", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheProductionRefusalIsSatisfiedByTheProjectedFormAndSkipsWhatItCannotJudge()
+    {
+        // FOUR STATES THAT MUST PASS UNDER ENFORCEMENT, and each for its own reason.
+        //   * The projected form alone - the shape the rule exists to require.
+        //   * Nothing configured for a permitted reference - a supported state, answered 404 at the
+        //     endpoint, and refusing it would make an empty permitted set unstartable.
+        //   * Both forms - already refused by rule 2 with the message written for that condition, so
+        //     raising here would report the wrong problem first.
+        //   * A reference outside the permitted set carrying material - not a reference this deployment
+        //     resolves, so it is not this rule's business; the endpoint refuses it at screen three.
+        FileBackedSecrets.RefuseInlineKeyStoreMaterial(
+            Build(
+                ("Security:KeyStore:ConfigurationKeyPrefix", "SECURITY_KEYSTORE_"),
+                ("Security:KeyStore:PermittedKeyRefs:0", "signing-fixture"),
+                ("SECURITY_KEYSTORE_signing-fixture_FILE", "/run/secrets/keystore-signing-fixture")),
+            enforce: true);
+
+        FileBackedSecrets.RefuseInlineKeyStoreMaterial(
+            Build(
+                ("Security:KeyStore:ConfigurationKeyPrefix", "SECURITY_KEYSTORE_"),
+                ("Security:KeyStore:PermittedKeyRefs:0", "signing-fixture")),
+            enforce: true);
+
+        FileBackedSecrets.RefuseInlineKeyStoreMaterial(
+            Build(
+                ("Security:KeyStore:ConfigurationKeyPrefix", "SECURITY_KEYSTORE_"),
+                ("Security:KeyStore:PermittedKeyRefs:0", "signing-fixture"),
+                ("SECURITY_KEYSTORE_signing-fixture", Material),
+                ("SECURITY_KEYSTORE_signing-fixture_FILE", "/run/secrets/keystore-signing-fixture")),
+            enforce: true);
+
+        FileBackedSecrets.RefuseInlineKeyStoreMaterial(
+            Build(
+                ("Security:KeyStore:ConfigurationKeyPrefix", "SECURITY_KEYSTORE_"),
+                ("Security:KeyStore:PermittedKeyRefs:0", "signing-fixture"),
+                ("SECURITY_KEYSTORE_never-permitted", Material)),
+            enforce: true);
+    }
+
+    [Fact]
+    public void OutsideProductionTheInlineFormIsLeftAloneSoTheDocumentedBringUpStillWorks()
+    {
+        // THE BOUND ON RULE 4, ASSERTED RATHER THAN ASSUMED. The documented compose bring-up and every
+        // parity capture run under Development and supply their fixtures inline; refusing those would break
+        // the documented commands (C-I, C-L) to protect a development container from itself. The rule is
+        // decided by the HOST's environment, so this row passes `enforce: false` exactly as the composition
+        // root passes its own production determination.
+        IConfiguration configuration = Build(
+            ("Security:KeyStore:ConfigurationKeyPrefix", "SECURITY_KEYSTORE_"),
+            ("Security:KeyStore:PermittedKeyRefs:0", "signing-fixture"),
+            ("SECURITY_KEYSTORE_signing-fixture", Material));
+
+        FileBackedSecrets.RefuseInlineKeyStoreMaterial(configuration, enforce: false);
     }
 
     /// <summary>Builds an in-memory configuration from key/value pairs.</summary>

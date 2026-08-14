@@ -667,6 +667,25 @@ internal static class PersistenceServiceCollectionExtensions
                 // carries what a record may contain and why the failure event writes nothing of its own.
                 AuthenticationRefusalRecord.Attach(bearer);
 
+                // 🔴 AND THE ONE 401 A PLANNED KEY ROTATION STILL COST, WHICH THE TWO INTERVALS ABOVE DO
+                // NOT CLOSE.
+                //
+                // Both refresh intervals are assigned and both are correct, and a MEASURED rotation still
+                // refused the first token minted under the new key: verifiers primed on the original key,
+                // Security restarted with a new active key plus the original as retiring, and this service
+                // answered 401 on attempt 1 and 200 on attempt 2 about a seventh of a second later. The
+                // intervals decide WHEN a refresh may happen; they cannot retry the request that provoked
+                // one, and `RefreshOnIssuerKeyNotFound` arms the refresh for the NEXT request while this
+                // one has already failed. The refused caller here is DATASERVICES, so the refusal lands two
+                // projections deep - a failed upstream call reported by DataServices and projected outward
+                // by Gateway - which is how one rotation became a visible ingress failure on a retrieval
+                // nobody had touched. Authorization/UnknownSigningKeyRevalidation.cs retries exactly that
+                // failure once against the key set the handler already asked for, with every check
+                // configured above still enforced, and carries the six properties that keep it safe -
+                // including why a forged key identifier still fails and why no fetch amplification is
+                // possible.
+                UnknownSigningKeyRevalidation.Attach(bearer);
+
                 // CLOCK SKEW IS BOUNDED AND NOT CONFIGURABLE, AND SAYING NOTHING WAS NOT THE SAME AS
                 // ALLOWING NOTHING.
                 //

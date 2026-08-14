@@ -6560,10 +6560,19 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         // In request order, which IS the sort order. Composed through the model so the clause text is the
         // oracle's rather than this file's.
         List<string> clauses = [];
+        List<SortData> requested = [];
 
         foreach (ColumnSortState.Types.ColumnSort column in request.Columns)
         {
             long sortType = ToLegacySortType(column.Direction);
+            string columnName = column.ColumnName ?? string.Empty;
+
+            // THE STORE ENTRY IS BUILT FOR EVERY STATED COLUMN, INCLUDING AN UNSORTED ONE, because the
+            // oracle's pass visits unsorted entries too - `_of_SetArrow` is unconditional [:L193] and
+            // clearing the indicator of a column the caller has just unsorted is real work.
+            // ColumnSortModel.ApplyRequestedSort drops them again after the pass, exactly as the oracle
+            // does once a click completes.
+            requested.Add(new SortData(columnName, sortType));
 
             if (sortType == 0L)
             {
@@ -6573,7 +6582,7 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
                 continue;
             }
 
-            clauses.Add(model.GetClause(column.ColumnName ?? string.Empty, sortType));
+            clauses.Add(model.GetClause(columnName, sortType));
         }
 
         // 🔴 JOINED WITH THE MODEL'S OWN SEPARATOR. This was string.Empty, so a multi-column sort was
@@ -6591,9 +6600,24 @@ internal sealed class DataWindowService : GeneratedDataWindowServiceBase
         // avoid.
         string expression = string.Join(ColumnSortModel.ClauseSeparator, clauses);
 
+        // =============================================================================================
+        //  🔴 THE APPLY ESTABLISHES THE SORT IN THE MODEL. It called `model.Update(expression)`, which is
+        //  a DIFFERENT OPERATION: `of_update` writes the REMEMBERED ORIGINAL sort
+        //  [n_cst_dwsvc_columnsort.sru:L269] and returns early while a user sort is active [:L276]. It
+        //  never touches the store and never assigns the composed expression, so the requested sort was
+        //  neither stored nor composed: this response and every later `GetColumnSortState` reported an
+        //  EMPTY state, and the operation answered OK for a sort that had not happened. The user sort in
+        //  the oracle is established by mutating the store and then running the pass, which is what
+        //  ColumnSortModel.ApplyRequestedSort does - see its remarks for why the store is replaced rather
+        //  than merged and why unsorted entries are visited before being dropped.
+        //
+        //  THE EXPRESSION COMPOSED ABOVE IS STILL THE ONE REPORTED ON THE EXPRESSION-ONLY PATH, and it is
+        //  composed through the model's own clause composer either way, so the two paths cannot disagree
+        //  about the text: the pass composes it from the same `GetClause` with the same separator.
+        // =============================================================================================
         long outcome = request.ExpressionOnly
             ? RetCode.OK
-            : model.Update(expression);
+            : model.ApplyRequestedSort(requested);
 
         return Task.FromResult(new ApplyColumnSortResponse
         {

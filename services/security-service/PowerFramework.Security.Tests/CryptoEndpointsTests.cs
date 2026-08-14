@@ -15,16 +15,18 @@
 //
 //    (2) EVERY OPERATION REQUIRES A TOKEN. Asserted by driving all 18 routes through the REAL
 //        composition root without one and requiring 401 from each - a data-driven row per route for
-//        the 17 POST projections, so that a route added later cannot escape the assertion by being
-//        forgotten, plus a row of its own for the authored DELETE, which is not POST-shaped and
-//        therefore cannot join that table.
+//        the 17 projections, so that a route added later cannot escape the assertion by being
+//        forgotten, plus a row of its own for the authored release, which answers 204 rather than 200
+//        and therefore cannot join that table.
 //
 //  TWO COUNTS THAT MUST NOT BE CONFLATED, AND ARE KEPT APART DELIBERATELY THROUGHOUT THIS FILE.
-//  SEVENTEEN is the number of PROJECTIONS - the POST operations the 63 legacy overloads land on.
+//  SEVENTEEN is the number of PROJECTIONS - the operations the 63 legacy overloads land on.
 //  EIGHTEEN is the number of PUBLISHED OPERATIONS - those seventeen plus the authored
-//  `DELETE /v1/crypto/rsa/keys/{keyRef}`, which releases a retained key and covers no legacy overload
-//  because the legacy had no key store to release from. NINE operations resolve an inbound `keyRef`:
-//  eight carry it in the request body and the authored release carries it in the path.
+//  `POST /v1/crypto/rsa/keys/release`, which releases a retained key and covers no legacy overload
+//  because the legacy had no key store to release from. NINE operations resolve an inbound `keyRef`,
+//  and ALL NINE carry it in the request body: the release used to carry it in a PATH SEGMENT, which the
+//  host's own request scope records, so it was moved into a body and no operation on this contract now
+//  puts caller-supplied text in a request line.
 //
 //  THREE LEVELS OF TEST, EACH DOING WHAT ONLY IT CAN DO.
 //
@@ -250,8 +252,9 @@ internal static class ContractDocument
 /// </param>
 /// <remarks>
 /// <para>
-/// THE EIGHTEENTH OPERATION IS NOT MODELLED BY THIS RECORD. Every row driven from this table asserts a
-/// POST-shaped operation; the authored <c>DELETE</c> release has its own rows, reached through
+/// THE EIGHTEENTH OPERATION IS NOT MODELLED BY THIS RECORD. Every row driven from this table asserts an
+/// operation answering 200 with a response body and declaring a 500; the authored release answers 204 with
+/// no body and reads no configured material, so it has its own rows, reached through
 /// <see cref="CryptoFixture.ReleasePath"/>. This record therefore describes seventeen operations while
 /// the contract publishes eighteen, and that gap is deliberate rather than an omission.
 /// </para>
@@ -277,7 +280,12 @@ internal sealed record CryptoOperation(
 /// <param name="Verb">The HTTP method key, lower-cased as the document spells it.</param>
 /// <param name="RequestSchema">
 /// The component schema name the operation's request body references, or <see langword="null"/> when the
-/// operation declares no request body at all - which exactly one operation of this contract does.
+/// operation declares no request body at all - which no operation of this contract now does.
+/// </param>
+/// <param name="OperationId">
+/// The published operation identifier the document declares. 🔴 CAPTURED BECAUSE THE VERB NO LONGER TELLS
+/// THE AUTHORED OPERATION APART: the release was the one non-POST until its reference moved out of the
+/// request path, so identity has to come from the identifier rather than from the method.
 /// </param>
 /// <remarks>
 /// DELIBERATELY NOT <see cref="CryptoOperation"/>. That record is the SET THIS SUITE DRIVES ROWS FROM and
@@ -289,7 +297,8 @@ internal sealed record CryptoOperation(
 internal sealed record DocumentedOperation(
     string Path,
     string Verb,
-    string? RequestSchema);
+    string? RequestSchema,
+    string OperationId);
 
 /// <summary>
 /// Shared fixtures for the contract C-02 tests: the operation table, the provider graph, the
@@ -318,13 +327,23 @@ internal static class CryptoFixture
     /// The one AUTHORED operation's path, kept out of <see cref="Operations"/> deliberately.
     /// </summary>
     /// <remarks>
-    /// EVERY ROW DRIVEN BY <see cref="Operations"/> ASSERTS A POST-SHAPED OPERATION - a request body, a
-    /// 200, a 400 and a 500. The release operation is a DELETE with a path parameter, a 204 and no 400 or
-    /// 500 at all, so folding it into that table would either break every row or force each of them to
+    /// <para>
+    /// EVERY ROW DRIVEN BY <see cref="Operations"/> ASSERTS A 200-ANSWERING OPERATION - a request body, a
+    /// 200, a 400 and a 500. The release operation answers 204 with no response body and declares no 500
+    /// at all, so folding it into that table would either break every row or force each of them to
     /// carry an exception. It has its own conformance rows instead, which state its shape explicitly
     /// rather than by exemption.
+    /// </para>
+    /// <para>
+    /// 🔴 IT IS A POST AT A FIXED PATH, AND IT WAS <c>DELETE /rsa/keys/{keyRef}</c>. A path segment is
+    /// recorded by the host's own request scope - and by every proxy upstream of it - so a
+    /// credential-like <c>keyRef</c> reached diagnostics no matter what the handler recorded; a sweep of a
+    /// running deployment found a freshly generated reference in four records of its own release window.
+    /// The reference now travels in the request body, so the rows below assert a fixed path and a
+    /// reference-bearing schema rather than a path parameter.
+    /// </para>
     /// </remarks>
-    internal const string ReleasePath = Prefix + "/rsa/keys/{keyRef}";
+    internal const string ReleasePath = Prefix + "/rsa/keys/release";
 
     /// <summary>The authored release operation's identifier.</summary>
     internal const string ReleaseOperationId = "releaseRsaKey";
@@ -396,6 +415,11 @@ internal static class CryptoFixture
         typeof(RsaSignRequest),
         typeof(RsaVerifyRequest),
         typeof(GenRsaKeyRequest),
+
+        // 🔴 THE AUTHORED RELEASE BINDS A RECORD NOW, BECAUSE ITS REFERENCE MOVED OUT OF THE PATH. It is
+        // covered by every reflection row here for the same reason the other sixteen are: it carries a
+        // reference, and the rows prove no request record on this surface can carry material.
+        typeof(ReleaseRsaKeyRequest),
         typeof(RandomBlobRequest),
         typeof(RndStringRequest),
         typeof(GuidRequest),
@@ -844,15 +868,24 @@ public sealed class CryptoContractConformanceTests
     }
 
     /// <summary>
-    /// The authored release operation is declared as a DELETE with the status set it actually answers.
+    /// The authored release operation carries its reference in the request BODY and never in the path.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// ITS SHAPE IS STATED EXPLICITLY RATHER THAN BY EXEMPTION FROM THE POST-SHAPED ROWS. It is a DELETE
-    /// because it removes the resource the generation operation named; it answers 204 because there is
-    /// nothing to report beyond the outcome; it declares NO 400, because the only input is a path segment
-    /// and any value of it is a well-formed request that simply names nothing; and it declares NO 500,
-    /// because there is no configured material for it to fail to read.
+    /// 🔴 THIS ROW IS THE FIX, AND IT WOULD HAVE CAUGHT THE DEFECT IF IT HAD ASSERTED THE OPPOSITE THING.
+    /// The operation was published as <c>DELETE /v1/crypto/rsa/keys/{keyRef}</c> and this row asserted that
+    /// shape, including <c>in: path</c> - so the contract and its test agreed perfectly while a
+    /// credential-like reference sat in a request line that the HOST's own request scope records, and that
+    /// every proxy, ingress and trace upstream of the service records too. A sweep of a running deployment
+    /// found a freshly generated reference in four records of its own release window. The assertion now
+    /// pins the property that matters: <b>no caller-supplied value appears in this contract's paths.</b>
+    /// </para>
+    /// <para>
+    /// ITS SHAPE IS STILL STATED EXPLICITLY RATHER THAN BY EXEMPTION FROM THE 200-ANSWERING ROWS. It
+    /// answers 204 because there is nothing to report beyond the outcome; it declares a 400 because the
+    /// reference is now a request member and an absent one is a malformed request rather than a request
+    /// naming nothing; and it declares NO 500, because there is no configured material for it to fail to
+    /// read.
     /// </para>
     /// <para>
     /// THE 404 IS THE SECURITY-BEARING STATUS. A reference naming nothing retained and one naming another
@@ -861,12 +894,12 @@ public sealed class CryptoContractConformanceTests
     /// </para>
     /// </remarks>
     [Fact]
-    public void TheAuthoredReleaseOperationIsDeclaredAsADeleteWithItsOwnStatusSet()
+    public void TheAuthoredReleaseOperationCarriesItsReferenceInTheBodyAndNotInThePath()
     {
         string block = ContractDocument.PathBlock(CryptoFixture.ReleasePath);
 
-        Assert.Contains("    delete:", block, StringComparison.Ordinal);
-        Assert.DoesNotContain("    post:", block, StringComparison.Ordinal);
+        Assert.Contains("    post:", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("    delete:", block, StringComparison.Ordinal);
 
         Assert.Contains(
             "operationId: " + CryptoFixture.ReleaseOperationId,
@@ -876,21 +909,31 @@ public sealed class CryptoContractConformanceTests
         Assert.Contains("CryptoService", block, StringComparison.Ordinal);
 
         Assert.Contains("        '204':", block, StringComparison.Ordinal);
+        Assert.Contains("        '400':", block, StringComparison.Ordinal);
         Assert.Contains("        '401':", block, StringComparison.Ordinal);
         Assert.Contains("        '403':", block, StringComparison.Ordinal);
         Assert.Contains("        '404':", block, StringComparison.Ordinal);
 
         Assert.DoesNotContain("        '200':", block, StringComparison.Ordinal);
-        Assert.DoesNotContain("        '400':", block, StringComparison.Ordinal);
         Assert.DoesNotContain("        '500':", block, StringComparison.Ordinal);
 
         // C-D reserves 501 for the ingress service's four deferred-capability declarations.
         Assert.DoesNotContain("        '501':", block, StringComparison.Ordinal);
 
-        // The reference is a PATH parameter, which is what makes this a DELETE of a named resource
-        // rather than a POST that happens to delete.
-        Assert.Contains("name: keyRef", block, StringComparison.Ordinal);
-        Assert.Contains("in: path", block, StringComparison.Ordinal);
+        // 🔴 THE LOAD-BEARING PAIR. The reference arrives in a request body, and NOTHING declares a path
+        // parameter - so the value cannot reach a request line, a proxy log or a browser history.
+        Assert.Contains(
+            "$ref: '#/components/schemas/ReleaseRsaKeyRequest'",
+            block,
+            StringComparison.Ordinal);
+
+        Assert.DoesNotContain("in: path", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("parameters:", block, StringComparison.Ordinal);
+
+        // AND THE PATH ITSELF CARRIES NO TEMPLATE PARAMETER, asserted against the path key rather than the
+        // block, because a parameterless path with a parameter declaration would be caught above and a
+        // parameterised path with no declaration would not.
+        Assert.DoesNotContain('{', CryptoFixture.ReleasePath);
     }
 
 
@@ -969,24 +1012,30 @@ public sealed class CryptoContractConformanceTests
     /// <para>
     /// SEVENTEEN AND EIGHTEEN ANSWER DIFFERENT QUESTIONS AND NEITHER SUBSTITUTES FOR THE OTHER.
     /// SEVENTEEN is how many operations the 63 legacy overloads project onto. EIGHTEEN is how many the
-    /// document publishes: those seventeen plus <c>DELETE /v1/crypto/rsa/keys/{keyRef}</c>, which is
+    /// document publishes: those seventeen plus <c>POST /v1/crypto/rsa/keys/release</c>, which is
     /// AUTHORED and projects no overload at all, because the legacy handed the private half of a generated
     /// pair straight back through a <c>ref</c> parameter and had no store to release from. Asserting both
     /// in one place, against one source, is what keeps them apart.
     /// </para>
     /// <para>
-    /// SIXTEEN REQUEST SCHEMAS FOR SEVENTEEN POST OPERATIONS, AND THAT IS NOT AN ERROR EITHER:
+    /// 🔴 THE AUTHORED ONE IS IDENTIFIED BY ITS OPERATION IDENTIFIER RATHER THAN BY ITS VERB, and that
+    /// change is the point. It used to be the one operation published under a method other than POST, so
+    /// the verb told it apart - and the reason it was a DELETE was that its reference sat in a PATH
+    /// SEGMENT, which the host's own request scope records. The reference moved into a request body, so all
+    /// eighteen are now a POST and the verb distinguishes nothing.
+    /// </para>
+    /// <para>
+    /// SEVENTEEN REQUEST SCHEMAS FOR EIGHTEEN OPERATIONS, AND THAT IS NOT AN ERROR:
     /// <c>RsaCipherRequest</c> binds both RSA cipher directions, which differ in provider family and in
-    /// nothing a request carries. The row asserts the seventeen-to-sixteen collapse explicitly so that a
+    /// nothing a request carries. The row asserts the eighteen-to-seventeen collapse explicitly so that a
     /// reader meeting either number elsewhere can tell which one is being counted.
     /// </para>
     /// <para>
-    /// NINE KEY REFERENCES: eight POST operations carry a <c>keyRef</c> in the request body - keyed digest
-    /// in both payload forms, both symmetric directions, and the four RSA operations that consume a key -
-    /// and the authored release carries one in its PATH. Key generation is the operation that RETURNS a
-    /// reference rather than resolving one, which is why it alone among the RSA operations declares no 404.
-    /// The count is derived from the request records themselves rather than from a list kept here, so a
-    /// family that acquired or lost a key would move it.
+    /// NINE KEY REFERENCES, AND ALL NINE IN A REQUEST BODY: keyed digest in both payload forms, both
+    /// symmetric directions, the four RSA operations that consume a key, and the authored release. Key
+    /// generation is the operation that RETURNS a reference rather than resolving one, which is why it
+    /// alone among the RSA operations declares no 404. The count is derived from the request records
+    /// themselves rather than from a list kept here, so a family that acquired or lost a key would move it.
     /// </para>
     /// </remarks>
     [Fact]
@@ -994,19 +1043,25 @@ public sealed class CryptoContractConformanceTests
     {
         IReadOnlyList<DocumentedOperation> declared = DeclaredCryptoOperations();
 
-        // EIGHTEEN PUBLISHED, SEVENTEEN PROJECTING, ONE AUTHORED.
+        // EIGHTEEN PUBLISHED, SEVENTEEN PROJECTING, ONE AUTHORED - AND ALL EIGHTEEN A POST.
         Assert.Equal(18, declared.Count);
-        Assert.Equal(17, declared.Count(operation => IsPost(operation)));
+        Assert.Equal(18, declared.Count(operation => IsPost(operation)));
 
-        DocumentedOperation release = Assert.Single(declared, operation => !IsPost(operation));
+        DocumentedOperation release = Assert.Single(
+            declared,
+            operation => string.Equals(
+                operation.OperationId,
+                CryptoFixture.ReleaseOperationId,
+                StringComparison.Ordinal));
 
-        Assert.Equal("delete", release.Verb);
+        Assert.Equal("post", release.Verb);
         Assert.Equal(CryptoFixture.ReleasePath, release.Path);
-        Assert.Contains("{keyRef}", release.Path, StringComparison.Ordinal);
+        Assert.DoesNotContain('{', release.Path);
 
-        // The authored operation is the ONE shape carrying no request body at all, which is why it cannot
-        // join the POST-shaped table and why that table describes seventeen of eighteen.
-        Assert.Null(release.RequestSchema);
+        // 🔴 IT CARRIES A REQUEST BODY NOW, WHICH IS WHERE ITS REFERENCE LIVES. The one shape it still does
+        // not share with the seventeen is the RESPONSE: it answers 204 with nothing, which is why it cannot
+        // join the table below and why that table describes seventeen of eighteen.
+        Assert.Equal("ReleaseRsaKeyRequest", release.RequestSchema);
 
         Assert.Equal(17, CryptoFixture.Operations.Count);
         Assert.DoesNotContain(
@@ -1014,28 +1069,32 @@ public sealed class CryptoContractConformanceTests
             CryptoFixture.Operations.Select(operation => operation.Path),
             StringComparer.Ordinal);
 
-        // The table is the document's POST set exactly - neither an invention nor an omission.
+        // The table is the document's PROJECTION set exactly - neither an invention nor an omission. The
+        // release is excluded by its operation identifier rather than by its verb, since every operation is
+        // now a POST.
         Assert.Equal(
-            declared.Where(IsPost).Select(operation => operation.Path).Order(StringComparer.Ordinal),
+            declared
+                .Where(operation => !string.Equals(
+                    operation.OperationId,
+                    CryptoFixture.ReleaseOperationId,
+                    StringComparison.Ordinal))
+                .Select(operation => operation.Path)
+                .Order(StringComparer.Ordinal),
             CryptoFixture.Operations.Select(operation => operation.Path).Order(StringComparer.Ordinal));
 
-        // SIXTEEN DISTINCT REQUEST SCHEMAS FOR SEVENTEEN OPERATIONS.
-        string[] requestSchemas =
-        [
-            .. declared
-                .Where(IsPost)
-                .Select(operation => operation.RequestSchema ?? string.Empty),
-        ];
+        // SEVENTEEN DISTINCT REQUEST SCHEMAS FOR EIGHTEEN OPERATIONS, and EVERY operation declares one -
+        // there is no longer a bodiless shape on this contract.
+        string[] requestSchemas = [.. declared.Select(operation => operation.RequestSchema ?? string.Empty)];
 
         Assert.DoesNotContain(string.Empty, requestSchemas, StringComparer.Ordinal);
-        Assert.Equal(16, requestSchemas.Distinct(StringComparer.Ordinal).Count());
-        Assert.Equal(16, CryptoFixture.RequestTypes.Count);
+        Assert.Equal(17, requestSchemas.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(17, CryptoFixture.RequestTypes.Count);
 
-        // NINE KEY REFERENCES: eight in a request body, one in a path.
+        // 🔴 NINE KEY REFERENCES, ALL NINE IN A REQUEST BODY. It used to be eight plus one in a path, and
+        // the path one is the exposure this change removed.
         int bodyKeyReferencing = requestSchemas.Count(schema => ResolveRequestType(schema).KeyReferencing);
 
-        Assert.Equal(8, bodyKeyReferencing);
-        Assert.Equal(9, bodyKeyReferencing + 1);
+        Assert.Equal(9, bodyKeyReferencing);
 
         // NINE OPERATIONS DECLARE 404, WHICH IS NOT THE SAME NINE. The eight keyed ones plus the unkeyed
         // file digest, which resolves a fileRef through the same allow-listed mechanism. Each row's flag is
@@ -1043,9 +1102,13 @@ public sealed class CryptoContractConformanceTests
         Assert.Equal(9, CryptoFixture.Operations.Count(operation => operation.DeclaresNotFound));
     }
 
-    /// <summary>Whether an operation is one of the seventeen POST projections.</summary>
+    /// <summary>Whether the document declares an operation under <c>post</c>.</summary>
     /// <param name="operation">The operation.</param>
     /// <returns><see langword="true"/> when the document declares it under <c>post</c>.</returns>
+    /// <remarks>
+    /// EVERY C-02 OPERATION IS A POST, so this no longer separates the projections from the authored one -
+    /// it asserts the uniformity. The authored operation is told apart by its operation identifier.
+    /// </remarks>
     private static bool IsPost(DocumentedOperation operation) =>
         string.Equals(operation.Verb, "post", StringComparison.Ordinal);
 
@@ -1091,17 +1154,19 @@ public sealed class CryptoContractConformanceTests
         string path = string.Empty;
         string verb = string.Empty;
         string? requestSchema = null;
+        string operationId = string.Empty;
         bool insideRequestBody = false;
 
         void Close()
         {
             if (verb.Length > 0 && path.StartsWith(CryptoFixture.Prefix, StringComparison.Ordinal))
             {
-                operations.Add(new DocumentedOperation(path, verb, requestSchema));
+                operations.Add(new DocumentedOperation(path, verb, requestSchema, operationId));
             }
 
             verb = string.Empty;
             requestSchema = null;
+            operationId = string.Empty;
             insideRequestBody = false;
         }
 
@@ -1122,6 +1187,14 @@ public sealed class CryptoContractConformanceTests
             {
                 Close();
                 verb = line.Trim().TrimEnd(':');
+                continue;
+            }
+
+            // The identifier sits at the same six-space level as requestBody and responses, so it is read
+            // on the same rule the rest of this scan rests on.
+            if (line.StartsWith("      operationId:", StringComparison.Ordinal))
+            {
+                operationId = line["      operationId:".Length..].Trim();
                 continue;
             }
 
@@ -1465,11 +1538,16 @@ public sealed class CryptoEndpointsServiceTests
         using SecurityHostFactory factory = new();
         using HttpClient client = factory.CreateClient();
 
-        // A concrete reference in the path position - the route template's parameter has to be filled for
-        // the request to match the route at all, and a 404 from routing would pass this row for the wrong
-        // reason. The value names nothing and is obviously synthetic.
-        using HttpResponseMessage response = await client.DeleteAsync(
-            new Uri(CryptoFixture.Prefix + "/rsa/keys/gen-0-nothing-here", UriKind.Relative),
+        // 🔴 A FIXED PATH AND A BODY, WHICH IS THE SHAPE THE OPERATION NOW HAS. It used to be reached with
+        // a concrete reference in a path segment - and that segment reaching the host's request scope is
+        // what moved the reference into the body. The body is deliberately an empty object: authorization
+        // is evaluated before model binding, so a row that sent a reference would risk passing for the
+        // wrong reason and would put a reference on the wire for no assertion's benefit.
+        using StringContent body = new("{}", Encoding.UTF8, "application/json");
+
+        using HttpResponseMessage response = await client.PostAsync(
+            new Uri(CryptoFixture.ReleasePath, UriKind.Relative),
+            body,
             TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
@@ -1544,7 +1622,7 @@ public sealed class CryptoEndpointsServiceTests
         }
     }
     /// <summary>
-    /// The generated document declares the release operation as a bearer-protected DELETE.
+    /// The generated document declares the release operation as a bearer-protected POST with a body.
     /// </summary>
     /// <returns>A task representing the assertion.</returns>
     /// <remarks>
@@ -1564,19 +1642,36 @@ public sealed class CryptoEndpointsServiceTests
             $"The generated document declares no path '{CryptoFixture.ReleasePath}'.");
 
         Assert.True(
-            item.TryGetProperty("delete", out JsonElement delete),
-            "The release operation is a DELETE of the resource the generation operation named.");
+            item.TryGetProperty("post", out JsonElement release),
+            "The release operation is a POST carrying its reference in a request body.");
 
         Assert.Equal(
             CryptoFixture.ReleaseOperationId,
-            delete.GetProperty("operationId").GetString());
+            release.GetProperty("operationId").GetString());
 
         Assert.True(
-            delete.TryGetProperty("security", out JsonElement security),
+            release.TryGetProperty("security", out JsonElement security),
             "The release operation declares a security requirement: a caller may release only its own "
                 + "keys, which requires an authenticated identity.");
 
         Assert.Contains("bearerAuth", security.GetRawText(), StringComparison.Ordinal);
+
+        // 🔴 THE GENERATED DOCUMENT DECLARES NO PARAMETERS FOR IT, which is the generated-side half of the
+        // property the authored-side row pins: a consumer generating a client from this document builds one
+        // that puts the reference in a body, so no generated client can place it in a request line either.
+        Assert.False(
+            release.TryGetProperty("parameters", out JsonElement _),
+            "The release operation declares no parameters: its reference travels in the request body, "
+                + "because a path segment is recorded by the host's own request scope.");
+
+        Assert.True(
+            release.TryGetProperty("requestBody", out JsonElement requestBody),
+            "The release operation declares a request body, which is where its reference travels.");
+
+        Assert.Contains(
+            nameof(ReleaseRsaKeyRequest),
+            requestBody.GetRawText(),
+            StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -2039,7 +2134,7 @@ public sealed class CryptoSecrecyTests
             Assert.Contains(covered, declared);
         }
 
-        Assert.Equal(16, CryptoFixture.RequestTypes.Count);
+        Assert.Equal(17, CryptoFixture.RequestTypes.Count);
     }
 
     /// <summary>
@@ -2860,7 +2955,7 @@ public sealed class CryptoReferenceResolutionTests
             CryptoFixture.Loggers));
 
         Results<NoContent, ProblemHttpResult> foreign = CryptoEndpoints.ReleaseRsaKey(
-            generated.KeyRef,
+            new ReleaseRsaKeyRequest { KeyRef = generated.KeyRef },
             CryptoFixture.Caller("a-different-caller"),
             store,
             CryptoFixture.Loggers);
@@ -2877,7 +2972,7 @@ public sealed class CryptoReferenceResolutionTests
             StringComparison.Ordinal);
 
         Results<NoContent, ProblemHttpResult> owned = CryptoEndpoints.ReleaseRsaKey(
-            generated.KeyRef,
+            new ReleaseRsaKeyRequest { KeyRef = generated.KeyRef },
             CryptoFixture.Caller(),
             store,
             CryptoFixture.Loggers);
@@ -2886,7 +2981,7 @@ public sealed class CryptoReferenceResolutionTests
 
         // Idempotent from the caller's point of view: a second release is a 404, not a second success.
         Results<NoContent, ProblemHttpResult> again = CryptoEndpoints.ReleaseRsaKey(
-            generated.KeyRef,
+            new ReleaseRsaKeyRequest { KeyRef = generated.KeyRef },
             CryptoFixture.Caller(),
             store,
             CryptoFixture.Loggers);
@@ -2894,6 +2989,38 @@ public sealed class CryptoReferenceResolutionTests
         Assert.Equal(
             StatusCodes.Status404NotFound,
             Assert.IsType<ProblemHttpResult>(again.Result).StatusCode);
+    }
+
+    /// <summary>
+    /// A release naming no reference is refused with 400, distinctly from the 404 a reference that names
+    /// nothing receives.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 A STATUS THE OPERATION COULD NOT PREVIOUSLY ANSWER, AND IT EXISTS BECAUSE THE REFERENCE MOVED
+    /// INTO THE BODY. While the reference was a path segment, an absent one simply failed to match the
+    /// route; as a request member it can be omitted, and answering that with 404 would report a fact about
+    /// the store - "no such key for this caller" - in response to a request that asked nothing about it,
+    /// while making an omitted member indistinguishable from a reference that genuinely resolves to nothing.
+    /// The detail is the shared missing-reference one every other operation uses, so the two arrive at one
+    /// message rather than two.
+    /// </remarks>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void AReleaseNamingNoReferenceIsRefusedWithBadRequestRatherThanNotFound(string? keyRef)
+    {
+        CryptoReferenceResolver store = CryptoFixture.EmptyStore();
+
+        Results<NoContent, ProblemHttpResult> refused = CryptoEndpoints.ReleaseRsaKey(
+            new ReleaseRsaKeyRequest { KeyRef = keyRef },
+            CryptoFixture.Caller(),
+            store,
+            CryptoFixture.Loggers);
+
+        ProblemHttpResult problem = Assert.IsType<ProblemHttpResult>(refused.Result);
+
+        Assert.Equal(StatusCodes.Status400BadRequest, problem.StatusCode);
     }
 
     /// <summary>

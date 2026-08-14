@@ -127,6 +127,7 @@ using System.Collections.Immutable;
 using System.Globalization;
 using System.Reflection;
 using System.Text;
+using System.Text.Json;
 
 using PowerFramework.DataServices.Expressions;
 using PowerFramework.DataServices.Services;
@@ -2857,19 +2858,48 @@ public enum PinyinClosedInput
 /// rule, which is why a lone legacy recording fails rather than passes.
 /// </para>
 /// <para>
-/// WHY THE WORKFLOW IDENTIFIER IS THE ORACLE WINDOW'S NAME. docs/PARITY.md leaves identifiers to
-/// discovery, so this file uses the name of the legacy window that PRODUCES the recording -
-/// <c>ws_objects/pfw.tests.pbl.src/w_test_dwsvc_dropdownsearch.srw</c>, which enables the drop-down search
-/// service with every filter rule on and is therefore the workflow that exercises the pinyin clause. An
-/// invented identifier would be arbitrary; this one is traceable.
+/// WHY THE WORKFLOW IDENTIFIER IS THE ROSTER'S, NOT THE ORACLE WINDOW'S. This constant previously held
+/// the legacy window name <c>w_test_dwsvc_dropdownsearch</c> verbatim, on the reasoning that a
+/// window-derived identifier is traceable where an invented one is arbitrary. The reasoning was right and
+/// the spelling was wrong, for two independent reasons that were established rather than assumed:
+/// </para>
+/// <para>
+/// FIRST, THAT SPELLING IS STRUCTURALLY ILLEGAL IN THIS STORE.
+/// <c>characterization/workflows/workflow.schema.json</c> constrains <c>workflowId</c> to
+/// <c>^[a-z][a-z0-9]*(-[a-z0-9]+)*$</c> - lower-case segments separated by single hyphens - and
+/// instructs that a window name's underscores be rendered as hyphens for exactly this purpose. An
+/// underscored identifier can never name a valid workflow directory, so this hook was watching a path
+/// that could not come into existence however much oracle work was done.
+/// </para>
+/// <para>
+/// SECOND, THE ROSTER ALREADY NAMES THIS WORKFLOW.
+/// <c>characterization/workflows/dataservices-dwsvc-dropdownsearch.yaml</c> is the reviewed definition
+/// covering the drop-down search service, and its identifier is the PAIRING KEY - the one thing that makes
+/// two recordings comparable. A hook watching a different key would report a blocked oracle while a
+/// recording sat under the roster key, and nothing would say so.
+/// </para>
+/// <para>
+/// So the identifier is now the roster's, and traceability to the oracle window is kept where it belongs:
+/// in the definition's own <c>oracleFixtures</c>, and in this file's header. The rename is safe precisely
+/// because it is being done NOW - the schema states an identifier is never renamed once a recording exists
+/// under it, since that orphans both halves of every pair already captured, and no recording exists under
+/// either spelling. <see cref="TheWorkflowIdentifierAgreesWithTheStoresRoster"/> pins both facts so the
+/// constant cannot drift back or drift onward.
 /// </para>
 /// </remarks>
 public sealed class PinyinOracleCharacterizationHookTests
 {
     /// <summary>
-    /// The workflow identifier: the legacy oracle window that exercises the pinyin filter clause.
+    /// The workflow identifier: the store roster entry whose oracle exercises the pinyin filter clause.
     /// </summary>
-    public const string WorkflowId = "w_test_dwsvc_dropdownsearch";
+    /// <remarks>
+    /// 🔴 DO NOT REPLACE THIS WITH THE ORACLE WINDOW NAME. The class remarks record why in full: the
+    /// window name <c>w_test_dwsvc_dropdownsearch</c> cannot satisfy the store's own
+    /// <c>workflowId</c> grammar, and this value is the pairing key that must match the reviewed
+    /// definition. <see cref="TheWorkflowIdentifierAgreesWithTheStoresRoster"/> fails if either fact
+    /// stops holding.
+    /// </remarks>
+    public const string WorkflowId = "dataservices-dwsvc-dropdownsearch";
 
     /// <summary>The legacy half of the pair, relative to the repository root.</summary>
     private const string LegacyRecordingDirectory = "characterization/recordings/legacy/" + WorkflowId;
@@ -3182,6 +3212,72 @@ public sealed class PinyinOracleCharacterizationHookTests
     /// as an equality so it stays correct after a recording lands rather than becoming the thing that has to
     /// be remembered.
     /// </remarks>
+    /// <summary>
+    /// The workflow identifier is a legal store identifier AND names a workflow the roster declares.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THIS GUARD EXISTS BECAUSE THE CONSTANT WAS WRONG IN A WAY NOTHING DETECTED. It held the legacy
+    /// oracle window name verbatim, underscores and all. Two independent facts made that unworkable, and
+    /// this test pins both so neither can come back:
+    /// </para>
+    /// <para>
+    /// (1) THE GRAMMAR. <c>characterization/workflows/workflow.schema.json</c> constrains
+    /// <c>workflowId</c> to lower-case alphanumeric segments separated by single hyphens. An underscored
+    /// identifier is not merely unconventional, it can never name a valid workflow directory - so this
+    /// hook was watching a path that could not come into existence. The pattern is read FROM THE SCHEMA
+    /// rather than restated here, because a restated pattern is a second thing to drift.
+    /// </para>
+    /// <para>
+    /// (2) THE ROSTER. The identifier is the pairing key, so it has to be the key of the reviewed
+    /// definition that covers this capability. A hook watching a key no definition declares would report
+    /// a blocked oracle while a recording sat under the roster key, and nothing would say so.
+    /// </para>
+    /// <para>
+    /// Both halves are asserted, and asserted separately, because a value can satisfy the grammar while
+    /// naming nothing - which is precisely the failure a grammar-only check would wave through.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheWorkflowIdentifierAgreesWithTheStoresRoster()
+    {
+        string? root = RepositoryRoot();
+
+        Assert.NotNull(root);
+
+        string schemaPath = Resolve(root, "characterization/workflows/workflow.schema.json");
+
+        Assert.True(File.Exists(schemaPath), $"The store's schema is missing at '{schemaPath}'.");
+
+        using JsonDocument schema = JsonDocument.Parse(File.ReadAllText(schemaPath));
+
+        string pattern = schema.RootElement
+            .GetProperty("properties")
+            .GetProperty("workflowId")
+            .GetProperty("pattern")
+            .GetString()!;
+
+        Assert.Matches(pattern, WorkflowId);
+
+        // THE ROSTER IS THE SET OF DEFINITION FILES, read off disk. A hardcoded expectation here would
+        // make this test agree with itself rather than with the store.
+        string definition = Resolve(root, $"characterization/workflows/{WorkflowId}.yaml");
+
+        Assert.True(
+            File.Exists(definition),
+            $"'{WorkflowId}' names no workflow definition. The identifier is the PAIRING KEY, so it must be "
+            + $"the identifier of the reviewed definition covering this capability; '{definition}' does not "
+            + "exist. Reconcile this constant with the roster rather than adding a definition to match it.");
+
+        // ...and the definition must agree, in its own text, that this is its identifier. A file named
+        // after an identifier whose content declares a different one would satisfy the check above while
+        // still pairing recordings under the wrong key.
+        Assert.Contains(
+            $"workflowId: {WorkflowId}",
+            File.ReadAllText(definition),
+            StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheOracleRecordingPredicateAgreesWithTheFilesystem()
     {

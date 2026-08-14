@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    PowerFramework.Characterization.Capture - the TARGET-SIDE capture driver for the paired
+    characterization store.
+
+    WHY THIS EXISTS. characterization/ carried fifteen reviewed workflow definitions, a schema, a
+    determinism mask per workflow and two recording roots - and nothing that could actually take a
+    capture. A store that specifies a capture and cannot perform one records an intention, so the
+    definitions stayed at executionStatus specified-not-executed with no way to change that other
+    than by hand-writing a recording, which is the one thing a golden-master store must never accept.
+    This project is the missing half of the target side: it drives a workflow's declared observable
+    outputs against a RUNNING service and writes normalized, diffable recordings.
+
+    WHAT IT DELIBERATELY IS NOT. It is not the legacy oracle and it cannot become one. The legacy
+    half needs the Appeon PowerBuilder virtual machine: pfw.dll is a 32-bit PE that exports the PBNI
+    entry points (_PBX_GetVersion@0, _PBX_CreateNonVisualObject@16, _PBX_CreateVisualObject@16,
+    _PBX_DrawVisualObject@12, _PBX_InvokeGlobalFunction@12) and references IPB_Session throughout,
+    which is the session interface the VM HANDS IT - so the binary is called BY PowerBuilder and
+    cannot be invoked without it. No pbvm library exists anywhere in this repository. That is why the
+    driver refuses to land an unpaired capture into the store rather than pretending a pair exists.
+
+    NO PACKAGE REFERENCE, ON PURPOSE. HttpClient and System.Text.Json carry the whole job, so this
+    tool adds nothing to the dependency graph the CI vulnerability and deprecation gates walk
+    (AAP 0.5.3). Every version, the target framework, nullable, implicit usings and
+    TreatWarningsAsErrors arrive from the repository-root Directory.Build.props and
+    Directory.Packages.props by MSBuild walk-up, exactly as they do for every service project.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+
+    <!-- Tooling, never shipped and never packed. -->
+    <IsPackable>false</IsPackable>
+
+    <!--
+      The invocation name the documentation uses. `dotnet run` is pointed at this project directory and
+      the arguments follow the argument separator, so the assembly name is kept short for the messages
+      it prints. Neither the project flag nor the separator can be spelled here: XML forbids a double
+      hyphen inside a comment, and MSBuild reports that as MSB4025 rather than as a comment problem.
+      characterization/tools/README.md carries the full command line.
+    -->
+    <AssemblyName>pfw-capture</AssemblyName>
+    <RootNamespace>PowerFramework.Characterization.Capture</RootNamespace>
+
+  </PropertyGroup>
+
+  <!--
+    An ITEM rather than a property, which is where InternalsVisibleTo belongs: the SDK turns each item
+    into an assembly attribute, and an Include attribute on a property is MSB4066. Declared so the
+    sibling test project can drive the plan loader, the placeholder resolver, the secret screen and the
+    store rules directly instead of having to spawn a process and parse its output. The four service
+    projects carry the same item for the same reason.
+  -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="PowerFramework.Characterization.Capture.Tests" />
+  </ItemGroup>
+
+</Project>

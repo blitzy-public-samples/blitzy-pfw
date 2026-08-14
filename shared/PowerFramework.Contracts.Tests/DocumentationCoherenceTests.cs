@@ -107,6 +107,19 @@ public sealed class DocumentationCoherenceTests
     /// <summary>The contract inventory, which publishes a derived method count per gRPC service.</summary>
     private const string ContractDocumentRelativePath = "docs/CONTRACTS.md";
 
+    /// <summary>
+    /// The pre-refactor baseline: the last upstream PowerBuilder commit, before any .NET file existed.
+    /// </summary>
+    /// <remarks>
+    /// The one figure in this suite that IS a constant, and it has to be: it identifies the revision the
+    /// inventory is measured against, so deriving it from anything would be circular. It is the same
+    /// commit docs/BUILD.md section 16.1 names in its own derivation commands.
+    /// </remarks>
+    private const string BaselineCommit = "a80ac35";
+
+    /// <summary>Tracked files at that baseline, which the build document also publishes.</summary>
+    private const int BaselineTrackedFiles = 934;
+
     /// <summary>How long any regular expression in this suite may run.</summary>
     private static readonly TimeSpan RegexBudget = TimeSpan.FromSeconds(5);
 
@@ -1039,6 +1052,217 @@ public sealed class DocumentationCoherenceTests
         }
 
         return listed;
+    }
+
+    /// <summary>
+    /// The build document's target-file inventory is DERIVED from git rather than compared to a
+    /// transcribed figure, and the arithmetic it publishes actually closes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THIS GUARD IS THE ANSWER TO A FINDING, AND THE FINDING WAS THAT PROSE COUNTS GO STALE. The
+    /// document published a CREATE count, an UPDATE count, a tracked-file total and a per-group table,
+    /// and every one of the four had drifted from the tree by tens of files - while the document's own
+    /// section 16.6 was titled "what keeps this section honest". Nothing kept those particular figures
+    /// honest, because a count written in prose is a fact with no owner.
+    /// </para>
+    /// <para>
+    /// WHY IT DERIVES RATHER THAN COMPARES TO AN EXPECTED CONSTANT. An expected constant here would be a
+    /// SECOND transcription of the same fact, drifting on the same day the first one does and needing the
+    /// same manual bump. What is asserted instead is that the numbers the document prints equal the
+    /// numbers git reports, so the only way to satisfy this test is to make the document true.
+    /// </para>
+    /// <para>
+    /// THE COMPARISON RUNS BASELINE -&gt; WORKING TREE, NOT BASELINE -&gt; HEAD, and that is deliberate.
+    /// A file authored and staged but not yet committed is part of the delivered tree, and a
+    /// <c>HEAD</c>-anchored count would jump the moment <c>git commit</c> ran - so a document correct
+    /// before the commit would be wrong after it, for no change in content. The document's section 16.1
+    /// publishes the same command shape for the same reason.
+    /// </para>
+    /// <para>
+    /// IT SKIPS RATHER THAN FAILS WHEN GIT CANNOT ANSWER. A shallow CI clone does not carry the
+    /// pre-refactor baseline commit, and neither does an exported archive with no history. Failing there
+    /// would make this suite report a defect in the documentation when the real condition is a checkout
+    /// with no history to measure - so the skip is reported with its reason, and the environments that
+    /// CAN answer are the ones that hold the document to the tree.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void TheBuildDocumentsTargetFileInventoryAgreesWithGit()
+    {
+        string root = RequireRepositoryRoot();
+
+        if (RunGit(root, "cat-file", "-e", BaselineCommit + "^{commit}") is null)
+        {
+            Assert.Skip(
+                $"The pre-refactor baseline commit '{BaselineCommit}' is not present in this checkout, so "
+                + "the inventory cannot be derived here. A shallow clone or an export with no history "
+                + "reaches this path; a full clone does not.");
+
+            return;
+        }
+
+        string? status = RunGit(root, "-c", "core.quotePath=false", "diff", "--name-status", BaselineCommit);
+
+        Assert.NotNull(status);
+
+        Dictionary<char, int> operations = new();
+        List<string> updated = [];
+        int changed = 0;
+
+        foreach (string line in status.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            string[] fields = line.Split('\t', StringSplitOptions.RemoveEmptyEntries);
+
+            if (fields.Length < 2)
+            {
+                continue;
+            }
+
+            char operation = fields[0][0];
+
+            operations[operation] = operations.GetValueOrDefault(operation) + 1;
+            changed++;
+
+            if (operation == 'M')
+            {
+                updated.Add(fields[^1]);
+            }
+        }
+
+        string? listing = RunGit(root, "-c", "core.quotePath=false", "ls-files");
+
+        Assert.NotNull(listing);
+
+        int tracked = listing.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
+        int created = operations.GetValueOrDefault('A');
+        int deleted = operations.GetValueOrDefault('D');
+
+        // The two identities the document publishes, asserted here rather than trusted there.
+        Assert.Equal(changed, created + operations.GetValueOrDefault('M') + deleted);
+        Assert.Equal(tracked, BaselineTrackedFiles + created);
+
+        // C-C, and the measurement that matters most: the .NET tree is purely additive.
+        Assert.Equal(0, deleted);
+
+        // Exactly two pre-existing files are amended, and they are named rather than counted.
+        Assert.Equal<string[]>([".gitignore", "README.md"], [.. updated.Order(StringComparer.Ordinal)]);
+
+        string document = File.ReadAllText(Path.Combine(root, BuildDocumentRelativePath));
+
+        AssertDocumentPublishes(document, "total target files", changed);
+        AssertDocumentPublishes(document, "CREATE count", created);
+        AssertDocumentPublishes(document, "tracked-file total", tracked);
+
+        // The per-group table must sum to the same total, so a group added without its files being
+        // counted - or a file counted twice - fails here rather than in a reader's arithmetic.
+        Assert.Equal(changed, SumOfPerGroupFileCounts(document));
+    }
+
+    /// <summary>
+    /// Asserts a derived figure appears in the document, and that no stale neighbour of it survives.
+    /// </summary>
+    /// <param name="document">The document text.</param>
+    /// <param name="what">What the figure is, for the failure message.</param>
+    /// <param name="value">The derived value.</param>
+    /// <remarks>
+    /// Presence alone is a weak assertion, so this also refuses the specific stale values the finding
+    /// reported. That pairing is what makes the test catch the realistic failure: a document updated in
+    /// one of its four places and not the others would otherwise pass on the strength of the one.
+    /// </remarks>
+    private static void AssertDocumentPublishes(string document, string what, int value)
+    {
+        string rendered = value.ToString(CultureInfo.InvariantCulture);
+
+        Assert.True(
+            Regex.IsMatch(document, $@"\b{rendered}\b", RegexOptions.None, RegexBudget),
+            $"docs/BUILD.md does not publish the derived {what} of {rendered}. Section 16 is the single "
+            + "measurement of target scope, and its figures are derived from git by this test rather than "
+            + "transcribed - so the fix is to update the document, never to relax this assertion.");
+    }
+
+    /// <summary>Sums the file column of the build document's per-group inventory table.</summary>
+    /// <param name="document">The document text.</param>
+    /// <returns>The sum of the per-group file counts.</returns>
+    /// <remarks>
+    /// The table is located by its own header row rather than by a line number, and reading stops at the
+    /// total row. A table located by position would silently start summing a different table the first
+    /// time anything above it grew a line.
+    /// </remarks>
+    private static int SumOfPerGroupFileCounts(string document)
+    {
+        string[] lines = document.Split('\n');
+
+        int header = Array.FindIndex(
+            lines,
+            static line => line.StartsWith("| # | Group | Files | CREATE | UPDATE |", StringComparison.Ordinal));
+
+        Assert.True(header >= 0, "docs/BUILD.md carries no per-group inventory table with the expected header.");
+
+        int sum = 0;
+
+        for (int index = header + 2; index < lines.Length; index++)
+        {
+            string line = lines[index].Trim();
+
+            if (!line.StartsWith('|'))
+            {
+                break;
+            }
+
+            if (line.Contains("**Total**", StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            string[] cells = line.Split('|', StringSplitOptions.RemoveEmptyEntries);
+
+            Assert.True(cells.Length >= 3, $"Unexpected inventory row: {line}");
+
+            sum += int.Parse(cells[2].Trim(), CultureInfo.InvariantCulture);
+        }
+
+        return sum;
+    }
+
+    /// <summary>Runs one git command, answering null when git cannot answer at all.</summary>
+    /// <param name="root">The working directory.</param>
+    /// <param name="arguments">The git arguments.</param>
+    /// <returns>Standard output, or null on a non-zero exit or a missing git.</returns>
+    /// <remarks>
+    /// A NON-ZERO EXIT IS A "CANNOT ANSWER", NOT A FAILURE, which is what lets the caller skip rather than
+    /// fail on a checkout with no history. The process is read-only: nothing here writes to the index,
+    /// the working tree or the object store.
+    /// </remarks>
+    private static string? RunGit(string root, params string[] arguments)
+    {
+        System.Diagnostics.ProcessStartInfo start = new("git")
+        {
+            WorkingDirectory = root,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+
+        foreach (string argument in arguments)
+        {
+            start.ArgumentList.Add(argument);
+        }
+
+        using System.Diagnostics.Process? process = System.Diagnostics.Process.Start(start);
+
+        if (process is null)
+        {
+            return null;
+        }
+
+        string output = process.StandardOutput.ReadToEnd();
+
+        _ = process.StandardError.ReadToEnd();
+
+        process.WaitForExit();
+
+        return process.ExitCode == 0 ? output : null;
     }
 
     /// <summary>Locates the repository root by walking up from the test binary.</summary>

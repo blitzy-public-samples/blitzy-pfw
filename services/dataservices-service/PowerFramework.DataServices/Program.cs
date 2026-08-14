@@ -980,6 +980,24 @@ internal static class DataServicesComposition
                 // interceptor. Authorization/AuthenticationRefusalRecord.cs carries what a record may
                 // contain and why the failure event deliberately writes nothing of its own.
                 AuthenticationRefusalRecord.Attach(bearer);
+
+                // 🔴 AND THE ONE 401 A PLANNED KEY ROTATION STILL COST, WHICH THE TWO INTERVALS ABOVE DO
+                // NOT CLOSE.
+                //
+                // Both refresh intervals are assigned and both are correct, and a MEASURED rotation still
+                // refused the first token minted under the new key: verifiers primed on the original key,
+                // Security restarted with a new active key plus the original as retiring, and this service
+                // answered 401 on attempt 1 and 200 on attempt 2 about a seventh of a second later. The
+                // intervals decide WHEN a refresh may happen; they cannot retry the request that provoked
+                // one, and `RefreshOnIssuerKeyNotFound` arms the refresh for the NEXT request while this
+                // one has already failed. The refused caller here is GATEWAY, so the refusal does not stop
+                // at this boundary - Gateway projects an upstream 401 outward as a 502, which is how one
+                // rotation became a visible ingress failure.
+                // Authorization/UnknownSigningKeyRevalidation.cs retries exactly that failure once against
+                // the key set the handler already asked for, with every check configured above still
+                // enforced, and carries the six properties that keep it safe - including why a forged key
+                // identifier still fails and why no fetch amplification is possible.
+                UnknownSigningKeyRevalidation.Attach(bearer);
             });
 
                 // 🔴 THE THIRD DURATION, WHICH THE TWO ABOVE DO NOT BOUND: how long a SUPERSEDED key set
@@ -1283,27 +1301,53 @@ internal static class DataServicesComposition
         // timeout and the circuit breaker - stays on all four, and that is the part the AAP added this
         // package for: an in-process call could not fail in transit and a network call can (AAP 0.5.3).
         // ==========================================================================================
+        // ==========================================================================================
+        //  🔴 THE CIRCUIT BREAKER THAT CAN ACTUALLY SEE A DEAD UPSTREAM.
+        //
+        //  ONE INSTANCE FOR ALL FOUR gRPC CLIENTS, because all four address Persistence and its health is
+        //  a property of Persistence rather than of the channel that discovered the fault. The interceptor
+        //  is a singleton over it, and `AddInterceptor` composes it around each channel's own CallInvoker -
+        //  ABOVE the gRPC retry policy `ApplyGrpcRetry` installs, which is what makes an open circuit
+        //  refuse without asking the channel for a subchannel.
+        //
+        //  WHY IT IS NOT SIMPLY THE `AddStandardResilienceHandler` BREAKER: that pipeline is an
+        //  HttpMessageHandler and Grpc.Net establishes its connections outside it, so a refused socket, an
+        //  unresolvable name or a reset connection was classified by nothing on this edge. See
+        //  Clients/OutboundGrpcCircuitBreaker.cs for the measurement, for why the HTTP-level breaker is
+        //  left exactly as it was, and for why no threshold is invented here (AAP 0.8.5).
+        // ==========================================================================================
+        _ = services.AddSingleton(static serviceProvider => new OutboundGrpcCircuitBreaker(
+            OutboundGrpcCircuitBreakerInterceptor.PersistenceUpstream,
+            OutboundBreakerThresholds.FromPackageDefaults(),
+            serviceProvider.GetService<ILogger<OutboundGrpcCircuitBreaker>>()));
+
+        _ = services.AddSingleton<OutboundGrpcCircuitBreakerInterceptor>();
+
         _ = services
             .AddGrpcClient<PersistenceQueryClient>(ConfigurePersistenceChannel)
             .ConfigurePrimaryHttpMessageHandler(CreateInternalGrpcHandler)
+            .AddInterceptor<OutboundGrpcCircuitBreakerInterceptor>()
             .AddStandardResilienceHandler()
             .Configure(ConfigureNonRetryingPersistenceResilience);
 
         _ = services
             .AddGrpcClient<PersistenceUpdateClient>(ConfigurePersistenceChannel)
             .ConfigurePrimaryHttpMessageHandler(CreateInternalGrpcHandler)
+            .AddInterceptor<OutboundGrpcCircuitBreakerInterceptor>()
             .AddStandardResilienceHandler()
             .Configure(ConfigureNonRetryingPersistenceResilience);
 
         _ = services
             .AddGrpcClient<PersistenceCommandClient>(ConfigurePersistenceChannel)
             .ConfigurePrimaryHttpMessageHandler(CreateInternalGrpcHandler)
+            .AddInterceptor<OutboundGrpcCircuitBreakerInterceptor>()
             .AddStandardResilienceHandler()
             .Configure(ConfigureNonRetryingPersistenceResilience);
 
         _ = services
             .AddGrpcClient<PersistenceTransactionClient>(ConfigurePersistenceChannel)
             .ConfigurePrimaryHttpMessageHandler(CreateInternalGrpcHandler)
+            .AddInterceptor<OutboundGrpcCircuitBreakerInterceptor>()
             .AddStandardResilienceHandler()
             .Configure(ConfigureNonRetryingPersistenceResilience);
 

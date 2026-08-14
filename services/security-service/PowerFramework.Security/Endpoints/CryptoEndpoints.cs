@@ -372,15 +372,55 @@ public static class CryptoEndpoints
     private const string RsaKeysRoute = "/rsa/keys";
 
     /// <summary>
-    /// The release route. The reference is a path segment because it NAMES the resource being deleted.
+    /// The release route. The reference is carried in the REQUEST BODY, exactly as it is on the other
+    /// eight operations that resolve one.
     /// </summary>
     /// <remarks>
-    /// A reference is drawn from a constrained character set - the same set the configured references are
-    /// validated against - so it is safe in a path segment, and no reference is ever logged, so it does
-    /// not reach a diagnostic through the request line either. Naming it in a body instead would make the
-    /// operation a POST that deletes, which is not what it is.
+    /// <para>
+    /// 🔴 <b>THIS WAS <c>DELETE /rsa/keys/{keyRef}</c>, AND THE CORRECTION IS THE WHOLE POINT OF THE
+    /// ROUTE.</b> An earlier revision put the reference in a path segment because it NAMES the resource
+    /// being released, and justified it on the grounds that "no reference is ever logged". That
+    /// justification was false, and not because this file logged one: <b>the REQUEST PATH is recorded by
+    /// the host, not by any handler.</b> ASP.NET Core's hosting diagnostics open a log scope carrying
+    /// <c>RequestPath</c> for every request, and this service configures its console formatter with
+    /// <c>IncludeScopes = true</c> [<c>Program.cs</c>, the scope-rendering block] precisely so a caller's
+    /// <c>traceId</c> reaches an operator - which renders that scope on every record. A measured sweep of
+    /// a running deployment found a freshly generated <c>keyRef</c> in FOUR records of the release
+    /// request's own window. A discipline this file could observe perfectly was therefore never the thing
+    /// that decided the outcome.
+    /// </para>
+    /// <para>
+    /// AND A LOG IS ONLY THE NEAREST SURFACE. A value in a request line also reaches a reverse proxy's
+    /// access log, an ingress trace, a shared telemetry pipeline and a browser history - none of them
+    /// this service's to configure, and none of them reachable by a redaction written here. A
+    /// <c>keyRef</c> is a credential-like handle: it names a retained private key and, until this
+    /// revision, ownership was the only thing standing between a leaked reference and a signature
+    /// produced with a key its holder never had.
+    /// </para>
+    /// <para>
+    /// SO THE FIX IS STRUCTURAL RATHER THAN A REDACTION, WHICH IS WHY IT IS A ROUTE CHANGE. Redacting
+    /// would mean either raising the level of the framework's request records - losing every request
+    /// record on the service - or filtering a scope value by route, which leaves the value in every
+    /// surface upstream of this process. Moving the reference into the body puts this operation on
+    /// exactly the terms the other eight reference-taking operations were already on: <b>no value a
+    /// caller supplies appears anywhere in a request line on this contract.</b> The class of exposure is
+    /// removed at source rather than suppressed at one of its outlets.
+    /// </para>
+    /// <para>
+    /// IT IS A <c>POST</c> AND NOT A BODY-CARRYING <c>DELETE</c>. HTTP permits a body on <c>DELETE</c>
+    /// but assigns it no semantics, so intermediaries are free to drop it - which would turn a release
+    /// into a request naming nothing, answered <c>404</c>, indistinguishable from "no such key". The
+    /// operation is therefore published beside its counterpart at <c>POST /rsa/keys</c>: generation and
+    /// release are one narrowing, paid in one place. Being a POST does not make it replay-safe -
+    /// <c>Clients/OutboundCallPolicy.cs</c> admits only the four safe methods and its path table carries
+    /// no Security path at all, so a release is still never retried.
+    /// </para>
+    /// <para>
+    /// The literal segment cannot collide with a reference, because the parameterised sibling route no
+    /// longer exists. Nothing else on this contract addresses a member of this collection.
+    /// </para>
     /// </remarks>
-    private const string RsaKeyReleaseRoute = "/rsa/keys/{keyRef}";
+    private const string RsaKeyReleaseRoute = "/rsa/keys/release";
 
     /// <summary>Route of the random-bytes operation.</summary>
     private const string RandomBlobRoute = "/random/blob";
@@ -1219,7 +1259,11 @@ public static class CryptoEndpoints
         + "private key is retained rather than returned, the caller needs a way to say it is finished "
         + "with one - otherwise the only way a slot is freed is the expiry backstop, and a provisioning "
         + "sequence longer than the per-caller quota would stall for no reason. A CALLER MAY RELEASE "
-        + "ONLY ITS OWN KEYS, identified by the subject claim of its token. A reference that names "
+        + "ONLY ITS OWN KEYS, identified by the subject claim of its token. THE REFERENCE IS CARRIED IN "
+        + "THE REQUEST BODY rather than in the path, on the same terms as every other operation here "
+        + "that resolves one: a value in a request line is recorded by the host's own request scope and "
+        + "by every proxy and trace upstream of this service, none of which a discipline inside this "
+        + "service can reach. A reference that names "
         + "nothing retained and one that names another caller's key answer IDENTICALLY with 404, "
         + "deliberately: distinguishing them would turn this operation into an oracle for which "
         + "references exist, and a reference is a credential-like handle. Releasing is idempotent from "
@@ -1328,9 +1372,11 @@ public static class CryptoEndpoints
     /// <b>EIGHTEEN PUBLISHED, SEVENTEEN PROJECTING - two numbers that are easy to conflate and are kept
     /// apart deliberately.</b> Seventeen POST operations between them project ALL 63 of the legacy
     /// surface's cryptographic overloads. The eighteenth,
-    /// <c>DELETE /v1/crypto/rsa/keys/{keyRef}</c>, is AUTHORED and projects nothing: the legacy had no
+    /// <c>POST /v1/crypto/rsa/keys/release</c>, is AUTHORED and projects nothing: the legacy had no
     /// key store, so it had nothing to release. Prose that says "17" about the published surface is
     /// wrong by one, and prose that says "18" about the legacy projection is wrong by one the other way.
+    /// All eighteen are now a POST carrying a request body, so the verb no longer distinguishes the
+    /// authored one - the operation identifier does.
     /// </para>
     /// <para>
     /// The single public member of this file, matching the one-registration-method-per-endpoint-file
@@ -1403,11 +1449,13 @@ public static class CryptoEndpoints
         // resolve a caller-supplied reference and can refuse one.
         //
         // THE THREE COUNTS, MEASURED RATHER THAN ESTIMATED, BECAUSE THEY ARE EASY TO CONFLATE:
-        //   * NINE take a keyRef. Eight carry one in the request body - hmac, hmac-file, both
-        //     symmetric operations and all four RSA operations that CONSUME a key - and the release
-        //     operation takes one as a path parameter. POST /v1/crypto/rsa/keys is NOT among them,
-        //     because it RETURNS a reference instead of resolving one, which is why it alone among the
-        //     RSA operations declares no 404.
+        //   * NINE take a keyRef, and ALL NINE carry it in the request body - hmac, hmac-file, both
+        //     symmetric operations, the four RSA operations that CONSUME a key, and the release
+        //     operation. NO OPERATION ON THIS CONTRACT CARRIES A CALLER-SUPPLIED VALUE IN ITS PATH; the
+        //     release was the one that did, and the request line it appeared in was recorded by the host
+        //     rather than by this file - see RsaKeyReleaseRoute. POST /v1/crypto/rsa/keys is NOT among
+        //     the nine, because it RETURNS a reference instead of resolving one, which is why it alone
+        //     among the RSA operations declares no 404.
         //   * TEN resolve a reference of SOME kind, the tenth being hash-file, which resolves a fileRef
         //     through the same allow-listed store mechanism rather than a keyRef. Reference resolution,
         //     not key resolution, is what makes a 404 reachable, so these ten are exactly the ten that
@@ -1558,16 +1606,18 @@ public static class CryptoEndpoints
             .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status500InternalServerError);
 
-        // The release operation is the generation operation's counterpart, and it is DELETE rather than
-        // POST because it removes the resource the generation operation named. It declares 204 for a
-        // release and 404 for a reference this caller does not hold; it declares no 400, because the
-        // only input is a path segment and any value of it is a well-formed request that simply names
-        // nothing - and no 500, because there is no configured material to fail to read.
-        group.MapDelete(RsaKeyReleaseRoute, ReleaseRsaKey)
+        // The release operation is the generation operation's counterpart and is published beside it. It
+        // declares 204 for a release and 404 for a reference this caller does not hold; it declares 400
+        // because the reference now arrives as a request member and an absent one is a malformed request
+        // rather than a request naming nothing - and no 500, because there is no configured material to
+        // fail to read. It is the ONE operation of the eighteen that answers no 200: a release has
+        // nothing to report beyond the outcome, so it carries a request body and no response body.
+        group.MapPost(RsaKeyReleaseRoute, ReleaseRsaKey)
             .WithName(ReleaseRsaKeyOperation)
             .WithSummary(ReleaseRsaKeySummary)
             .WithDescription(ReleaseRsaKeyDescription)
             .Produces(StatusCodes.Status204NoContent)
+            .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status401Unauthorized)
             .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status404NotFound);
@@ -3017,12 +3067,15 @@ public static class CryptoEndpoints
     /// <summary>
     /// Releases a retained generated private key at its owner's request.
     /// </summary>
-    /// <param name="keyRef">The reference the caller was given by the generation operation.</param>
+    /// <param name="request">The release request, carrying the reference in its body.</param>
     /// <param name="user">The authenticated caller, whose subject claim owns the key.</param>
     /// <param name="references">The reference resolver, which owns the retained-key store.</param>
     /// <param name="loggerFactory">The logger factory a rejection is recorded through.</param>
-    /// <returns>204 when the key was released, or 404 when this caller holds no such key.</returns>
-    /// <exception cref="ArgumentNullException">A collaborator is <see langword="null"/>.</exception>
+    /// <returns>
+    /// 204 when the key was released, 404 when this caller holds no such key, or 400 when the request
+    /// names no reference at all.
+    /// </returns>
+    /// <exception cref="ArgumentNullException">A collaborator or the request is <see langword="null"/>.</exception>
     /// <remarks>
     /// <para>
     /// PART OF THE AUTHORED NARROWING RATHER THAN A LEGACY OPERATION. The legacy has no retained-key
@@ -3038,21 +3091,39 @@ public static class CryptoEndpoints
     /// an unknown one does. See <see cref="CryptoReferenceResolver.TryReleaseGeneratedKey"/>.
     /// </para>
     /// <para>
-    /// NEITHER THE REFERENCE NOR ANY KEY MATERIAL IS LOGGED. The completion record carries the operation
-    /// name and nothing else, which is the same discipline every sibling handler follows.
+    /// 🔴 NEITHER THE REFERENCE NOR ANY KEY MATERIAL IS LOGGED, AND SINCE THE REFERENCE MOVED OUT OF THE
+    /// PATH THAT STATEMENT IS TRUE OF THE WHOLE PROCESS RATHER THAN ONLY OF THIS HANDLER. The completion
+    /// record carries the operation name and nothing else, which is the same discipline every sibling
+    /// handler follows - but a handler's discipline never governed the host's own request scope. See
+    /// <see cref="RsaKeyReleaseRoute"/> for the measured exposure that decided the shape of this
+    /// operation.
+    /// </para>
+    /// <para>
+    /// AN ABSENT REFERENCE IS A 400 RATHER THAN A 404, and the distinction is deliberate. A request that
+    /// names no reference has not asked about the store at all, so answering "no such key for this
+    /// caller" would report a fact about the store in response to a malformed request - and would make an
+    /// omitted member indistinguishable from a reference that genuinely resolves to nothing. It is
+    /// refused with the same detail every other operation on this contract uses for a missing reference,
+    /// so the two arrive at one message rather than two.
     /// </para>
     /// </remarks>
     internal static Results<NoContent, ProblemHttpResult> ReleaseRsaKey(
-        string keyRef,
+        ReleaseRsaKeyRequest request,
         ClaimsPrincipal user,
         [FromServices] CryptoReferenceResolver references,
         [FromServices] ILoggerFactory loggerFactory)
     {
+        ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(user);
         ArgumentNullException.ThrowIfNull(references);
         ArgumentNullException.ThrowIfNull(loggerFactory);
 
-        if (!references.TryReleaseGeneratedKey(keyRef, OwnerOf(user)))
+        if (string.IsNullOrWhiteSpace(request.KeyRef))
+        {
+            return Reject(RetCode.E_INVALID_ARGUMENT, MissingReferenceDetail, loggerFactory);
+        }
+
+        if (!references.TryReleaseGeneratedKey(request.KeyRef, OwnerOf(user)))
         {
             return Reject(RetCode.E_OBJECT_NOT_FOUND, GeneratedKeyNotHeldDetail, loggerFactory);
         }
@@ -5708,6 +5779,49 @@ public sealed record GenRsaKeyRequest
     [JsonPropertyName("pemFormat")]
     public bool? PemFormat { get; init; }
 }
+
+/// <summary>
+/// A request to release a retained generated private key.
+/// </summary>
+/// <remarks>
+/// <para>
+/// BINDS NO LEGACY DECLARATION, and it is the only request record in this file that binds none. The
+/// legacy hands the private half of a generated pair straight back through a <c>ref</c> parameter
+/// [ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20] and therefore has no store to release from;
+/// retaining the key instead is what makes the generation response safe across a network boundary, and
+/// this record is the cost of that narrowing, paid where the narrowing was made.
+/// </para>
+/// <para>
+/// 🔴 IT EXISTS BECAUSE THE REFERENCE MOVED OUT OF THE REQUEST PATH. The release was published as
+/// <c>DELETE /v1/crypto/rsa/keys/{keyRef}</c>, and a path segment is recorded by the host's own request
+/// scope - and by every proxy, ingress and trace upstream of this process - regardless of what any
+/// handler here chooses to record. The route constant <c>RsaKeyReleaseRoute</c> carries the measured
+/// exposure and the reasoning. With this record, no operation on this contract carries a caller-supplied
+/// value in a request line.
+/// </para>
+/// <para>
+/// IT CARRIES A REFERENCE AND NOTHING ELSE. There is deliberately no member through which key material,
+/// a passphrase or an owner identity could be supplied: material would violate the contract-level
+/// secrets rule, and an owner would let a caller name whose key to destroy - ownership is read from the
+/// subject claim of the presented token and is never accepted as input.
+/// </para>
+/// </remarks>
+public sealed record ReleaseRsaKeyRequest
+{
+    /// <summary>
+    /// The opaque reference the generation operation returned.
+    /// </summary>
+    /// <remarks>
+    /// Required, and an absent or blank value is refused with 400 rather than answered with the 404 a
+    /// reference naming nothing receives - a request that names no reference has asked nothing about the
+    /// store, and conflating the two would report a fact about the store in answer to a malformed
+    /// request.
+    /// </remarks>
+    [Required]
+    [JsonPropertyName("keyRef")]
+    public string? KeyRef { get; init; }
+}
+
 
 /// <summary>
 /// A request for random bytes.

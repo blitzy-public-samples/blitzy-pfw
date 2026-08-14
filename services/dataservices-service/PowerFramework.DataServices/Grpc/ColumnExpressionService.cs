@@ -1964,14 +1964,26 @@ public sealed class ExpressionTraceSubscription : IDisposable
 /// dressed as consistency, which C-B forbids.
 /// </para>
 /// <para>
-/// WHAT IT DOES NOT OBSERVE, STATED RATHER THAN IMPLIED. The engine raises two of these three events on
-/// ITSELF during its own work - do-item-changed from inside item-changed [:L224] and from the item
-/// calculation [:L862], and var-changed from inside <c>of_setvar</c> [:L1770] and the foreign-link walk
-/// [:L324, :L355]. Those internal raises are in-process recursion of the same handlers and are NOT
-/// separately published, because publishing them would need a notification seam inside a file this one
-/// does not own. What <c>EventStream</c> therefore carries is every event raised THROUGH this relay,
-/// which is every event the host raises - the same set a legacy subscriber attached at the host would
-/// have seen.
+/// 🔴 <b>WHAT IT PUBLISHES, AND THE DEFECT THAT CHANGED THE ANSWER.</b> This type used to publish only
+/// from its own three <c>Raise*Async</c> methods, and it recorded that the engine's INTERNAL raises -
+/// do-item-changed from inside item-changed [:L224] and from the item calculation [:L862], and
+/// var-changed from inside <c>of_setvar</c> [:L1770] and the foreign-link walk [:L324, :L355] - went
+/// unpublished because publishing them "would need a notification seam inside a file this one does not
+/// own". The consequence was not a narrowing, it was silence: <b>no production caller ever reached those
+/// three methods</b>, because every published mutation on this contract calls the engine directly. So
+/// <c>EventStream</c> answered an empty collection to every poll, for every event, forever - a
+/// subscriber could not observe a variable it had just set. The seam now exists
+/// (<see cref="IColumnExpressionEventObserver"/>, implemented below), this relay is registered as the
+/// engine's observer by the factory that builds it, and publication happens AT THE RAISE for all three
+/// events wherever they are raised from - including on a PEER engine, which publishes on that peer's own
+/// topic because its identity is the routing key.
+/// </para>
+/// <para>
+/// THE THREE <c>Raise*Async</c> METHODS THEREFORE NO LONGER PUBLISH OF THEIR OWN, and they must not:
+/// they call the engine, the engine notifies the observer, and a second publication here would emit
+/// every host-raised event twice under two different sequence numbers. What they still contribute is the
+/// pair of GUARDS below, which is the whole reason they exist - a refusal there means the event is never
+/// raised at all, so nothing is published, which is exactly the legacy's behaviour.
 /// </para>
 /// <para>
 /// SEQUENCING TOKENS ARE FOR DETECTION. These are notifications, so a monotonic per-DataWindow sequence
@@ -1979,7 +1991,7 @@ public sealed class ExpressionTraceSubscription : IDisposable
 /// oldest-dropping for the same reason the trace is: raising an event must not stall a calculation.
 /// </para>
 /// </remarks>
-public sealed class ColumnExpressionEventRelay
+public sealed class ColumnExpressionEventRelay : IColumnExpressionEventObserver
 {
     /// <summary>How many events one subscriber may fall behind by before the oldest is dropped.</summary>
     public const int SubscriberCapacity = 512;
@@ -2050,7 +2062,16 @@ public sealed class ColumnExpressionEventRelay
             return;
         }
 
+        // The engine publishes through this relay as the raise happens - see the type's remarks for why
+        // publishing here as well would double every host-raised event.
         await engine.OnItemChangedAsync(row, dwo, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc/>
+    public void ItemChangedRaised(ColumnExpressionEngine engine, long row, IDataWindowObject dwo)
+    {
+        ArgumentNullException.ThrowIfNull(engine);
+        ArgumentNullException.ThrowIfNull(dwo);
 
         Publish(
             engine,
@@ -2101,6 +2122,17 @@ public sealed class ColumnExpressionEventRelay
         await engine
             .OnDoItemChangedAsync(row, columnName, columnId, fromInput, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc/>
+    public void DoItemChangedRaised(
+        ColumnExpressionEngine engine,
+        long row,
+        string? columnName,
+        long columnId,
+        bool fromInput)
+    {
+        ArgumentNullException.ThrowIfNull(engine);
 
         Publish(
             engine,
@@ -2138,6 +2170,12 @@ public sealed class ColumnExpressionEventRelay
         ArgumentNullException.ThrowIfNull(engine);
 
         await engine.OnVarChangedAsync(index, forceCalc, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc/>
+    public void VarChangedRaised(ColumnExpressionEngine engine, int index, bool forceCalc)
+    {
+        ArgumentNullException.ThrowIfNull(engine);
 
         Publish(
             engine,
@@ -4327,6 +4365,12 @@ public sealed class ColumnExpressionService : GeneratedColumnExpressionServiceBa
             traceSink: null,
             _timeProvider,
             _logger);
+
+        // 🔴 THE EVENT SEAM, WIRED HERE BECAUSE THIS IS THE ONLY PLACE AN ENGINE IS BUILT. Without it the
+        // relay has no production caller and EventStream answers an empty collection to every poll - see
+        // ColumnExpressionEventRelay's remarks. Set BEFORE OnInit so that anything the initialisation
+        // itself raises is observed too.
+        engine.EventObserver = _eventRelay;
 
         // n_cst_dwsvc.sru:L85-L86 - attach the host and lift its broker off it, in that order, in one
         // call. The evaluator supplied above is left alone by the engine's override.

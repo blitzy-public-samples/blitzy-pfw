@@ -406,28 +406,39 @@ declares the six lifecycle events at `:L29-L34` and handles them at `:L52-L78`, 
 deliberate non-ports — thread affinity at `:L127`, resume at `:L160` and suspend at `:L182`. Hence
 `persistence-thread-task-lifecycle`, named after the substrate rather than after the pool.
 
-### The pinyin hook's identifier constant diverges from the roster, and the roster is canonical
+### RESOLVED — the pinyin hook's identifier constant now holds the roster identifier
 
-`services/dataservices-service/PowerFramework.DataServices.Tests/PinyinFirstLetterMatcherTests.cs:L2853`
-pins `WorkflowId` to the oracle window's own name, `w_test_dwsvc_dropdownsearch`, and derives its two
-recording directory paths from it at `:L2856` and `:L2859`. The roster's identifier for the same workflow is
-`dataservices-dwsvc-dropdownsearch`.
+**Status: reconciled.** `PinyinOracleCharacterizationHookTests.WorkflowId` in
+`services/dataservices-service/PowerFramework.DataServices.Tests/PinyinFirstLetterMatcherTests.cs` held the
+oracle window's own name, `w_test_dwsvc_dropdownsearch`, and derived its two recording directory paths from
+it. It now holds the roster identifier, `dataservices-dwsvc-dropdownsearch`, and a new guard
+(`TheWorkflowIdentifierAgreesWithTheStoresRoster`) pins it there.
 
-**The roster identifier is the canonical one**, for a mechanical reason rather than a stylistic one: the
-schema's `workflowId` pattern admits lower-case alphanumeric segments separated by single hyphens and
+**The roster identifier was always the canonical one**, for a mechanical reason rather than a stylistic one:
+the schema's `workflowId` pattern admits lower-case alphanumeric segments separated by single hyphens and
 therefore **rejects underscores**, so the constant's spelling could not be written into a definition at all.
 The schema's own derivation rule — the capability area followed by the oracle window's name with its
 underscores rendered as hyphens — produces exactly the roster spelling, which keeps the identifier traceable
 to its oracle while conforming to the grammar.
 
-Nothing is broken by the divergence today, and that is worth being precise about rather than reassuring
-about. The hook is a **conditionally skipped** matrix whose activation predicate requires an ordinary file
-under `characterization/recordings/legacy/<workflowId>/`, and no such directory exists on either side — both
-recording roots hold nothing but their own readmes — so the constant currently resolves to a path nothing
-reads. **The constant is reconciled to the roster
-identifier in the same reviewed change that lands the first legacy recording** — the change that would
-activate the matrix is the change that must agree with the roster, and reconciling it earlier would edit a
-skipped assertion without a recording to verify the edit against.
+**Why the entry above changed from "reconcile later" to "reconciled now", stated plainly because the earlier
+reasoning was wrong.** This register previously committed to reconciling the constant *in the same reviewed
+change that lands the first legacy recording*, on the ground that reconciling earlier would edit a skipped
+assertion with no recording to verify the edit against. Two facts overturn that:
+
+- **The old spelling could never have named a valid directory.** It is not that the constant pointed at a
+  path which would become correct once a capture existed — no conforming workflow can produce an underscored
+  directory name at all, so the hook was watching a path that could not come into existence however much
+  oracle work was done. There was nothing for the deferred change to be verified *against*.
+- **The window for a safe rename is exactly now, and it closes when a recording lands.** The schema states
+  that an identifier is never renamed once a recording sits under it, because a rename orphans both halves of
+  every pair already captured and nothing reports that it happened. The moment the earlier text nominated is
+  therefore the moment the change becomes unsafe — the deferral pointed at the one time it must not be done.
+
+The guard asserts both halves, and asserts them separately because a value can satisfy a grammar while
+naming nothing: the constant must match the pattern **read from `workflow.schema.json` itself** rather than
+from a restatement, and it must name a definition that exists on disk and declares that same identifier in
+its own text.
 
 ### Two oracle coverage gaps, recorded so they are not mistaken for omissions
 

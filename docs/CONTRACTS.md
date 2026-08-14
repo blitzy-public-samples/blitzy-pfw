@@ -574,7 +574,7 @@ neither substitutes for the other:**
 | Projected overloads | **63** | Legacy overloads that have a landing site on the wire — every one of them |
 | Not projected | **0** | Nothing is excluded. Every overload family, the three `HashFile` declarations [`n_crypto.sru:L27-L29`] included, has a landing site |
 | Wire operations | **17** | The `POST /v1/crypto/**` operations they collapse onto |
-| Authored operations | **1** | `DELETE /v1/crypto/rsa/keys/{keyRef}`, which covers no legacy overload — see below |
+| Authored operations | **1** | `POST /v1/crypto/rsa/keys/release`, which covers no legacy overload — see below |
 
 Overloads collapse onto operations because what varies across a legacy overload group — string versus
 blob payload, present versus absent initialization vector, present versus absent explicit mode — is
@@ -607,7 +607,7 @@ request/response with no ordering requirement between calls and nothing to strea
 shape without remainder.
 
 **THE ONE AUTHORED OPERATION, AND WHY IT DOES NOT DISTURB THE 63-TO-17 ARITHMETIC.**
-`DELETE /v1/crypto/rsa/keys/{keyRef}` covers **no legacy overload**, and that is not an accident of
+`POST /v1/crypto/rsa/keys/release` covers **no legacy overload**, and that is not an accident of
 counting — the legacy has nothing for it to cover. `GenRSAKey` [`n_crypto.sru:L19-L20`] hands the
 private half straight back through a `ref` parameter, so the caller owns it from that moment and there
 is no store to release from. `generateRsaKey` **retains** the private half instead, which is what makes
@@ -643,7 +643,29 @@ expressing optional and alternative parameters and a JSON request expresses them
 | 15 | `POST /v1/crypto/encoding/string-to-blob` | `stringToBlob` | String to blob |
 | 16 | `POST /v1/crypto/encoding/blob-to-string` | `blobToString` | Blob to string |
 | 17 | `POST /v1/crypto/encoding/blob-reverse` | `reverseBlob` | Blob reversal |
-| 18 | `DELETE /v1/crypto/rsa/keys/{keyRef}` | `releaseRsaKey` | **None — authored.** Releases a key row 11 retained |
+| 18 | `POST /v1/crypto/rsa/keys/release` | `releaseRsaKey` | **None — authored.** Releases a key row 11 retained |
+
+**NO OPERATION ON THIS CONTRACT CARRIES A CALLER-SUPPLIED VALUE IN ITS PATH, and row 18 is why that
+sentence had to be written.** The release was published as `DELETE /v1/crypto/rsa/keys/{keyRef}`, chosen
+because the reference *names* the resource being removed and justified on the grounds that the reference is
+never logged. **The justification was false, and not because any handler logged one: the request path is
+recorded by the host.** ASP.NET Core's hosting diagnostics open a log scope carrying `RequestPath` for every
+request, and Security renders scopes deliberately so a caller's `traceId` reaches an operator — so a sweep
+of a running deployment found a freshly generated `keyRef` in **four** records of its own release window. A
+request line also reaches a reverse proxy's access log, an ingress trace and a browser history, none of them
+this service's to configure. A `keyRef` is a credential-like handle to a retained private key, so the
+exposure is removed at source rather than redacted at one outlet: the reference is carried in a request body
+like every other reference here, and the operation sits beside its generation counterpart as a `POST`. It is
+a `POST` rather than a body-carrying `DELETE` because HTTP assigns a `DELETE` body no semantics, so an
+intermediary may drop it — which would turn a release into a request naming nothing, answered `404`,
+indistinguishable from "no such key". Being a `POST` does not make it replayable: no consumer's replay-safe
+policy admits any Security path, and the method gate admits only the four safe methods.
+
+**One consequence for the counts: all 18 operations are now `POST`, so the verb no longer identifies the
+authored one — the `operationId` does.** Row 18 also gained a `400`: a reference that is a request member
+can be omitted, and an omitted reference is a malformed request rather than a request naming nothing, so it
+is refused distinctly from the `404` a reference resolving to nothing receives. It remains the one operation
+answering no `200` and declaring no `500`.
 
 All 18 require `bearerAuth`; none is anonymous. Two properties of the file operations are contract
 rather than convenience: they take an **opaque server-resolved file reference**, never a

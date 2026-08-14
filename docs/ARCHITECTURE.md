@@ -2079,6 +2079,39 @@ background refresh that had already replaced the current configuration — becau
 held it. [`SECRETS.md`](SECRETS.md) §4.2.1 carries the measured before-and-after figures for both halves of
 a rotation.
 
+**And neither interval closes the window on the request that provokes the refresh, which is a third
+mechanism rather than a fourth setting.** The handler does ask for a refresh the instant it meets an
+unknown `kid`, but that request is for the NEXT request's benefit: the current one has already failed and
+the handler goes on to answer `401`. Measured on this stack, a rotation therefore cost exactly one refusal
+per verifier — Gateway, DataServices and Persistence each refused a correctly signed token minted seconds
+earlier and admitted it on the following request. Worse, `ConfigurationManager<T>` was then probed
+directly on the pinned package: after `RequestRefresh()` it returns **the configuration it already holds**,
+reference-identical and in 0 ms, and retrieves on a background continuation — so simply asking it again
+inside the failure does not help either.
+
+Each verifier now carries `Authorization/UnknownSigningKeyRevalidation`, one copy per service, chained onto
+the bearer handler's failure hook beside the refusal record. On that one failure — and no other — it waits,
+bounded, for the refresh to **land**, comparing the instance the manager answers with against the one
+validation used, and the moment a different instance appears it looks the `kid` up once and validates the
+token once more against the refreshed set under the service's **own** parameters. Measured after the
+change, same rotation: `200` on the first request at all three verifiers in 47–58 ms, one `Information`
+record apiece naming the new `kid`, and no refusal recorded anywhere.
+
+Four properties make that safe, and each is pinned by its own test row per service. Validation is not
+weakened — the same `TokenValidationParameters`, cloned, with only the manager's issuer and signing keys
+merged in, which is exactly what `JwtBearerHandler` does on its own first attempt, and the merge is
+discarded with the request rather than left on the shared options. No new signing authority appears: the
+keys still come only from the key set Security published, so AAP §0.6.6.3 and constraint C-G are untouched
+— and because the two token-**minting** libraries stay out of these three assemblies, the `kid` is read as
+one field of the JOSE header with the verification library's own base64url decoder rather than by
+constructing a token object. A `kid` that is genuinely unknown is still refused, as is a wrong audience, a
+lapsed lifetime or a signature that does not check out under the key its identifier names. And the refresh
+rate limit is the library's own — `RequestRefresh()` re-arms at most once per `MetadataRefreshInterval`,
+verified by probe — so a flood of forged identifiers still provokes one retrieval per interval. The wait's
+ceiling is a compiled constant reachable from no configuration key, which is what stops a request-holding
+bound becoming a deployment knob, and it asserts no latency objective (AAP §0.8.5): it bounds the extra
+work this hook may do before the refusal it was already making proceeds.
+
 Unlike the tolerance, the first two **are** settings, and the distinction is principled rather than
 inconsistent: a wider tolerance weakens expiry checking, whereas a wider retrieval interval only delays
 convergence — it cannot make an invalid signature acceptable. The lower bound is where the trade sits: this
@@ -2697,7 +2730,7 @@ blocked rather than approximate", that is what it says.
 | L1 | **Pinyin first-letter matching cannot be proven exact from the repository alone**, and the risk is narrower than it first appears. The **flags are documented**: [`ws_objects/pfw.shared.pbl.src/enums.sru:L1146-L1149`] declares them under the comment `//PinyinFirstLetterLike:[flags]` as `PY_LIKE_IGNORE_CASE` = 1 (ignore case), `PY_LIKE_IGNORE_WIDTH` = 2 (ignore full-width versus half-width) and `PY_LIKE_FUZZY_SOUND` = 4 (fuzzy sound matching, `l`/`n`, `f`/`h`, `r`/`l`), so the literal `7` the call site passes [`n_cst_dwsvc_dropdownsearch.sru:L323`] enables **all three**. What remains unavailable is the **lookup table and the matching algorithm**, which exist only inside the closed native binary with no C++ source anywhere in the tree — and in particular the exact fuzzy-sound equivalence set, whose three documented pairs are illustrative rather than provably exhaustive | Characterize the table and the matching behaviour from the behavioural oracle; the flag decoding needs no characterization. **If the oracle cannot be exercised, report the pinyin filter as blocked rather than approximating it** — an approximation returns subtly different result sets, which is a regression that looks like correct behaviour |
 | L2 | **Cross-session foreign column-expression variables are narrowed by design.** The legacy holds a live object pointer to another DataWindow's expression service, which cannot be serialized | Co-resident references are supported through a session-scoped handle; references spanning sessions or service instances are **blocked with a defined error**, never given a silently wrong value. A deliberate, documented narrowing — see [`CONTRACTS.md`](CONTRACTS.md) |
 | L3 | **Encrypted-SQLite page-format parity is out of Phase-1 scope** (§8.3) | Provision the unencrypted path only and record the limitation, rather than attempting a format the target provider cannot produce |
-| L4 | **Two edges of the topology remain unobserved even though the stack has been brought up** (§10.6). No gRPC RPC has been invoked across a container boundary — every listener was proven reachable at the TLS layer from its legitimate in-network caller and no further — and the certificate arm of the issuance edge was not exercised, the bring-up using the shared-secret scheme | For those two edges specifically, definition-and-manifest review plus CI is the assurance mechanism, and no more is claimed for them. Everything the bring-up *did* show is reported in one place, [`orchestration/README.md`](../orchestration/README.md) §10, which this document defers to. What is claimed here is in-process: twenty projects build with zero warnings and all ten test projects pass with zero failures and nothing skipped — the counts are in [`BUILD.md`](BUILD.md) §1.3, which owns every measured figure, and are deliberately not restated here |
+| L4 | **One edge of the topology remains unobserved, and it is narrower than an earlier revision of this row claimed** (§10.6). That revision said "no gRPC RPC has been invoked across a container boundary" and that the certificate arm of the issuance edge was unexercised; both have since been done. Five of the six gRPC contracts — C-03, C-04, C-05, C-06 and C-08, server-streaming calls among them — have been invoked across container boundaries, and the issuance edge accepted a chain-verified client certificate. What remains is **C-07** (`CommandService`), which no published route reaches, and the **caller** half of mutual TLS in Gateway and DataServices, whose `*_MTLS_*` paths the documented bring-up leaves empty | For that remainder specifically, definition-and-manifest review plus CI is the assurance mechanism, and no more is claimed for it. Everything the bring-up *did* show is reported in one place, [`orchestration/README.md`](../orchestration/README.md) §10, which this document defers to. What is claimed here is in-process: twenty-two projects build with zero warnings and all eleven test projects pass with zero failures and nothing skipped — the counts are in [`BUILD.md`](BUILD.md) §1.3, which owns every measured figure, and are deliberately not restated here |
 | L5 | **There is no authoritative legacy build definition to translate.** The two project objects disagree on library count and vendor, and both reference a library that exists nowhere [`project.srj:L41`, `p_pfw.srj:L40`]; there are zero Git tags, so no release is marked (§1.3) | Author the .NET build and CI as clean creations, using the project objects as reference for *intent* only |
 | L6 | **One compiled library has no source export.** `pfwx.utility.codec.pbl` appears on the secondary target's library list [`pfwx.pbt`, `LibList`] with no corresponding source directory | Recorded as an anomaly. It contributes no objects to the estate reconciliation and no capability to any service — see [`SERVICE_MAPPING.md`](SERVICE_MAPPING.md) |
 | L7 | **Two distinct files share the name `pfw.sra`.** `ws_objects/pfw.pbl.src/pfw.sra` is the framework application and is authoritative for the composition root; `ws_objects/pfw.pack.pbl.src/pfw.sra` is the packager | Every reference cites the full path. A relative reference to either would be ambiguous, so none is used |

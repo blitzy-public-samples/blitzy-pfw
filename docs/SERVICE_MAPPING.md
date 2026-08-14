@@ -53,8 +53,8 @@ complete `orchestration/` set and the read-only legacy tree — **is present in 
 
 **So are the four services themselves, which is worth stating precisely because this document assigns
 capabilities to them.** Each of Gateway, DataServices, Persistence and Security has an application project
-with an entry point, its handler and domain tree, and a sibling test project; all twenty projects build in
-Release with zero warnings and zero errors, all ten test projects pass, all four images build, and the four
+with an entry point, its handler and domain tree, and a sibling test project; all twenty-two projects build in
+Release with zero warnings and zero errors, all eleven test projects pass, all four images build, and the four
 services have come up together as a stack. **The figures are in [`BUILD.md`](BUILD.md) §1.3, which is the
 canonical verification record, and are deliberately not restated here** — a mapping document that carries
 its own copy of a mutable total is a mapping document that will eventually contradict the record. The

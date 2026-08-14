@@ -490,10 +490,16 @@ public sealed class OutboundCallPolicyTests
     /// <para>
     /// <b>NOTHING WAS ADDED TO THE POLICY FOR THIS OPERATION, AND THIS ROW IS WHY THAT IS SAFE.</b> The
     /// exclusion holds twice over already: the safe-method admission is exactly GET, HEAD, OPTIONS and
-    /// TRACE - and its own remarks record that "PUT and DELETE are idempotent but not safe" - while the
+    /// TRACE - which admits neither <c>DELETE</c> nor <c>POST</c> - while the
     /// replay-safe path table is built solely from the four Persistence gRPC rosters and therefore carries
     /// no Security path at all. Both arms are exercised here, the response arm and the transport-fault arm,
     /// because a method admission that held for one and not the other would be a gap.
+    /// </para>
+    /// <para>
+    /// 🔴 THE OPERATION IS NOW A <c>POST</c> AT A FIXED PATH, AND THAT MOVED FOR A SECURITY REASON RATHER
+    /// THAN A STYLISTIC ONE: its reference used to be a path segment, which the server's own request scope
+    /// records. The exclusion is unaffected - <c>POST</c> was never admitted either - and this row is
+    /// exercised under the method the operation actually uses so that it keeps proving the real thing.
     /// </para>
     /// <para>
     /// The <c>POST</c> comparison in the same rows is what makes the assertion about the METHOD rather than
@@ -504,10 +510,10 @@ public sealed class OutboundCallPolicyTests
     [Fact]
     public async Task The_rsa_key_release_is_never_replayed()
     {
-        const string releasePath = "/v1/crypto/rsa/keys/any-reference";
+        const string releasePath = "/v1/crypto/rsa/keys/release";
 
         ResilienceContext refused = ResilienceContextPool.Shared.Get(TestContext.Current.CancellationToken);
-        refused.SetRequestMessage(new HttpRequestMessage(HttpMethod.Delete, Absolute(releasePath)));
+        refused.SetRequestMessage(new HttpRequestMessage(HttpMethod.Post, Absolute(releasePath)));
 
         Assert.False(await OutboundCallPolicy.ShouldRetryAsync(
             new RetryPredicateArguments<HttpResponseMessage>(
@@ -516,7 +522,7 @@ public sealed class OutboundCallPolicyTests
                 0)));
 
         ResilienceContext faulted = ResilienceContextPool.Shared.Get(TestContext.Current.CancellationToken);
-        faulted.SetRequestMessage(new HttpRequestMessage(HttpMethod.Delete, Absolute(releasePath)));
+        faulted.SetRequestMessage(new HttpRequestMessage(HttpMethod.Post, Absolute(releasePath)));
 
         Assert.False(await OutboundCallPolicy.ShouldRetryAsync(
             new RetryPredicateArguments<HttpResponseMessage>(

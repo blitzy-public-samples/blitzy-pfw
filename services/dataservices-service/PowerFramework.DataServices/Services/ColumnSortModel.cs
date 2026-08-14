@@ -1551,7 +1551,30 @@ public sealed class ColumnSortModel : DataWindowServiceBase, IDataWindowColumnSo
     /// carry.
     /// </para>
     /// </remarks>
-    private void Sort()
+    private void Sort() =>
+        // :L211  _of_Sort(sSort) - the code is DISCARDED, exactly as the oracle discards it. The core
+        // below returns it so that a CALLER WITH SOMEWHERE TO PUT IT can have it; every oracle-shaped
+        // call site keeps discarding it, which is what this one-line overload preserves.
+        _ = SortCore();
+
+    /// <summary>
+    /// The body of <c>_of_sort()</c>, answering the apply code instead of discarding it.
+    /// </summary>
+    /// <returns>Whatever the apply answered.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// This service has not been attached to a host yet.
+    /// </exception>
+    /// <remarks>
+    /// SPLIT OUT RATHER THAN CHANGED. The oracle's subroutine has no return value at all
+    /// [<c>n_cst_dwsvc_columnsort.sru:L42</c> declares <c>private subroutine _of_sort ()</c>], so
+    /// <see cref="Sort()"/> keeps discarding the code and every existing call site is byte-for-byte the
+    /// behaviour it was. The code is nevertheless real - <c>_of_Sort(sSort)</c> at <c>:L211</c> produces
+    /// one and the oracle throws it away because a PowerBuilder event handler had nowhere to put it -
+    /// and a service boundary DOES have somewhere to put it: the response's <c>retCode</c>. Inventing a
+    /// second apply path to obtain it would be the real change; returning the code the existing path
+    /// already computes is not.
+    /// </remarks>
+    private long SortCore()
     {
         DataWindowServiceHost host = RequireHost();
 
@@ -1662,10 +1685,12 @@ public sealed class ColumnSortModel : DataWindowServiceBase, IDataWindowColumnSo
 
         // :L209  SetPointer(HourGlass!)  - DEFERRED, emits nothing.
 
-        // :L211  _of_Sort(sSort)   - the code is DISCARDED, exactly as the oracle discards it.
-        _ = Sort(sSort);
+        // :L211  _of_Sort(sSort)
+        long code = Sort(sSort);
 
         // :L213  SetPointer(Arrow!)     - DEFERRED, emits nothing.
+
+        return code;
     }
 
     /// <summary>
@@ -1728,6 +1753,82 @@ public sealed class ColumnSortModel : DataWindowServiceBase, IDataWindowColumnSo
 
         // :L246
         return RetCode.OK;
+    }
+
+    /// <summary>
+    /// Establishes a caller-stated multi-column sort in the store and applies it, answering the apply
+    /// code - the headless equivalent of the store mutation and <c>_of_Sort()</c> call that a header
+    /// click performs (<c>n_cst_dwsvc_columnsort.sru:L108-L163</c>).
+    /// </summary>
+    /// <param name="requested">
+    /// The columns and directions, IN PRECEDENCE ORDER. An EMPTY list is meaningful and CLEARS the sort:
+    /// the pass then composes no user clause and the captured original is restored, which is exactly
+    /// what the oracle does when its store empties itself at <c>:L155-L156</c>.
+    /// </param>
+    /// <returns>Whatever the apply answered.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="requested"/> is <see langword="null"/>.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// This service has not been attached to a host yet.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>WHY THIS EXISTS, STATED AS THE DEFECT IT FIXES.</b> The service boundary was applying a
+    /// caller-stated sort by calling <see cref="Update(in string?)"/> with the composed expression. That
+    /// is a DIFFERENT OPERATION: <c>of_update</c> writes the REMEMBERED ORIGINAL sort
+    /// [<c>:L269</c>] and returns early while a user sort is active [<c>:L276</c>] - it never touches
+    /// <c>SortDatas</c> and never assigns <c>_sSort</c>. So the requested sort was neither stored nor
+    /// composed, the response and every later read reported an empty state, and the operation answered
+    /// OK for a sort that had not happened. The user sort in the oracle is established by MUTATING THE
+    /// STORE and then running the pass, which is what this method does.
+    /// </para>
+    /// <para>
+    /// THE STORE IS REPLACED, NOT MERGED, and that is what makes the operation a statement of the whole
+    /// sort rather than an increment of it. A header click knows only about the one column it hit, so
+    /// the oracle merges [<c>:L108-L121</c> finds or appends the clicked column]; a caller of this
+    /// contract states the complete precedence order in one request, so merging would silently retain a
+    /// column the caller did not name. Request order IS precedence order, which is the same rule the
+    /// oracle's store order carries into the pass at <c>:L187</c>.
+    /// </para>
+    /// <para>
+    /// UNSORTED ENTRIES ARE ACCEPTED, VISITED AND THEN DROPPED, in that order, because all three steps
+    /// are the oracle's. They are accepted and visited so the pass emits their indicator descriptors -
+    /// <c>_of_SetArrow</c> is called UNCONDITIONALLY [<c>:L193</c>] and clearing an unsorted column's
+    /// indicator is real work. They are dropped afterwards because the oracle drops them too: the
+    /// control branch removes the clicked entry once it cycles back to unsorted [<c>:L134-L143</c>] and
+    /// the plain branch empties or reduces the store to the single survivor [<c>:L153-L160</c>]. So the
+    /// oracle never leaves an unsorted entry in the store once a click has completed, and neither does
+    /// this - which is what keeps <see cref="SortEntries"/> a report of the sort that is IN FORCE.
+    /// </para>
+    /// <para>
+    /// NOTHING ELSE IS RE-DECIDED HERE. The clause text, the separator, the sentinel handling, the lazy
+    /// capture of the original, the indicator descriptors, the redraw suppression, the row-focus
+    /// suppression and the caret restoration are all the pass's and the apply's, unchanged. This method
+    /// only writes the store and asks for the code the pass already computes.
+    /// </para>
+    /// </remarks>
+    internal long ApplyRequestedSort(IReadOnlyList<SortData> requested)
+    {
+        ArgumentNullException.ThrowIfNull(requested);
+
+        // The whole statement replaces the whole store, in the caller's order.
+        _sortDatas.Clear();
+        _sortDatas.AddRange(requested);
+
+        // The pass: composes _sSort from the store, emits one indicator descriptor per entry, and
+        // applies either the composed user sort or the captured original.
+        long code = SortCore();
+
+        // The oracle's own post-pass cleanup, generalised from one clicked entry to the whole statement.
+        // Iterated downwards so the removals cannot renumber an index still to be visited.
+        for (int nIndex = UpperBound(_sortDatas); nIndex >= 1; nIndex--)
+        {
+            if (EntryAt(_sortDatas, nIndex).SortType == SORT_NONE)
+            {
+                RemoveEntryAt(_sortDatas, nIndex);
+            }
+        }
+
+        return code;
     }
 
     /// <summary>

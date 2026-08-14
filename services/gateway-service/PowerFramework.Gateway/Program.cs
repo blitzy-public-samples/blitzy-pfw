@@ -484,6 +484,25 @@ builder.Services
         // contain and why the failure event deliberately writes nothing of its own.
         AuthenticationRefusalRecord.Attach(bearer);
 
+        // 🔴 AND THE ONE 401 A PLANNED KEY ROTATION STILL COST, WHICH THE TWO INTERVALS ABOVE DO NOT
+        // CLOSE.
+        //
+        // Both refresh intervals are assigned and both are correct, and a MEASURED rotation still refused
+        // the first token minted under the new key: verifiers primed on the original key, Security
+        // restarted with a new active key plus the original as retiring, and Gateway, DataServices and
+        // Persistence each answered 401 on attempt 1 and 200 on attempt 2 about a seventh of a second
+        // later. Security accepted it immediately, because Security holds the key rather than fetching a
+        // key set. The intervals decide WHEN a refresh may happen; they cannot retry the request that
+        // provoked it, and `RefreshOnIssuerKeyNotFound` arms the refresh for the NEXT request's benefit
+        // while this one has already failed.
+        //
+        // So a valid, correctly signed, unexpired token from the estate's only issuer was refused at the
+        // sole ingress for no reason a caller could act on. Authorization/UnknownSigningKeyRevalidation.cs
+        // retries exactly that failure once against the key set the handler already asked for, with every
+        // check this file configures still enforced - and carries the five properties that keep it safe,
+        // including why a forged key identifier still fails and why no fetch amplification is possible.
+        UnknownSigningKeyRevalidation.Attach(bearer);
+
         TokenValidationParameters parameters = bearer.TokenValidationParameters;
 
         parameters.ValidateIssuer = true;
@@ -833,6 +852,30 @@ builder.Services.AddScoped(static serviceProvider => new SecurityClient(
 builder.Services.AddScoped<IServiceTokenProvider>(static serviceProvider =>
     serviceProvider.GetRequiredService<SecurityClient>());
 
+// ==================================================================================================
+//  🔴 THE CIRCUIT BREAKER THAT CAN ACTUALLY SEE A DEAD UPSTREAM.
+//
+//  ONE INSTANCE FOR BOTH gRPC CLIENTS, because both address DataServices and its health is a property
+//  of DataServices rather than of the channel that discovered the fault. The interceptor is a singleton
+//  over it, and `AddInterceptor` composes it around each channel's own CallInvoker - ABOVE the gRPC
+//  retry policy ApplyGrpcRetry installs, which is what makes an open circuit refuse without asking the
+//  channel for a subchannel.
+//
+//  WHY IT IS NOT SIMPLY THE `AddStandardResilienceHandler` BREAKER: that pipeline is an
+//  HttpMessageHandler and Grpc.Net establishes its connections outside it - the same mechanism the
+//  banner above ApplyGrpcRetry already records for retry. Measured consequence before this existed: with
+//  DataServices stopped, 105 replay-safe requests all answered 502, the next request still made four
+//  gRPC attempts over four seconds, and zero circuit events were emitted. See
+//  Clients/OutboundGrpcCircuitBreaker.cs for the full account, including why the HTTP-level breaker is
+//  left exactly as it was and why no threshold is invented here.
+// ==================================================================================================
+builder.Services.AddSingleton(static serviceProvider => new OutboundGrpcCircuitBreaker(
+    OutboundGrpcCircuitBreakerInterceptor.DataServicesUpstream,
+    OutboundBreakerThresholds.FromPackageDefaults(),
+    serviceProvider.GetService<ILogger<OutboundGrpcCircuitBreaker>>()));
+
+builder.Services.AddSingleton<OutboundGrpcCircuitBreakerInterceptor>();
+
 builder.Services
     .AddGrpcClient<DataWindowService.DataWindowServiceClient>((serviceProvider, grpcOptions) =>
     {
@@ -842,6 +885,7 @@ builder.Services
         ApplyGrpcRetry(grpcOptions.ChannelOptionsActions, options.Outbound);
     })
     .ConfigurePrimaryHttpMessageHandler(CreateInternalChannelHandler)
+    .AddInterceptor<OutboundGrpcCircuitBreakerInterceptor>()
     .AddStandardResilienceHandler()
     .Configure(ConfigureGrpcOutboundResilience);
 
@@ -856,6 +900,7 @@ builder.Services
             ApplyGrpcRetry(grpcOptions.ChannelOptionsActions, options.Outbound);
         })
     .ConfigurePrimaryHttpMessageHandler(CreateInternalChannelHandler)
+    .AddInterceptor<OutboundGrpcCircuitBreakerInterceptor>()
     .AddStandardResilienceHandler()
     .Configure(ConfigureGrpcOutboundResilience);
 

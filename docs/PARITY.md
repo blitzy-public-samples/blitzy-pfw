@@ -77,8 +77,8 @@ Everything else this document references is present too: the read-only legacy tr
 fixture corpus, the six shared library projects and their test projects, the four service applications with
 entry points and their four test projects, the protocol and OpenAPI definitions under
 `shared/PowerFramework.Contracts/`, the Playwright specs under `tests/e2e/specs/`, and the six sibling
-documents in this folder. All twenty projects build in Release with zero warnings and zero errors and all
-ten test projects pass.
+documents in this folder. All twenty-two projects build in Release with zero warnings and zero errors and all
+eleven test projects pass.
 
 **Present is not the same claim as exercised, and this document does not keep its own account of what was
 run.** One place does, for the whole repository:
@@ -189,7 +189,7 @@ Stated narrowly, because a parity document that overclaims its own verification 
   a throwaway skeleton project, not against this repository's services**, and it is evidence that the
   command and the coverage collector work rather than a result for the four services.
   [`BUILD.md`](BUILD.md) §13 states the same caveat and is the authority for it.
-- **Separately, in this repository:** restore is audit-clean, all twenty projects build with zero warnings
+- **Separately, in this repository:** restore is audit-clean, all twenty-two projects build with zero warnings
   and zero errors, all ten test suites pass, all four images build, and the **four-service stack has been
   brought up** — every container reaching Docker health `healthy` in dependency order, with `/health`
   answering anonymously over TLS on all four and Gateway's aggregate answering against three live
@@ -849,20 +849,22 @@ class directly cannot see them.
 >
 > **What an in-process host still cannot see, and how much of it the bring-up actually covered.** It
 > performs no TLS handshake, no ALPN negotiation, no real gRPC channel setup and no client-certificate
-> exchange. The container bring-up closed **two** of those four and left two open, and the distinction is
-> not pedantic — the two it left open are the two this document's §7 behaviours travel over:
+> exchange. The container bring-up has now closed **three** of those four and left one open, and the
+> distinction is not pedantic — the row that remains open is the one §R4 names:
 >
 > | Gap in an in-process host | Closed by the bring-up? |
 > | --- | --- |
 > | TLS handshake | **Closed.** Every `/health` gate was answered over TLS against the projected anchor, and in-network reachability was verified with hostname validation |
-> | ALPN negotiation | **Closed for HTTP/1.1 only.** The `Http1AndHttp2` listeners answered an HTTP/1.1 request on the very port a gRPC caller negotiates HTTP/2 on; no HTTP/2 negotiation by a gRPC client was observed |
-> | Real gRPC channel setup | **Open.** No gRPC RPC has been invoked at all, so no C-03 to C-08 call has crossed a container boundary |
-> | Client-certificate exchange | **Open.** The bring-up authenticated callers with the shared-secret scheme and left every `*_MTLS_*` path empty |
+> | ALPN negotiation | **Closed for HTTP/1.1 and HTTP/2.** The `Http1AndHttp2` listeners answered an HTTP/1.1 `GET` on the very port a gRPC caller negotiates HTTP/2 on, and gRPC callers then negotiated HTTP/2 on it for real |
+> | Real gRPC channel setup | **Closed for five of the six contracts.** C-03, C-04, C-05, C-06 and C-08 have been invoked across a container boundary, `Retrieve` and `EventStream` among them so stream setup is covered as well as unary. **C-07 remains open and cannot be closed by this bring-up** — no published route reaches `CommandService` |
+> | Client-certificate exchange | **Open on the caller half.** The issuance arm of `POST /v1/tokens` accepted a chain-verified client certificate, but the bring-up leaves the four `GATEWAY_MTLS_*` / `DATASERVICES_MTLS_*` paths empty, so neither service has presented its OWN pair |
 >
 > Those verdicts are not this document's to publish and are not restated as figures here: they come from
 > [`orchestration/README.md` §10](../orchestration/README.md#10-what-has-and-has-not-been-exercised), the
-> only execution-status record in the repository, and the two open rows are the same two §R4 names. And a
-> bring-up is still not a *capture* in any case: no recording has been taken on either side (§1.5).
+> only execution-status record in the repository. **Two rows moved after an earlier revision of this table
+> was written**, and the direction matters: they moved from open to closed, so a reader who trusted the old
+> table would have under-counted what is proven rather than over-counted it. And a bring-up is still not a
+> *capture* in any case: no recording has been taken on either side (§1.5).
 
 ### 6.2 The paging rewriters are pure-function matrices requiring no storage engine
 
@@ -1791,7 +1793,7 @@ prerequisite; that the four determinism seams of §5.1 are the enumerated source
 the twelve groups in §7 are legacy behaviours to be reproduced and annotated, each with locators that
 resolve; that the coverage gate is measured from `coverage.cobertura.xml` at 80% line coverage per in-scope
 service and is enforced by `.github/workflows/ci.yml` in four independent legs, with all four services
-measured above the floor; and that all ten test projects build and pass in this repository, with the
+measured above the floor; and that all eleven test projects build and pass in this repository, with the
 counts held in [`BUILD.md`](BUILD.md) §1.3 rather than restated here.
 
 **It does not claim.** That any **paired recording** exists — the store exists and holds none on either

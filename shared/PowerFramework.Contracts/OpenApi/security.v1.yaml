@@ -5,10 +5,10 @@
 #    C-01  security.v1.TokenService    POST /v1/tokens
 #                                      GET  /.well-known/jwks.json
 #                                      GET  /.well-known/openid-configuration
-#    C-02  security.v1.CryptoService   18 operations under /v1/crypto/**. SEVENTEEN of them are POST
-#                                      and between them project ALL 63 of the legacy surface's
-#                                      cryptographic overloads; the EIGHTEENTH is
-#                                      DELETE /v1/crypto/rsa/keys/{keyRef}, which is AUTHORED and
+#    C-02  security.v1.CryptoService   18 operations under /v1/crypto/**, every one of them a POST.
+#                                      SEVENTEEN of them between them project ALL 63 of the legacy
+#                                      surface's cryptographic overloads; the EIGHTEENTH is
+#                                      POST /v1/crypto/rsa/keys/release, which is AUTHORED and
 #                                      projects no legacy overload - the legacy had no key store, so
 #                                      it has nothing to release. TWO WAYS TO GET THIS COUNT WRONG,
 #                                      both easy: declining to project the three HashFile overloads
@@ -886,7 +886,7 @@ paths:
   # ================================================================================================
   #  C-02 - security.v1.CryptoService
   #  18 operations: 17 POST projections covering ALL 63 of the legacy surface's cryptographic
-  #  overloads, plus one AUTHORED operation - DELETE /v1/crypto/rsa/keys/{keyRef} - which releases a
+  #  overloads, plus one AUTHORED operation - POST /v1/crypto/rsa/keys/release - which releases a
   #  generated key and projects no legacy overload, because the legacy had no key store to release
   #  from. Every one of the 18 requires a token (inherited from the document-level requirement) and
   #  every one returns the single ProblemDetails shape on every non-2xx.
@@ -901,22 +901,30 @@ paths:
   #  keyRef in the position the legacy took key bytes; where the legacy took an initialization
   #  vector, the wire takes an ivRef resolved the same way.
   #
-  #  ALL SEVENTEEN PROJECTIONS ARE POST, INCLUDING THE ONES THAT LOOK LIKE READS. That is deliberate.
+  #  ALL EIGHTEEN OPERATIONS ARE POST, INCLUDING THE ONES THAT LOOK LIKE READS. That is deliberate.
   #  A GET with the payload in the query string would place plaintext, ciphertext and digests into
   #  request lines, and therefore into access logs, proxy caches and browser history - none of which
   #  the in-process legacy had. These operations are also not idempotent in any useful sense: the
   #  three random generators return a different result per call by definition.
   #
-  #  THE EIGHTEENTH IS THE EXCEPTION AND IT IS A DELETE, which is why the count of POST operations and
-  #  the count of published operations are different numbers. Releasing a generated key is a genuine
-  #  deletion of a named server-side resource, addressed by that resource's own identifier in the path
-  #  rather than by a payload, and it answers 204 with no body - the one shape in this contract that
-  #  neither takes a request body nor declares a 400 or a 500.
+  #  🔴 THE EIGHTEENTH WAS PUBLISHED AS `DELETE /v1/crypto/rsa/keys/{keyRef}` AND IS NOW
+  #  `POST /v1/crypto/rsa/keys/release`, WHICH IS A SECURITY CORRECTION RATHER THAN A TIDYING. A path
+  #  segment is recorded in the SERVER's own request scope and in every proxy, ingress and trace
+  #  upstream of it, so a keyRef in a request line reached diagnostics no matter how carefully the
+  #  handler avoided recording one - a measured sweep of a running deployment found a freshly generated
+  #  reference in four records of its own release window. A keyRef is a credential-like handle to a
+  #  retained private key, so the exposure is removed at source: the reference is carried in a request
+  #  body, exactly as it is on the other eight operations that resolve one, and NO OPERATION ON THIS
+  #  CONTRACT CARRIES A CALLER-SUPPLIED VALUE IN ITS PATH. It is a POST rather than a body-carrying
+  #  DELETE because HTTP assigns a DELETE body no semantics and an intermediary may drop it, which
+  #  would turn a release into a request naming nothing and answer it 404 - indistinguishable from
+  #  "no such key". It is still the one shape in this contract that answers no 200: it declares 204
+  #  with no response body, and it declares no 500 because it reads no configured material.
   #
-  #  NINE OF THE EIGHTEEN TAKE A keyRef: eight carry one in the request body (hmac, hmac-file, both
-  #  symmetric operations and all four RSA operations that consume a key) and the release operation
-  #  takes one as a path parameter. POST /v1/crypto/rsa/keys is not among them - it RETURNS a keyRef
-  #  rather than resolving one - which is exactly why it alone among the RSA operations declares no 404.
+  #  NINE OF THE EIGHTEEN TAKE A keyRef, AND ALL NINE CARRY IT IN THE REQUEST BODY: hmac, hmac-file,
+  #  both symmetric operations, the four RSA operations that consume a key, and the release.
+  #  POST /v1/crypto/rsa/keys is not among them - it RETURNS a keyRef rather than resolving one -
+  #  which is exactly why it alone among the RSA operations declares no 404.
   #
   #  TEN DECLARE A 404, WHICH IS A DIFFERENT TEN AND WORTH KEEPING APART FROM THE NINE. Reference
   #  resolution is what makes a 404 reachable, not KEY resolution, so the nine above plus hash-file -
@@ -1650,8 +1658,8 @@ paths:
           $ref: '#/components/responses/ServerError'
 
 
-  /v1/crypto/rsa/keys/{keyRef}:
-    delete:
+  /v1/crypto/rsa/keys/release:
+    post:
       operationId: releaseRsaKey
       x-contract-id: C-02
       tags: [CryptoService]
@@ -1659,6 +1667,25 @@ paths:
       description: |-
         Releases the private key this service retained under `keyRef`, freeing the caller's share of
         the retained-key store immediately.
+
+        ## THE REFERENCE IS CARRIED IN THE REQUEST BODY, AND THAT IS A SECURITY PROPERTY
+
+        This operation was published as `DELETE /v1/crypto/rsa/keys/{keyRef}`. **A value in a request
+        line is recorded by the server's own request scope, and by every reverse proxy, ingress and
+        trace upstream of it** - so a `keyRef` in a path segment reached diagnostics regardless of the
+        care the handler took not to record one. A sweep of a running deployment found a freshly
+        generated reference in four records of its own release window.
+
+        A `keyRef` is a credential-like handle to a retained private key, so the exposure is removed
+        at source rather than suppressed at one of its outlets: the reference is carried in a request
+        body, exactly as it is on the other eight operations that resolve one. **No operation on this
+        contract carries a caller-supplied value in its path.**
+
+        It is a `POST` and not a body-carrying `DELETE`: HTTP assigns a `DELETE` body no semantics, so
+        an intermediary is free to drop it - which would turn a release into a request naming nothing,
+        answered `404`, indistinguishable from "no such key". Being a `POST` does not make it
+        replayable; a release must never be retried, and no Security path is admitted by any
+        consumer's replay-safe policy.
 
         ## PART OF THE SAME NARROWING AS `generateRsaKey`, NOT A LEGACY OPERATION (C-K)
 
@@ -1707,20 +1734,19 @@ paths:
         value is a string, and a string cannot be wiped, so no memory-scrubbing guarantee is offered
         or implied. That residual belongs to the preserved legacy signature, which returns key text
         rather than bytes [`n_crypto.sru:L19-L20`], and it is recorded here rather than hidden.
-      parameters:
-        - name: keyRef
-          in: path
-          required: true
-          description: >-
-            The opaque reference `generateRsaKey` returned. It is never logged and never echoed in a
-            response body.
-          schema:
-            $ref: '#/components/schemas/KeyReference'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReleaseRsaKeyRequest'
       responses:
         '204':
           description: >-
             The key was released and the caller's share of the store is free immediately. No body,
             because there is nothing to report beyond the outcome.
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -3935,6 +3961,30 @@ components:
             at `n_crypto.sru:L20`, which selects the textual key format of the returned public key.
             Omitting it selects the three-argument overload at `:L19`, which does not take the switch
             at all.
+
+    ReleaseRsaKeyRequest:
+      type: object
+      title: ReleaseRsaKeyRequest
+      description: >-
+        A retained-key release request. It binds NO legacy declaration - the legacy hands the private
+        half straight back through a `ref` parameter at `n_crypto.sru:L19-L20` and has no store to
+        release from - and it exists because the reference moved out of the request PATH, where the
+        server's own request scope and every proxy upstream of it recorded it. It carries a reference
+        and nothing else: key material would violate the contract-level secrets rule, and an owner
+        field would let a caller name whose key to destroy, when ownership is read from the `sub` claim
+        of the presented token and is never accepted as input.
+      additionalProperties: false
+      required: [keyRef]
+      properties:
+        # A DIRECT $ref RATHER THAN AN allOf WRAPPER, exactly as the eight sibling operations declare
+        # theirs. The reference must resolve to the KeyReference component itself: SecretsDisciplineTests
+        # asserts that every key-consuming operation's keyRef IS that component, so wrapping it to hang a
+        # per-property description off it would publish a property that merely looks like a reference. The
+        # note that would have gone here is on the operation's own description instead: an absent or blank
+        # value is `400`, not the `404` a reference naming nothing receives, because a request that names
+        # no reference has asked nothing about the store.
+        keyRef:
+          $ref: '#/components/schemas/KeyReference'
 
     RandomBlobRequest:
       type: object

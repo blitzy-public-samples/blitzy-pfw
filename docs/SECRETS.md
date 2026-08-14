@@ -925,6 +925,40 @@ case that is not happening. Both carry a `_FILE` companion that is passed throug
 key back into the environment for the length of the rollover, which is the exposure the active key was moved
 out of.
 
+#### 4.1.4 The C-02 key store is covered by the same convention, and it was not
+
+**The declared set was the two signing keys plus the caller roster — so the one class of material a *caller*
+can ask Security to use was the one class with no projected form.** A sweep of a running deployment that had
+configured a legitimate key reference through the supported prefix found that reference's **exact material**
+in the `docker compose config` render, in `docker inspect` and in `/proc/1/environ` at once. The mechanism in
+§4.1.3 existed and simply did not reach it.
+
+**The declared set is derived rather than restated, so covering it was a derivation change rather than a new
+mechanism.** Resolution at the endpoint is `configuration[ConfigurationKeyPrefix + keyRef]`, and the
+resolver now composes exactly that spelling for every entry of `Security:KeyStore:PermittedKeyRefs`:
+
+| Configuration | Supplied as | Read by Security as |
+| --- | --- | --- |
+| `Security:KeyStore:ConfigurationKeyPrefix` = `SECURITY_KEYSTORE_`, `PermittedKeyRefs:0` = `report-hmac` | `SECURITY_KEYSTORE_report-hmac_FILE=/run/secrets/security/keystore-report-hmac` | The trimmed contents of that file, under `SECURITY_KEYSTORE_report-hmac` |
+
+A reference added to the permitted set becomes file-backable with no code change, which is the property that
+keeps the newest reference from being the one left on the exposed form. All three rules above apply
+unchanged.
+
+**And in Production the inline form is refused rather than accepted.** A production deployment that has been
+given the projected alternative and still supplies key-store material inline is leaking material it has been
+given a way not to leak, so the host **refuses to start** and names the key and the remedy — never the value.
+Development and every other environment keep the inline form, so the documented bring-up (C-I) and every
+parity capture are unchanged.
+
+**The rule does not try to tell a key from a file path, deliberately.** A permitted reference resolves either
+to key material (the keyed operations) or to a filesystem path (`hashFile`, `hmacFile`), and the
+configuration declares no difference between them — so a refusal scoped to "real key material" would have to
+**guess** which kind a value is from its shape, and a guess that errs permissively leaks exactly the material
+the rule protects. The rule is therefore uniform, the refusal states the file-path case explicitly, and the
+remedy is the same for both: project the value. A projected file holding a path is one line, and it is the
+only reading that cannot mis-classify.
+
 ### 4.1a Three issuance-roster secrets, and they are a different kind of material
 
 The signing secret above is the only **signing** secret in the system, and that remains exactly true. It
@@ -1011,7 +1045,7 @@ published set omits.
 | Boundary | Where its verification key comes from | What it does at the instant of rotation |
 | --- | --- | --- |
 | **Security** | **In process**, from its own signing-key layer. It configures no bearer `Authority` and no `MetadataAddress` at all, so it builds no configuration manager and performs no metadata retrieval | Converges **immediately** on restart. It is both issuer and verifier of its own tokens, and both halves move together |
-| Gateway, DataServices, Persistence | The **published key set**, fetched by the stock bearer handler and **cached** | Keep serving from the cached set. A **pre-rotation** token still verifies; a **post-rotation** token is refused `401` with `IDX10503`, naming a `kid` that matched nothing |
+| Gateway, DataServices, Persistence | The **published key set**, fetched by the stock bearer handler and **cached** | Keep serving from the cached set. A **pre-rotation** token still verifies. A **post-rotation** token names a `kid` the cached set lacks, and each of the three then waits — bounded, and only on that one failure — for the refresh that failure arms to land, and validates the token once more against the refreshed set. Measured on this stack: `200` on the **first** request at all three, 47–58 ms, one `Information` record per verifier naming the new `kid`, no refusal recorded. Before that hook existed the same rotation was measured as a `401` carrying `IDX10503` at all three. See [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.6 |
 
 **The two intervals that bound it, and why both are needed**
 
@@ -1093,10 +1127,14 @@ key is a worse security posture than a bounded overlap.
    pointing at the cause.
 3. **Restart Security only.** No other service is reconfigured and none needs restarting — the whole
    point of the two intervals is that the verifiers converge on their own.
-4. **Expect, and do not misread, the window.** Within `MetadataRefreshInterval` a newly minted token is
-   accepted everywhere. Within the fallback lifetime — the same five minutes — a token signed by the
-   previous key stops being accepted. A `401` carrying `IDX10503` during that window is the cache
-   converging, not a misconfiguration.
+4. **The window is one-sided now, and the side that remains is the RETIRED key.** A newly minted token is
+   accepted at all three verifiers on its **first** presentation — each waits for the refresh its own
+   failure arms and then revalidates in full, measured at `200` in 47–58 ms — so a `401` carrying
+   `IDX10503` is no longer an expected part of a cutover. Treat one as a real refusal and check that the
+   new key is genuinely published (§4.1.2 step 5's two checks); the one condition that reinstates it is a
+   key set that cannot be **fetched** at all, because a metadata failure leaves the refusal standing
+   rather than admitting the request. What still has a window is the other direction: a token signed by
+   the previous key stays acceptable until the fallback entry expires, the same five minutes.
 5. **If the retired key is COMPROMISED, restart the verifiers.** The five-minute bound is short enough for
    an orderly rotation and is not short enough for an incident: a stolen key can mint fresh tokens, and
    those tokens are accepted until the fallback entry expires. Restarting Gateway, DataServices and

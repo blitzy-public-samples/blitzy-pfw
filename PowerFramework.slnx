@@ -63,12 +63,13 @@
   file section notes that no filter is authored for the format to match. If you are reading this
   because you were about to add one, all three are telling you not to.
 
-  SCOPE: EXACTLY TWENTY PROJECTS, WHICH RECONCILES AS 6 PLUS 6 PLUS 4 PLUS 4
+  SCOPE: EXACTLY TWENTY-TWO PROJECTS, WHICH RECONCILES AS 6 PLUS 6 PLUS 4 PLUS 4 PLUS 2
 
       6   shared libraries under shared/
       6   sibling test projects, one per shared library
       4   service applications under services/
       4   service test projects, one per service
+      2   the characterization capture driver and its test project, under characterization/tools/
 
   Every path below was verified to resolve against this working tree before being written. A path
   that does not resolve makes the whole solution unloadable, so the check is not optional. The
@@ -76,18 +77,19 @@
   here reaches only projects that are themselves listed here, so this solution restores and builds
   its own complete graph with nothing arriving from outside it.
 
-  ALL TEN TEST PROJECTS ARE LOAD BEARING, AND THE SIX SHARED ONES ARE ONLY REACHABLE FROM HERE
+  ALL ELEVEN TEST PROJECTS ARE LOAD BEARING, AND SEVEN OF THEM ARE ONLY REACHABLE FROM HERE
 
   A test project omitted from a solution is not discovered by a test run against that solution. Its
   tests then do not execute, no coverage data is produced for the code it covers, and the result
   presents as a clean pass. That failure mode reads exactly like success, which makes it worse than
   a broken build.
 
-  This matters most for the six shared test projects. The shared tree deliberately carries no
-  solution of its own, so THIS file is the only solution that enumerates them and therefore the only
-  one from which they can be discovered and run. The four service test projects are additionally
-  enumerated by their own per service solution, which is where the per service coverage gate is
-  measured; their presence here is what lets a single root level test run cover the whole estate.
+  This matters most for the six shared test projects and for the capture driver's test project. The
+  shared tree deliberately carries no solution of its own, and neither does characterization/tools,
+  so THIS file is the only solution that enumerates those seven and therefore the only one from which
+  they can be discovered and run. The four service test projects are additionally enumerated by their
+  own per service solution, which is where the per service coverage gate is measured; their presence
+  here is what lets a single root level test run cover the whole estate.
 
   SOLUTION FOLDERS ARE PRESENTATION ONLY
 
@@ -152,10 +154,17 @@
   sciter_control/ or the pre existing browser harness directories inside tests/ is referenced by any
   path below, and none ever may be.
 
-  Two directories the refactor does add are also absent, for the same reason of not being MSBuild
-  projects. The end to end suite under tests/e2e is an npm and Playwright project, driven by its own
-  package manifest. The characterization/ tree holds paired behavioural recordings and workflow
-  definitions, which are data.
+  One directory the refactor adds is also absent, for the same reason of not being an MSBuild project:
+  the end to end suite under tests/e2e is an npm and Playwright project, driven by its own package
+  manifest.
+
+  The characterization/ tree is PARTLY present, and the split is deliberate. Its recordings, workflow
+  definitions, schema and capture plans are DATA and appear nowhere below. Its two projects under
+  characterization/tools are ordinary MSBuild projects and are listed: the target side capture driver
+  that turns a declared workflow into a normalized recording against a running service, and that
+  driver's own test project. The driver is tooling and is never shipped in a container image, which is
+  why it lives beside the data it drives rather than under services/ - and why it is marked not
+  packable and takes no package reference of any kind.
 
   LEGACY PROVENANCE: ONE IDEA IS BORROWED, AND ONE MECHANISM IS DELIBERATELY NOT TRANSLATED
 
@@ -269,6 +278,27 @@
     -->
     <Project Path="shared/PowerFramework.Shared.Localization/PowerFramework.Shared.Localization.csproj" />
     <Project Path="shared/PowerFramework.Shared.Localization.Tests/PowerFramework.Shared.Localization.Tests.csproj" />
+
+  </Folder>
+
+  <!--
+    THE CHARACTERIZATION TOOLING, TWO PROJECTS, PAIRED SUBJECT THEN TESTS.
+
+    The target side capture driver and its tests. It is TOOLING, not a service: it ships in no
+    container image, it is marked not packable, and it declares no package reference at all, so
+    nothing arrives in the dependency graph through it. It is listed here for one reason above the
+    others - characterization/tools carries no solution of its own, so this is the only solution from
+    which its test project can be discovered, and a test project no solution enumerates presents as a
+    clean pass while executing nothing.
+
+    It references no service and no shared library. The driver speaks to a RUNNING service over its
+    published HTTP contract, exactly as any other external client does, which is what keeps a capture
+    an observation of the deployed system rather than of an in process object graph.
+  -->
+  <Folder Name="/characterization/">
+
+    <Project Path="characterization/tools/PowerFramework.Characterization.Capture/PowerFramework.Characterization.Capture.csproj" />
+    <Project Path="characterization/tools/PowerFramework.Characterization.Capture.Tests/PowerFramework.Characterization.Capture.Tests.csproj" />
 
   </Folder>
 
