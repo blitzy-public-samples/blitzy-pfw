@@ -1,0 +1,142 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Test project for shared/PowerFramework.Contracts, the published cross-service boundary:
+    Proto/common.v1.proto, Proto/dataservices.v1.proto, Proto/persistence.v1.proto,
+    OpenApi/security.v1.yaml and OpenApi/gateway.v1.yaml.
+
+    HAND-AUTHORED ON PURPOSE. `dotnet new xunit3` does not exist in the pinned SDK and
+    `dotnet new xunit` scaffolds the xunit v2 line with an older test SDK and coverage package,
+    so templating this project would silently downgrade the test stack.
+
+    Everything else is inherited from the repository-root Directory.Build.props by directory
+    walk-up: net10.0, C# latest, nullable enabled, implicit usings enabled, warnings as errors,
+    .NET analysers, and central package management. Those are mandatory quality gates, so they
+    are deliberately NOT restated here and must never be relaxed per project. Adding NoWarn, or
+    turning off warnings as errors, or disabling nullable to make a test compile would be a
+    violation rather than a fix: the fix belongs in the offending test file. Package versions
+    live in the repository-root Directory.Packages.props, which is why every PackageReference
+    below is versionless, without exception: Directory.Build.props disables central version
+    overriding outright, so a VersionOverride here would fail restore with NU1013.
+  -->
+
+  <PropertyGroup>
+    <!-- MANDATORY for xunit.v3, which runs tests from a self hosting executable. Without Exe the
+         project still compiles but no test is discovered, and the coverage gate then reads a
+         Cobertura report that contains no data. This is the single property that distinguishes a
+         v3 test project from a v2 one. -->
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup Label="Test stack and OpenAPI object model : all versionless, versions from Directory.Packages.props">
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <!-- Produces coverage.cobertura.xml, the exact artifact the 80 percent line coverage gate is
+         measured from, when the test command collects XPlat Code Coverage. -->
+    <PackageReference Include="coverlet.collector" />
+
+    <!-- Centrally pinned at 2.12.0, and that pin is mandatory: 2.0.0 carries NuGet advisory
+         NU1903, while the 3.x line breaks the build because the 10.0.x OpenAPI source generator
+         is compiled against the 2.x object model and emits CS0200. Within the 2.x line the value
+         is 2.12.0 rather than 2.11.0 because the lock-stepped YAML reader below is deprecated
+         upstream at 2.11.0. This project is where that
+         pin gets its regression guard, which is why it takes the reference directly. -->
+    <PackageReference Include="Microsoft.OpenApi" />
+
+    <!--
+      THE PACKAGE SET ABOVE PLUS THIS ONE IS THE WHOLE PACKAGE SET. SIX ENTRIES, NO SEVENTH.
+
+      Every reference here is versionless and resolves against the repository-root
+      Directory.Packages.props, whose sixteen PackageVersion rows are the complete approved
+      dependency inventory for this refactor.
+
+      WHY THIS PACKAGE IS HERE, AND WHY ITS VERSION IS NOT WRITTEN IN THIS FILE.
+
+      Microsoft.OpenApi 2.12.0 ships JSON and YAML *writers* plus a JSON *reader* only. Its
+      assembly exposes OpenApiJsonReader, OpenApiJsonWriter and OpenApiYamlWriter, and no YAML
+      reader of any kind (verified by inspecting the published package). Both contract documents
+      are YAML, so loading and validating them against the pinned object model is physically
+      impossible without this reader. This project is its only consumer, because it is the only
+      project that READS a contract document rather than serving one.
+
+      Microsoft.OpenApi.YamlReader is pinned centrally at 2.12.0, and the version is not
+      interchangeable: 2.11.0 - and every version from 2.7.0 up to it - carries an UPSTREAM
+      DEPRECATION with reason CriticalBugs whose recommended alternate, [3.10.0, ), is the 3.x line
+      that breaks compilation. 2.12.0 is the first 2.x that carries no deprecation, so it is the only
+      remediation available on the compatible line, and it must move in step with the
+      Microsoft.OpenApi pin because it declares that version as its own dependency minimum.
+
+      Its dependencies at 2.12.0 are Microsoft.OpenApi [2.12.0, ), SharpYaml 2.1.4 and
+      System.Text.Json 8.0.5, all MIT licensed. The Microsoft.OpenApi range is a MINIMUM rather than
+      an exact lock - so it cannot pull the mandatory pin down, but it does not hold it either; the
+      central PackageVersion entry is what does that. System.Text.Json resolves to the net10.0 shared
+      framework rather than to a package, so SharpYaml 2.1.4 is the only net addition to the resolved
+      graph. Neither carries a NuGet advisory at these versions, so restore stays audit clean, which
+      matters because warnings are errors.
+
+      THE VERSION LIVES CENTRALLY, LIKE EVERY OTHER ONE, and this reference is versionless in
+      consequence. An earlier form of this file supplied the version here with VersionOverride, on
+      the reasoning that doing so let the project restore from a clean checkout without editing a
+      file outside its own folder. That reasoning was wrong on both halves. Directory.Packages.props
+      is part of the same clean checkout, so amending it is not an external edit; and the override
+      restored cleanly precisely because it sits in the gap between central package management's two
+      guards - NU1008 catches a bare Version attribute and NU1010 catches a package with no central
+      entry, while an override is neither - so it quietly re established a per project version
+      authority for one package. That is the drift the central manifest exists to prevent.
+      Directory.Build.props now sets CentralPackageVersionOverrideEnabled to false, so a
+      VersionOverride anywhere in the tree is a hard restore error (NU1013) rather than a silent
+      divergence.
+    -->
+    <PackageReference Include="Microsoft.OpenApi.YamlReader" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The subject under test, and the only supplier of the generated Protobuf message types and
+         of the gRPC service base classes and client stubs (generated with GrpcServices Both).
+         Google.Protobuf arrives transitively through it, so it is deliberately not referenced
+         explicitly here: an explicit reference would risk a version conflict. -->
+    <ProjectReference Include="..\PowerFramework.Contracts\PowerFramework.Contracts.csproj" />
+
+    <!--
+      NOT A STRAY REFERENCE, AND NOT TO BE TIDIED AWAY. PowerFramework.Contracts declares zero
+      project references by design, because the contracts project is the boundary definition and
+      carries no behaviour of its own. The consequence is that the numeric agreement between the
+      RetCode enum in Proto/common.v1.proto and the ported constants in
+      PowerFramework.Shared.Kernel/RetCode.cs has no compile-time edge anywhere else in the tree.
+
+      Kernel is referenced here so the fidelity tests can read their expectations FROM the Kernel
+      constants rather than restating literals, which makes this project the single place where
+      that otherwise review-time-only invariant is enforced mechanically. It is also why this
+      project is sequenced behind Kernel.
+
+      Scope is deliberately limited to these two: no service project and no other shared library
+      is referenced, because a shared test project reaching into a service would invert the
+      layering that keeps the published contracts the only cross-service coupling.
+    -->
+    <ProjectReference Include="..\PowerFramework.Shared.Kernel\PowerFramework.Shared.Kernel.csproj" />
+  </ItemGroup>
+
+
+  <!--
+    REPOSITORY ROOT, EMBEDDED SO THIS PROJECT'S ON DISK LOCATORS DO NOT DEPEND ON WHERE ITS OUTPUT WENT
+    This project reads real files from the source tree, and it finds them by walking up from
+    AppContext.BaseDirectory for a marker. That walk holds only while the output sits inside the
+    checkout, so a test run whose artifacts path option names a directory outside the tree - a supported
+    and entirely valid way to run the suite - left every one of those locators with no ancestor
+    carrying the marker, and they threw for a reason unrelated to the code under test.
+
+    The value comes from the PowerFrameworkRepositoryRoot property in the repository root
+    Directory.Build.props, which resolves it from that file's own location. It is turned into assembly
+    metadata HERE, in each test project, rather than there: a service assembly ships inside a container
+    image and must carry no build machine path, and the root property sheet keeps its documented rule of
+    introducing no project level item. The locators still verify their marker and still keep the walk as
+    the fallback, so an absent or stale value degrades to the previous behaviour rather than misreading
+    a different tree.
+  -->
+  <ItemGroup>
+    <AssemblyMetadata Include="PowerFrameworkRepositoryRoot" Value="$(PowerFrameworkRepositoryRoot)" />
+  </ItemGroup>
+
+</Project>

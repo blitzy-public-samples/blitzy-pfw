@@ -1,0 +1,231 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!--
+    PowerFramework.Persistence - the Persistence service application project.
+
+    Persistence is the ONLY service in the system that generates or executes SQL and the ONLY one
+    that holds a storage provider. It hosts four gRPC services, contracts C-05 Query, C-06 Update,
+    C-07 Command and C-08 Transaction, alongside two minimal REST endpoints on port 5101:
+    /health anonymous, and /v1/ping which requires a JWT and answers 401 without one.
+
+    Legacy provenance. These paths are the read-only behavioural oracle and are never referenced
+    from the .NET tree, per constraint C-C; nothing here depends on the PowerBuilder toolchain,
+    the PowerBuilder runtime, or any shipped native binary:
+        ws_objects/pfw.utility.sqlite.pbl.src/                         the SQLite binding
+        ws_objects/pfw.thread.pbl.src/                                 the async substrate
+        ws_objects/pfw.thread.ext.pbl.src/                             the SQL task and transaction layer
+        ws_objects/pfw.utility.parser.pbl.src/n_sql.sru, parsesql.srf   the SQL statement model
+
+    WHAT THIS FILE DELIBERATELY DOES NOT STATE.
+    TargetFramework, LangVersion, Nullable, ImplicitUsings, TreatWarningsAsErrors,
+    EnableNETAnalyzers, AnalysisLevel and ManagePackageVersionsCentrally are all inherited from the
+    repository-root Directory.Build.props by directory walk-up. Restating or overriding any of them
+    here would be a defect. Package versions are inherited from the repository-root
+    Directory.Packages.props, which is why every PackageReference below is VERSIONLESS: no version
+    attribute, no floating range, no wildcard, no "latest".
+
+    No project-level NoWarn or WarningLevel appears here either: warnings-as-errors is a quality
+    gate, not a preference. Where a single analyzer diagnostic genuinely has to be relaxed for a
+    preserved legacy identifier, the relaxation belongs in the repository-root .editorconfig scoped
+    to the file that carries it. Inside this project that file is Sql/ClauseModifier.cs, and it is
+    the only one.
+
+    OutputType is left at the Microsoft.NET.Sdk.Web default. OutputType=Exe is an xunit.v3
+    requirement that applies ONLY to the sibling PowerFramework.Persistence.Tests project.
+
+    No Protobuf item, no Grpc.Tools reference and no .proto include appears here.
+    shared/PowerFramework.Contracts owns protocol-definition compilation, with a single Protobuf
+    item at GrpcServices="Both". Compiling the same messages a second time would emit duplicate
+    generated types and break the build; the stubs are consumed purely through the ProjectReference.
+
+    Rules position. No user rules were provided for this project: review_rules returns exactly one
+    line saying so. The binding constraints are therefore the enterprise-standard baseline plus the
+    named non-rule constraints C-A through C-L, and each non-obvious decision below cites the
+    constraint that drives it, as C-K requires.
+  -->
+
+  <PropertyGroup>
+    <!--
+      Stated explicitly even though the containing directory name already yields it, because drift
+      here is expensive: the parent Dockerfile invokes PowerFramework.Persistence.dll by name, and
+      every .cs file across the ten subfolders declares a PowerFramework.Persistence.* namespace.
+      AssemblyName is left to the SDK, which derives PowerFramework.Persistence from this project
+      file's own name. A hyphenated form such as persistence-service is not a legal C# namespace and
+      must never appear here.
+    -->
+    <RootNamespace>PowerFramework.Persistence</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup Label="Package references - versionless by design, see Directory.Packages.props">
+
+    <!--
+      The gRPC server for C-05 through C-08. Carries Grpc.Tools and Google.Protobuf transitively,
+      so neither is referenced explicitly. gRPC is the right transport here because the legacy
+      surface Query, Update, Exec, Commit, Rollback, SQLErrText is action-oriented rather than
+      resource-oriented, server streaming reproduces progressive recordset delivery, and the
+      mandated conflict response needs richer status detail than a plain status code carries.
+    -->
+    <PackageReference Include="Grpc.AspNetCore" />
+
+    <!--
+      Inbound token VALIDATION only, on /v1/ping and on every gRPC method, which is what C-G asks
+      of a newly created boundary. Security is the sole issuer in the system, so the minting
+      package Microsoft.IdentityModel.JsonWebTokens is deliberately absent: Persistence holds
+      verification material and nothing more, and the JWKS fetch is performed by this handler
+      itself, which is also why no outbound HTTP resilience package is referenced.
+    -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+
+    <!--
+      SQLite is the only storage engine anywhere in the repository with a schema, DDL or connection
+      string behind it, so it is the only provider provisioned. That is C-E: no database is
+      fabricated. The SQL Server and Oracle statement generation the legacy carries survives as
+      pure string transforms under Sql/Paging/, fully unit-testable with no instance of either
+      engine running, so no client package for either is referenced and no SQL parser package is
+      either. Encrypted SQLite is out of Phase-1 scope, so no SQLCipher package appears.
+    -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
+
+    <!--
+      C-K. ADO-level access is required IN ADDITION to the EF Core provider, and the reason is
+      behavioural rather than stylistic. The legacy binding n_sqlite declares both Open(uri) and
+      Open(uri, password), that is the test.db?mode=rwc[,password] URI grammar together with its
+      documented check and journal extensions, and it executes statements through
+      Exec(cmd, arg1 .. arg11) with positional binding. Neither the URI grammar nor the raw
+      positional-? command execution that contract C-07 publishes is expressible through EF Core
+      alone, so both layers coexist here on purpose.
+    -->
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+
+    <!--
+      C-K, and mandatory rather than preferred. Microsoft.EntityFrameworkCore.Sqlite pulls a 2.1.x
+      native SQLite bundle transitively, and that version raises the high-severity NuGet audit
+      advisory NU1903. Because TreatWarningsAsErrors is inherited as true, the advisory does not
+      merely warn, it BREAKS the build. This explicit direct reference, centrally pinned at 3.0.5,
+      overrides the transitive one and clears the audit: the resolved graph then reports the bundle,
+      config, core and provider packages all at 3.0.5.
+
+      It must NOT be marked PrivateAssets="all". The parent Dockerfile's runtime layer depends on
+      this bundle's native e_sqlite3 being published beside the managed assemblies, and marking the
+      reference private would strip it. Note also that the managed native comes from here and from
+      nowhere else: no Content or None item copies the legacy sqlite3.dll or sqlite3.cipher.dll,
+      which C-C forbids.
+    -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
+
+    <!--
+      Design-time only, for generating and maintaining the COMPANY schema migrations under
+      Data/Migrations/. Marked as a development dependency in exactly the shape the SDK itself
+      writes for this package, which declares developmentDependency in its own manifest:
+      PrivateAssets="all" stops it flowing to consumers and keeps it out of the deployed payload,
+      while IncludeAssets omits compile so no code in this project can bind to its types.
+
+      C-K, recorded because the choice is genuinely not obvious. The runtime asset is retained
+      deliberately. Dropping it removes Microsoft.EntityFrameworkCore.Design.dll from the build
+      output, whereupon dotnet ef fails with "Your startup project does not reference
+      Microsoft.EntityFrameworkCore.Design" and the migrations this reference exists to produce
+      become ungenerable. Retaining it costs nothing at deployment time, because PrivateAssets="all"
+      already excludes the assembly from dotnet publish output and leaves no entry for it in the
+      published deps.json, so the container image carries no design-time payload and no dangling
+      dependency record. Both halves of that claim were verified by executing publish and
+      inspecting the result rather than assumed.
+    -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+
+  </ItemGroup>
+
+  <ItemGroup Label="Project references - shared libraries only, which is the whole of C-A">
+
+    <!--
+      The published boundary. Supplies the generated server base classes for C-05 QueryService,
+      C-06 UpdateService, C-07 CommandService and C-08 TransactionService in namespace
+      PowerFramework.Contracts.Persistence.V1, plus PowerFramework.Contracts.Common.V1 carrying
+      RetCode, DwBuffer, ItemStatus, DbError and ConflictDetail.
+
+      REVIEW INVARIANT, and the reason this reference and the next one deserve reading together.
+      PowerFramework.Contracts declares no ProjectReference of its own, deliberately, so nothing
+      anywhere in the repository enforces that the RetCode enum in common.v1.proto and the RetCode
+      constants in Shared.Kernel agree numerically. This project is the first and only place both
+      are referenced together, which makes it the only place such a divergence could ever surface.
+      A mismatch is a silent wire-compatibility defect that no compiler will catch, so the two must
+      be reconciled by inspection whenever either side changes.
+    -->
+    <ProjectReference Include="..\..\..\shared\PowerFramework.Contracts\PowerFramework.Contracts.csproj" />
+
+    <!--
+      RetCode including the complete SQLITE_* set, Enums supplying SQL_MS_REPLACE, SQL_MS_APPEND
+      and SQL_MS_PREPEND together with the database-type constants the paging rewriters dispatch
+      on, Predicates with the tri-state boundary semantics preserved verbatim so a prevention still
+      reads as a success and cancelled is still neither succeeded nor failed, Formatting, and Bits.
+      Bits is genuinely used, not incidental: the legacy packs retrieval progress current and total
+      into a single long as two 16-bit words, and MakeLong reproduces that packing.
+    -->
+    <ProjectReference Include="..\..\..\shared\PowerFramework.Shared.Kernel\PowerFramework.Shared.Kernel.csproj" />
+
+    <!--
+      Assertions and AssertionFailure. The static class is named Assertions rather than Assert,
+      because a static class cannot contain a member of its own name; the file is Assert.cs and the
+      Assert and AssertFailed method names are preserved. Persistence catches AssertionFailure so
+      that the legacy fail-fast posture survives as fail-fast: a structural fault terminates,
+      it never degrades gracefully.
+    -->
+    <ProjectReference Include="..\..\..\shared\PowerFramework.Shared.Diagnostics\PowerFramework.Shared.Diagnostics.csproj" />
+
+    <!--
+      OrderedMap, the substitute for the legacy n_map, used as the datastore cache by
+      Tasks/SqlTaskBase.cs and Tasks/SqlQueryTask.cs. Its positional accessors are one-based with
+      an inclusive Count bound, matching the legacy indexing convention, which is exactly the
+      translation hazard the whole port has to respect rather than silently normalise.
+    -->
+    <ProjectReference Include="..\..\..\shared\PowerFramework.Shared.Containers\PowerFramework.Shared.Containers.csproj" />
+
+    <!--
+      EventBroker, VetoResult and EventArgumentContext. Required rather than convenient: AAP 0.4.1
+      assigns the whole of pfw.thread to Persistence in scope, and one of that library's six objects
+      is n_cst_threading_eventful.sru, which derives from n_cst_eventful. That inheritance is one of
+      the two structural facts the AAP cites as proof that n_cst_eventful must live in a shared
+      in-scope library at all, so the derived threading broker cannot be ported here without the
+      base it derives from. Tasks/TaskProxies/ThreadingEventBroker.cs is that port, and it is the
+      dispatcher behind the notification channels in Tasks/TaskProxies/SqlTaskProxyBase.cs.
+      docs/SERVICE_MAPPING.md records object 233 as In scope / Persistence / Ported, and this edge is
+      what makes that record true. Shared.Eventful declares exactly one project edge of its own, to
+      Shared.Kernel, which is already referenced above - so this edge adds no new transitive project to
+      the graph and the graph stays acyclic.
+    -->
+    <ProjectReference Include="..\..\..\shared\PowerFramework.Shared.Eventful\PowerFramework.Shared.Eventful.csproj" />
+
+    <!--
+      Deliberately absent. PowerFramework.Shared.Localization is not referenced because Persistence
+      consumes no localized text: the diagnostics this service emits are operator-facing and the
+      legacy strings it reproduces are hardcoded at their own sites, so an unused reference would be
+      an unused coupling. No peer service project is referenced either: C-A permits the published
+      contracts project as the only cross-service edge in the system, and no behavioural code
+      crosses a service boundary. Nothing in the five paths above reaches outside shared/.
+
+      A SECOND ProjectReference TO Shared.Eventful SAT HERE AND HAS BEEN REMOVED. It was an exact
+      duplicate of the edge declared immediately above this comment, so MSBuild deduplicated it and the
+      build never complained - which is precisely why it survived. The cost was not a build failure but a
+      project graph that read as though this service took six edges where it takes five, directly under a
+      comment whose subject is a reference that is deliberately ABSENT. One edge, one declaration, one
+      place to change it.
+    -->
+
+  </ItemGroup>
+
+  <ItemGroup Label="Test visibility - what makes the per-service coverage gate reachable (C-H)">
+
+    <!--
+      Lets the sibling test project exercise the internal seams the coverage gate depends on: the
+      injected clock behind the transaction pool's idle expiry, the internals of the SQL Server and
+      Oracle paging rewriters, and the changeset and full-state codecs with their preserved defects.
+      Without this the 80% line-coverage gate is reachable only by widening the public API, which
+      would be the wrong trade. The SDK turns this item into the assembly attribute at build time.
+    -->
+    <InternalsVisibleTo Include="PowerFramework.Persistence.Tests" />
+
+  </ItemGroup>
+
+</Project>

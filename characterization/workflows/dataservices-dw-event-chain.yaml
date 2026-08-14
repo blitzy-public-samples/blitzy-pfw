@@ -1,0 +1,1433 @@
+# yaml-language-server: $schema=./workflow.schema.json
+# ==================================================================================================
+#  dataservices-dw-event-chain - THE DATAWINDOW EVENT CHAIN
+#  ------------------------------------------------------------------------------------------------
+#  WHY THIS DEFINITION IS AUTHORED FIRST AMONG ITS SIBLINGS
+#  Event-ordering preservation is the highest risk in the whole refactor, and the item-change
+#  micro-protocol is the most intricate behaviour in the in-scope set. Every one of the five
+#  `dataservices-dwsvc-*` workflows runs INSIDE this chain rather than beside it: each of the five
+#  oracle windows enables exactly one sub-service, and every event that sub-service observes arrives
+#  through the 22-event surface characterized here. So this pair pins the substrate, and the five
+#  siblings cross-reference it rather than re-deriving it.
+#
+#  THIS FILE SPECIFIES A CAPTURE. IT CONTAINS NO CODE AND NO CAPTURED VALUE.
+#  It conforms to `./workflow.schema.json`, which is authoritative for shape. Store-wide conventions
+#  - the capture rule's canonical text, the recording-file conventions, the seam register, the defect
+#  roster and what must never enter a recording - belong to `../README.md` and to `../../docs/PARITY.md`
+#  and are CITED here, never restated. A fourth copy of a rule three files already own word for word
+#  is a fourth thing to drift.
+#
+#  ORDER, NEVER SPEED (C-B, and `../README.md` section 6.4)
+#  This workflow is about the ORDER in which events arrive and the values they return. It records no
+#  elapsed value and asserts no timing. The monotonic sequencing token below exists FOR DETECTION
+#  ONLY - an out-of-order arrival is a hard error, never a reorder opportunity and never a latency
+#  measurement. The repository publishes no service-level agreement, no latency budget, no throughput
+#  target and no availability commitment, so there is nothing a timing assertion could be measured
+#  against. The only quantitative gate in the brief is 80% per-service line coverage, and it is read
+#  from `coverage.cobertura.xml` in CI - not from this store.
+#
+#  ---- THE CASE-1 QUESTION IS SETTLED, AND THIS FILE USES THE SETTLED READING ---------------------
+#  The migration plan describes the item-change dispatch's `case 1` as "falling through" to `case 2`.
+#  IT DOES NOT. `se_cst_dw.sru:L212` is an arm with no statements, and PowerScript `CHOOSE CASE` does
+#  not fall through the way a C `switch` does, so a result of 1 leaves the construct with value and
+#  status UNTOUCHED. `../../docs/PARITY.md` section 7.7 and `../../docs/CONTRACTS.md` section 6.5 both
+#  settle it from the dispatch text and explicitly withdraw the fall-through reading, and
+#  `../../shared/PowerFramework.Contracts/Proto/dataservices.v1.proto` models the four arms as four
+#  distinct outcomes. The distinction is OBSERVABLE - whether a restore happens before the
+#  validation-error event fires - so a capture written against the withdrawn reading would assert a
+#  behaviour the oracle does not exhibit, which is the one failure a characterization suite cannot
+#  survive. Defect D-01 below records both the settled reading and the withdrawn one, so a reader
+#  arriving from the plan's wording is not left to rediscover the correction.
+#
+#  ---- TWO LOCATORS CORRECTED AGAINST THE SOURCE -------------------------------------------------
+#  Both were read line by line in `se_cst_dw.sru` rather than copied forward:
+#    * the edit-changed topic's ordering prefix is declared at `:L57`, not `:L58` (`:L58` is the
+#      comment introducing the clicked topic);
+#    * the type-directed coercion switch spans `:L231-L244`, inside the default arm at `:L226-L250`.
+#  Every locator in this file was verified the same way.
+#
+#  ---- WHAT THIS DEFINITION DELIBERATELY OMITS, AND WHY ------------------------------------------
+#    * `blockedBehaviours` - OMITTED because this workflow blocks nothing. The store's two blocked
+#      cases both belong to siblings: pinyin first-letter matching to `dataservices-dwsvc-dropdownsearch`
+#      and cross-session foreign expression variables to `dataservices-dwsvc-columnexp`. Neither is
+#      reachable from the event surface characterized here, and claiming either would misattribute a
+#      known gap. Said here so a reader does not read the member's absence as an oversight.
+#    * `redaction` - OMITTED because nothing this capture records is sensitive. Every data value that
+#      reaches a recording originates in the read-only fixtures' own inline rows (six columns of
+#      status codes and small decimals), and the one path that surfaces user data in a message is the
+#      validation-error path, whose text comes from the same rows. NO KEY, NO PASSWORD, NO
+#      CERTIFICATE, NO TOKEN AND NO CONNECTION STRING IS READ, EMITTED OR RECORDED HERE (C-F).
+#      This chain issues no SQL, so the redacted-statement rule has no field to act on.
+#    * the deferred-capability member - OMITTED. This workflow's capability is in scope in full: the
+#      event chain, its gates and its session state are headless and ship complete. The structural
+#      parent cited below is REFERENCE-ONLY and is not ported, which is a citation rather than a gap
+#      in what this workflow covers (C-D).
+#
+#  ---- GOVERNING CONSTRAINTS -------------------------------------------------------------------
+#  NO USER-SPECIFIED RULES EXIST. The project's rules document returns exactly one line reporting
+#  that none were provided, so no rule is invented, inferred or back-filled, and nothing in this file
+#  exists because of one. Enterprise-standard best practice applies in their place. The binding
+#  constraints are the migration plan's own: C-B (defects reproduced, never corrected - a corrected
+#  capture is a parity FAILURE), C-C (the legacy tree is read-only and is the oracle; every claim
+#  carries a locator), C-D (nothing for a deferred capability area), C-F (no secret value), C-K
+#  (every decision carries its reason) and C-L (the shared-volume capture rule).
+# ==================================================================================================
+
+schemaVersion: "1"
+
+workflowId: dataservices-dw-event-chain
+
+title: >-
+  DataWindow event chain: 22 events, the item-change micro-protocol, and the ordering discipline per
+  capability area
+
+capabilityArea: >-
+  The DataWindow event chain of the service class `se_cst_dw` - its 22-event surface (9 semantic
+  events and 13 raw platform events), the non-uniform delegation shape each raw event applies to its
+  semantic handler and to the event broker, the composable event gate, the four cross-event session
+  fields, the item-change micro-protocol and its own four-value return alphabet, the validation-error
+  handler that consumes the stash the item-change event leaves behind, and the ordering discipline
+  assigned to each capability area within the chain.
+
+targetService: DataServices
+
+description: >-
+  ONE ORDERED CHAIN, CAPTURED TWICE. The pair proves that the order in which the 22 events fire, the
+  value each returns, and the session state carried between them are identical on the legacy master
+  and on the .NET candidate after identical masking.
+
+
+  THE FIVE SERVICE WORKFLOWS RUN INSIDE THIS CHAIN. `dataservices-dwsvc-rowselect`,
+  `dataservices-dwsvc-columnsort`, `dataservices-dwsvc-contextmenu`, `dataservices-dwsvc-dropdownsearch`
+  and `dataservices-dwsvc-columnexp` each characterize one sub-service, and each of those sub-services
+  observes the world through this surface: the changed-event dispatcher calls the column-expression
+  service before it triggers the broker, the raw editing event calls the drop-down search service after
+  it, the filter override calls the row-select service, and the context-menu pair is two of the nine
+  semantic events. Those five definitions therefore cross-reference this one for the ordering contract
+  instead of restating it, and this one records no sub-service behaviour of its own beyond the points at
+  which the chain hands control to a sub-service.
+
+
+  ON THE IDENTIFIER, BECAUSE IT DEVIATES FROM THE STORE'S CONVENTION AND THE DEVIATION IS DELIBERATE.
+  `../README.md` section 3.2 fixes workflow identifiers to the legacy oracle window that produces the
+  recording, on the sound reasoning that a window name is traceable where an invented name is arbitrary.
+  This workflow has no single such window: the behaviour under characterization belongs to the service
+  CLASS, and all five `w_test_dwsvc_*` windows drive it. The identifier is therefore derived from the
+  service object and its capability area, and every one of the five driving windows is cited below with
+  the line at which it enables its sub-service - so the identifier stays as checkable as a
+  window-derived one, by naming five windows rather than one.
+
+
+  THE STRUCTURAL PARENT IS CITED AND IS NOT PORTED. `se_cst_dw` derives from `se_cst_datawindow`
+  [`se_cst_dw.sru:L4,L10`], which is REFERENCE-ONLY in this refactor. That edge is structural rather
+  than a call, so no refactoring of a call site removes it; the target instead defines its own abstract
+  host contract carrying only the ancestral members the service class actually consumes - the DataWindow
+  accessor surface it reads and writes through, the two overridden methods it calls upward at
+  [`:L406`] and [`:L431`], and the two constructor and destructor chains at [`:L570`] and [`:L583`].
+  The parent's own content is theming and redraw behaviour that the service class never references, and
+  none of it is captured, implemented or stubbed here. THE CITATION IS EVIDENCE FOR THE HOST CONTRACT'S
+  SHAPE; IT IS NOT A WORKFLOW FOR THE CAPABILITY AREA THAT OWNS THE PARENT, AND NOTHING IN THIS STORE
+  IS (C-D).
+
+
+  NO DATA VALUE RECORDED HERE IS SENSITIVE. Every captured value originates in the read-only fixtures'
+  own inline rows; nothing is read from a credential, a key store or a connection string (C-F).
+
+oracleFixtures:
+  # THE OBJECT UNDER CHARACTERIZATION. Read, never edited, moved, reformatted or copied into this tree
+  # (C-C). The locators below are the ones this definition's observed outputs and defects cite.
+  - path: ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru
+    role: service-object
+    locators:
+      - "L4"          # the structural inheritance edge, forward declaration
+      - "L6-L7"       # the nested broker type, an instance member of the service class
+      - "L10"         # the inheritance edge again, on the type definition
+      - "L11-L32"     # THE 22-EVENT DECLARATION BLOCK: 9 semantic + 13 raw
+      - "L33"         # the broker instance
+      - "L35"         # the self-shadowing global auto-instance
+      - "L41-L43"     # EID_ROWFOCUSCHANGE, EID_ITEMFOCUSCHANGE, EID_ITEMCHANGE and the coupling comment
+      - "L46"         # one of the eight comment sites that make the veto look binary
+      - "L47-L76"     # the twelve broker topics
+      - "L51"
+      - "L54"         # the item-changed topic, ordering prefix "0-"
+      - "L56"
+      - "L57"         # the edit-changed topic, ordering prefix "1-"
+      - "L59"
+      - "L62"
+      - "L65"
+      - "L68"
+      - "L71"
+      - "L80-L84"     # the five sub-service members the chain hands control to
+      - "L89-L96"     # THE FOUR CROSS-EVENT STATE FIELDS
+      - "L109-L111"   # the public gate surface: query, disable, enable
+      - "L112"        # the private deferred-accept continuation
+      - "L115-L118"   # delegation shape: semantic then broker, both returns inspected
+      - "L120-L122"   # delegation shape: BROKER ONLY, no semantic event in the path
+      - "L124-L128"   # delegation shape: gated, semantic inspected, BROKER RETURN IGNORED
+      - "L130-L134"   # delegation shape: gated, semantic inspected, BROKER RETURN INSPECTED
+      - "L136-L143"   # delegation shape: object-validity guard around the broker trigger
+      - "L145-L162"   # delegation shape: guard, broker, then the focusless row move
+      - "L164-L174"   # delegation shape: semantic, subscriber-gated broker, then a sub-service
+      - "L176-L180"   # delegation shape: gated on the item-focus bit
+      - "L182-L253"   # THE ITEM-CHANGE MICRO-PROTOCOL
+      - "L187"
+      - "L189-L190"
+      - "L192-L196"
+      - "L198-L202"
+      - "L204-L208"
+      - "L210"        # the source comment that settles the case-1 question
+      - "L211-L251"   # the four-arm dispatch
+      - "L212"        # case 1: an arm with NO statements
+      - "L216-L222"   # case 2: conditional restore
+      - "L217-L218"   # the two commented-out dropdown guards
+      - "L223-L225"   # case 3: keep the value, rewrite the result to 1
+      - "L226-L250"   # the default arm
+      - "L231-L244"   # the type-directed coercion switch, ten prefixes
+      - "L247"
+      - "L250"
+      - "L256-L293"   # the pre-change handler
+      - "L280-L290"   # THE DORMANT commented-out byte-length check
+      - "L292"
+      - "L295-L320"   # the changed-event dispatcher's strict sequence
+      - "L313-L315"
+      - "L316-L318"
+      - "L319"
+      - "L322-L385"   # THE VALIDATION-ERROR HANDLER
+      - "L327"
+      - "L331-L332"
+      - "L334-L335"
+      - "L338-L340"
+      - "L342-L345"
+      - "L347-L358"
+      - "L350"
+      - "L351-L353"
+      - "L354-L356"
+      - "L357"
+      - "L359-L363"
+      - "L366-L380"
+      - "L368-L369"
+      - "L372"
+      - "L375-L376"
+      - "L382-L384"
+      - "L387-L393"   # the kill-focus handler and its conditional deferred accept
+      - "L395-L397"   # delegation shape: broker only, second occurrence
+      - "L399-L401"   # delegation shape: broker then semantic
+      - "L403-L414"   # the filter override, which reaches a sub-service
+      - "L416-L446"   # the delete-row override, which SYNTHESIZES a row-change event
+      - "L435"
+      - "L437"
+      - "L506"        # the disable path's invalid-argument guard
+      - "L530"        # the enable path's invalid-argument guard
+      - "L537-L558"   # the deferred continuation's body
+      - "L560-L568"
+      - "L570-L581"   # sub-service construction order vs initialization order - THEY DIFFER
+      - "L583-L589"
+      - "L594-L597"   # the broker's default return value
+      - "L599-L607"   # the broker's argument-injection rule and its four exclusions
+
+  # THE DEFINITION THE CANDIDATE BINDS. `DataWindowCatalogue.ServiceFixtureName` transcribes this one,
+  # so it is the definition the target half of the pair reads its column model and its nine rows from.
+  - path: ws_objects/pfw.tests.pbl.src/dw_test_dwsvc.srd
+    role: primary-fixture
+    locators:
+      - "L2"          # release 19
+      - "L8-L13"      # six columns, every one carrying updatewhereclause=yes
+      - "L11"         # the status value list on the first character column
+      - "L14"         # the sort specification
+      - "L15"         # THE NINE INLINE ROWS - the seed, carried by the definition itself
+      - "L22-L27"     # the column controls, declared OUT of identifier order
+      - "L25-L26"     # two drop-down DataWindow columns, edit disallowed
+      - "L27"         # one drop-down list-box column, edit disallowed
+
+  # THE DEFINITION THE LEGACY WINDOWS BIND. Its table block at `:L8-L14` is BYTE-IDENTICAL to the
+  # primary fixture's `:L8-L14`, and its `:L15` declares the same nine rows - the two data lines differ
+  # only in whitespace between literals. That equivalence is what keeps the pair comparable across the
+  # two definitions, and it was verified by diffing the two blocks rather than assumed. Two differences
+  # exist and are named so neither is mistaken for drift: this definition's child drop-down is its own,
+  # and it carries one extra computed field at `:L28` that the primary fixture does not.
+  - path: ws_objects/pfw.tests.pbl.src/dw_svc_sample.srd
+    role: supporting-fixture
+    locators:
+      - "L8-L14"
+      - "L15"
+      - "L25-L26"
+      - "L27"
+      - "L28"
+
+  # The child drop-down definition the primary fixture's two drop-down columns resolve to. Its three
+  # display-and-data pairs are what the restore arms put back when an edit is rejected.
+  - path: ws_objects/pfw.tests.pbl.src/dw_test_dwsvc_dddw.srd
+    role: supporting-fixture
+    locators:
+      - "L8-L9"
+      - "L11"
+
+  # The equivalent child for the definition the legacy windows bind. Same two columns, same three pairs.
+  - path: ws_objects/pfw.tests.pbl.src/dw_svc_sample_dddw.srd
+    role: supporting-fixture
+    locators:
+      - "L8-L9"
+      - "L11"
+
+  # THE FIVE DRIVING WINDOWS. Each enables exactly one sub-service in its open event, at the line cited.
+  # That is what makes the sub-service-enabled preconditions below checkable rather than asserted, and
+  # it is how this workflow stays traceable to the oracle without a single window of its own.
+  - path: ws_objects/pfw.tests.pbl.src/w_test_dwsvc_rowselect.srw
+    role: oracle-window
+    locators:
+      - "L5"          # the control is declared as the service class itself
+      - "L40"         # row-select enabled
+      - "L51"         # the bound definition
+  - path: ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnsort.srw
+    role: oracle-window
+    locators:
+      - "L41"
+      - "L50"
+  - path: ws_objects/pfw.tests.pbl.src/w_test_dwsvc_contextmenu.srw
+    role: oracle-window
+    locators:
+      - "L54"
+      - "L80"
+  - path: ws_objects/pfw.tests.pbl.src/w_test_dwsvc_dropdownsearch.srw
+    role: oracle-window
+    locators:
+      - "L41"
+      - "L55"
+  - path: ws_objects/pfw.tests.pbl.src/w_test_dwsvc_columnexp.srw
+    role: oracle-window
+    locators:
+      - "L96"         # column expressions enabled on the first control
+      - "L136"        # and on the second, which is why this window drives two hosts
+      - "L169"
+      - "L301"
+
+  # THE BROKER'S OWN PROTOCOL, read as the authoritative statement of what the chain's triggers can
+  # carry. The tri-valued prevention is declared here, NOT in the service class - whose inline topic
+  # comments suggest a binary convention and are the reason this file is cited at all.
+  - path: ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru
+    role: specification
+    locators:
+      - "L110-L112"   # the prevent flags: prevent-once is 1, prevent-deep is 2
+
+  # REFERENCE-ONLY, AND NOT PORTED. The structural parent of the service class. It is read for one
+  # narrow purpose - to establish which ancestral members the target's abstract host contract must
+  # carry - and for nothing else. Its own behaviour is theming and redraw work that the service class
+  # never references, and this workflow captures none of it, implements none of it and stubs none of
+  # it. No recording, no workflow and no mask in this store targets a capability area that does not
+  # ship in this phase (C-D).
+  - path: ws_objects/pfw.ui.controls.ext.pbl.src/se_cst_datawindow.sru
+    role: supporting-fixture
+    locators:
+      - "L4"          # it derives further, which is why the host contract is defined rather than ported
+      - "L8-L12"      # the three events it adds, none of which the service class references
+
+seedPhase:
+  # THE SEED SHAPE HERE IS GENUINELY DIFFERENT FROM THE PERSISTENCE WORKFLOWS, AND THE DIFFERENCE IS
+  # WORTH STATING. Those workflows seed a database: the oracle's own setup deletes the file, recreates
+  # the schema and inserts rows, which is precisely the destructive reseed the capture rule forbids
+  # between the two halves of a pair. THIS workflow seeds nothing of the kind. The rows it starts from
+  # are declared INLINE IN THE READ-ONLY DATAWINDOW DEFINITION ITSELF - nine rows at
+  # `dw_test_dwsvc.srd:L15` and the same nine at `dw_svc_sample.srd:L15` - so there is NO FILE DELETE,
+  # NO DDL, NO INSERT AND NO CONNECTION anywhere in this seed phase. Binding the definition IS the
+  # seed. The two assertions below are still both true and still both required: the binding happens
+  # once per pair, and nothing here runs between the two captures.
+  steps:
+    - action: >-
+        Bind the DataWindow definition named by the driving oracle window's dataobject property. On the
+        legacy side that is the definition the window declares; on the target side it is the
+        transcribed definition the catalogue registers under the same column model. Binding loads the
+        definition's own inline rows - this step performs no file delete, no schema creation and no row
+        insert, because the rows are part of the read-only fixture.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_rowselect.srw:L51"
+    - action: >-
+        Confirm the nine inline rows the bound definition declares are present and in declaration
+        order, with the six columns in their declared types - three two-place decimals and three
+        hundred-character strings - and the declared sort specification applied.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_test_dwsvc.srd:L15"
+    - action: >-
+        Confirm the child drop-down definition's three display-and-data pairs are resolvable, because
+        the item-change and validation-error restore arms put a display value back and cannot be
+        captured without them.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_test_dwsvc_dddw.srd:L11"
+    - action: >-
+        Enable exactly the one sub-service the driving window enables in its open event and leave the
+        other four disabled. This is a seed step rather than a precondition check because the chain's
+        observable order depends on it: the changed-event dispatcher calls the column-expression
+        service only when that service is enabled, and the raw editing event calls the drop-down
+        search service only when that one is.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_rowselect.srw:L40"
+    - action: >-
+        Set every event-gate bit to enabled - the gate bitmask starts at zero, meaning nothing
+        disabled - so that the baseline capture exercises the full chain and the gate cases below are
+        departures from a known starting state rather than from an unknown one.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L89"
+    - action: >-
+        Configure the determinism seams declared below once, and use that one configuration for both
+        halves of the pair. A seam configured per capture is two configurations, and two
+        configurations make the two recordings answer two different questions.
+    - action: >-
+        On the target side, open one validation session per host and record the identifier it
+        allocates. No schema provisioning and no row seeding runs on this side either: the candidate
+        materializes the same nine rows from the same read-only definition, transcribed rather than
+        read at run time, so this step is idempotent and is safe to repeat without touching any
+        persistent state.
+  runsOncePerPair: true
+  neverBetweenCaptures: true
+
+capturePhase:
+  behaviourUnderTest: >-
+    THE ORDERED DISPATCH OF THE 22 EVENTS THE SERVICE CLASS DECLARES AT
+    `ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L11-L32`, AND NOTHING ELSE. For each
+    event: the position at which it arrives, the arguments it receives, the numeric value it returns,
+    the delegation path it took to get there - which semantic handler it called, whether it triggered
+    the broker, and whether it inspected what the broker returned - and the state of the four
+    cross-event session fields immediately afterwards. Within that, three behaviours are the point of
+    the capture: the item-change micro-protocol at `:L182-L253` with its own four-value return
+    alphabet; the changed-event dispatcher's strict three-step sequence at `:L295-L320`; and the
+    validation-error handler at `:L322-L385`, which consumes and clears the code the item-change event
+    stashed and is therefore a function of the preceding event's return value.
+
+
+    WHAT THIS CAPTURE IS NOT. It is not a capture of any sub-service's own behaviour - the five
+    sibling workflows own those - and it records only the points at which the chain hands control to a
+    sub-service. It is not a retrieval or update capture: no statement is generated and no storage is
+    written. AND IT IS NOT A MEASUREMENT. No elapsed value is recorded and no timing is asserted; the
+    sequencing token exists to DETECT a displaced arrival, never to time one.
+
+  preconditions:
+    # ---- THE ORDERING DISCIPLINE, ASSIGNED PER CAPABILITY AREA WITH ITS REASON (C-K) --------------
+    # The discipline is mandated per area rather than globally, so it is recorded per area. The two
+    # names are the wire enumeration's own, from
+    # `../../shared/PowerFramework.Contracts/Proto/dataservices.v1.proto`: ORDERING_DISCIPLINE_SYNCHRONOUS
+    # is a strictly synchronous request and response inside one session on one stream, where NO
+    # reordering is permitted and a displaced arrival fails the session;
+    # ORDERING_DISCIPLINE_SEQUENCED carries a monotonic token a consumer may use to detect and reorder.
+    # Both halves of the pair are captured under the same assignment, or the comparison compares two
+    # different contracts.
+    - >-
+      ORDERING DISCIPLINE - ITEM-CHANGE AND VALIDATION CHAIN, covering the raw item-change event, the
+      pre-change handler, the two changed handlers, the validation-error handler and the kill-focus
+      handler's deferred-accept decision: ORDERING_DISCIPLINE_SYNCHRONOUS, strictly synchronous with no
+      reordering permitted. REASON: reordering is not merely undesirable here, it is semantically
+      impossible. The validation-error handler READS AND CLEARS the code the item-change event stashed
+      [`:L331-L332`] and pre-sets its own result when that code was 1 or 3 [`:L338-L340`], so its
+      behaviour is a function of the prior event's return value; the item-change handler fires a NESTED
+      event from inside itself [`:L204-L208`]; and the kill-focus handler queues a deferred accept only
+      when the item-change flag is clear [`:L387-L390`]. A token that let a consumer re-sort this group
+      would let it read the stash before it was written.
+    - >-
+      ORDERING DISCIPLINE - FOCUS, MOUSE AND ROW-FOCUS NOTIFICATIONS, covering set-focus, kill-focus in
+      its notification half, row-change, row-changing, left-button click, left-button double-click,
+      left-button up, right-button down and right-button up: ORDERING_DISCIPLINE_SEQUENCED, a monotonic
+      sequencing token. REASON: these carry no cross-event state and their only return contract is the
+      prevention convention, so a token is sufficient for a consumer to detect a displaced arrival and
+      reorder. THE TOKEN IS FOR DETECTION, NOT FOR TIMING - it is an ordinal, and nothing in this store
+      derives a duration from two of them.
+    - >-
+      ORDERING DISCIPLINE - THE KILL-FOCUS EVENT BELONGS TO BOTH GROUPS ABOVE, AND THE OVERLAP IS
+      DELIBERATE RATHER THAN AN INCONSISTENCY. Its notification half is sequenced with the other focus
+      events; its deferred-accept decision at [`:L387-L390`] is synchronous with the item-change chain,
+      because whether the accept is queued at all depends on the item-change flag that chain owns. A
+      capture that assigned it to one group only would lose one of the two behaviours.
+    - >-
+      ORDERING DISCIPLINE - CONTEXT MENU, the initializer followed by the selection:
+      ORDERING_DISCIPLINE_SYNCHRONOUS. REASON: initialization must COMPLETE before the menu identifier
+      the second event receives can be meaningful - the application adds and configures the items in the
+      first event, and the identifier that comes back names one of them.
+    - >-
+      ORDERING DISCIPLINE - DROP-DOWN SEARCH, the filter request followed by the filtered notification:
+      ORDERING_DISCIPLINE_SYNCHRONOUS. REASON: the first event produces its result through a REFERENCE
+      STRING OUT-PARAMETER [`:L13`] and declares no return type, so the caller blocks on the filter the
+      handler writes into it and the answer has no fire-and-forget form.
+    - >-
+      ORDERING DISCIPLINE - MACRO INVOCATION, the column-expression method call:
+      ORDERING_DISCIPLINE_SYNCHRONOUS. REASON: the calculation cannot proceed without the returned
+      value, and the return is typed as an untyped value over a string array [`:L14`], so there is
+      nothing to continue with until it arrives.
+    - >-
+      ORDERING DISCIPLINE - EXPRESSION TRACE: ORDERING_DISCIPLINE_SEQUENCED. REASON: pure diagnostics,
+      fire and forget. It returns nothing, nothing waits on it, and no other event's behaviour depends
+      on when it arrives.
+    # ---- STATE THE CAPTURE STARTS FROM ----------------------------------------------------------
+    - >-
+      The event-gate bitmask starts at zero - nothing disabled - so every gate case below is a departure
+      from a recorded baseline. The three bits are composable values 1, 2 and 4 [`:L41-L43`] and the
+      capture drives each independently as well as in combination.
+    - >-
+      Exactly one sub-service is enabled per capture, matching the driving oracle window, and a further
+      baseline capture is taken with all five disabled. This is observable rather than cosmetic: the
+      changed-event dispatcher calls the column-expression service only when it is enabled
+      [`:L313-L315`] and the raw editing event calls the drop-down search service only when that one is
+      [`:L169-L171`], so the enabled set changes the recorded order.
+    - >-
+      One validation session is open per host on the target side, and its identifier is recorded. The
+      four cross-event fields have nowhere to live on a stateless boundary, so they are fields of a
+      server-held session opened and closed by dedicated calls; a capture taken without one would have
+      no place to read the stash from.
+    - >-
+      The broker's default return value is zero - continue - established in its constructor
+      [`:L594-L597`]. Every dispatch with no subscriber therefore reads as continue rather than as
+      prevent, and a capture taken against a different default would invert every veto in the recording.
+    - >-
+      The broker subscription set is identical across both halves of the pair, including which of the
+      twelve topics has a subscriber. The changed-event dispatcher triggers only when the item-changed
+      topic has one [`:L316-L318`] and the raw editing event only when the edit-changed topic has one
+      [`:L166-L168`], so an unequal subscription set produces an unequal order for reasons that are not
+      behaviour.
+    - >-
+      The broker's argument-injection rule is active and its four exclusions hold [`:L599-L607`]: the
+      parent is injected as the first argument of a dispatch EXCEPT when the subscription passes no
+      arguments, when the target is the parent itself, when it is the column-expression or drop-down
+      search sub-service, or when it descends from the DataWindow service base. The injected argument is
+      visible in the recorded dispatch, so the exclusions are part of what is compared.
+    - >-
+      The same six-column model and the same nine rows are bound on both halves - three two-place
+      decimal columns and three hundred-character string columns, with the two drop-down DataWindow
+      columns and the one drop-down list-box column all declaring that editing is disallowed. That last
+      detail is the configuration the restore arms exist for, so it is a precondition rather than a
+      detail.
+    - >-
+      The target half is captured against the running service, not against an in-process test host. A
+      test host mounts no volume and so cannot be the candidate half of a pair however thorough it is;
+      `../README.md` section 7 is the authority for that distinction.
+    - >-
+      Both halves of this pair are taken in ONE working tree. Where several clones run concurrently each
+      needs its own compose project and its own volume, so that one clone's teardown cannot invalidate
+      another clone's half-finished pair.
+
+  observedOutputs:
+    # ==============================================================================================
+    #  PART 1 OF 3 - THE 22 EVENTS, ONE RECORDED OUTPUT EACH
+    #  ---------------------------------------------------------------------------------------------
+    #  NINE SEMANTIC EVENTS AND THIRTEEN RAW PLATFORM EVENTS, TOTALLING EXACTLY 22, enumerated in the
+    #  order the service class declares them at `se_cst_dw.sru:L11-L32`. Each is its own output rather
+    #  than a line item inside one, for two reasons: each traces to its own locator, and - more
+    #  importantly - THE DELEGATION SHAPE IS NOT UNIFORM ACROSS THE RAW EVENTS. Two call the broker and
+    #  no semantic handler at all; one triggers the broker and IGNORES what it returns while its
+    #  near-twin INSPECTS it; two wrap the broker in an object-validity guard; one gates the broker on
+    #  whether the topic has a subscriber and then calls a sub-service. Recording a single "the events
+    #  fired in this order" output would compare the order and lose all of that, and harmonizing the
+    #  shapes into one would be exactly the silent correction C-B forbids.
+    #
+    #  The name of each output is the wire enumeration's own member name, from
+    #  `../../shared/PowerFramework.Contracts/Proto/dataservices.v1.proto`, so a legacy record and a
+    #  target record key on the same identifier. Every record carries the sequencing token, the
+    #  arguments, the numeric return value and the session-state snapshot taken after the event
+    #  returned; `format` below is used where the projection is not obvious from that.
+    # ==============================================================================================
+
+    # ---- THE NINE SEMANTIC EVENTS ----------------------------------------------------------------
+    - name: event.EVENT_ID_ONINITCONTEXTMENU
+      description: >-
+        SEMANTIC 1 of 9. `oninitcontextmenu(long row, dwobject dwo)` returning long - the first half of
+        the context-menu pair, in which the application populates and configures the menu. Recorded with
+        its arguments and its numeric return, because the identifier the second event receives is only
+        meaningful once this one has completed.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L11"
+    - name: event.EVENT_ID_ONCONTEXTMENU
+      description: >-
+        SEMANTIC 2 of 9. `oncontextmenu(long row, dwobject dwo, long mid)` returning long - the
+        selection half of the pair, carrying the chosen menu identifier. The identifier is declared long
+        on the event even though the context-menu service's own constants are declared unsigned, and the
+        recording carries the value the signature admits rather than the one the constants imply.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L12"
+    - name: event.EVENT_ID_ONDDSGETFILTER
+      description: >-
+        SEMANTIC 3 of 9. `onddsgetfilter(long row, dwobject dwo, string data, ref string filter)` - it
+        returns NOTHING and produces its result by writing into a REFERENCE STRING OUT-PARAMETER. That
+        is why its area is synchronous: the caller blocks on the filter text the handler writes, so the
+        answer has no fire-and-forget form.
+      format: >-
+        The out-parameter's value is recorded as the filter expression text the handler wrote, exactly as
+        written and unnormalized, alongside the value it held on entry - so a handler that leaves it
+        untouched is distinguishable from one that writes an empty string.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L13"
+    - name: event.EVENT_ID_ONCOLUMNEXPINVOKEMETHOD
+      description: >-
+        SEMANTIC 4 of 9. `oncolumnexpinvokemethod(long row, dwobject dwo, string name, string args[])`
+        returning an untyped value over a string array - the macro-invocation callback. The legacy
+        expects the APPLICATION to implement the macro switch, so across a service boundary this is an
+        inverted call: the service calls back into its client and waits.
+      format: >-
+        The untyped return is recorded as a discriminated value - its runtime type and its textual
+        projection - never as a bare string, because the type the handler returned is part of what the
+        calculation then does with it.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L14"
+    - name: event.EVENT_ID_ONDOITEMCHANGE
+      description: >-
+        SEMANTIC 5 of 9. `ondoitemchange(long row, dwobject dwo, string data)` returning long - fired
+        BEFORE the edit reaches the buffer, so the value it validates is the text rather than the stored
+        item. Its handler delegates onward to the item-changed semantic event [`:L292`] and its return is
+        the value the micro-protocol stashes and then dispatches on. THE DORMANT VALIDATION LIVES HERE,
+        commented out at [`:L280-L290`], and this output is what proves it stayed dormant.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L24"
+    - name: event.EVENT_ID_ONITEMCHANGED
+      description: >-
+        SEMANTIC 6 of 9. `onitemchanged(long row, dwobject dwo)` - the application-facing notification
+        that the buffer now holds the new value. It returns nothing, and it is fired LAST of the three
+        steps the changed-event dispatcher performs, unconditionally [`:L319`].
+      format: >-
+        Recorded as an arrival with its arguments and no return value. Its position in the sequence is
+        the behaviour under test, so the record carries the token and the two steps that preceded it.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L25"
+    - name: event.EVENT_ID_ONDOITEMCHANGED
+      description: >-
+        SEMANTIC 7 of 9. `ondoitemchanged(long row, dwobject dwo)` - the dispatcher whose three-step
+        order at [`:L295-L320`] is itself contract: the column-expression service's changed handler
+        first and only if that service is enabled, then the broker trigger and only if the item-changed
+        topic has a subscriber, then the semantic notification unconditionally. Both conditions are
+        observable, so all three steps and both conditions are recorded.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L26"
+    - name: event.EVENT_ID_ONDDSFILTERED
+      description: >-
+        SEMANTIC 8 of 9. `onddsfiltered(long row, dwobject dwo, long rowcount, long filteredcount)` -
+        the second half of the drop-down search pair, carrying both counts. It returns nothing; the two
+        counts ARE its output and both are compared, because a filter that produced the right rows with
+        the wrong counts is a divergence.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L28"
+    - name: event.EVENT_ID_ONCOLUMNEXPTRACE
+      description: >-
+        SEMANTIC 9 of 9. `oncolumnexptrace(long row, dwobject dwo, string stack, string expr, string
+        value)` - the expression trace, pure diagnostics. It returns nothing and nothing waits on it,
+        which is why its area is sequenced rather than synchronous. The call stack it carries is built
+        by the expression engine's recursion stack, so the string is recorded verbatim rather than
+        parsed.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L32"
+
+    # ---- THE THIRTEEN RAW PLATFORM EVENTS, IN DECLARATION ORDER ----------------------------------
+    - name: event.EVENT_ID_ONDWNRBUTTONDOWN
+      description: >-
+        RAW 1 of 13, declared at [`:L15`]. DELEGATION SHAPE - the fullest of them: it calls the semantic
+        right-button-down event and returns 1 if that returned 1, then triggers the broker's
+        right-button-down topic and returns 1 if THAT returned 1, otherwise 0. Both returns are
+        inspected, and the recording carries both so the two prevention sources stay distinguishable.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L115-L118"
+    - name: event.EVENT_ID_ONDWNRBUTTONUP
+      description: >-
+        RAW 2 of 13, declared at [`:L16`]. DELEGATION SHAPE - BROKER ONLY. There is no semantic event in
+        its path at all: it triggers the right-button-up topic, returns 1 if that returned 1, otherwise
+        0. Recorded explicitly as a broker-only shape, because a port that added the missing semantic
+        event for symmetry would fire an event the legacy does not fire.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L120-L122"
+    - name: event.EVENT_ID_ONDWNROWCHANGE
+      description: >-
+        RAW 3 of 13, declared at [`:L17`]. DELEGATION SHAPE - gated on the row-focus bit and returning 0
+        immediately when it is disabled; then the semantic row-focus-changed event, whose 1 returns 1;
+        then the broker trigger WHOSE RETURN IS DISCARDED [`:L126`]; then 0. The discarded return is the
+        behaviour, not an oversight - see defect D-06.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L124-L128"
+    - name: event.EVENT_ID_ONDWNROWCHANGING
+      description: >-
+        RAW 4 of 13, declared at [`:L18`]. DELEGATION SHAPE - identical to its near-twin above in every
+        respect EXCEPT that it INSPECTS the broker's return and returns 1 on a prevention [`:L132`]. The
+        pair is captured together and compared against each other, because the asymmetry between
+        [`:L126`] and [`:L132`] is only visible when both are recorded.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L130-L134"
+    - name: event.EVENT_ID_ONDWNLBUTTONDBLCLK
+      description: >-
+        RAW 5 of 13, declared at [`:L19`]. DELEGATION SHAPE - semantic double-clicked event first, then
+        the broker trigger WRAPPED IN AN OBJECT-VALIDITY GUARD [`:L138`]: the semantic handler may have
+        destroyed the control, so the broker is reached only while the object is still valid. The guard's
+        outcome is recorded, because skipping the trigger and triggering it are different orders.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L136-L143"
+    - name: event.EVENT_ID_ONDWNLBUTTONCLK
+      description: >-
+        RAW 6 of 13, declared at [`:L20`]. DELEGATION SHAPE - the longest: semantic clicked event, then a
+        validity-guarded broker trigger, and then A FOCUSLESS ROW MOVE that has no counterpart in any
+        other handler - while the object is valid and the row is positive, it reads the processing
+        property and, when the current row differs from the clicked row, moves the current row and
+        RETURNS 1 IF THE MOVE DID NOT TAKE [`:L152-L159`]. All three stages and the resulting current row
+        are recorded.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L145-L162"
+    - name: event.EVENT_ID_ONDWNCHANGING
+      description: >-
+        RAW 7 of 13, declared at [`:L21`]. DELEGATION SHAPE - semantic edit-changed event, whose 1
+        returns 1; then the broker's edit-changed topic BUT ONLY IF IT HAS A SUBSCRIBER [`:L166-L168`];
+        then the drop-down search sub-service's own edit-changed event BUT ONLY IF THAT SERVICE IS
+        ENABLED [`:L169-L171`]; then 0. This is the second of the two places where the chain hands
+        control to a sub-service, and both conditions are recorded.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L164-L174"
+    - name: event.EVENT_ID_ONDWNITEMCHANGEFOCUS
+      description: >-
+        RAW 8 of 13, declared at [`:L22`]. DELEGATION SHAPE - gated on the item-focus bit, then the
+        semantic item-focus-changed event, then the broker with its return inspected. The gate here is a
+        DIFFERENT bit from the two that guard the row-focus handlers, and the capture drives each bit
+        independently so the three gates cannot be confused for one.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L176-L180"
+    - name: event.EVENT_ID_ONDWNITEMCHANGE
+      description: >-
+        RAW 9 of 13, declared at [`:L23`]. THE ITEM-CHANGE MICRO-PROTOCOL - the most intricate behaviour
+        in the in-scope set, captured step by step by the six outputs in part 2 below. Its return value
+        speaks the four-value alphabet and NOT the return-code algebra, so the recording carries the raw
+        number and no boolean or return-code projection of it.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L182-L253"
+    - name: event.EVENT_ID_ONDWNITEMVALIDATIONERROR
+      description: >-
+        RAW 10 of 13, declared at [`:L27`]. THE MOST DEFECT-LADEN SINGLE EVENT IN THE SET, captured step
+        by step in part 2. It is reached BECAUSE the item-change handler returned 1, it consumes and
+        clears the stash that handler left, and it performs the value-and-status restore that the
+        item-change handler's own case-1 arm deliberately does not.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L322-L385"
+    - name: event.EVENT_ID_ONDWNKILLFOCUS
+      description: >-
+        RAW 11 of 13, declared at [`:L29`]. DELEGATION SHAPE - three steps in a fixed order: queue the
+        deferred accept BUT ONLY IF THE ITEM-CHANGE FLAG IS CLEAR [`:L388-L390`]; trigger the
+        lose-focus topic, discarding its return; then return whatever the semantic lose-focus event
+        returned [`:L392`]. Both the condition and the order are recorded.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L387-L393"
+    - name: event.EVENT_ID_ONDWNLBUTTONUP
+      description: >-
+        RAW 12 of 13, declared at [`:L30`]. DELEGATION SHAPE - BROKER ONLY, the second of the two such
+        handlers, and its shape is compared against the right-button-up handler's to confirm both stayed
+        broker-only.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L395-L397"
+    - name: event.EVENT_ID_ONDWNSETFOCUS
+      description: >-
+        RAW 13 of 13, declared at [`:L31`]. DELEGATION SHAPE - BROKER FIRST, then semantic, which is the
+        reverse of every other handler that has both: it triggers the get-focus topic discarding the
+        return, then returns whatever the semantic get-focus event returned [`:L399-L400`]. The reversal
+        is recorded as the shape it is.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L399-L401"
+
+    # ==============================================================================================
+    #  PART 2 OF 3 - THE THREE ORDERED BEHAVIOURS, STEP BY STEP
+    #  ---------------------------------------------------------------------------------------------
+    #  The item-change micro-protocol, the changed-event dispatcher's strict sequence, and the
+    #  validation-error handler. Each step is its own output because each is individually observable and
+    #  individually reversible by a well-meaning port; a single "the protocol behaved" output would
+    #  compare the endpoint and lose every step that led to it.
+    # ==============================================================================================
+    - name: itemChange.gateEarlyOut
+      description: >-
+        STEP 1. Whether the handler returned 0 immediately because the item-change bit was disabled, and
+        the bitmask value it tested. The early-out is captured with the bit set and with it clear, so the
+        recording proves the gate was consulted rather than assumed.
+      format: >-
+        The bitmask as a decimal integer and a boolean for whether the early-out was taken. The bit's
+        value is 4 and the mask is composable, so the number is recorded rather than a bit name.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L187"
+    - name: itemChange.snapshotBeforeDispatch
+      description: >-
+        STEP 2. THE TWO SNAPSHOTS, and they are two rather than one: the column's original value from the
+        primary buffer [`:L189`] and the row's item status [`:L190`]. They are restored independently
+        later, so a recording that carried only the value could not detect a status that was restored when
+        it should not have been.
+      format: >-
+        The value with its runtime type and an explicit null marker, and the item status by its legacy
+        name. Null is recorded as null and never as an empty string or a zero, because the equality test
+        in step 4 treats two nulls as equal and a coerced null would make that arm unobservable.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L189-L190"
+    - name: itemChange.reentrancyFlagWindow
+      description: >-
+        STEP 3. The item-change re-entrancy flag is SAVED, set, and then RESTORED TO ITS SAVED VALUE
+        rather than cleared [`:L192-L196`], which is what makes nesting work. Recorded as the flag value
+        before, during and after, together with the value the semantic pre-change handler returned and
+        THE STASH THAT VALUE WAS WRITTEN INTO [`:L195`].
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L192-L196"
+    - name: itemChange.equalityTest
+      description: >-
+        STEP 4. The outcome of the equality test between the snapshot and the buffer's current value,
+        INCLUDING WHICH ARM DECIDED IT - the direct comparison at [`:L198`] or the EXPLICIT NULL-AND-NULL
+        ARM at [`:L200-L201`]. Two nulls compare equal here. Without that arm the null case would fall
+        into the unequal branch and fire an event the legacy does not fire, so which arm matched is
+        recorded, not merely the boolean it produced.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L198-L202"
+    - name: itemChange.nestedChangingEvent
+      description: >-
+        STEP 5. When the values differed: the value RE-READ from the buffer [`:L206`] - re-read rather
+        than reused, because the handler may have altered it - and the nested raw editing event fired
+        from inside the item-change handler [`:L207`]. The nesting is recorded as a nesting, with the
+        outer event still open, because a port that flattened it into a sibling would produce the same
+        set of events in a different shape.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L204-L208"
+    - name: itemChange.dispatchArm
+      description: >-
+        STEP 6. WHICH OF THE FOUR ARMS THE STASHED RESULT SELECTED, and what that arm did. The four are
+        distinct and none is merged: the arm for 1 has NO STATEMENTS [`:L212`] so 1 is returned exactly
+        as produced with value and status UNTOUCHED; the arm for 2 restores value and status but only if
+        the step-4 equality held [`:L216-L222`]; the arm for 3 keeps the value, does not move focus, and
+        REWRITES THE RESULT TO 1 [`:L223-L225`]; and the default arm coerces, fires the changed
+        dispatcher and forces 2 [`:L226-L250`]. The recorded arm plus the recorded value and status
+        afterwards is what distinguishes them - see defect D-01, which also records the withdrawn
+        fall-through reading so a reader cannot mistake the empty arm for an omission.
+      format: >-
+        The arm identifier, the incoming stashed value, the outgoing value, and the value and item status
+        after the arm ran. All four numbers are recorded as the raw numbers of the item-change alphabet -
+        never mapped onto the return-code algebra, in which 1 means prevented and reads as succeeded,
+        which is not what 1 means here at all.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L211-L251"
+    - name: itemChange.coercionOutcome
+      description: >-
+        STEP 6, DEFAULT ARM. The type-directed coercion, per column, keyed on THE FIRST FIVE CHARACTERS
+        of the declared column type across a fixed set of ten prefixes [`:L231-L244`] - the two character
+        prefixes, the three decimal and numeric prefixes, the two integral prefixes, and the datetime,
+        date and time prefixes - each with its own conversion, and the whole switch guarded by the step-4
+        equality [`:L229`]. Recorded per column of the fixture, so the two-place decimal columns and the
+        hundred-character string columns each demonstrate their own arm, and any type reaching no arm
+        demonstrates that too.
+      format: >-
+        Per column: the declared type, its first five characters, the arm that matched or the absence of
+        one, the input text and the stored value with its runtime type. A prefix that matches no arm
+        leaves the buffer untouched, and that outcome is recorded rather than inferred.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L231-L244"
+    - name: itemChange.forcedResult
+      description: >-
+        STEP 6, DEFAULT ARM. The FORCED result: after firing the changed dispatcher [`:L247`] the arm
+        overwrites whatever it held with 2 [`:L250`], so the platform will not re-apply the edit text over
+        a buffer the changed handler may itself have altered. Recorded as the value before the overwrite
+        and the value after, because only the pair shows the overwrite happening.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L247-L250"
+    - name: changedDispatcher.strictSequence
+      description: >-
+        THE FIRST OF THE TWO ADJACENT ORDERINGS, and the sequence IS the behaviour [`:L295-L320`]: the
+        column-expression sub-service's changed handler first and ONLY IF THAT SERVICE IS ENABLED
+        [`:L313-L315`]; then the broker's item-changed trigger and ONLY IF THE TOPIC HAS A SUBSCRIBER
+        [`:L316-L318`]; then the semantic changed notification, unconditionally [`:L319`]. A recalculation
+        that happens before a subscriber sees the change is a different observable order from one that
+        happens after, so all three steps and both conditions are recorded in order.
+      format: >-
+        Three ordered entries, each with the condition that admitted or skipped it. A skipped step is
+        recorded as skipped with its condition's value, never omitted - an omitted step and a skipped
+        step look identical in a diff and mean different things.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L295-L320"
+    - name: validationError.reentrancyGuard
+      description: >-
+        THE SECOND ADJACENT ORDERING, step 1. The handler returns 1 IMMEDIATELY when it is already inside
+        itself [`:L327`], before anything else - before the stash is read, before any snapshot. Recorded
+        as the guard's value on entry and whether the early return was taken, and driven re-entrantly at
+        least once so the recording contains a case in which it fired.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L327"
+    - name: validationError.stashConsumption
+      description: >-
+        Step 2. THE STASH IS READ AND THEN CLEARED [`:L331-L332`] - read-and-clear is the only legal way
+        to consume it, and the clearing is part of the behaviour rather than housekeeping. Recorded as the
+        value read and the value left behind, so a port that read without clearing is detected on the very
+        next validation error rather than eventually.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L331-L332"
+    - name: validationError.presetFromStash
+      description: >-
+        Step 3. The result PRE-SET to 1 when the consumed stash was 1 or 3 [`:L338-L340`], which is
+        precisely why this area cannot be reordered: the handler's behaviour is a function of the
+        preceding event's return value. Recorded as the stash value and whether the pre-set applied.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L338-L340"
+    - name: validationError.errorEventNullCoercion
+      description: >-
+        Step 4. When no pre-set applied, the semantic error event is fired and A NULL RETURN IS COERCED
+        TO ZERO [`:L342-L345`]. Here null IS coerced, deliberately and locally - which is not a licence to
+        coerce null anywhere else, and specifically not in the return-code predicates where null is
+        neither succeeded nor failed. Recorded as the raw return including its null marker AND the value
+        after coercion, so the coercion is visible rather than implied.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L342-L345"
+    - name: validationError.validationMessage
+      description: >-
+        Step 5, THE NON-EMPTY DATA PATH. The column's validation message is read [`:L350`], HAS ITS OUTER
+        TWO CHARACTERS STRIPPED under a length guard [`:L351-L353`], and falls back to a localized string
+        when the result is empty or is a single question mark [`:L354-L356`]. All four states are recorded
+        - the raw message, the stripped message, whether the fallback fired and why - because the strip is
+        the kind of transformation a port silently drops and the fallback is the kind it silently widens.
+      format: >-
+        The raw text exactly as the property returned it, the text after stripping, the fallback
+        condition that matched or none, and the final text. Text is recorded verbatim and unnormalized
+        apart from the newline convention the mask declares.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L350-L356"
+    - name: validationError.structuredError
+      description: >-
+        Step 6. THE DIALOG, RE-EXPRESSED AS A MACHINE-READABLE RESULT. The legacy shows a modal message
+        box with a localized title and the stop-sign severity [`:L357`] and then sets its result to 1
+        [`:L358`]. ONLY THE DELIVERY CHANNEL CHANGES: the exact message text, the localization category
+        it routed through, the substitution arguments and the severity are all preserved and all compared
+        field by field. This is the one path in this chain that surfaces user data in a message, and the
+        data is the fixture's own seeded row values - no credential, key or certificate is reachable from
+        it (C-F).
+      format: >-
+        A field-by-field record - title text, body text, localization category, substitution arguments in
+        order, severity - with the severity carried by name. The severity here is the stop sign; the
+        enumeration's other members are not reachable from this call site and are recorded as absent
+        rather than as defaults.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L357-L358"
+    - name: validationError.emptyDataReturnsThree
+      description: >-
+        Step 7, THE EMPTY-DATA PATH, WHICH IS A DISTINCT PATH AND NOT A DEGENERATE CASE OF THE OTHER. On
+        empty data the handler CLEARS ITS OWN GUARD and RETURNS 3 [`:L359-L363`] - no message, no restore,
+        and an early return that skips the restore dispatch entirely. Recorded as its own outcome, because
+        3 here and 3 in the item-change alphabet mean different things and the recording must keep them
+        apart.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L359-L363"
+    - name: validationError.restoreGuard
+      description: >-
+        Step 8. The value-and-status restore, performed for results 1 and 3 only, and only when TWO
+        conditions hold: THE ROW STILL EXISTS and the consumed stash was not 3 [`:L369`], and then the
+        snapshot still matches the buffer or both are null [`:L372`]. The row-existence check is
+        DEFENSIVE BECAUSE THE MESSAGE'S POSTED CONTINUATION MAY HAVE DELETED THE ROW - the source comment
+        at [`:L368`] says so - and it must survive. Recorded as both conditions' values, the restore's
+        occurrence, and the value and status afterwards.
+      format: >-
+        The result being dispatched on, the row number, the row count, the consumed stash, the equality
+        outcome, whether the restore ran, and the value and item status before and after it. A capture
+        that includes a row deleted from inside a validation error is taken deliberately, because that is
+        the only way the guard's necessity appears in a recording.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L366-L380"
+    - name: validationError.result
+      description: >-
+        Step 9. The guard cleared [`:L382`] and the value returned [`:L384`], recorded as the raw number.
+        The three reachable outcomes - 1 from a pre-set or a message, 3 from empty data, and whatever the
+        semantic error event produced after null coercion - are distinguished in the recording by the path
+        that produced them, not by the number alone.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L382-L384"
+
+    # ==============================================================================================
+    #  PART 3 OF 3 - THE CHAIN-WIDE OUTPUTS
+    #  ---------------------------------------------------------------------------------------------
+    #  What holds across the whole dispatch rather than inside one event: the sequence itself, the
+    #  session fields carried between events, the gate, the broker's dispatch record, and four ordering
+    #  facts that live outside the 22 events but change the order they arrive in.
+    #
+    #  NO OUTPUT IN THIS DEFINITION CARRIES `maskedAsNonBehavioural`, AND THE ABSENCE IS DELIBERATE
+    #  RATHER THAN AN OVERSIGHT. That flag exists for a field the oracle emits which carries no
+    #  behaviour - canonically its own elapsed-time field. This chain emits no such field: every value
+    #  below is behaviour, and the variation that does enter is neutralised by the seams in
+    #  `determinismMask` instead. Preferring a seam to a mask is the store's own rule, because a masked
+    #  field is a field in which a regression can hide.
+    # ==============================================================================================
+    - name: eventSequence
+      description: >-
+        THE ORDERED SEQUENCE ITSELF - every dispatched event in arrival order with its monotonic
+        sequencing token, its nesting depth, and the discipline its capability area was captured under.
+        This is the primary output of the workflow and the one a reordering regression shows up in.
+        THE TOKEN IS A DETECTION DEVICE AND NOTHING ELSE: a token at or below the ordering mark is a
+        reversal or a duplicate and is a hard error, the server does not buffer and re-sort, and NO
+        DURATION IS DERIVED FROM ANY PAIR OF TOKENS.
+      format: >-
+        One record per line in arrival order, each carrying the token, the event identifier, the nesting
+        depth, the ordering discipline, and a reference to the session it belongs to. The order of the
+        lines is the comparison; a stable serialization order inside each line keeps a field reordering
+        from reading as a behavioural difference.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L11-L32"
+    - name: eventReturnValues
+      description: >-
+        THE NUMERIC RETURN VALUE OF EVERY EVENT THAT HAS ONE, AS A NUMBER. Never a boolean projection of
+        one, and never mapped through another alphabet. Three distinct numeric alphabets meet in this
+        chain and the recording keeps them apart: the prevention convention the raw handlers return (0 to
+        continue, 1 to prevent), the four-value item-change alphabet, and the broker's tri-valued
+        prevention. Two of them share the digit 1 and mean different things by it.
+      format: >-
+        The raw integer, plus the alphabet it belongs to, plus a null marker where the handler returned
+        null. An event declared without a return records the absence explicitly rather than a zero.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L11-L32"
+    - name: sessionState
+      description: >-
+        THE FOUR CROSS-EVENT FIELDS AT EVERY TRANSITION [`:L89-L96`] - the disabled-event bitmask
+        [`:L89`], the flag recording that execution is inside the item-change handler [`:L92`], the flag
+        recording that it is inside the validation-error handler [`:L94`], and THE STASH: the
+        item-changed return value held for the validation-error event to consume [`:L96`]. A stateless
+        boundary has nowhere to put these, so on the target side they are fields of a server-held session
+        correlated by identifier. A fifth field is recorded alongside them and is target-side only -
+        whether a deferred accept is pending - because a queued continuation, unlike a posted platform
+        message, has to be representable or a consumer cannot tell that work is outstanding.
+      format: >-
+        A snapshot per transition: the session's ordinal, the event that caused the transition, and all
+        five fields. The stash is recorded with the item-change alphabet's raw number rather than as a
+        bare integer, because that is what it holds.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L89-L96"
+    - name: itemStatusTransitions
+      description: >-
+        THE ITEM VALUE AND THE ITEM STATUS BEFORE AND AFTER EVERY STEP THAT COULD CHANGE EITHER - the two
+        snapshots, the two restores, the coercion, and each nested event. The two are recorded
+        independently because they are restored independently: the arms set the value and the status in
+        separate calls [`:L219-L220`, `:L375-L376`], so a port that restored one and not the other
+        produces a row that looks right and saves wrong.
+      format: >-
+        Per step: the row, the column, the value with its runtime type and null marker, and the item
+        status by its legacy name. Statuses are recorded by name rather than by ordinal, because the name
+        is what the buffer contract is written against.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L189-L190"
+    - name: eventGateMatrix
+      description: >-
+        THE GATE, DRIVEN EXHAUSTIVELY. The three bits are composable values 1, 2 and 4 [`:L41-L43`] and
+        the four guards that test them sit at [`:L124`], [`:L130`], [`:L176`] and [`:L187`]. The capture
+        drives each bit independently disabled and independently enabled, and then in combination,
+        recording for every case which events fired and which returned early. The row-focus bit guards TWO
+        handlers while the other two bits guard one each, so a per-bit summary would be ambiguous where a
+        per-event matrix is not.
+      format: >-
+        A row per gate combination and event, carrying the bitmask, the event identifier, whether the
+        guard admitted it, and the value returned. Recorded as a table rather than as prose so a reviewer
+        can diff a cell.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L41-L43"
+    - name: eventGateColumnExpressionCoupling
+      description: >-
+        THE COUPLING, CAPTURED AS ITS OWN CASE. The source comment on the item-change bit records that
+        disabling it ALSO SUPPRESSES COLUMN-EXPRESSION CALCULATION [`:L43`], and the mechanism is visible
+        in the chain: the item-change gate returns before the handler reaches the changed dispatcher
+        [`:L187`], and the dispatcher is the only place the chain calls the column-expression sub-service's
+        changed handler [`:L313-L315`]. The capture disables that one bit with the column-expression
+        service ENABLED and records that no recalculation occurred - a second-order effect that no
+        per-event return value reveals on its own.
+      format: >-
+        The bitmask, the sub-service's enabled state, the events that fired, and whether a recalculation
+        was observed. The absence of the recalculation is recorded as an explicit negative, because an
+        absent record and an absence are not the same evidence.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L43"
+    - name: gateMutatorResults
+      description: >-
+        THE GATE'S PUBLIC SURFACE AND WHAT IT RETURNS [`:L109-L111`] - the query, the disable and the
+        enable. Both mutators reject a zero argument with the invalid-argument return code [`:L506`,
+        `:L530`] and otherwise return the success code, and the recording carries those raw numeric codes.
+        TWO SIGNATURE DETAILS ARE RECORDED BECAUSE THEY ARE OBSERVABLE AT THE BOUNDARY AND ASYMMETRIC: the
+        disable function is declared returning a long while the enable function is declared returning an
+        integer [`:L110`, `:L111`], and the enable function's own header comment states a long. The
+        asymmetry is reproduced rather than tidied.
+      format: >-
+        Per call: the function, the argument, the raw numeric return, and the resulting bitmask. The codes
+        are the return-code algebra's - a different alphabet from the item-change values, and labelled as
+        such in the record.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L109-L111"
+    - name: brokerDispatch
+      description: >-
+        EVERY BROKER TRIGGER THE CHAIN ISSUES, with its topic, its outcome and its argument list. Four
+        things are recorded per dispatch and each is a distinct failure mode if lost. THE TOPIC IS
+        RECORDED BOTH DECOMPOSED AND FUSED - the ordering prefix as a number, a flag for whether the
+        legacy spelling actually carried one, and the logical name, alongside the exact legacy string -
+        because two of the twelve topics carry a prefix and ten do not, so an unprefixed topic and a
+        zero-prefixed topic both report zero and only the flag separates them. THE OUTCOME IS TRI-VALUED
+        - continue, prevent-once, prevent-deep - and is recorded as its raw number. THE INJECTED FIRST
+        ARGUMENT is recorded, together with which of the four exclusions applied when it was not injected
+        [`:L599-L607`]. And WHETHER THE TOPIC HAD A SUBSCRIBER is recorded, because two of the triggers
+        are gated on exactly that [`:L166`, `:L316`] and the broker's own default return of zero
+        [`:L594-L597`] makes an unsubscribed dispatch read as continue.
+      format: >-
+        One record per dispatch: the fused topic string quoted verbatim, the decomposed fields, the
+        subscriber flag, the argument list with the injection marker, and the raw tri-valued outcome. The
+        fused string is quoted because two of them begin with a digit and a hyphen.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L47-L76"
+    - name: deferredAcceptContinuation
+      description: >-
+        THE DEFERRED ACCEPT, AND ITS CONDITION. The kill-focus handler queues the private accept-text
+        continuation ONLY when the item-change flag is clear [`:L388-L390`]; the legacy achieves the
+        deferral by posting to the platform message queue, which a headless container does not have, so
+        the target expresses it as an explicitly queued continuation on the validation session. THE
+        ORDERING IS WHAT IS COMPARED, not the mechanism: the continuation runs AFTER the event that
+        queued it has returned, and its body re-checks that focus has moved away before accepting and
+        restores focus if the accept fails [`:L537-L558`]. That re-check is why it cannot be executed
+        inline.
+      format: >-
+        The condition's value, whether a continuation was queued, its position in the sequence relative
+        to the event that queued it, and the outcome of its two internal checks. A capture in which the
+        flag was set records the continuation as NOT queued, which is half the behaviour.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L387-L393"
+    - name: dormantByteLengthCheck
+      description: >-
+        THE DORMANT PATH, PROVEN DORMANT. The pre-change handler contains a commented-out byte-length
+        check with its own dialog [`:L280-L290`] which would measure the input against the column's
+        declared character width and reject over-long input. It is carried across commented and inert and
+        MUST NOT BE REVIVED. The capture drives an over-long value into a hundred-character string column
+        and records that NO message was produced and the value was NOT rejected on that account - the
+        explicit negative that proves the path stayed dormant on both sides.
+      format: >-
+        The input length in bytes, the column's declared width, the messages produced (none), and the
+        handler's return. A recording in which this path fires is a parity FAILURE on the target side,
+        not an improvement in validation.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L280-L290"
+    - name: subServiceCompositionOrder
+      description: >-
+        THE ORDER THE FIVE SUB-SERVICES ARE CONSTRUCTED IN AND THE ORDER THEY ARE INITIALIZED IN, WHICH
+        ARE NOT THE SAME ORDER [`:L570-L581`]. Construction runs context menu, row select, column sort,
+        drop-down search, column expressions [`:L570-L574`]; initialization runs context menu, row select,
+        DROP-DOWN SEARCH, COLUMN SORT, column expressions [`:L576-L580`] - the middle two are swapped.
+        Teardown runs the broker's unsubscribe-all first and then destroys in construction order
+        [`:L583-L589`]. All three orders are recorded because each is an observable sequence of calls into
+        objects that may subscribe, and normalizing them into one order would be a silent correction.
+      format: >-
+        Three ordered lists of sub-service names - constructed, initialized, destroyed - captured once per
+        host lifecycle.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L570-L581"
+    - name: syntheticRowChangeOnDelete
+      description: >-
+        A ROW-CHANGE EVENT THE CHAIN FIRES ITSELF, WITH NO PLATFORM MESSAGE BEHIND IT. The delete-row
+        override [`:L416-L446`] rejects an out-of-range row, resolves a zero argument to the current row,
+        remembers whether the row was the current one and whether it was the last, delegates upward, and
+        then SYNTHESIZES the raw row-change event - with row zero when the delete emptied the DataWindow
+        [`:L435`], or with the row number when the deleted row was current and remains current [`:L437`].
+        It is captured here rather than left to a sub-service workflow because it injects an event into
+        the very sequence this workflow compares.
+      format: >-
+        The requested row, the resolved row, the two remembered flags, the delegated return, and the
+        synthesized event with its argument and its position in the sequence. A capture in which nothing
+        was synthesized records that outcome too.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L416-L446"
+    - name: filterOverrideHook
+      description: >-
+        THE OTHER PLACE THE CHAIN HANDS CONTROL TO A SUB-SERVICE. The filter override delegates upward
+        and, ONLY on a successful filter and ONLY when the row-select sub-service is enabled, fires that
+        service's filtered event [`:L403-L414`]. Recorded as the delegated return, the enabled state, and
+        whether the hook fired - the third of the three conditional hand-offs in the chain, alongside the
+        changed dispatcher's and the raw editing event's.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L403-L414"
+    - name: orderingDisciplineTag
+      description: >-
+        THE DISCIPLINE EACH RECORD WAS CAPTURED UNDER, carried on the record rather than inferred from the
+        event identifier. It is recorded because the assignment is per capability area and is therefore
+        part of the contract the capture was taken against: a pair whose two halves disagree about which
+        events were synchronous is comparing two different contracts, and the tag is what makes that
+        detectable instead of invisible.
+      format: >-
+        The wire enumeration's own member name per record - the synchronous discipline or the sequenced
+        one - and never a boolean, because a third member exists for the unspecified state and collapsing
+        the three would hide a record that was captured under no assignment at all.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L11-L32"
+
+  recordingArtifacts:
+    # Six text-based, diffable files, one workflow's output in one workflow's own directory. THE
+    # EXTENSIONS ARE NOT A STYLE CHOICE: the root `.gitignore` carries six extensions UNANCHORED - one
+    # log extension and five archive and dump extensions, enumerated in `../README.md` section 3.5 - so
+    # they match at every depth including inside this store, and its only negations are anchored elsewhere
+    # and rescue nothing here. A capture named that way is silently untracked - present on the machine
+    # that produced it, absent from `git status`, from review and from CI, so the comparison looks taken
+    # and cannot be found. The root `.gitignore` is not to be modified; naming the file correctly is the
+    # fix, and the schema's own filename pattern makes the six unspellable here in any case.
+    - filename: event-sequence.jsonl
+    - filename: session-state.jsonl
+    - filename: item-change-dispatch.json
+    - filename: validation-error-paths.json
+    - filename: event-gate-matrix.csv
+    - filename: broker-dispatch.jsonl
+
+# ==================================================================================================
+#  THE DETERMINISM MASK - INLINE, SYMMETRIC, AND EVERY ENTRY WITH ITS REASON
+#  ------------------------------------------------------------------------------------------------
+#  The mask is a member of this definition rather than a pointer to one, because a mask that drifts
+#  away from its workflow silently invalidates every pair captured under it. EVERY ENTRY APPLIES TO
+#  BOTH SIDES: masking only the candidate leaves the master holding a value that can never be matched,
+#  and masking only the master inverts the same problem. One configuration, used for both captures.
+#  `../../docs/PARITY.md` section 5.1 is the authoritative seam register and carries each seam's
+#  injection point and status; the entries below are this workflow's application of it.
+# ==================================================================================================
+determinismMask:
+  - seam: >-
+      Every clock read reachable from this chain - any timestamp that reaches a recorded field or a
+      recorded decision, on either side.
+    method: >-
+      Inject the clock and substitute a deterministic double that advances only when the test advances
+      it. Nothing in this chain branches on a clock value, so the substitution changes no path; it only
+      makes a recorded timestamp reproducible. Prefer this to masking the field out, because a masked
+      field is a field a regression can hide in.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      A timestamp differs on every run by definition rather than by behaviour, so an unmasked one
+      reports a difference on every comparison and trains a reviewer to ignore red results. NOTE WHAT
+      THIS IS NOT: seaming the clock does not introduce a timing assertion. No elapsed value is
+      recorded or compared anywhere in this workflow.
+  - seam: >-
+      Modify-call ordering on the DataWindow property path - the describe and modify calls the chain
+      issues, including the property read in the focusless row move and the validation-message read in
+      the validation-error handler.
+    method: >-
+      Fix the order in which the chain issues its describe and modify calls, and record them in that
+      fixed order on both sides.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      Two orderings that reach the same state can emit different intermediate output, so an unpinned
+      order surfaces as a difference where no behaviour changed. Fixing the order is not the same as
+      fixing the OUTCOME: the properties' values remain fully compared, and a genuine change in what a
+      property returns is still detected.
+  - seam: >-
+      Line endings in every multi-line recorded field - most consequentially the validation message
+      text and the expression trace's call stack.
+    method: >-
+      Declare one newline convention for this workflow and apply it identically to both halves at
+      comparison time. This is a comparison-time normalization only: IT DOES NOT LICENSE EDITING A
+      STORED MASTER, which the technique forbids outright.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      The master is produced on Windows by the legacy framework while the candidate runs in a Linux
+      container, so raw line endings differ BY PLATFORM RATHER THAN BY BEHAVIOUR - and the repository's
+      root `.gitattributes` declares only language mappings with no text or end-of-line rule, so nothing
+      normalises them on the way into version control. Without this entry a byte-exact comparison
+      reports a difference on every line of every multi-line field. Changing `.gitattributes` is NOT in
+      scope and would be the wrong place to solve it: the normalization belongs to the comparison, not
+      to the repository's checkout behaviour.
+  - seam: >-
+      Validation-session correlation identifiers, and the host handles scoped to them - allocated per
+      run on the target side, where the legacy has an in-process object identity instead.
+    method: >-
+      Replace each identifier with a stable ordinal assigned in creation order, on both sides, and
+      record the ordinal rather than the identifier. Equality between two ordinals still means what
+      equality between two identifiers meant.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      The identifier is allocated per run and can never match across two runs, let alone across two
+      sides. But THE IDENTITY RELATION IS BEHAVIOUR - which events belong to the same session, and
+      therefore which event reads the stash another event wrote - and an ordinal preserves that relation
+      exactly while removing the variation. Masking the field out entirely would remove the relation
+      with it and is why the ordinal is used instead.
+  - seam: >-
+      Any random or globally-unique value reachable from a payload this chain records - including one
+      arriving from a sub-service or from a client-supplied argument rather than generated inside the
+      chain itself.
+    method: >-
+      Seam the generator and substitute a deterministic sequence for the capture. Where a value cannot be
+      made reproducible without changing observable behaviour, mask that field out of the comparison and
+      record why at the field.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      Such a value is non-deterministic by construction and can never match. The entry is present even
+      though the chain generates none of its own, because a payload it merely carries - a client-supplied
+      correlation value, or a value produced by a sub-service the chain hands control to - would otherwise
+      reach a recording unmasked, and a mask discovered after a pair was captured invalidates the pair.
+
+# ---- WHAT IS DELIBERATELY NOT MASKED, STATED EXPLICITLY --- -----------------------------------------
+#  These are the behaviour under test. Masking any one of them would produce a comparison that passes
+#  while proving nothing, which is worse than a comparison that fails:
+#    * THE EVENT ORDER, and every nesting relationship inside it;
+#    * THE SEQUENCING TOKENS - they are ordinals and they are compared as ordinals;
+#    * EVERY EVENT'S RETURN VALUE, as its raw number, in whichever of the three alphabets it belongs to;
+#    * THE THREE GATE BITS and every bitmask value derived from them;
+#    * THE FOUR CROSS-EVENT SESSION FIELDS, including the stash and including its cleared state;
+#    * THE ITEM STATUSES AND THE ITEM VALUES, before and after every step;
+#    * THE COERCION OUTCOMES per column type, including a type that matches no arm;
+#    * THE TRI-VALUED VETO OUTCOMES, as raw numbers;
+#    * THE TOPIC STRINGS, both decomposed and in their exact fused legacy spelling.
+#  And nothing is masked on one side only, anywhere, ever.
+
+# ==================================================================================================
+#  THE DEFECTS THIS PAIR EXISTS TO PROVE SURVIVED
+#  ------------------------------------------------------------------------------------------------
+#  THE INVERSION IS LOAD-BEARING: a capture that shows CORRECTED behaviour is a parity FAILURE, not an
+#  improvement. Where the target produces output that looks more correct than the oracle, the finding is
+#  a divergence in the target and is filed as a defect (C-B). A legacy defect is reproduced and annotated
+#  at its point of reproduction, never repaired. `../../docs/PARITY.md` section 7 is the authoritative
+#  catalogue of behaviour groups; the entries below record which of them THIS pair pins.
+# ==================================================================================================
+provesDefects:
+  - defect: >-
+      D-01. THE ITEM-CHANGE RETURN ALPHABET IS `{0, 1, 2, 3}` AND IT IS NOT THE RETURN-CODE ALGEBRA. Four
+      distinct dispatch arms, none merged: the arm for 1 has no statements and returns 1 with value and
+      status untouched; the arm for 2 restores value and status but only if the earlier equality test
+      held; the arm for 3 keeps the value, does not move focus and rewrites its result to 1; and the
+      default arm - which catches every value outside `{1, 2, 3}`, not only zero - coerces by column type,
+      fires the changed dispatcher and then forcibly returns 2.
+    locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L182-L253, with the dispatch at :L211-L251"
+    note: >-
+      TWO WAYS TO GET THIS WRONG, AND THE SECOND IS THE SUBTLE ONE. First, mapping these values onto the
+      return-code algebra: there 1 is prevented and reads as SUCCEEDED, while here 1 means reject the edit
+      and raise the validation error, and 2 means the buffer is already written so do not re-apply the edit
+      text. The two alphabets share digits and share nothing else, so the wire models this as its own
+      enumeration with these four numeric values preserved. Second, THE CASE-1 QUESTION, WHICH IS SETTLED:
+      the migration plan describes the arm for 1 as "falling through" to the arm for 2, and that reading is
+      WITHDRAWN by `../../docs/PARITY.md` section 7.7 and `../../docs/CONTRACTS.md` section 6.5. PowerScript
+      `CHOOSE CASE` does not fall through the way a C `switch` does - an arm with no statements executes
+      nothing and control leaves the construct - so 1 returns UNTOUCHED. The empty arm is load-bearing
+      precisely while empty: delete it and 1 reaches the default arm, is coerced, fires the changed event
+      and is rewritten to 2. The source's own comment immediately above the dispatch [`:L210`] says why -
+      returning 1 is what raises the validation error, and it is THAT handler which restores value and
+      status [`:L369-L379`] after reading the stash, so restoring here as well would restore twice and
+      would do it before the stash had been read. The difference is observable, which is why this pair
+      records the arm AND the value and status after it.
+  - defect: >-
+      D-02. THE STASHED ITEM-CHANGE CODE IS CONSUMED AND CLEARED BY A DIFFERENT EVENT. The item-change
+      handler writes its semantic handler's result into a private field, and the validation-error handler
+      reads that field and then zeroes it, pre-setting its own result to 1 when the value was 1 or 3.
+      Cross-event mutable state with a read-and-clear contract, in a chain that otherwise looks stateless.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L96 declared, :L195 written,
+      :L331-L332 read and cleared
+    note: >-
+      THIS IS THE REASON THE ITEM-CHANGE AREA CANNOT BE REORDERED - the second event's behaviour is a
+      function of the first event's return value, so a consumer permitted to re-sort them could read the
+      stash before it was written. The clearing is behaviour rather than housekeeping: a port that read
+      without clearing would pre-set the result on the NEXT validation error too, and the recording detects
+      that immediately because the cleared state is compared.
+  - defect: >-
+      D-03. THE VALIDATION MESSAGE HAS ITS OUTER TWO CHARACTERS STRIPPED, under a length guard, and then
+      falls back to a localized string when what remains is empty or is a single question mark.
+    locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L350-L356"
+    note: >-
+      Both halves are easy to lose in a port and each fails differently. Drop the strip and every message
+      carries two stray delimiter characters. Widen the fallback condition - to any short string, say -
+      and messages the legacy shows are replaced by the generic text. The recording therefore carries the
+      raw text, the stripped text, the condition that matched, and the final text, so which half broke is
+      visible rather than inferred.
+  - defect: >-
+      D-04. EMPTY DATA CLEARS THE GUARD AND RETURNS 3 - a distinct path, not a degenerate case of the
+      non-empty one. No message is shown, no restore is attempted, and the handler returns before reaching
+      its restore dispatch at all.
+    locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L359-L363"
+    note: >-
+      The source comment records the intent: empty input is refused here and re-checked at save time. Note
+      the 3 returned here is in the validation-error handler's own return contract and is NOT the 3 of the
+      item-change alphabet, even though the same digit appears in both - the recording labels each with the
+      alphabet it belongs to so the two cannot be conflated. The guard is cleared on this path
+      specifically, which a port that clears only at the end of the handler would get wrong.
+  - defect: >-
+      D-05. THE ROW-EXISTENCE GUARD BEFORE THE RESTORE. The restore of value and status happens for results
+      1 and 3 only when the row still exists AND the consumed stash was not 3.
+    locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L366-L380, the guard at :L368-L369"
+    note: >-
+      IT LOOKS REDUNDANT AND IT IS NOT - IT MUST SURVIVE. The source comment at [`:L368`] states the
+      reason: the message box processes posted messages while it is open, so the row may have been DELETED
+      before control returns. A port that drops the check is one deleted row away from an out-of-range
+      access on a path a user reaches by clicking a dialog. This is the standing shape of a defensive
+      legacy check that a well-meaning cleanup removes because no test exercised it, which is exactly why
+      the capture drives a delete from inside a validation error.
+  - defect: >-
+      D-06. THE BROKER-RETURN ASYMMETRY BETWEEN TWO NEAR-IDENTICAL HANDLERS. The row-change handler
+      triggers the broker and DISCARDS what it returns; the row-changing handler triggers the broker and
+      RETURNS 1 when it returns 1. Everything else about the two handlers matches, including the gate bit
+      they test and the shape of their semantic call.
+    locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L126 discarded, :L132 inspected"
+    note: >-
+      HARMONIZING THE TWO WOULD BE A SILENT CORRECTION IN EITHER DIRECTION. Make the row-change handler
+      inspect the return and a subscriber gains the power to prevent an event the legacy does not let it
+      prevent. Make the row-changing handler discard it and a subscriber loses a prevention it has. The
+      two are recorded side by side precisely because the asymmetry is invisible when only one is examined.
+  - defect: >-
+      D-07. DISABLING THE ITEM-CHANGE GATE ALSO SUPPRESSES COLUMN-EXPRESSION EVALUATION - a second-order
+      effect of a bit whose name says nothing about expressions. The source comment on the bit's
+      declaration records it.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L41-L43, with the public gate surface
+      at :L109-L111
+    note: >-
+      The mechanism is visible in the chain rather than hidden in the sub-service: the item-change gate
+      returns before the handler reaches the changed dispatcher [`:L187`], and that dispatcher is the only
+      place the chain calls the column-expression service's changed handler [`:L313-L315`]. So the coupling
+      is real, it is reachable through the public disable function, and a caller disabling one event
+      silently loses recalculation. The three bit identifiers keep their legacy spelling and their values
+      1, 2 and 4, because those values travel in payloads, in logs and in these recordings.
+  - defect: >-
+      D-08. A COMMENTED-OUT BYTE-LENGTH CHECK WITH ITS OWN DIALOG SITS INSIDE THE PRE-CHANGE HANDLER - a
+      dormant validation path that would measure input against the column's declared character width and
+      reject over-long input with a message about byte counts.
+    locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L256-L293, the dormant block at :L280-L290"
+    note: >-
+      IT IS CARRIED ACROSS AS COMMENTED AND INERT AND MUST NOT BE REVIVED. Reviving it would add a
+      validation the legacy does not perform - the exact "improvement" C-B forbids - and it would change
+      results on a fixture whose declared column widths and whose stored values do not agree in the first
+      place. The capture drives an over-long value into a hundred-character column and records the explicit
+      negative: no message, and no rejection on that account. A recording in which this path fires is a
+      failure on the target side.
+  - defect: >-
+      D-09. THE DEFERRED ACCEPT IS POSTED, AND ONLY CONDITIONALLY. The kill-focus handler hands a private
+      accept-text continuation to the platform message queue so that it runs after the current event
+      returns - but only when the item-change flag is clear.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L387-L393, the continuation declared
+      at :L112 and defined at :L537-L558
+    note: >-
+      A headless container has no message pump, so the target expresses the deferral as an explicitly
+      queued continuation on the validation session. THE MECHANISM CHANGES AND THE ORDERING DOES NOT, and
+      the ordering is what the pair compares: the continuation runs after the event that queued it has
+      returned, which matters because its body re-checks that focus has actually moved away before
+      accepting and restores focus when the accept fails. Executing it inline would perform that re-check
+      too early and would change the outcome. Whether it is queued at all is equally observable, so the
+      capture records the flag's value and the negative case.
+  - defect: >-
+      D-10. THE BROKER'S PREVENTION IS TRI-VALUED - prevent-once, prevent-deep, and continue - and must
+      never be flattened to a boolean, even though every one of the chain's own topic comments suggests a
+      binary convention.
+    locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L111-L112"
+    note: >-
+      THE COMMENTS ARE NOT A DEFECT TO CORRECT AND ARE ALSO NOT THE CONTRACT. Eight comment sites in the
+      service class read `0:continue,1:prevent` [`se_cst_dw.sru:L46,L51,L56,L59,L62,L65,L68,L71`], and all
+      eight are accurate about what a handler on those particular topics is expected to return - they are
+      simply not a statement about what the broker can carry. The shape is therefore taken from the
+      broker's own declarations. FLATTENING WOULD SILENTLY CONVERT A DEEP PREVENTION INTO A SHALLOW ONE:
+      the dispatch chain would resume after the vetoing handler and the events the caller intended to stop
+      would fire. `shared-eventful-broker-ordering` owns the broker's own characterization; this pair
+      records the raw tri-valued outcome of every dispatch the chain issues.
+  - defect: >-
+      D-11. TWO OF THE TWELVE BROKER TOPICS CARRY A LEXICAL ORDERING PREFIX BAKED INTO THE TOPIC STRING -
+      the item-changed topic, spelled "0-itemchanged", and the edit-changed topic, spelled
+      "1-editchanged" - WHILE THE OTHER TEN CARRY NONE. Dispatch order derives from the lexical sort of
+      the subscription name, so the prefix is ordering data hidden inside an identity string. Both
+      spellings are written here quoted, because a bare scalar beginning with a digit and a hyphen is
+      exactly the shape a reader - or a serializer - reinterprets as something other than a string.
+    locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L54 and :L57, among the twelve at :L47-L76"
+    note: >-
+      THE SPARSITY IS THE HAZARD. Because ten topics carry no prefix, transmitting the fused string loses
+      the ordering invisibly: the two prefixed topics still sort correctly by accident of their spelling
+      while nothing in the payload says that ordering was ever encoded. Worse, an unprefixed topic and a
+      zero-prefixed topic both decompose to a sequence of zero, so a flag for whether a prefix was
+      actually present is what separates them - a lexical sort places the zero-prefixed item-changed topic
+      before the unprefixed clicked topic, and the absence of a prefix is not the same statement as a
+      prefix of zero. This pair records both the decomposed fields and the exact fused spelling;
+      `shared-eventful-broker-ordering` owns the decomposition itself.
+  - defect: >-
+      D-12. THE SERVICE CLASS IS A SELF-SHADOWING GLOBAL AUTO-INSTANCE - a global variable declared with
+      the same name as its own type, immediately after the type definition ends.
+    locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L35, with the type at :L10"
+    note: >-
+      The legacy's single flat namespace tolerated it: there are no namespaces and no import statements,
+      and symbol resolution follows the ORDER of the library list in the target file, so a name may denote
+      a type or an instance depending on position. The target keeps the descriptive type name and injects
+      the instance instead of shadowing it. The reason this belongs in a characterization definition rather
+      than only in a design note is that it decides WHOSE STATE a recorded field belongs to: the four
+      cross-event fields are per-instance, and a port that resolved the shadowed name to the global
+      auto-instance would record one shared session where the legacy has one per control - which the
+      two-control oracle window makes observable.
+  - defect: >-
+      D-13. THE FIVE SUB-SERVICES ARE CONSTRUCTED IN ONE ORDER AND INITIALIZED IN ANOTHER. Construction
+      runs context menu, row select, column sort, drop-down search, column expressions; initialization runs
+      context menu, row select, DROP-DOWN SEARCH, COLUMN SORT, column expressions. The middle two are
+      swapped between the two loops, in adjacent lines of the same event.
+    locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L570-L581, with teardown at :L583-L589"
+    note: >-
+      IT LOOKS LIKE A TYPO AND IT IS REPRODUCED ANYWAY, because initialization is where each sub-service
+      receives its host and may subscribe to a topic, and the broker's dispatch order derives from the
+      lexical sort of subscription names rather than from arrival - so the initialization order is
+      observable wherever two sub-services subscribe to comparable names. Reordering the second loop to
+      match the first is exactly the tidy-up C-B forbids: it is unverifiable from the repository whether
+      the order matters, and unverifiable is not the same as harmless. Teardown adds a third order -
+      unsubscribe-all first, then destroy in construction order - and all three are recorded.
+  - defect: >-
+      D-14. THE DELETE-ROW OVERRIDE SYNTHESIZES A ROW-CHANGE EVENT WITH NO PLATFORM MESSAGE BEHIND IT, and
+      passes ROW ZERO when the delete emptied the DataWindow - a row number that is not a valid row.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L416-L446, the synthesized calls at
+      :L435 and :L437
+    note: >-
+      It is captured by this workflow rather than by a sub-service's because it injects an event into the
+      very sequence this pair compares, and a handler written against the platform's own row-change
+      contract will not expect a zero. The second synthesis is conditional in a way that is easy to
+      mis-port: it fires only when the deleted row was the current row AND is still the current row after
+      the delete. There is also a redraw call on the last-row path whose effect is presentational, and the
+      capture records that the call was made without asserting anything about what it drew.
+
+# ---- THE SHARED-VOLUME CAPTURE RULE ------------------------------------------------------------
+#  `applies: true`. THE RULE'S CANONICAL TEXT IS OWNED BY `../README.md` SECTION 2.1 AND IS CITED HERE
+#  RATHER THAN REPRODUCED - the same text is carried word for word by that file, by
+#  `../../docs/PARITY.md` section 4.2 and by `../../orchestration/README.md` section 7.2, and a fourth
+#  copy would be a fourth thing to drift.
+#
+#  WHY IT APPLIES EVEN THOUGH THIS WORKFLOW'S ROWS ARE INLINE IN A READ-ONLY FIXTURE. The exemption in
+#  `../README.md` section 2.7 is narrow and is not a loophole: it holds only while a workflow reads and
+#  writes NOTHING. This workflow does not qualify. The target half is captured against the running
+#  service rather than an in-process host, the chain writes into a live buffer through its restore and
+#  coercion arms, and the deferred continuation accepts text after the event that queued it has
+#  returned. A volume state that moved between the two halves would change the input the second half ran
+#  against, and nothing would report it - so the rule is honoured in full, including its teardown
+#  corollary: between the two halves, tear the stack down with a plain down and never with the flag that
+#  removes named volumes.
+sharedVolume:
+  applies: true
+
+# ---- HONEST STATE ------------------------------------------------------------------------------
+#  NOTHING HERE HAS BEEN RUN, AND THE ONLY LEGAL VALUE SAYS SO. No paired capture exists on either
+#  side: the legacy half needs a PowerBuilder toolchain that is not present, and no recording directory
+#  for this identifier exists. Nothing in this definition may be read as reporting a parity result.
+executionStatus: specified-not-executed
+
+# ---- SIBLINGS ----------------------------------------------------------------------------------
+#  The five sub-service workflows run INSIDE the chain characterized here, and the broker workflow owns
+#  the topic decomposition and the tri-valued veto that this one records the effects of. A
+#  cross-reference only: each pair stays independently comparable under its own identifier, and the two
+#  behaviours this store reports BLOCKED belong to two of these siblings rather than to this workflow -
+#  pinyin first-letter matching to the drop-down search definition, and cross-session foreign expression
+#  variables to the column-expression definition.
+relatedWorkflows:
+  - dataservices-dwsvc-rowselect
+  - dataservices-dwsvc-columnsort
+  - dataservices-dwsvc-contextmenu
+  - dataservices-dwsvc-dropdownsearch
+  - dataservices-dwsvc-columnexp
+  - shared-eventful-broker-ordering

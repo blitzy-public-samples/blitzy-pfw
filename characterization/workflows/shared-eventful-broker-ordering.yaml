@@ -1,0 +1,1825 @@
+# yaml-language-server: $schema=./workflow.schema.json
+# ==================================================================================================
+#  shared-eventful-broker-ordering - THE EVENT BROKER ITSELF
+#  ------------------------------------------------------------------------------------------------
+#  WHAT THIS DEFINITION IS FOR, AND HOW IT DIFFERS FROM ITS NEAREST SIBLING
+#  `dataservices-dw-event-chain` characterizes the broker AS USED - twelve topics reached through a
+#  22-event surface, where every dispatch arrives already shaped by the DataWindow service class that
+#  owns them. THIS definition characterizes the broker ITSELF: the subscription table, the order
+#  handlers are invoked in, the way a single opaque subscription string is taken apart into separate
+#  stored fields, how "processed" is decided, and the THREE-VALUED veto. The sibling records the
+#  EFFECTS of these mechanics inside one consumer; this pair pins the mechanics.
+#
+#  THIS FILE SPECIFIES A CAPTURE. IT CONTAINS NO CODE AND NO CAPTURED VALUE.
+#  It conforms to `./workflow.schema.json`, which is authoritative for shape. Store-wide conventions
+#  - the capture rule's canonical text, the recording-file conventions, the seam register, the defect
+#  roster and what must never enter a recording - belong to `../README.md` and to `../../docs/PARITY.md`
+#  and are CITED here, never restated. A fourth copy of a rule three files already own word for word
+#  is a fourth thing to drift.
+#
+#  ORDER, NEVER SPEED (C-B, and `../README.md` section 6.4)
+#  This workflow is about ORDER, and only about order. It records no elapsed value, no dispatch rate
+#  and no count-per-unit-time, and it asserts no timing anywhere. That discipline needs stating twice
+#  here rather than once, because THE ORACLE ITSELF OFFERS A TIMING TEMPTATION: the fixture's own
+#  grammar note at `ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L238` records that subscriptions
+#  are held in ascending name order and remarks that a short name improves lookup and dispatch
+#  performance. THE SORT IS BEHAVIOUR AND IS CAPTURED. THE PERFORMANCE REMARK IS NOT, AND NOTHING
+#  BELOW MEASURES IT. The repository publishes no service-level agreement, no latency budget, no
+#  throughput target and no availability commitment, so there is nothing a timing assertion could be
+#  measured against. The only quantitative gate in the brief is 80% per-service line coverage, read
+#  from `coverage.cobertura.xml` in CI - not from this store.
+#
+#  ---- THE VETO IS THREE-VALUED. IT IS NEVER A BOOLEAN. -------------------------------------------
+#  `PREVENT_ONCE` is 1, `PREVENT_DEEP` is 2, and continue is the third state, carried as 0 in the
+#  broker's own prevention field. The two named values are declared at
+#  `ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L111-L112`, selected at `:L1295` and
+#  `:L1297`, enforced at `:L822`, and - the part a boolean cannot express - UNWOUND DIFFERENTLY at
+#  `:L954-L957`, where a once-prevention is cleared as the dispatch returns while a deep prevention
+#  SURVIVES for as long as the nesting depth stays above zero. Flatten the three values to a boolean
+#  and a deep prevention silently becomes a shallow one: the enclosing dispatch resumes handlers the
+#  legacy would never have reached, and every one of them looks like a correct invocation. The trap is
+#  live rather than theoretical - eight inline comments in the consuming service class read
+#  `0:continue,1:prevent` and suggest a two-valued convention, one of them at
+#  `ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L46`. Cross-reference
+#  `dataservices-dw-event-chain`, which cites this same object precisely because its own comments
+#  cannot be trusted on this point.
+#
+#  ---- ONE LOCATOR CORRECTED AGAINST THE SOURCE ---------------------------------------------------
+#  The edit-changed topic's ordering prefix is declared at
+#  `ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L57`, NOT at `:L58` - `:L58` is the
+#  comment introducing the clicked topic. Defect D-07 below carries the corrected locator. Every
+#  locator in this file was read line by line in the source rather than copied forward, and the
+#  fixture window was confirmed to be 402 lines with every citation inside that range.
+#
+#  ---- WHAT THIS DEFINITION DELIBERATELY OMITS, AND WHY ------------------------------------------
+#    * `blockedBehaviours` - OMITTED because this workflow blocks nothing. The broker is pure legacy
+#      script with no native binding anywhere in it, so there is no closed binary to characterize
+#      around: every mechanic below is readable in the source and reproducible from it. The store's
+#      two blocked cases both belong to siblings. Said here so the member's absence is not read as an
+#      oversight.
+#    * `deferredCapabilities` - OMITTED, and the omission is load-bearing rather than incidental. The
+#      broker's library is SPLIT: the broker object is in scope as a shared library, while the
+#      dynamic-invocation objects beside it in the same library do not ship in this phase. That is a
+#      fact about the LIBRARY, not a missing half of THIS capability - the broker's own behaviour
+#      ships complete - so recording it as a deferred capability would misdescribe it, and the
+#      schema's member for it can only name one of the four capability areas that receive no code at
+#      all. `../../docs/DEFERRED.md` owns those destinations and this definition makes no claim about
+#      them. D-07's note carries the split-library fact instead, since D-07 is the one defect proved
+#      from a library other than the broker's own and is therefore where a reader is already asking
+#      which library owns what.
+#    * `redaction` - OMITTED because nothing this capture records is sensitive. Every value that
+#      reaches a recording is the fixture's own literal test data - two small integer pairs, a short
+#      greeting string, and two Chinese status words - and the broker reads no configuration, opens no
+#      connection and issues no statement. NO KEY, NO PASSWORD, NO CERTIFICATE, NO TOKEN AND NO
+#      CONNECTION STRING IS READ, EMITTED OR RECORDED HERE (C-F).
+#
+#  ---- GOVERNING CONSTRAINTS ---------------------------------------------------------------------
+#  NO USER-SPECIFIED RULES EXIST. The project's rules document returns exactly one line reporting
+#  that none were provided, so no rule is invented, inferred or back-filled, and nothing in this file
+#  exists because of one. Enterprise-standard best practice applies in their place. The binding
+#  constraints are the migration plan's own: C-B (defects reproduced, never corrected - a corrected
+#  capture is a parity FAILURE), C-C (the legacy tree is read-only and is the oracle; every claim
+#  carries a locator), C-D (nothing for a capability area that receives no code this phase), C-F (no
+#  secret value), C-K (every decision carries its reason) and C-L (the shared-volume capture rule).
+# ==================================================================================================
+
+schemaVersion: "1"
+
+workflowId: "shared-eventful-broker-ordering"
+
+title: "Event broker: subscription ordering, the decomposed topic identity, and the tri-valued veto"
+
+capabilityArea: >-
+  The event broker `n_cst_eventful` in its own right - the ordered subscription table and the lexical
+  name sort it is held in; the single opaque subscription string and the five encodings it fuses;
+  priority bands, the head-versus-tail insertion tie-break and the insertion-order tie within a band;
+  the three capture modes and the processed-state determination that drives them; the retrievable
+  return value and the overriding rule; nested dispatch and its own depth-scoped state; the
+  TRI-VALUED veto and its two different unwind behaviours; the argument-passing contract with its
+  surplus and missing cases; the unsubscribe and disable grammar, which is a smaller grammar than the
+  subscribe one; and the exception capture that rewrites a handler's failure into a four-field block.
+
+targetService: "Shared.Eventful"
+
+description: >-
+  ONE BROKER, EXERCISED DIRECTLY, CAPTURED TWICE. The pair proves that the order in which subscribed
+  handlers are invoked, the value each returns, the value the dispatch finally returns, and the
+  surviving subscription set after every mutation are identical on the legacy master and on the .NET
+  candidate after identical masking.
+
+
+  HOW THIS DIFFERS FROM `dataservices-dw-event-chain`, STATED FIRST BECAUSE THE TWO ARE EASY TO
+  CONFUSE. That sibling drives the broker through a consumer: twelve fixed topic constants, one
+  subscriber per topic, and a dispatch order fixed by the service class rather than chosen by the
+  capture. It therefore cannot vary a priority, cannot exercise a capture mode the consumer never
+  uses, and cannot observe what happens when two subscriptions contend for one position. THIS
+  workflow drives the broker's own public surface from the fixture window, so priority, capture mode,
+  namespace, insertion side, argument count and veto value are all inputs the capture varies
+  deliberately. The two definitions therefore prove different things about the same object and are
+  both required: neither subsumes the other, and each stays independently comparable under its own
+  identifier.
+
+
+  THE BROKER IS A SHARED LIBRARY, AND TWO INDEPENDENT PROOFS SAY SO. It is an instance member of the
+  DataWindow service class - `ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L6-L7` nests
+  the type and `:L33` declares the instance - and it is INHERITED by a threading class,
+  `ws_objects/pfw.thread.pbl.src/n_cst_threading_eventful.sru:L4,L10` deriving from it directly. One
+  consumer could be refactored away; an inheritance edge and a member declaration in two different
+  libraries cannot both be, which is why the broker is a shared library rather than a member of
+  either consumer.
+
+
+  THE BROKER'S LIBRARY IS A SPLIT LIBRARY, AND THIS WORKFLOW CHARACTERIZES ONLY THE BROKER. The
+  broker object is in scope as a shared library; the dynamic-invocation objects that sit beside it in
+  the same legacy library receive no code, no test and no container in this phase. The boundary is
+  visible inside the broker's own subscription record, whose `invoker` field at
+  `ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L21` is typed as one of those objects -
+  so this definition cites that TYPE as the mechanism the broker calls a handler through, and records
+  nothing about the object's own behaviour. NO ORACLE FIXTURE, NO PRECONDITION, NO OBSERVED OUTPUT, NO
+  MASK ENTRY AND NO DEFECT BELOW TARGETS A CAPABILITY AREA THAT DOES NOT SHIP IN THIS PHASE (C-D).
+
+
+  THE TOPIC IDENTITY IS FUSED IN THE API AND ALREADY DECOMPOSED IN THE IMPLEMENTATION, WHICH IS WHY
+  THE CONTRACT DECOMPOSES IT TOO (C-K). A subscription is created from ONE string that fuses three
+  independent encodings the wire contract must carry apart - a lexical ordering prefix, the logical
+  name, and a lifetime-or-namespace suffix - so the contract carries `sequence`, `name` and
+  `lifetime` as three separate fields and reconstitutes the fused legacy spelling only at the
+  compatibility edge. The evidence for that decision is not an argument from taste: THE BROKER
+  ALREADY DOES IT INTERNALLY. Its subscription record at `:L12-L25` stores `ns`, `name`, `capture` and
+  `priority` as four separate fields, and the parse at `:L334-L381` is what fills them. Only the
+  public surface is fused. The capture therefore records BOTH the fused legacy string AND the
+  decomposed fields on every subscription, so reconstitution is verifiable in both directions - which
+  matters because a wrong reconstitution does not raise: a trigger whose name does not match a stored
+  name exactly falls through to the default return value at `:L797-L798`, silently, and reads as an
+  event nobody subscribed to.
+
+
+  NO VALUE RECORDED HERE IS SENSITIVE. Every captured value originates in the read-only fixture's own
+  literals; nothing is read from a credential, a key store, a configuration file or a connection
+  string (C-F).
+
+# ==================================================================================================
+#  ORACLE FIXTURES - read, never edited, moved, renamed, reformatted, re-encoded or copied into this
+#  tree (C-C). Every locator below was verified against the source; the fixture window is 402 lines
+#  and the broker is 1,328.
+# ==================================================================================================
+oracleFixtures:
+  # THE DRIVING WINDOW. It is the only window in the corpus that exercises the broker directly, and
+  # it is unusual among the store's oracles in that its most valuable content is its COMMENTS: three
+  # comment blocks document the subscribe grammar, the disable grammar and the unsubscribe grammar
+  # form by form, and they are the authoritative statement of a grammar the broker's own source only
+  # implements. The live code exercises three subscriptions, one default return value, two triggers,
+  # one disable and one unsubscribe. The comments around them enumerate twelve further subscribe calls
+  # - the eleven documented forms plus the arity example - together with sixteen further disable forms
+  # and sixteen further unsubscribe forms, every one of which was counted in the source.
+  - path: ws_objects/pfw.tests.pbl.src/w_test_eventful.srw
+    role: oracle-window
+    locators:
+      - "L29-L31"     # the three callback events the window declares, two typed long and one untyped
+      - "L41"         # the broker instance variable
+      - "L44-L62"     # HANDLER 1: returns the sum of its two numeric parameters
+      - "L47"         # the broker injects ITSELF as the message parameter, which is how a handler reaches it
+      - "L52"         # DORMANT commented prevention call - carried across inert, never revived
+      - "L55"         # DORMANT commented unsubscribe call
+      - "L58"         # DORMANT commented disable call
+      - "L60-L61"     # the return-value contract: non-null becomes the trigger's return and is overridable
+      - "L62"         # handler 1's return expression
+      - "L65-L84"     # HANDLER 2: reads the dispatch state, then fires a NESTED trigger
+      - "L72"         # the processed-flag read
+      - "L74"         # the retrievable-return-value read
+      - "L77"         # the composed record - source, processed flag, last return value
+      - "L80"         # THE NESTED TRIGGER, fired from inside a handler
+      - "L84"         # handler 2's return expression, which includes the value it retrieved
+      - "L87"         # HANDLER 3: surfaces its string argument and returns NOTHING
+      - "L90"         # the broker is created in the window's open event
+      - "L114"        # and destroyed on close
+      - "L133-L189"   # THE DISABLE GRAMMAR, seventeen forms - the same criteria, the other operation
+      - "L145-L150"   # the negation symbol's three positions, stated by the fixture itself
+      - "L153"        # the ONE LIVE disable call
+      - "L156"        # negated name
+      - "L159"        # by namespace alone
+      - "L162"        # negated namespace
+      - "L177"        # trailing separator - subscriptions having NO namespace
+      - "L180"        # separator plus negation - subscriptions HAVING one
+      - "L189"        # the no-argument disable form
+      - "L207-L248"   # THE SUBSCRIBE GRAMMAR, documented authoritatively
+      - "L220"        # plain name, default priority
+      - "L221"        # the high-priority marker
+      - "L222"        # the low-priority marker
+      - "L223"        # prepend into the default band
+      - "L224"        # prepend into the high band
+      - "L225"        # prepend into the low band
+      - "L226"        # the explicit numeric priority form
+      - "L227"        # the namespace-suffix form
+      - "L228"        # a second namespace example, and unsubscribing by namespace
+      - "L229"        # the capture-all marker
+      - "L230"        # the capture-already-handled marker
+      - "L232"        # the two mutual-exclusion rules and the leading-position rule
+      - "L233"        # priority is independent of the namespace
+      - "L234"        # the processed-state determination, and a setter name that differs from the API
+      - "L235"        # the processed state cannot be rolled back, but the return value can be overridden
+      - "L236"        # prevention stops the dispatch
+      - "L237"        # a subscription made during dispatch takes effect only on the NEXT dispatch
+      - "L238"        # subscriptions are held in ascending name order - the sort, not the speed remark
+      - "L240"        # handler arity need not match the trigger's; order and type compatibility must
+      - "L246"        # a missing argument arrives as the type's initial value
+      - "L247"        # surplus arguments are silently discarded
+      - "L250"        # LIVE: a plain-name subscription
+      - "L251"        # LIVE: capture-all marker AND namespace suffix in one name
+      - "L252"        # LIVE: a third handler under the same namespace
+      - "L260"        # LIVE: the default return value for every event
+      - "L263"        # the commented per-event default-return form
+      - "L266"        # with no default configured, a trigger may return an untyped null
+      - "L285-L342"   # THE UNSUBSCRIBE GRAMMAR, seventeen forms
+      - "L286"        # by object
+      - "L289"        # by every object EXCEPT one, through the excluding boolean
+      - "L292"        # by object and callback name
+      - "L295"        # by name, object and callback name
+      - "L297-L303"   # the negation symbol again, with the note that negation RETAINS what it names
+      - "L306"        # the ONE LIVE unsubscribe call
+      - "L309"        # negated name
+      - "L312"        # by namespace alone
+      - "L315"        # negated namespace
+      - "L318"        # name and namespace together
+      - "L321"        # negated name within a namespace
+      - "L324"        # name outside a namespace
+      - "L327"        # both criteria negated at once
+      - "L330"        # trailing separator - the named event's subscriptions having NO namespace
+      - "L333"        # separator plus negation - the named event's subscriptions HAVING one
+      - "L336"        # every subscription having no namespace
+      - "L339"        # every subscription having one
+      - "L342"        # the no-argument unsubscribe form
+      - "L360-L372"   # TRIGGER SITE 1, and the untyped-null branch on the returned value
+      - "L364"        # the trigger call with three arguments
+      - "L365"        # the null test on the result - the observable shape of an unconfigured default
+      - "L389-L401"   # TRIGGER SITE 2, the same shape with a different argument pair
+      - "L393"        # the second trigger call
+
+  # THE OBJECT UNDER CHARACTERIZATION. 1,328 lines of PowerScript with NO native binding anywhere in
+  # it, which is why every mechanic below is readable from source and none of it is blocked. The
+  # locators are grouped by the mechanic they establish, because several of them are one line long
+  # and carry the whole behaviour - the head-versus-tail tie-break is a single comparison operator.
+  - path: ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru
+    role: service-object
+    locators:
+      - "L12-L25"     # THE SUBSCRIPTION RECORD - twelve fields, four of them the decomposed identity
+      - "L21"         # the invoker field, typed as the dynamic-invocation object beside it
+      - "L27-L30"     # the per-event default-return record
+      - "L33-L36"     # the four broker events: prepare, triggering, triggered, exception
+      - "L38"         # the self-shadowing global auto-instance
+      - "L71-L72"     # the subscription table and the default-return table
+      - "L77-L78"     # THE NESTING DEPTH AND THE PER-DEPTH INDEX STACK
+      - "L80-L81"     # the global default return value and the retrievable return value
+      - "L83-L85"     # the post flag, the exception one-shot flag and the PREVENTION FIELD
+      - "L87-L88"     # the name-window bounds used for the fast reject
+      - "L91-L98"     # THE EIGHT GRAMMAR SYMBOLS
+      - "L91"         # prepend
+      - "L92"         # low priority
+      - "L93"         # high priority
+      - "L94"         # explicit priority
+      - "L95"         # capture already-handled
+      - "L96"         # capture all
+      - "L97"         # namespace
+      - "L98"         # negation
+      - "L100-L102"   # THE THREE CAPTURE MODES
+      - "L104-L106"   # THE THREE PRIORITY SENTINELS
+      - "L108-L109"   # THE TWO MODIFICATION MODES
+      - "L110-L112"   # THE TWO NAMED VETO VALUES - continue is the unnamed third state
+      - "L111"        # prevent once
+      - "L112"        # prevent deep
+      - "L116-L168"   # the declared public surface: 46 overloads across 11 operations, counted here
+      - "L233-L264"   # the eleven trigger arities
+      - "L296"        # the four-argument subscribe, which is where the parse lives
+      - "L334"        # the priority default, before any symbol is read
+      - "L340-L360"   # THE PREFIX-SYMBOL LOOP, and its three invalid-argument guards
+      - "L361"        # a name that is nothing but symbols is rejected
+      - "L363"        # the symbols are stripped from the stored name
+      - "L365-L373"   # the explicit-priority split, conditional on the text being numeric
+      - "L368"        # the numeric test that decides whether a colon is a priority or a name character
+      - "L375-L379"   # the namespace split, on the FIRST separator, rejecting an empty namespace
+      - "L381"        # an empty name is rejected
+      - "L385-L393"   # the dead-subscriber sweep, which runs only OUTSIDE a dispatch
+      - "L400-L403"   # a callback that does not resolve is rejected at subscribe time
+      - "L410-L421"   # THE SORTED INSERT
+      - "L417"        # prepend compares with or-equal - insert at the HEAD of the band
+      - "L419"        # append compares strictly - insert at the TAIL of the band
+      - "L427-L432"   # THE IN-FLIGHT CURSOR BUMP - the mechanism behind the deferred-subscription defect
+      - "L437"        # the record is stored at the computed position
+      - "L439-L440"   # the name-window bounds are WIDENED on subscribe and never narrowed
+      - "L445"        # the post overload, which queues the dispatch instead of running it
+      - "L479-L540"   # the two default-return setters
+      - "L552"        # the per-name lookup falls back to the global default
+      - "L576-L603"   # the collector, which rebuilds the table and recomputes the bounds
+      - "L594-L597"   # the bounds are recomputed over ENABLED, VALID subscriptions only
+      - "L637"        # the retrievable return value is returned as stored
+      - "L655"        # THE PROCESSED FLAG IS DERIVED - it is the non-nullness of the stored value
+      - "L767-L770"   # the subscription test's own fast path
+      - "L785-L974"   # THE DISPATCH
+      - "L793"        # an empty name returns the global default without touching the table
+      - "L795"        # the per-name default is resolved first
+      - "L797-L798"   # THE FAST REJECT against the name window
+      - "L800-L806"   # the half-interval scan start, applied only above three subscriptions
+      - "L808-L813"   # depth increment, and the outer prevention value saved then cleared
+      - "L815-L817"   # the retrievable value is NULLED for this dispatch and the outer value saved
+      - "L820"        # the dispatch loop, indexed through the per-depth cursor
+      - "L822"        # VETO ENFORCEMENT - the loop exits while the prevention field is non-zero
+      - "L824-L828"   # exact-name matching, and the early exit the sorted order permits
+      - "L829"        # an invalidated subscription is skipped
+      - "L830"        # a disabled subscription is skipped
+      - "L831-L832"   # THE CAPTURE-MODE FILTER
+      - "L834-L836"   # a dead subscriber is skipped and marked for collection
+      - "L838-L846"   # first-match setup, and the broker installing itself as the message parameter
+      - "L851-L855"   # re-entrancy: a subscription already invoking gets a FRESH invoker
+      - "L858-L860"   # an unresolvable callback raises
+      - "L862-L864"   # ARGUMENT PASSING - a failure skips the handler SILENTLY
+      - "L866"        # the handler is invoked
+      - "L867-L901"   # THE EXCEPTION CAPTURE
+      - "L871-L872"   # the one-shot guard that stops the text being decorated twice
+      - "L873-L877"   # an assertion failure is unpacked differently from any other throwable
+      - "L881"        # the captured text is re-indented
+      - "L883-L886"   # the four-field block the handler's failure is rewritten into
+      - "L889-L895"   # the exception result's OWN two-value alphabet, whose 2 means CONTINUE
+      - "L898-L901"   # depth-zero decoration, then the failure propagates out of the dispatch
+      - "L903-L935"   # THE PROCESSED-STATE DETERMINATION
+      - "L909"        # a null return participates in nothing
+      - "L910-L923"   # the four ways an unprocessed dispatch becomes processed
+      - "L918-L920"   # including a comparison that THROWS, which counts as processed
+      - "L925-L931"   # the overriding rule once the dispatch is already processed
+      - "L951-L953"   # the outer retrievable value, depth and post flag are restored
+      - "L954-L957"   # THE VETO UNWIND - once is cleared, deep survives while nested
+      - "L960"        # the exception one-shot flag is cleared at depth zero
+      - "L962-L963"   # deferred collection runs here
+      - "L967-L971"   # the default return value is substituted for a trigger, but not for a post
+      - "L993-L1090"  # THE UNSUBSCRIBE AND DISABLE ENGINE - a SMALLER grammar than the subscribe one
+      - "L1000-L1006"  # the namespace split, and what its absence means
+      - "L1008-L1015"  # the two negation positions
+      - "L1017-L1019"  # the three absent-criterion flags
+      - "L1021-L1023"  # a bare negation with no name is rejected
+      - "L1029-L1052"  # the four match criteria, then the whole-set inversion
+      - "L1053-L1066"  # unsubscribing DURING a dispatch marks rather than removes
+      - "L1067-L1071"  # disabling sets a flag and never removes
+      - "L1080-L1085"  # the bounds recomputation, over enabled and valid entries only
+      - "L1087-L1091"  # compaction is QUEUED during a dispatch and immediate outside one
+      - "L1252-L1273"  # the indentation helper the captured exception text passes through
+      - "L1276-L1300"  # THE VETO SELECTOR
+      - "L1293"       # prevention OUTSIDE a dispatch fails rather than arming anything
+      - "L1295"       # deep
+      - "L1297"       # once
+      - "L1302"       # the no-argument overload, which selects once
+
+  # SUPPORTING - THE FUSED-TOPIC EVIDENCE, and the reason D-07 exists. This is the broker's largest
+  # consumer and the only place in the estate where a set of topic strings is declared together, so it
+  # is the only place the ordering prefix's SPARSENESS is visible. Read for its twelve constants and
+  # for the eight comments that make the veto look two-valued; nothing else about it is captured here,
+  # and `dataservices-dw-event-chain` owns its behaviour.
+  - path: ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru
+    role: supporting-fixture
+    locators:
+      - "L6-L7"       # the broker nested as a type inside the service class
+      - "L33"         # the broker instance member - proof one that the broker is a shared library
+      - "L46"         # one of the eight comments suggesting a two-valued prevention convention
+      - "L47-L76"     # THE TWELVE TOPICS
+      - "L54"         # the item-changed topic, and one of only TWO carrying an ordering prefix
+      - "L57"         # the edit-changed topic, the other one - CORRECTED FROM L58
+      - "L60"         # the clicked topic, unprefixed, and representative of the other ten
+
+  # SUPPORTING - THE LIFETIME EVIDENCE, and proof two that the broker is a shared library. This class
+  # inherits the broker directly, and its bulk-unsubscribe calls are what show the namespace field
+  # doing double duty as a LIFETIME: a negated-namespace unsubscribe tears down every subscription
+  # that is not in the retained namespace. That is the third of the three encodings the fused string
+  # carries, and it is the one the contract names `lifetime`.
+  - path: ws_objects/pfw.thread.pbl.src/n_cst_threading.sru
+    role: supporting-fixture
+    locators:
+      - "L84"         # the class's own comment naming the two operations it forwards
+      - "L532"        # subscribe, forwarded to the broker unchanged
+      - "L544"        # bulk unsubscribe, EXCLUDING the retained namespace
+      - "L594-L596"   # the same exclusion applied to one named event
+  - path: ws_objects/pfw.thread.pbl.src/n_cst_threading_eventful.sru
+    role: supporting-fixture
+    locators:
+      - "L4"          # the inheritance edge, forward declaration
+      - "L10"         # and on the type definition - proof two that the broker is a shared library
+
+# ==================================================================================================
+#  SEED PHASE - EMPTY, AND THE SCHEMA REQUIRES THAT TO BE ACCOUNTED FOR RATHER THAN LEFT BLANK.
+# ==================================================================================================
+seedPhase:
+  steps: []
+  emptyReason: >-
+    THE BROKER HOLDS NOTHING BUT IN-MEMORY SUBSCRIPTIONS, so there is nothing to delete, nothing to
+    create and nothing to seed. Its whole state is the six private members at
+    ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L71-L88 - a subscription table, a
+    default-return table, a nesting depth with its per-depth cursor stack, two return-value slots, and
+    three flags including the prevention field. Every one of them is created with the object and dies
+    with it: the fixture creates the broker in its open event at
+    ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L90 and destroys it on close at :L114. No row, no
+    file, no table, no connection and no configuration value participates in the behaviour on either
+    side, and the broker reads nothing from storage at any point.
+
+
+    THE SUBSCRIPTIONS ARE NOT A SEED, AND THE DISTINCTION IS DELIBERATE RATHER THAN PEDANTIC. Creating
+    a subscription is not establishing a starting state the capture then observes - IT IS THE
+    BEHAVIOUR UNDER TEST. The insertion position each subscribe call computes is the single most
+    important recorded output in this workflow, because it is what fixes the invocation order, so
+    every subscribe call belongs to the capture phase and is captured, not seeded. Putting them in the
+    seed phase would run them once and record none of them, which would remove the one thing this pair
+    exists to prove. This is the reverse of the persistence workflows, whose destructive database setup
+    genuinely has to be lifted out of the capture and run once.
+
+
+    ONE CONSEQUENCE IS OPERATIONAL AND IS RECORDED IN THE CAPTURE-PHASE PRECONDITIONS AS WELL, because
+    a reader who checks only the seed phase would otherwise miss it: because there is nothing to seed,
+    each capture case must be driven against a FRESHLY CREATED BROKER. Subscription state accumulates
+    across cases - the name-window bounds at
+    ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L439-L440 are widened on every subscribe
+    and are never narrowed by one, so a table left over from an earlier case changes the fast-reject
+    outcome of the next one. A harness that reuses one broker across the matrix below produces a
+    recording whose later cases depend on the order the earlier ones ran in, which is not a comparison
+    of anything.
+  runsOncePerPair: true
+  neverBetweenCaptures: true
+
+# ==================================================================================================
+#  CAPTURE PHASE - the behaviour, taken twice, against the state the seed phase established.
+# ==================================================================================================
+capturePhase:
+  behaviourUnderTest: >-
+    THE ORDER IN WHICH THE BROKER INVOKES SUBSCRIBED HANDLERS, AND THE VALUES THAT ORDER PRODUCES. For
+    each dispatch: which subscriptions matched and which were passed over and why; the position each
+    matching handler was invoked at; the arguments it received; the value it returned; and, after every
+    invocation, the dispatch's processed flag and its retrievable return value. For each subscribe
+    call: the fused string as given, the four fields the parse stored, the transient insertion side,
+    the position the record landed at, and the resulting name-window bounds. For each mutation: which
+    subscriptions matched the criteria, whether they were removed or merely flagged, when the table was
+    compacted, and the surviving set afterwards.
+
+
+    WITHIN THAT, FOUR MECHANICS ARE THE POINT OF THE CAPTURE. First, ORDERING: priority band, then
+    head-or-tail within the band, then insertion order for a tie - decided at
+    ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L410-L421, where the entire
+    head-versus-tail distinction is one comparison operator differing between :L417 and :L419. Second,
+    THE DECOMPOSED IDENTITY: one opaque string in, four stored fields plus one transient flag out, at
+    :L334-L381. Third, THE PROCESSED-STATE DETERMINATION at :L903-L935, which is what makes the three
+    capture modes observable at all. Fourth, THE TRI-VALUED VETO - three distinct outcomes, captured as
+    three distinct cases, with the difference between the two named values visible only across a
+    NESTED dispatch at :L954-L957.
+
+
+    WHAT THIS CAPTURE IS NOT. It is not a capture of any consumer's event surface - the twelve topics
+    of the DataWindow service class belong to `dataservices-dw-event-chain`, and this workflow reads
+    that class only for its topic constants. It is not a capture of the dynamic-invocation object the
+    broker calls handlers through: that object receives no code in this phase, and what is recorded
+    here is the broker's own outcome from calling it - resolved, unresolvable, or argument-passing
+    refused - never its internals. It touches no storage, generates no statement and reads no
+    configuration. AND IT IS NOT A MEASUREMENT: no elapsed value, no dispatch rate and no count per
+    unit time is recorded or asserted anywhere in it.
+
+  preconditions:
+    # ---- THE CONSTANT SETS. Identical on both halves, with every identifier SPELLING and every VALUE
+    # ---- preserved verbatim, because they appear in captured payloads and in stored recordings and a
+    # ---- rename silently invalidates every comparison already taken.
+    - >-
+      THE EIGHT GRAMMAR SYMBOLS are established with their legacy identifier spellings and their exact
+      one-character values, declared at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L91-L98: `SYMBOL_PREPEND` is `"-"`
+      [:L91], `SYMBOL_LOW` is `"@"` [:L92], `SYMBOL_HIGH` is `"!"` [:L93], `SYMBOL_PRIO` is `":"`
+      [:L94], `SYMBOL_HANDLED` is `"%"` [:L95], `SYMBOL_ALL` is `"*"` [:L96], `SYMBOL_NS` is `"."`
+      [:L97] and `SYMBOL_NOT` is `"^"` [:L98]. All eight are single characters and three of them - the
+      namespace separator, the priority separator and the negation marker - are also ordinary
+      characters a caller may legitimately want inside a name, which is why the parse order below is
+      itself part of the contract.
+    - >-
+      THE THREE CAPTURE MODES are established with their spellings and values from
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L100-L102: `CAP_UNHANDLED` is 0,
+      `CAP_HANDLED` is 1 and `CAP_ALL` is 2. A subscription's mode is stored in the record's own
+      `capture` field and is compared at :L831-L832 against the dispatch's running mode, which starts
+      at `CAP_UNHANDLED`. Three values, not a boolean pair: a mode that fires always is distinct from
+      one that fires only before the event is processed and from one that fires only after.
+    - >-
+      THE THREE PRIORITY SENTINELS are established with their spellings and their exact numeric values
+      from ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L104-L106: `PRIORITY_LOW` is
+      -2147483648, `PRIORITY_NORMAL` is 0 and `PRIORITY_HIGH` is 2147483647. The two extremes are the
+      signed 32-bit bounds, and that is not decoration - it is what makes the named bands unreachable
+      by an explicit numeric priority, so a caller cannot construct a value that outranks the high band
+      or undercuts the low one. The capture drives an explicit priority between the bands to record
+      that relation rather than assume it.
+    - >-
+      THE TWO MODIFICATION MODES are established with their spellings and values from
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L108-L109: `MOD_OFF` is 1 and
+      `MOD_DISABLE` is 2. Both reach the same matching engine at :L993-L1090 and diverge only in what
+      they do with a match - remove it, or set its flag - so both are driven through the same criteria
+      subset below and the difference between them is a recorded output rather than an assumption.
+    - >-
+      THE VETO IS THREE-VALUED AND THE CAPTURE TREATS IT AS THREE VALUES. Two are named at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L110-L112 - `PREVENT_ONCE` is 1 [:L111]
+      and `PREVENT_DEEP` is 2 [:L112] - and the third, continue, is the unnamed zero the prevention
+      field holds when no handler has vetoed. All three are recorded as raw numbers. NO BOOLEAN
+      PROJECTION OF THE VETO IS RECORDED, COMPARED OR DERIVED ANYWHERE IN THIS WORKFLOW.
+    - >-
+      THE SYMBOL-COMBINATION RULES hold on both halves, from the fixture's own grammar note at
+      ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L232 and enforced in the parse: the two priority
+      markers are mutually exclusive with each other AND with the explicit numeric form, the two
+      capture markers are mutually exclusive with each other, any other combination is legal, and the
+      symbols may appear in any order among themselves but must ALL come before the name. The parse
+      enforces each by returning an invalid-argument code on the second assignment to a field that is
+      no longer at its default - the prepend guard at :L343, the capture guards at :L346 and :L349, the
+      priority guards at :L352 and :L355, and the explicit-priority guard at :L369-L370. The capture
+      drives each rejection as its own case, because a rejected subscription and an accepted one differ
+      in the surviving set.
+
+    # ---- THE SUBSCRIBE GRAMMAR, FORM BY FORM. Every form is quoted exactly as the fixture's own
+    # ---- comment block writes it, including the two forms whose example name is `"click"` rather than
+    # ---- `"clicked"` - the fixture writes it that way and a corrected transcription would be a
+    # ---- corrected capture.
+    - >-
+      THE ELEVEN DOCUMENTED SUBSCRIBE FORMS are each established as their own subscription, from the
+      grammar block at ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L207-L248: the plain name
+      `"clicked"` for the default band [:L220]; the high-priority marker `"!clicked"` [:L221]; the
+      low-priority marker `"@clicked"` [:L222]; the three prepend forms `"-clicked"`, `"-!clicked"` and
+      `"-@clicked"`, which insert at the head of the default, high and low bands respectively [:L223,
+      :L224, :L225]; the explicit numeric form `"9999:clicked"` [:L226]; the namespace-suffix form
+      `"clicked.myns"` [:L227] with its second example `"close.myns"` and the note that unsubscribing
+      by namespace removes every subscription under it [:L228]; the capture-all marker `"*click"`
+      [:L229]; and the capture-already-handled marker `"%click"` [:L230].
+    - >-
+      THE EXPLICIT-PRIORITY FORM IS CONDITIONAL ON THE TEXT BEING NUMERIC, and both branches are
+      established. The parse looks for the priority separator and splits on it ONLY when the text to its
+      left is a number [ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L365-L373, with the
+      numeric test at :L368]. So `"9999:clicked"` yields priority 9999 and the stored name `"clicked"`,
+      while a form whose left side is not numeric - `"a:clicked"` - yields the DEFAULT priority and the
+      stored name `"a:clicked"` with the separator still in it. Both are captured, because the second is
+      the one a reader assumes cannot happen.
+    - >-
+      THE NAMESPACE SPLIT IS ON THE FIRST SEPARATOR, AND TWO SHAPES ARE REJECTED, and all three cases
+      are established. The parse takes everything after the FIRST namespace separator as the namespace
+      [ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L375-L379], so a two-separator form
+      yields a namespace that itself contains a separator rather than a nested namespace. An empty
+      namespace is rejected [:L379] and an empty name is rejected [:L381] - which means `"clicked."`
+      and `".myns"` are both invalid at SUBSCRIBE time even though both are valid and meaningful at
+      unsubscribe time. That asymmetry is captured on both operations so the two grammars are not
+      mistaken for one.
+    - >-
+      THE INSERTION SIDE IS TRANSIENT AND IS RECORDED FROM ITS EFFECT, NOT FROM THE RECORD. The prepend
+      flag never reaches the stored subscription: the record's twelve fields at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L12-L25 have no member for it, and the
+      flag is consumed at insertion time [:L417]. So the fused string carries FIVE encodings - insertion
+      side, priority, capture mode, name and namespace - of which only FOUR survive into the table. The
+      capture therefore records the insertion side as the POSITION the record landed at relative to the
+      band it joined, which is the only observable trace it leaves.
+
+    # ---- THE FIXTURE'S OWN LIVE STARTING STATE. Reproduced exactly on both halves, because the three
+    # ---- handlers' return contracts are what make the processed-state cases observable.
+    - >-
+      THE THREE LIVE SUBSCRIPTIONS THE FIXTURE CREATES are established in its own order, from
+      ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L250-L252: the plain-name form `"clicked"` bound
+      to the first handler [:L250]; then `"*clicked.myns"`, which carries the capture-all marker AND a
+      namespace suffix IN ONE NAME, bound to the second handler [:L251]; then `"test.myns"`, under the
+      same namespace, bound to the third [:L252]. Both `"clicked"` subscriptions land in the default
+      band, so the SECOND one's position is decided purely by insertion order - which is the tie case
+      the matrix drives deliberately, arriving here for free from the fixture itself.
+    - >-
+      THE DEFAULT RETURN VALUE IS ZERO, set for every event by the fixture at
+      ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L260. This is a precondition rather than a
+      detail because the ENTIRE processed-state determination is a comparison against it
+      [ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L916-L917]: a capture taken against a
+      different default would reclassify every handler return in the recording. The per-event overload
+      exists and is commented out at ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L263; the capture
+      drives the per-event form as its own case so the two-level resolution at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L552 - per name first, global fallback
+      second - is on the record.
+    - >-
+      THE THREE HANDLER CONTRACTS hold as the fixture writes them. The first
+      [ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L44-L62] returns the sum of its two numeric
+      parameters [:L62], so with the fixture's own trigger arguments it returns a non-default value and
+      marks the event processed. The second [:L65-L84] reads the processed flag [:L72] and the
+      retrievable return value [:L74], composes a record from the source, the flag and that value
+      [:L77], FIRES A NESTED TRIGGER FROM INSIDE ITSELF [:L80], and returns a sum that includes the
+      value it retrieved [:L84] - so its return value is a function of the first handler's, which is
+      what makes the invocation order observable in the final result rather than only in the trace. The
+      third [:L87] surfaces its string argument and RETURNS NOTHING AT ALL, which is the
+      returns-nothing case the matrix needs and which the fixture supplies directly.
+    - >-
+      THE THREE DORMANT CALLS IN THE FIRST HANDLER STAY DORMANT and are recorded as dormant. A
+      prevention call [ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L52], an unsubscribe call
+      [:L55] and a disable call [:L58] are all present and all commented out. They are carried across
+      inert exactly as they are: the capture drives the equivalent behaviours through their own matrix
+      cases below rather than by reviving these lines, and the recording notes that the fixture's
+      baseline dispatch reaches none of them. Reviving a commented line is a corrected capture.
+    - >-
+      EACH CAPTURE CASE RUNS AGAINST A FRESHLY CREATED BROKER, created as the fixture creates it at
+      ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L90 and destroyed as it destroys it at :L114.
+      Subscription state accumulates otherwise - the name-window bounds are widened on every subscribe
+      at ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L439-L440 and are never narrowed by
+      one - so a shared broker makes each case's outcome depend on which cases ran before it.
+
+    # ---- THE CAPTURE MATRIX. Sixteen case groups, each driven and recorded on its own, so that a
+    # ---- failure names one mechanic rather than the dispatch as a whole.
+    - >-
+      CASE C-01 - THREE HANDLERS AT THREE DIFFERENT PRIORITIES, one in the high band, one in the
+      default band and one in the low band, all on the same event name, subscribed in an order that
+      does NOT match their priority order. Records that invocation follows priority and not subscribe
+      order. This is the base case every other ordering case is a departure from.
+    - >-
+      CASE C-02 - TWO HANDLERS AT THE SAME PRIORITY, subscribed one after the other with no ordering
+      marker on either. Records that insertion order breaks the tie, which is the append comparison at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L419 scanning past every equal-priority
+      entry before stopping.
+    - >-
+      CASE C-03 - A PREPEND-FORM SUBSCRIPTION AGAINST AN EXISTING SAME-BAND SUBSCRIPTION, driven in all
+      three bands so the three prepend forms are each exercised. Records head insertion: the prepend
+      comparison at ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L417 stops at the first
+      entry of equal-or-lower priority instead of scanning past it, so the new record is invoked BEFORE
+      an equal-priority incumbent. The capture pairs each prepend case with its plain-form counterpart
+      from C-02, because the difference between the two operators is only visible when both are recorded.
+    - >-
+      CASE C-04 - AN EXPLICIT NUMERIC PRIORITY INTERLEAVED WITH THE NAMED BANDS, using a positive value
+      and a negative value on the same event as a high-band, a default-band and a low-band subscription.
+      Records that an explicit value sorts strictly between the two sentinel extremes and against the
+      default band by its own sign, and that no explicit value can reach outside the bands.
+    - >-
+      CASE C-05 - THE CAPTURE-ALL MARKER RECEIVING AN EVENT A PLAIN SUBSCRIBER HAS ALREADY HANDLED. A
+      plain-form subscription returns a non-default value and marks the dispatch processed; a
+      capture-all subscription later in the order is invoked ANYWAY, because the mode filter at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L831-L832 admits it unconditionally.
+      This is the fixture's own live arrangement and the capture records it from the fixture as well as
+      from a constructed case.
+    - >-
+      CASE C-06 - THE CAPTURE-ALREADY-HANDLED MARKER, proving it fires ONLY after the event is marked
+      processed. Driven twice on the same subscription set: once where an earlier handler marks the
+      dispatch processed, and once where none does. Records that the marker's subscription is invoked in
+      the first run and skipped entirely in the second - the inverse of a plain subscription, and the
+      reason the three modes cannot be reduced to two.
+    - >-
+      CASE C-07 - A HANDLER RETURNING EXACTLY THE CONFIGURED DEFAULT VALUE, so the dispatch is NOT
+      marked processed. Records that the processed flag stays false, that the retrievable return value
+      stays null, and that a plain subscription after it is still invoked while a capture-already-handled
+      subscription after it is still skipped. The comparison is at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L916-L917.
+    - >-
+      CASE C-08 - A HANDLER RETURNING A NON-DEFAULT VALUE, so the dispatch IS marked processed. Records
+      the flag turning true, the retrievable value being set at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L922-L923, and - driven with a second
+      such handler after it - the OVERRIDING rule at :L925-L931, where a later non-default return
+      replaces the retrievable value while the processed flag, already true, cannot be turned back. The
+      no-rollback property is the fixture's own note at
+      ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L235 and it is captured explicitly.
+    - >-
+      CASE C-09 - A HANDLER RETURNING NOTHING AT ALL, supplied directly by the fixture's third handler
+      at ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L87. Records that a null return participates
+      in nothing: the guard at ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L909 skips the
+      whole determination, so the dispatch is not marked processed and the retrievable value is not
+      touched - which is a DIFFERENT outcome from returning the default value in C-07, even though both
+      leave the flag false, because C-07 evaluated the comparison and this case never reached it.
+    - >-
+      CASE C-10 - A TRIGGER WITH NO DEFAULT RETURN VALUE CONFIGURED AT ALL, driven against a broker on
+      which no default was ever set. Records two things that a configured default hides. First, the
+      dispatch returns an UNTYPED NULL rather than a value, because the substitution at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L967-L971 has nothing to substitute -
+      the fixture's own trigger sites branch on exactly that at
+      ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L365 and :L394, so the branch is part of the
+      oracle's observable output and not an inference. Second, the processed-state determination takes
+      its null-default shortcut at ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L912-L913,
+      so ANY non-null return marks the dispatch processed without any comparison happening.
+    - >-
+      CASE C-11 - THE NESTED TRIGGER FIRED FROM INSIDE A HANDLER, supplied directly by the fixture at
+      ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L80. Records the depth increment at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L808-L809, and - the part a naive port
+      loses - that the INNER dispatch gets its own processed state: the retrievable value is nulled for
+      it at :L815-L817 and the outer value is restored at :L951-L953. So a handler that reads the
+      processed flag before firing a nested trigger and again afterwards sees the same answer both
+      times, and the inner dispatch's own subscriptions cannot mark the outer one processed. The
+      per-depth cursor stack at :L820 is what keeps the two loops independent, and both cursors are
+      recorded.
+    - >-
+      CASE C-12 - A SUBSCRIPTION CREATED DURING DISPATCH, from inside a running handler, targeting the
+      event currently being dispatched and inserted at a position the running loop has not yet reached.
+      Records that it is NOT invoked by the in-flight dispatch and IS invoked by the next one. The
+      capture also records the CONVERSE case in the same group, because the two are asymmetric and the
+      asymmetry is the finding: an UNSUBSCRIBE issued during dispatch takes effect immediately, since
+      the engine flags the record at ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1053-L1058
+      and the running loop reads that flag at :L829 before invoking anything.
+    - >-
+      CASE C-13 - A TRIGGER WITH MORE ARGUMENTS THAN THE HANDLER ACCEPTS. Records that the surplus is
+      discarded silently: the handler is invoked, it receives the leading arguments in order, no error
+      code is returned, no exception is raised and nothing is logged. Driven at two arities so a
+      one-over case and a several-over case are both on the record, per the fixture's own documented
+      example at ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L247.
+    - >-
+      CASE C-14 - A TRIGGER WITH FEWER ARGUMENTS THAN THE HANDLER ACCEPTS. Records that the missing
+      positions arrive as their declared type's INITIAL value rather than raising - the fixture's
+      documented example shows a missing string parameter arriving as an empty string at
+      ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L246, and the capture drives a numeric position
+      as well so the initial value is recorded per type rather than generalised from one. Driven
+      alongside a type-INCOMPATIBLE position, which is the different outcome: argument passing fails at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L862-L864 and the handler is SKIPPED
+      silently, so the recording distinguishes a handler invoked with a filled-in blank from a handler
+      never invoked at all.
+    - >-
+      CASE C-15 - THE VETO, DRIVEN AS THREE DISTINCT OUTCOMES ON ONE SUBSCRIPTION SET of at least three
+      handlers, so that "which handlers still ran" is a different answer in each. Continue: no handler
+      vetoes, every subsequent handler runs, the prevention field stays zero. Prevent-once: a handler in
+      the middle vetoes with the once value, the loop exits at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L822 so no later handler in THAT
+      dispatch runs, and the unwind at :L954-L957 clears the field so an ENCLOSING dispatch continues
+      normally. Prevent-deep: the same handler vetoes with the deep value, the same loop exits, but the
+      unwind LEAVES THE FIELD SET while the depth stays above zero, so the enclosing dispatch's
+      remaining handlers do NOT run either. All three are driven from inside a nested dispatch, because
+      that is the only arrangement in which the two named values differ at all - captured at depth zero
+      alone they are indistinguishable, and a capture taken only at depth zero would report a passing
+      comparison for an implementation that had collapsed them. A fourth sub-case records the guard at
+      :L1293: a prevention attempted OUTSIDE any dispatch returns a failure code and arms nothing.
+    - >-
+      CASE C-16 - THE UNSUBSCRIBE AND DISABLE FORMS, as a representative subset covering every
+      criterion combination the engine at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L993-L1090 can express, driven through
+      BOTH operations so the remove-versus-flag difference is recorded per form. By name: `"clicked"`,
+      the live form at ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L306 with its disable
+      counterpart at :L153. By object [:L286]; by every object EXCEPT one, through the excluding
+      boolean rather than through a symbol [:L289]; by object and callback name together [:L292]; and by
+      name, object and callback name all three [:L295]. By namespace alone: `".myns"` [:L312]. By name
+      and namespace together: `"clicked.myns"`
+      [:L318]. The negated variants: `"^clicked"` for every event EXCEPT the named one [:L309],
+      `".^myns"` for every namespace except the named one [:L315], `"^clicked.myns"` [:L321],
+      `"clicked.^myns"` [:L324] and `"^clicked.^myns"` with both negated at once [:L327]. The
+      trailing-separator variants, which turn the namespace into a criterion with an empty value:
+      `"clicked."` selects the named event's subscriptions having NO namespace [:L330] and `"."`
+      selects every subscription having none [:L336], while `"clicked.^"` selects the named event's
+      subscriptions that DO have one [:L333] and `".^"` selects every subscription that does [:L339].
+      And the no-argument form that takes everything, at :L342 for unsubscribe and :L189 for disable.
+      Two rejection cases are driven alongside them: a bare negation with no name, refused at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1021-L1023, and a subscribe-only form
+      such as `"!clicked"` offered to an unsubscribe.
+    - >-
+      CASE C-16 IS ALSO WHERE THE TWO GRAMMARS ARE PROVED TO BE DIFFERENT GRAMMARS, which is a trap
+      worth its own statement. The mutation engine reads only TWO of the eight symbols - the namespace
+      separator and the negation marker, at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1000-L1015. It does not read the
+      priority markers, the explicit-priority separator, the prepend marker or the capture markers at
+      all. So an unsubscribe written with a subscribe-form name looks for a subscription whose stored
+      name literally begins with that symbol, finds none, and returns success having removed nothing.
+      The capture records that outcome explicitly - a successful call with an unchanged surviving set -
+      because it is the failure mode a reader is most likely to write and least likely to notice.
+
+    # ---- THE FUSED-AND-DECOMPOSED TOPIC RECORDING, and why the contract decomposes (C-K).
+    - >-
+      EVERY SUBSCRIPTION IS RECORDED IN BOTH FORMS, FUSED AND DECOMPOSED, ON BOTH HALVES OF THE PAIR.
+      The fused form is the string exactly as it was passed to the subscribe call, byte for byte,
+      including every leading symbol. The decomposed form is the three contract fields - the ordering
+      sequence, the logical name and the lifetime - plus the capture mode, which the same parse
+      produces and which the contract carries as its own field rather than folding into any of the
+      three. Recording both is what makes RECONSTITUTION verifiable in both directions, and that is
+      required rather than thorough: the legacy matches a trigger against a stored name by EXACT
+      equality at ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L824, with a window-based
+      fast reject before it at :L797-L798, so a reconstitution that drops or reorders one character
+      does not raise - the dispatch simply matches nothing and returns the default return value, which
+      is indistinguishable in every recorded field from an event that genuinely had no subscriber.
+    - >-
+      THE ORDERING PREFIX IS RECORDED AS PART OF THE STORED NAME, WHICH IS WHERE THE LEGACY PUTS IT,
+      and the capture drives both a prefixed and an unprefixed topic so the asymmetry is on the record.
+      This precondition exists because the prefix's mechanism is easy to get wrong in a way that looks
+      right: a leading digit is NOT one of the eight symbols, so the prefix-symbol loop at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L340-L360 stops at the very first
+      character and the prefix stays in the name. Its ordering effect is therefore entirely a LEXICAL
+      one - it fixes the record's position in a table the sorted insert at :L410-L413 keeps in ascending
+      name order, and thereby the name-window bounds at :L439-L440 and the scan start at :L800-L806.
+      It does not reorder handlers WITHIN one topic, because a dispatch matches one name exactly. The
+      capture records the position, the bounds and the scan start; IT RECORDS NO TIMING, and the
+      lookup-cost remark attached to the sort at
+      ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L238 is explicitly not captured, not asserted
+      and not compared.
+    - >-
+      THE LIFETIME FIELD IS DRIVEN THROUGH ITS REAL LEGACY USE, not through a synthetic example. The
+      namespace does double duty as a lifetime marker: a threading class that inherits the broker calls
+      a bulk unsubscribe with the negated-namespace form `".^persistent"` at
+      ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L544, and the same exclusion scoped to one
+      event name - the triggered name concatenated with `".^persistent"` - at :L594-L596. So every
+      subscription whose namespace is not the retained one is torn down and the retained ones survive,
+      which is exactly a lifetime and is why the contract names the field that. The capture drives that
+      exact arrangement - two subscriptions in the retained namespace and two outside it, then the
+      negated-namespace bulk unsubscribe in both its whole-table and per-name forms - and records the
+      surviving set, so the contract's `lifetime` field is grounded in an observed behaviour rather
+      than in a naming convention. Note that the form is built by CONCATENATION at :L596, so the
+      lifetime encoding is appended to a name the caller supplied: a name that already contained a
+      namespace separator would yield a different criterion, which is the fused string's hazard
+      appearing in the legacy's own code.
+
+    # ---- COMPARABILITY. What must hold for the second half to answer the same question as the first.
+    - >-
+      THE SUBSCRIPTION SET IS ESTABLISHED IN THE SAME ORDER ON BOTH HALVES, case by case, and the order
+      is part of the case rather than an implementation detail of the harness. Insertion order breaks
+      every priority tie [ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L419], so two halves
+      that subscribe the same set in two different orders produce two different invocation orders for
+      reasons that are not behaviour, and the comparison reports a difference that means nothing.
+    - >-
+      THE TRIGGER ARGUMENTS ARE THE FIXTURE'S OWN, on both halves, for every case that is not
+      specifically an arity case: the two small integer pairs the fixture's two trigger sites pass at
+      ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L364 and :L393, and the short greeting string the
+      nested trigger passes at :L80. The first handler returns the sum of its numeric arguments, so the
+      argument values propagate into the recorded return values and a substituted value changes them.
+    - >-
+      THE TARGET HALF IS CAPTURED AGAINST THE RUNNING SERVICE, not against an in-process test host. A
+      test host mounts no volume and so cannot be the candidate half of a pair however thorough it is;
+      ../README.md section 7 is the authority for that distinction.
+    - >-
+      BOTH HALVES OF THIS PAIR ARE TAKEN IN ONE WORKING TREE, under the shared-volume capture rule whose
+      canonical text is ../README.md section 2.1. Where several clones run concurrently each needs its
+      own compose project and its own volume, so that one clone's teardown cannot invalidate another
+      clone's half-finished pair.
+    - >-
+      NO TIMING VALUE IS RECORDED AS AN ASSERTION ANYWHERE IN THIS CAPTURE, and there is no oracle
+      timing field to carry masked either: unlike the parser window, which reads a processor clock and
+      prints an elapsed field of its own, the broker fixture reads no clock and emits no elapsed value,
+      so no observed output below sets the non-behavioural flag for that reason. Order is behaviour;
+      speed is not.
+
+  observedOutputs:
+    # ==============================================================================================
+    #  PART 1 OF 8 - WHAT EACH SUBSCRIBE CALL PRODUCED
+    #  ---------------------------------------------------------------------------------------------
+    #  One record per subscribe call. These are recorded as their own outputs rather than as one
+    #  "subscription created" line because the parse produces FOUR stored fields and one transient
+    #  flag from ONE string, and a single line would compare the string and lose the parse. This is
+    #  also the group that makes the ordering outputs in part 2 interpretable: an invocation order is
+    #  only meaningful against the table it was read from.
+    # ==============================================================================================
+    - name: subscription.fusedName
+      description: >-
+        The subscription string exactly as it was passed to the subscribe call, byte for byte,
+        including every leading symbol and the namespace suffix. Recorded unmodified and unnormalized
+        so that it can be compared against the reconstituted form in part 5. A difference here means
+        the harness, not the broker, behaved differently on the two halves.
+      format: >-
+        The raw string in a quoted field, with no symbol stripped, no case folded and no whitespace
+        trimmed. An empty string is recorded as an empty string rather than as absent, because the
+        broker treats an empty name as its own case.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L296"
+    - name: subscription.storedName
+      description: >-
+        The name the parse actually stored, after the leading symbols were stripped, after an explicit
+        priority was split off if the text before the separator was numeric, and after the namespace
+        was split off. This is the string a dispatch matches against by exact equality, so it is the
+        field a wrong reconstitution corrupts. Two cases make it non-obvious and both are captured: a
+        non-numeric priority separator stays IN this value, and an ordering prefix stays in it too.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L363"
+    - name: subscription.resolvedPriority
+      description: >-
+        The numeric priority the parse stored - one of the three sentinels, or an explicit value. The
+        raw number is recorded, never a band label, because the two sentinel extremes are the signed
+        32-bit bounds and an explicit value's relation to them is exactly what case C-04 exists to
+        prove. A band label would compare equal for two values that sort differently.
+      format: >-
+        The signed integer as stored. The low and high sentinels are recorded as their full numeric
+        values rather than as names, so that a port that substituted a smaller magnitude is detected.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L334"
+    - name: subscription.resolvedNamespace
+      description: >-
+        The namespace the parse stored - everything after the FIRST separator - or an empty value when
+        the name carried no separator. Recorded because it is the lifetime field the contract carries
+        separately, and because it is the criterion every namespace-scoped mutation matches on. A
+        two-separator name is recorded with the second separator still inside this value, which is
+        what the legacy stores and is not a nested namespace.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L377"
+    - name: subscription.resolvedCaptureMode
+      description: >-
+        The capture mode the parse stored, as its raw numeric value from the three-mode set. Recorded
+        as a number rather than as a marker character or a boolean, because the mode governs whether a
+        subscription is invoked at all under the filter in part 2 and because the three values are not
+        reducible to two.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L346"
+    - name: subscription.insertionSide
+      description: >-
+        Whether the subscribe call requested head insertion or tail insertion within its band. THIS
+        FIELD HAS NO COUNTERPART IN THE STORED RECORD - the flag is consumed at insertion and the
+        twelve stored fields have no member for it - so it is recorded from the request rather than
+        read back, and its EFFECT is recorded separately as the table position below. Recording both
+        is what lets a reviewer see that a head request produced a head position.
+      format: >-
+        A two-valued marker naming the side requested, alongside the one character in the fused name
+        that requested it. Recorded even when the default side applies, so that a case where the
+        marker was silently dropped by a port is visible as a changed side rather than as an absent
+        field.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L417"
+    - name: subscription.tablePosition
+      description: >-
+        The one-based index the record landed at in the subscription table, and the index of the
+        band's first and last entry at that moment. This is THE most consequential single output in
+        the workflow: it is what fixes the invocation order, and it is where the head-versus-tail
+        distinction and the insertion-order tie-break both become observable. A port that computed a
+        correct set of subscriptions in a wrong order is detected here and nowhere else.
+      format: >-
+        The one-based index as the legacy numbers it, NOT a zero-based translation of it. The legacy
+        table is one-based and its bound function returns the last valid index, so recording a
+        translated index would make an off-by-one in the port indistinguishable from a correct value.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L437"
+    - name: subscription.tableSnapshot
+      description: >-
+        The whole subscription table after the call, in stored order, each entry carrying its stored
+        name, priority, namespace, capture mode, subscriber label, invalidation flag and disabled flag.
+        Recorded after every subscribe and every mutation so that ordering is verifiable from the table
+        itself and not only inferred from an invocation trace - the two can disagree, and when they do
+        the disagreement is the finding.
+      format: >-
+        A stable serialization in stored order, one entry per line, with the fields in a fixed column
+        order. The subscriber is recorded as its stable label rather than its instance identity, per
+        the mask below.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L71"
+    - name: subscription.nameWindowBounds
+      description: >-
+        The two name-window bounds after the call. They are WIDENED on every subscribe and never
+        narrowed by one, and they are recomputed - over enabled and valid entries only - by the
+        collector and by every mutation. Recorded because they are the input to the dispatch fast
+        reject, so they are the mechanism by which a mutation to one subscription changes the outcome
+        of a trigger for an entirely different name.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L439-L440"
+    - name: subscription.returnCode
+      description: >-
+        The numeric code the subscribe call returned - success, or one of the two distinct failure
+        kinds the parse and the callback resolution produce. Recorded as the raw number in the
+        framework's own return-code algebra, never as a boolean projection of it: the algebra is
+        tri-state, so a boolean would collapse outcomes the numeric form keeps apart. Every rejection
+        case in the preconditions is compared on this field AND on the unchanged table snapshot, since
+        a rejection that still inserted something is a different defect from one that returned the
+        wrong code.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L381"
+    - name: subscription.callbackResolution
+      description: >-
+        Whether the named callback resolved on the given subscriber at SUBSCRIBE time, and the
+        method identifier that resolution produced. The legacy resolves eagerly and refuses the
+        subscription outright when it cannot, rather than failing later at dispatch - so a
+        misspelled callback is a subscribe-time error, and the recording proves the check stayed
+        eager. The identifier is recorded as a stable ordinal per the mask below.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L400-L403"
+
+    # ==============================================================================================
+    #  PART 2 OF 8 - THE ORDERED DISPATCH TRACE
+    #  ---------------------------------------------------------------------------------------------
+    #  THE CENTRAL OUTPUT OF THIS WORKFLOW. The trace is an ORDERED INVOCATION SEQUENCE, and both the
+    #  sequence and the reason each subscription was or was not part of it are compared. Recording
+    #  only the handlers that ran would compare the result and lose the decision: four different
+    #  guards can skip a subscription, they are evaluated in a fixed order, and a port that skipped
+    #  for the wrong reason produces an identical invocation list.
+    # ==============================================================================================
+    - name: dispatch.invocationOrder
+      description: >-
+        The ordered sequence of handler invocations for one dispatch - position by position, each
+        carrying the matched subscription's stored name, its fused name, its resolved priority, its
+        namespace, its capture mode and the stable label of the subscriber the callback ran on. THIS
+        SEQUENCE IS THE BEHAVIOUR UNDER TEST. Any difference in it between the two halves is a parity
+        failure, including a difference that only reorders two handlers whose returns happen to
+        compose to the same final value.
+      format: >-
+        An ordered list, one invocation per line, positions numbered from one in invocation order. The
+        position is an ordinal for detection and identity only; NO DURATION IS DERIVED FROM TWO
+        POSITIONS and no interval between them is recorded.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L820"
+    - name: dispatch.skipDecisions
+      description: >-
+        For every subscription the loop examined and did NOT invoke, which guard skipped it - a stored
+        name that did not match, an invalidated record, a disabled record, a capture mode the running
+        mode did not admit, a subscriber that was no longer valid, or an argument-passing refusal.
+        Recorded in examination order alongside the invocations, because the guards are evaluated in a
+        fixed order and two guards can both be true: a port that evaluated them in a different order
+        reports the same invocation list with a different reason, and only this field detects it.
+      format: >-
+        One line per examined subscription, in examination order, naming the subscription and the
+        guard that stopped it, or naming the invocation position when none did.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L824-L836"
+    - name: dispatch.fastRejectOutcome
+      description: >-
+        Whether the dispatch was rejected before the table was scanned at all, by comparing the
+        triggered name against the two name-window bounds, and which bound rejected it. Recorded on
+        every dispatch including the ones that proceed, because this is the field that makes a
+        RECONSTITUTION ERROR visible: a name reconstituted outside the window is rejected here and
+        returns the default value, which is otherwise indistinguishable from a name that simply had no
+        subscriber.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L797-L798"
+    - name: dispatch.scanStartIndex
+      description: >-
+        The one-based index the scan began at. The legacy does not always start at the first entry:
+        above three subscriptions it compares the triggered name against the entry at the midpoint and
+        skips the first half when that entry sorts lower. Recorded because the skip is conditional on
+        the table SIZE, so it is a behaviour that appears only once a table grows, and because a port
+        that scanned from the start every time would produce identical invocations and a different
+        scan path - which matters the moment a skipped entry should have matched.
+      format: >-
+        The one-based start index, the table size it was computed from, and whether the half-interval
+        skip applied.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L800-L806"
+    - name: dispatch.earlyExitOutcome
+      description: >-
+        Whether the scan stopped before reaching the end of the table, and why - a stored name sorting
+        past the triggered name, or the end of a run of matches after at least one match. Both exits
+        exist because the table is name-sorted, so they are the sorted order's observable consequence
+        and the place a port that abandoned the sort still looks correct until a later subscription is
+        missed.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L826-L827"
+    - name: dispatch.nestingDepth
+      description: >-
+        The nesting depth on entry and on exit, and the per-depth scan cursor for every level that was
+        open. Recorded because the cursor stack is what keeps an inner dispatch's position independent
+        of an outer one's, and because the cursor is also what the in-flight subscription defect
+        manipulates - a cursor bumped past a newly inserted record is the whole of that defect, and it
+        is invisible in any other field.
+      format: >-
+        The depth as an integer, plus one cursor value per open level in level order.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L808-L809"
+    - name: dispatch.messageParameterInstallation
+      description: >-
+        Whether the broker installed itself as the callback's message parameter, what value that
+        parameter held beforehand, and whether that prior value was restored afterwards. This is the
+        only channel by which a handler reaches the broker at all - the fixture's handlers read it and
+        then call the processed-flag, retrieved-value, nested-trigger and prevention operations through
+        it - so a dispatch that failed to install it would make every handler-side operation in this
+        workflow unreachable. Recorded as a stable label per the mask below.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L838-L846"
+    - name: dispatch.reentrantInvokerAllocation
+      description: >-
+        Whether a subscription that was already mid-invocation received a fresh invocation handle
+        instead of reusing its stored one, and whether that fresh handle was released afterwards.
+        Reached when a handler re-enters the same subscription through a nested trigger. Recorded
+        because a port that reused one handle across a re-entrant call would corrupt the outer call's
+        state rather than fail visibly.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L851-L855"
+
+    # ==============================================================================================
+    #  PART 3 OF 8 - PROCESSED STATE AND RETURN VALUES
+    #  ---------------------------------------------------------------------------------------------
+    #  The processed state is not a flag the broker sets; it is DERIVED from whether a return value
+    #  slot is null, and the slot is only written when a comparison against the configured default
+    #  succeeds. Four separate conditions can make a dispatch processed, one of them being a
+    #  comparison that THREW. Each is recorded, because they are observationally distinct starting
+    #  points for the same flag value.
+    # ==============================================================================================
+    - name: handler.returnValue
+      description: >-
+        The value each handler returned, per invocation, with its runtime type. Recorded as a
+        discriminated value - type and textual projection - rather than as a bare string, because the
+        determination below compares it against the configured default and a type difference changes
+        the comparison's outcome. A handler that returned nothing is recorded as an explicit null
+        rather than as an absent field: returning nothing and returning zero are different cases and
+        case C-09 exists to prove it.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L62"
+    - name: dispatch.processedFlag
+      description: >-
+        The processed flag after every invocation, not only at the end of the dispatch. Recorded per
+        step because the flag is what the capture-mode filter reads on the NEXT iteration, so its
+        value mid-dispatch is an input to the ordering rather than a summary of it. The flag is
+        derived from the non-nullness of the retrievable value slot, so the two are recorded together
+        and a disagreement between them is itself a finding.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L655"
+    - name: dispatch.processedTransitionCause
+      description: >-
+        Which of the four conditions turned the dispatch processed - no default configured at all, a
+        default whose type is the untyped kind, a successful comparison finding the return unequal to
+        the default, or A COMPARISON THAT RAISED AND WAS CAUGHT. The fourth is the one a port loses:
+        the legacy catches the comparison failure and treats it as processed, so an incomparable
+        return marks the event handled rather than propagating. All four produce the same flag value
+        and are distinguished only here.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L910-L920"
+    - name: dispatch.retrievableReturnValue
+      description: >-
+        The value a handler reads back through the broker's retrieval operation, recorded after every
+        invocation. It is nulled at the start of every dispatch and restored to the enclosing
+        dispatch's value on exit, so a nested dispatch has its own - which is what case C-11 proves.
+        The fixture's second handler reads this value and folds it into its own return, so it
+        propagates into the final result and an ordering error changes it.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L637"
+    - name: dispatch.returnValueOverride
+      description: >-
+        Whether a later handler replaced the retrievable value once the dispatch was already
+        processed, and whether the processed flag stayed set through it. The legacy permits the VALUE
+        to be overridden while the STATE cannot be rolled back, and the two halves of that rule fail
+        differently: a port that let the state roll back would restart the plain subscriptions, and
+        one that refused the value override would report the first handler's result instead of the
+        last one's.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L925-L931"
+    - name: dispatch.finalReturnValue
+      description: >-
+        The value the dispatch returned to its caller, with its runtime type, and whether the
+        configured default was substituted for a null result. Two shapes matter and both are captured:
+        the substituted default, and - with no default configured - AN UNTYPED NULL, which is a real
+        return shape rather than an error and which the fixture's own trigger sites branch on. The
+        substitution happens for a synchronous trigger and NOT for a queued one, so the queued form is
+        recorded as its own case.
+      format: >-
+        The runtime type and the textual projection, with a null recorded explicitly as a typed null
+        rather than as an empty value, so that an untyped null is distinguishable from an empty string
+        and from a zero.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L967-L971"
+    - name: dispatch.defaultReturnValueResolution
+      description: >-
+        Which default return value the dispatch resolved for the triggered name, and whether it came
+        from the per-name table or from the global fallback. Recorded because the resolution is
+        two-level and the per-name entry is set by a different overload from the global one, so a port
+        that implemented only the global form would agree with the master on every case the fixture
+        drives live and diverge on the per-name case.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L552"
+
+    # ==============================================================================================
+    #  PART 4 OF 8 - THE TRI-VALUED VETO, AS ITS OWN GROUP
+    #  ---------------------------------------------------------------------------------------------
+    #  THREE OUTCOMES, THREE RECORDS, NEVER A BOOLEAN. The two named values differ ONLY across a
+    #  nested dispatch, so every field in this group is recorded at depth zero AND at depth one. A
+    #  capture taken at depth zero alone would report a passing comparison for an implementation that
+    #  had collapsed the two into one.
+    # ==============================================================================================
+    - name: veto.valueSelected
+      description: >-
+        The raw numeric value the prevention field held after a handler vetoed - the once value, the
+        deep value, or the zero that means continue. Recorded as the number. NO BOOLEAN PROJECTION OF
+        THIS FIELD IS RECORDED OR COMPARED, because a boolean cannot distinguish the two named values
+        and flattening them silently converts a deep prevention into a shallow one.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1295-L1297"
+    - name: veto.subsequentHandlersInThisDispatch
+      description: >-
+        Which subscriptions after the vetoing one were invoked in the SAME dispatch, and which were
+        not. Both named values produce the same answer here - the loop exits and nothing later runs -
+        so this field alone cannot tell them apart, which is precisely why it is recorded alongside
+        the enclosing-dispatch field below rather than instead of it.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L822"
+    - name: veto.subsequentHandlersInEnclosingDispatch
+      description: >-
+        Which subscriptions after the nested trigger's call site were invoked in the ENCLOSING
+        dispatch. THIS IS THE FIELD THAT SEPARATES THE TWO NAMED VALUES, and it is the only one that
+        does. Under the once value the enclosing dispatch resumes and its remaining handlers run;
+        under the deep value it does not resume and they do not run. A port that flattened the veto to
+        a boolean - which this workflow never does - agrees with the master on every other field in
+        this group and diverges only here.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L954-L957"
+    - name: veto.unwindState
+      description: >-
+        The prevention field's value immediately after each dispatch returned, at every open depth.
+        Records the asymmetric unwind directly: a once-prevention is cleared as the dispatch returns,
+        a deep-prevention is left set while the depth stays above zero and is cleared only when the
+        depth reaches zero, and a saved outer prevention is restored ahead of both.
+      format: >-
+        One numeric value per depth level, in level order, taken after each dispatch returns.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L954-L957"
+    - name: veto.outsideDispatchOutcome
+      description: >-
+        The code returned by a prevention attempted when no dispatch is open, and the prevention
+        field's value afterwards. The legacy refuses it - returning a failure code and arming nothing -
+        so a port that armed the field regardless would prevent the NEXT unrelated dispatch, which no
+        other field in this workflow would catch.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1293"
+
+    # ==============================================================================================
+    #  PART 5 OF 8 - THE TOPIC IDENTITY, FUSED AND DECOMPOSED
+    #  ---------------------------------------------------------------------------------------------
+    #  Recorded in both forms on both halves, so that reconstitution is verifiable in both
+    #  directions. A one-directional record cannot detect a reconstitution error, and a
+    #  reconstitution error does not raise - it silently matches nothing.
+    # ==============================================================================================
+    - name: topic.decomposedFields
+      description: >-
+        The three contract fields for each subscription and each triggered name - the ordering
+        sequence, the logical name and the lifetime - plus the capture mode, which the same parse
+        produces and which the contract carries as a fourth field rather than folding into any of the
+        three. Recorded so that the contract's decomposition is checkable against the parse that
+        justified it, field by field.
+      format: >-
+        Four named fields per topic. The lifetime is recorded as the namespace text and as its
+        derived retention meaning, since the same field carries both.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L12-L25"
+    - name: topic.reconstitutedFusedName
+      description: >-
+        The fused legacy string rebuilt from the decomposed fields, recorded next to the original so
+        that the two can be compared directly. THE ROUND TRIP IS THE ASSERTION: a rebuild that differs
+        from the original by one character produces a dispatch that matches nothing and returns the
+        default value, and no other recorded field distinguishes that from an event with no
+        subscriber. The insertion side cannot be recovered from the stored record at all, so the
+        rebuild is recorded together with an explicit note of which encodings it could and could not
+        restore.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L824"
+    - name: topic.orderingPrefixPresence
+      description: >-
+        For each topic captured from the consuming service class, whether its declared constant
+        carries a lexical ordering prefix, and the position the resulting record took in the
+        subscription table. Driven over BOTH a prefixed topic and an unprefixed one so the asymmetry
+        is on the record: the two prefixed constants are spelled `"0-itemchanged"` and
+        `"1-editchanged"`, while the representative unprefixed one is spelled `"clicked"`. Only two of
+        that class's twelve topics carry a prefix and the other ten look complete without one, which
+        is the whole of why the loss is invisible.
+      format: >-
+        The topic's exact constant spelling, quoted verbatim including any prefix; a flag for whether
+        a prefix is present; and the one-based table position the record took.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L47-L76"
+    - name: topic.lifetimeRetentionOutcome
+      description: >-
+        After a bulk unsubscribe issued with the negated-namespace form `".^persistent"`, which
+        subscriptions survived and which were removed, grouped by namespace. This is the lifetime field
+        doing the work the contract names it for, captured through the arrangement a threading class
+        that inherits the broker actually uses rather than through a synthetic one. Recorded for the
+        whole-table form and for the per-name form, since the second is built by concatenating the
+        criterion onto a caller-supplied name.
+      locator: "ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L544"
+
+    # ==============================================================================================
+    #  PART 6 OF 8 - ARGUMENT PASSING
+    #  ---------------------------------------------------------------------------------------------
+    #  Three outcomes, not two: arguments fit, arguments are adjusted silently, or passing is refused
+    #  and the handler is SKIPPED with no error anywhere. The third is easy to miss because it leaves
+    #  no trace in any return value.
+    # ==============================================================================================
+    - name: arguments.passedToHandler
+      description: >-
+        The argument list each handler actually received, position by position, with each value's
+        runtime type. Recorded per invocation rather than per dispatch, because two handlers on one
+        dispatch can receive different lists when their declared arities differ.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L364"
+    - name: arguments.surplusDiscarded
+      description: >-
+        How many trailing arguments the trigger supplied that the handler did not declare, and the
+        fact that the handler was invoked anyway with no error code, no raised failure and no log
+        line. Recorded as a count and not as a flag, so that a one-over case and a several-over case
+        are distinguishable.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L247"
+    - name: arguments.missingFilledWithInitialValue
+      description: >-
+        Which declared positions the trigger did not supply, and the value each received instead -
+        the declared type's initial value. Recorded per position and per type rather than summarised,
+        because the initial value differs by type and a port that filled every gap with one sentinel
+        would agree on the string case the fixture's own example shows and diverge on the numeric one.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L246"
+    - name: arguments.passRefusedOutcome
+      description: >-
+        Whether argument passing was refused for an incompatible position and, when it was, that the
+        handler was SKIPPED SILENTLY - not invoked, no error code returned by the dispatch, nothing
+        raised and nothing recorded by the broker itself. Recorded explicitly because it is
+        observationally identical to a handler that ran and did nothing, and only this field separates
+        them.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L862-L864"
+
+    # ==============================================================================================
+    #  PART 7 OF 8 - MUTATION AND THE SURVIVING SET
+    #  ---------------------------------------------------------------------------------------------
+    #  Every unsubscribe and disable form is compared on THREE fields, not one: the code it returned,
+    #  which subscriptions it matched, and the set that survived. A form that returned success having
+    #  matched nothing is the failure mode this group exists to catch.
+    # ==============================================================================================
+    - name: mutation.criteriaParsed
+      description: >-
+        The criteria the mutation string was parsed into - the name and whether it was negated, the
+        namespace and whether it was negated, whether the namespace was a criterion at all, and
+        whether the subscriber and callback name were criteria. Recorded because this grammar is a
+        SMALLER grammar than the subscribe one: it reads only two of the eight symbols, so a
+        subscribe-form name parses here as a literal name that matches nothing.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1000-L1019"
+    - name: mutation.matchedSubscriptions
+      description: >-
+        Which subscriptions the criteria matched, before and after the whole-set inversion the
+        excluding form applies. Recorded separately from the surviving set because a form can match
+        the intended subscriptions and still act on them wrongly, and because the inversion is applied
+        after all four criteria rather than to any one of them.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1029-L1052"
+    - name: mutation.survivingSet
+      description: >-
+        The subscription table after the mutation, in stored order, with each entry's invalidation and
+        disabled flags. THE HEADLINE OUTPUT OF THIS GROUP. Recorded after every one of the forms in
+        case C-16, so that a form which returned success having removed nothing is visible as an
+        unchanged set rather than inferred from a return code.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1087-L1091"
+    - name: mutation.inFlightEffect
+      description: >-
+        For a mutation issued from inside a running handler: whether the running dispatch's remaining
+        invocations were affected. Records the ASYMMETRY directly - an unsubscribe takes effect at
+        once, because the engine flags the record and the running loop reads that flag before every
+        invocation, while a subscribe does not, because the running loop's cursor is advanced past the
+        new record. Two operations, one dispatch, opposite answers, and both compared.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1053-L1058"
+    - name: mutation.compactionTiming
+      description: >-
+        When the table was compacted after a removal - immediately, or deferred until the dispatch
+        unwound. Recorded because the legacy defers it by queueing the compaction on the platform
+        message queue during a dispatch, and a headless service has no such queue: the target must
+        reproduce the deferral as an explicit continuation, so WHETHER the table was compacted before
+        or after the dispatch returned is a compared field rather than an implementation detail.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1088"
+    - name: mutation.returnCode
+      description: >-
+        The numeric code each mutation returned, as the raw number in the framework's own return-code
+        algebra. Recorded alongside the surviving set for every form, including the two rejection
+        cases, because success and no-op share a code and only the pair of fields separates them.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1021-L1023"
+
+    # ==============================================================================================
+    #  PART 8 OF 8 - EXCEPTION CAPTURE
+    #  ---------------------------------------------------------------------------------------------
+    #  A handler that fails does not simply propagate. The broker rewrites the failure text into a
+    #  four-field block, re-indents it, offers it to its own exception event, and only then rethrows.
+    #  The shape and the decision are behaviour; the runtime-specific message text is not, and the
+    #  mask below draws that line.
+    # ==============================================================================================
+    - name: exception.capturedClassification
+      description: >-
+        That an exception was captured, and its classification - an assertion failure, which is
+        unpacked through its own payload members, or any other kind, which is labelled with its class
+        name. The classification is behaviour and is compared; the message wording is masked per the
+        mask below. Recorded so that the capture-and-continue behaviour is verifiable without
+        comparing text no two runtimes could agree on.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L873-L877"
+    - name: exception.rewrittenBlockShape
+      description: >-
+        The four-field block the failure text was rewritten into - subscription name, target class
+        chain, callback event name, and the captured text - in that field order, with the indentation
+        the alignment helper applied. THE SHAPE IS COMPARED FIELD BY FIELD; the captured text's own
+        wording is masked. Recorded because the first three fields are drawn from the subscription and
+        are fully deterministic, so they are exactly as comparable as any other output here.
+      format: >-
+        The field names and their order, with each field's value except the captured text compared
+        verbatim, and the applied indentation recorded as a width rather than as literal whitespace so
+        that it survives newline normalization.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L883-L886"
+    - name: exception.oneShotDecorationGuard
+      description: >-
+        Whether the failure text was decorated once or more than once as it unwound through nested
+        dispatches, and the state of the one-shot guard at each depth. Recorded because the guard is
+        cleared only at depth zero, so a port that cleared it per dispatch would decorate the same
+        failure repeatedly and produce a text that grows with the nesting depth.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L871-L872"
+    - name: exception.handlingDecision
+      description: >-
+        The numeric result the broker's own exception event returned and what the dispatch did with
+        it - stop dispatching, clear the one-shot guard and continue with the next subscription, or
+        fall through and rethrow. THIS FIELD CARRIES ITS OWN TWO-VALUE ALPHABET AND IT IS NOT THE
+        VETO'S: here 1 stops the dispatch and 2 CONTINUES it, whereas in the veto 2 is the deep
+        prevention. The digits overlap and the meanings do not, so the raw number is recorded against
+        this field's own alphabet and is never mapped onto the veto's.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L889-L895"
+    - name: exception.propagationOutcome
+      description: >-
+        Whether the failure ultimately propagated out of the dispatch to the trigger's caller, and
+        whether it carried the depth-zero class-name prefix. Recorded because propagation is the
+        default path - the exception event only diverts it when the broker is subclassed and its
+        handler returns one of the two values above - so a port that swallowed handler failures by
+        default would be a behavioural change dressed as robustness.
+      locator: "ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L898-L901"
+
+  # RECORDING ARTIFACTS - text-based and diffable only. NONE OF THE SIX IGNORED EXTENSIONS IS SPELLED
+  # HERE and none can be: the schema's filename pattern admits only the seven diffable formats, which
+  # is what stops a capture being named in a way the root .gitignore silently untracks at any depth.
+  # This capture's headline output is an ORDERED INVOCATION TRACE, so its primary artifact is a plain
+  # text file per case - a trace is read top to bottom in review, and a diff of it is legible in a way
+  # a diff of a nested structure is not. The structured companions carry the per-field records.
+  recordingArtifacts:
+    - filename: "c01-three-priority-bands-trace.txt"
+    - filename: "c02-same-priority-insertion-tie-trace.txt"
+    - filename: "c03-prepend-head-insertion-trace.txt"
+    - filename: "c04-explicit-priority-interleaved-trace.txt"
+    - filename: "c05-capture-all-after-handled-trace.txt"
+    - filename: "c06-capture-handled-only-trace.txt"
+    - filename: "c07-return-equals-default-trace.txt"
+    - filename: "c08-return-differs-and-override-trace.txt"
+    - filename: "c09-handler-returns-nothing-trace.txt"
+    - filename: "c10-no-default-configured-trace.txt"
+    - filename: "c11-nested-trigger-trace.txt"
+    - filename: "c12-mutation-during-dispatch-trace.txt"
+    - filename: "c13-surplus-arguments-trace.txt"
+    - filename: "c14-missing-and-incompatible-arguments-trace.txt"
+    - filename: "c15-veto-continue-trace.txt"
+    - filename: "c15-veto-prevent-once-trace.txt"
+    - filename: "c15-veto-prevent-deep-trace.txt"
+    - filename: "c15-veto-outside-dispatch-trace.txt"
+    - filename: "c16-unsubscribe-forms-trace.txt"
+    - filename: "c16-disable-forms-trace.txt"
+    - filename: "subscription-table-snapshots.json"
+    - filename: "subscription-parse-records.json"
+    - filename: "topic-fused-and-decomposed.csv"
+    - filename: "dispatch-return-values.json"
+    - filename: "veto-unwind-by-depth.json"
+    - filename: "argument-passing-outcomes.csv"
+    - filename: "mutation-surviving-sets.json"
+    - filename: "exception-capture-records.json"
+    - filename: "constant-inventory.csv"
+
+# ==================================================================================================
+#  DETERMINISM MASK - INLINE, NEVER DELEGATED, AND DELIBERATELY MINIMAL.
+#  ------------------------------------------------------------------------------------------------
+#  Five entries, and five is close to the floor for a workflow of this size. That is a finding about
+#  this behaviour rather than an oversight: the broker computes over its own in-memory table and
+#  reads no clock, no random source, no configuration and no storage anywhere in the paths captured
+#  above, so ALMOST EVERYTHING IT PRODUCES IS ALREADY DETERMINISTIC AND IS THEREFORE COMPARED. The
+#  seams below are the four kinds of variation that reach a recording anyway - a platform line
+#  ending, a per-run allocation, a per-run instance identity, and a runtime-specific failure message
+#  - plus a clock the broker itself never reads but which a harness can still leak into a record.
+#
+#  `../../docs/PARITY.md` section 5.1 is the register these seams are drawn from and is cited as
+#  PROVENANCE; the entries themselves are declared here in full, because a mask that drifts away from
+#  its workflow silently invalidates every pair captured under it. Every entry names BOTH sides:
+#  masking one half leaves the other holding a value that can never be matched, which manufactures a
+#  passing comparison out of mismatched data.
+# ==================================================================================================
+determinismMask:
+  - seam: >-
+      Every clock read that reaches a recorded field or a recorded decision, on either side -
+      including a timestamp the capture harness adds to a trace line rather than one the broker
+      produces.
+    method: >-
+      Inject the clock and substitute a deterministic double that advances only when the capture
+      advances it. Nothing in the broker branches on a clock value - it reads no clock at all in any
+      path captured here - so the substitution changes no path and only makes a harness-supplied
+      timestamp reproducible. Prefer this to masking the field out, because a masked field is a field
+      a regression can hide in.
+    appliesTo:
+      - "legacy"
+      - "dotnet"
+    reason: >-
+      A timestamp differs on every run by definition rather than by behaviour, so an unmasked one
+      reports a difference on every comparison and trains a reviewer to ignore red results. NOTE
+      PRECISELY WHAT THIS ENTRY IS NOT. Seaming the clock introduces no timing assertion: no elapsed
+      value, no interval between two trace positions and no dispatch rate is recorded or compared
+      anywhere in this workflow. The entry exists because a trace is a natural place for a harness to
+      stamp a time, not because the behaviour has one.
+  - seam: >-
+      Line endings in every multi-line recorded field, and in the ordered trace files themselves -
+      most consequentially the rewritten four-field exception block, which the broker assembles with
+      embedded line separators and then re-indents, and the composed record the fixture's second
+      handler builds from the dispatch state at
+      ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L77.
+    method: >-
+      Declare one newline convention for this workflow and apply it identically to both halves AT
+      COMPARISON TIME. This is a comparison-time normalization only: IT DOES NOT LICENSE EDITING A
+      STORED MASTER, which the technique forbids outright. The exception block's indentation is
+      recorded as a width rather than as literal leading whitespace, so that normalizing the line
+      endings cannot disturb the field the indentation belongs to.
+    appliesTo:
+      - "legacy"
+      - "dotnet"
+    reason: >-
+      The master is produced on Windows by the legacy framework while the candidate runs in a Linux
+      container, so raw line endings differ BY PLATFORM RATHER THAN BY BEHAVIOUR - and the
+      repository's root `.gitattributes` declares only six language mappings with no text and no
+      end-of-line rule, so nothing normalises them on the way into version control. Without this
+      entry a byte-exact comparison reports a difference on every line of every multi-line field and
+      on every line of every trace. Changing `.gitattributes` is NOT in scope and would be the wrong
+      place to solve it: the normalization belongs to the comparison, not to the repository's
+      checkout behaviour. One precision worth recording so a later reader does not over-apply this
+      entry: the broker and its fixture accumulate multi-line text with a LINE FEED, not a
+      carriage-return pair - the fixture contains no carriage-return escape at all - so this seam is
+      about the recording's own line endings and the platform that writes them, and it must not be
+      used to justify rewriting a separator that some other behaviour depends on.
+  - seam: >-
+      Per-run allocated identifiers - the callback method identifier each subscription resolves and
+      stores at subscribe time, and any invocation handle the dispatch allocates or reallocates for a
+      re-entrant call.
+    method: >-
+      Replace each identifier with a stable ordinal assigned in SUBSCRIPTION ORDER, on both sides, and
+      record the ordinal rather than the identifier. Equality between two ordinals still means exactly
+      what equality between two identifiers meant, and the ordinal additionally makes the subscription
+      order legible in the field itself.
+    appliesTo:
+      - "legacy"
+      - "dotnet"
+    reason: >-
+      The identifier is allocated per run and can never match across two runs, let alone across two
+      runtimes. But TWO RELATIONS OVER IT ARE BEHAVIOUR and the ordinal preserves both: that a
+      subscription resolved its callback at all rather than being refused, and that a re-entrant
+      invocation received a DIFFERENT handle from the stored one. Masking the field out entirely would
+      remove both relations with it, and the second is the only evidence that the re-entrancy path ran.
+  - seam: >-
+      Object instance identity wherever it reaches a recorded field - the subscriber recorded against
+      each subscription and each invocation, and the value recorded for the message parameter the
+      broker installs and restores around a callback.
+    method: >-
+      Replace each instance with a stable label assigned per participating object, on both sides -
+      one label per subscriber, and a distinct label for the broker itself. The stored class chain,
+      which is derived text rather than an address, is compared verbatim and is not masked.
+    appliesTo:
+      - "legacy"
+      - "dotnet"
+    reason: >-
+      An instance address differs on every run and has no counterpart across two runtimes. But WHICH
+      OBJECT handled the event is behaviour, and so is the fact that the broker installs ITSELF as the
+      message parameter and restores the prior value afterwards - that channel is the only way a
+      handler reaches the broker, so a label that made the broker indistinguishable from a subscriber
+      would hide a port that installed the wrong object. A per-object label keeps every identity
+      relation the address carried while removing the variation.
+  - seam: >-
+      Captured exception text, where the broker catches a handler's failure and rewrites it - the
+      failure's own message wording and any frame or stack text folded into the captured field.
+    method: >-
+      Mask the runtime-specific message wording and the frame text out of the comparison while
+      comparing everything structural around them: that an exception was captured at all, its
+      classification, the four-field block's field order, the three fields drawn from the subscription
+      itself, the one-shot guard's state at each depth, the result the exception event returned, and
+      whether the failure ultimately propagated. The masked text is present in the recording behind a
+      placeholder so a reviewer can see it was handled deliberately rather than dropped.
+    appliesTo:
+      - "legacy"
+      - "dotnet"
+    reason: >-
+      A failure message's wording and its frame list are properties of the runtime that produced them
+      - a legacy throwable's text and a managed exception's message have no reason to agree
+      character for character, and neither is chosen by the behaviour under test. THE CAPTURE-AND-
+      CONTINUE BEHAVIOUR IS NOT RUNTIME-SPECIFIC AND IS COMPARED WITHOUT EXCEPTION: whether the
+      broker caught the failure, whether it decorated it once or repeatedly, whether it continued to
+      the next subscription or stopped, and whether it rethrew are all compared, because they are what
+      prove the handling survived. Masking the wording while comparing the structure keeps every
+      assertion that can hold and drops the only one that cannot.
+
+# ---- WHAT IS DELIBERATELY NOT MASKED, STATED EXPLICITLY ---------------------------------------------
+#  For this workflow the mask is deliberately minimal, because almost everything the broker produces
+#  IS the behaviour under test. Masking any one of the following would produce a comparison that
+#  passes while proving nothing, which is worse than a comparison that fails:
+#    * THE INVOCATION ORDER, and every nesting relationship inside it;
+#    * THE MATCHED SUBSCRIPTION NAMES, fused and stored, byte for byte;
+#    * THE RESOLVED PRIORITIES, as raw signed numbers including both sentinel extremes in full;
+#    * THE NAMESPACES, and the retention outcome a negated-namespace mutation produces from them;
+#    * THE CAPTURE MODES, as raw numbers, all three of them;
+#    * EVERY RETURN VALUE - each handler's, the dispatch's, and the retrievable one - with its type,
+#      including an untyped null, which is a real return shape and not an absent field;
+#    * THE PROCESSED FLAG after every invocation, and WHICH of the four conditions set it;
+#    * THE VETO VALUES AND THEIR EFFECTS, as raw numbers, at every open depth;
+#    * THE SURVIVING SUBSCRIPTION SETS after every unsubscribe and every disable form;
+#    * THE TABLE POSITIONS AND THE NAME-WINDOW BOUNDS, as one-based indices and as stored text;
+#    * THE FUSED TOPIC STRINGS and the decomposed fields, both directions of the round trip;
+#    * THE ARGUMENT LISTS, including a filled-in initial value and a discarded surplus count;
+#    * THE RETURN CODES of every subscribe and every mutation, as raw numbers in the framework's own
+#      tri-state algebra, never as a boolean projection of one.
+#  And nothing is masked on one side only, anywhere, ever.
+
+# ==================================================================================================
+#  THE DEFECTS THIS PAIR EXISTS TO PROVE SURVIVED
+#  ------------------------------------------------------------------------------------------------
+#  THE INVERSION IS LOAD-BEARING: a capture that shows CORRECTED behaviour is a parity FAILURE, not an
+#  improvement. Where the target produces output that looks more correct than the oracle, the finding
+#  is a divergence in the target and is filed as a defect (C-B). A legacy defect is reproduced and
+#  annotated at its point of reproduction, never repaired. `../../docs/PARITY.md` section 7 is the
+#  authoritative catalogue of behaviour groups; the entries below record which of them THIS pair pins.
+#
+#  SEVERAL OF THESE ARE THE KIND A WELL-MEANING IMPLEMENTER WOULD "IMPROVE" RATHER THAN REPRODUCE -
+#  a surplus argument discarded without a word, a subscription that quietly waits for the next
+#  dispatch, a trigger that returns an untyped null because nobody configured a default. Each note
+#  therefore names what a correction would break, because that is the part a reviewer cannot
+#  reconstruct from the defect statement alone.
+# ==================================================================================================
+provesDefects:
+  - defect: >-
+      D-01. A SUBSCRIPTION CREATED DURING A DISPATCH TAKES EFFECT ONLY ON THE NEXT DISPATCH. Subscribe
+      to the event currently being dispatched, from inside a running handler, at a table position the
+      running scan has not yet reached, and the new subscription is NOT invoked by the dispatch in
+      flight. It is invoked by the next one. No error is returned, nothing is logged, and the subscribe
+      call reports success - so from the caller's side the subscription exists immediately and simply
+      does not fire.
+    locator: >-
+      ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L237 records it; the mechanism is
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L427-L432
+    note: >-
+      THE MECHANISM IS NOT A QUEUE, AND THAT DISTINCTION IS THE WHOLE OF THE DEFECT. A reader who
+      assumes deferral assumes the record is held aside and applied later; it is not. The record is
+      inserted into the table AT ONCE, in its correctly sorted position, and then every open scan
+      cursor at or beyond that position IS INCREMENTED so that each in-flight loop steps over the entry
+      it would otherwise have reached. The subscription is skipped, not withheld.
+
+
+      WHAT A CORRECTION WOULD BREAK: an implementation that appended to a pending list and merged it
+      after the dispatch would produce the right invocation set for the in-flight dispatch and the
+      WRONG TABLE ORDER afterwards, because the merge would append rather than sort into position -
+      so the defect would appear fixed while a later dispatch invoked handlers out of order. An
+      implementation that simply let the new record be reached would invoke a handler the legacy never
+      invokes, which is the same class of error in the opposite direction. AND NOTE THE ASYMMETRY THIS
+      DEFECT SITS INSIDE, because "mutations during dispatch are deferred" is the wrong
+      generalisation: an UNSUBSCRIBE issued from inside a handler takes effect IMMEDIATELY, since the
+      engine flags the record at :L1053-L1058 and the running loop reads that flag at :L829 before
+      every invocation. Only the table compaction is deferred, and it is deferred by queueing on the
+      platform message queue at :L1088 - a queue a headless service does not have, so the target must
+      reproduce it as an explicit continuation. Case C-12 drives both directions for exactly this
+      reason.
+  - defect: >-
+      D-02. SURPLUS TRIGGER ARGUMENTS ARE SILENTLY DISCARDED. Trigger an event with more arguments than
+      the subscribed handler declares and the extra trailing values are dropped. The handler is invoked
+      normally with the leading arguments, the dispatch returns normally, and NO ERROR, NO WARNING AND
+      NO LOG LINE marks the loss anywhere.
+    locator: "ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L247"
+    note: >-
+      This is the one an implementer is most likely to "fix", because a strict signature check looks
+      like an obvious safety improvement and would be caught by no unit test written against a
+      matching arity. WHAT A CORRECTION WOULD BREAK: raising, or returning an invalid-argument code,
+      turns a working dispatch into a failing one wherever a caller passes a wider argument list than a
+      particular subscriber consumes - which the legacy explicitly permits, since the fixture's own
+      grammar note at :L240 states that a handler's arity need NOT match the trigger's and that only the
+      order and type compatibility must. The recording carries the discarded count rather than a flag so
+      that a port which dropped the wrong number of arguments is distinguishable from one that dropped
+      the right number.
+  - defect: >-
+      D-03. MISSING ARGUMENTS ARRIVE AS THE DECLARED TYPE'S INITIAL VALUE RATHER THAN RAISING. Trigger
+      an event with fewer arguments than the handler declares and the unsupplied positions are filled
+      with their type's initial value - the fixture's documented example shows an unsupplied string
+      parameter arriving as an empty string. The handler cannot tell a filled-in position from one the
+      caller passed deliberately.
+    locator: "ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L246"
+    note: >-
+      WHAT A CORRECTION WOULD BREAK - TWO WAYS TO GET THIS WRONG, AND THE SECOND IS THE SUBTLE ONE.
+      First, raising on a short argument list: the legacy permits it outright, so a strict check breaks
+      every subscriber declared wider than its trigger. Second - and this is why case C-14 drives an
+      incompatible position alongside a missing one - A MISSING POSITION AND AN INCOMPATIBLE POSITION
+      HAVE DIFFERENT OUTCOMES, and
+      conflating them loses one of the two. A missing position is filled and the handler RUNS; an
+      incompatible position makes argument passing refuse, and the handler IS SKIPPED SILENTLY at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L862-L864 with no error and no record
+      of its own. A port that filled an incompatible position with an initial value too would invoke a
+      handler the legacy never invokes, and a port that raised on a missing one would skip a handler the
+      legacy runs. The recording separates the two by recording the refusal explicitly, because a
+      skipped handler is otherwise indistinguishable from one that ran and did nothing.
+  - defect: >-
+      D-04. THE PROCESSED STATE IS DECIDED BY COMPARING A HANDLER'S RETURN AGAINST THE CONFIGURED
+      DEFAULT RETURN VALUE, SO A HANDLER THAT RETURNS NOTHING IS TREATED AS NOT HAVING PROCESSED THE
+      EVENT. There is no explicit "handled" call. A handler marks the event processed by returning
+      something unequal to the configured default, and by no other means - so a handler that does
+      substantial work and returns nothing leaves the dispatch unprocessed, and the next plain
+      subscriber is invoked as though nothing had happened.
+    locator: >-
+      ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L234 records it, with the fixture's own
+      configuration at :L260 and the comparison at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L903-L935
+    note: >-
+      FOUR CONSEQUENCES, EACH REPRODUCED, AND THE LAST TWO ARE THE ONES A PORT LOSES. First, the state
+      is DERIVED rather than stored: the flag is the non-nullness of the retrieved-value slot at :L655,
+      so there is no separate boolean to get out of step with it. Second, THE STATE CANNOT BE ROLLED
+      BACK while the VALUE CAN be overridden - the fixture's note at :L235 - so a later handler can
+      change what the dispatch returns but cannot make it unprocessed again. Third, with NO default
+      configured the comparison is skipped entirely and any non-null return marks the event processed
+      [:L912-L913]. Fourth, and least expected: WHEN THE COMPARISON ITSELF RAISES - two values the
+      runtime cannot compare - THE FAILURE IS CAUGHT AND THE EVENT IS MARKED PROCESSED [:L918-L920].
+
+
+      WHAT A CORRECTION WOULD BREAK: adding an explicit handled call, or treating a null return as
+      "handled because it ran", inverts the capture-mode filter for every subsequent subscription - a
+      plain subscription that should still be invoked is skipped, and a capture-already-handled
+      subscription that should still be waiting is invoked early. And letting the raising comparison
+      propagate instead of counting as processed converts a marked event into a thrown failure out of
+      the trigger, which the legacy never does.
+  - defect: >-
+      D-05. WITH NO DEFAULT RETURN VALUE CONFIGURED, A TRIGGER MAY RETURN A NULL VALUE OF THE UNTYPED
+      KIND. It is a real return shape, not an error and not an omission: no default exists to
+      substitute for an unhandled dispatch, so the untyped slot is returned still null.
+    locator: "ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L266"
+    note: >-
+      THE ORACLE ITSELF BRANCHES ON THIS, which is what makes it a captured shape rather than an
+      inference: both of the fixture's trigger sites test the returned value for null before converting
+      it, at :L365 and at :L394, and display a distinct marker when it is. A caller is therefore
+      expected to handle it. WHAT A CORRECTION WOULD BREAK: substituting a zero, an empty string or a
+      typed default in place of the untyped null makes the unconfigured case indistinguishable from a
+      configured-zero case - which is the very distinction case C-10 exists to record, and which also
+      changes the processed-state shortcut at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L912-L913 from "no default configured"
+      to "default configured as zero", inverting the classification of every handler return in that
+      dispatch. Note also that the substitution is applied to a synchronous trigger and NOT to a queued
+      one [:L967-L971], so a port that substituted unconditionally would change the queued form's
+      observable result as well.
+  - defect: >-
+      D-06. PRIORITY IS INDEPENDENT OF THE NAMESPACE, AND THE NAMESPACE IS USED MAINLY WITH THE
+      UNSUBSCRIBE AND DISABLE OPERATIONS. The two encodings travel in one string and look related; they
+      are not. A high-priority subscription in one namespace outranks a default-priority subscription in
+      another, and it equally outranks a default-priority subscription in its OWN namespace: the
+      namespace contributes nothing to dispatch order and is not a grouping the dispatch respects.
+    locator: "ws_objects/pfw.tests.pbl.src/w_test_eventful.srw:L233"
+    note: >-
+      The temptation this defect guards against is treating the namespace as a scope or a channel -
+      dispatching per namespace, or ordering within one - because a fused string that carries both
+      encodings reads as though the namespace qualifies the priority. It does not. The dispatch matches
+      the STORED NAME by exact equality and sorts by priority alone; the namespace is read only by the
+      mutation engine's criteria. WHAT A CORRECTION WOULD BREAK: ordering or grouping by namespace
+      reorders handlers across namespaces and produces an invocation sequence the legacy never
+      produces. Case C-01 therefore drives its three priority bands across TWO namespaces rather than
+      one, so the independence is proved by the recording rather than asserted by this note.
+  - defect: >-
+      D-07. THE ORDERING PREFIX IS SPARSE WHERE THE BROKER IS CONSUMED, WHICH IS WHY TRANSMITTING THE
+      FUSED STRING LOSES THE ORDERING INVISIBLY. Of the twelve topic constants the DataWindow service
+      class declares, only TWO carry a lexical ordering prefix baked into the topic string - the
+      item-changed topic, spelled `"0-itemchanged"`, and the edit-changed topic, spelled
+      `"1-editchanged"` - and the other ten carry none at all: the clicked topic is spelled plainly as
+      `"clicked"`, and so are the remaining nine. Ten times out of twelve, a fused string that has lost
+      its ordering encoding looks exactly like a complete one.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L54 for the item-changed topic and :L57
+      for the edit-changed topic, within the twelve declared at :L47-L76
+    note: >-
+      THE LOCATOR FOR THE SECOND TOPIC IS :L57, NOT :L58 - :L58 is the comment introducing the clicked
+      topic. Both lines were read in the source rather than copied forward, and the twelve constants
+      were counted there.
+
+
+      THE PREFIX IS PART OF THE STORED NAME, AND UNDERSTANDING THAT IS WHAT KEEPS A PORT HONEST. A
+      leading digit is not one of the eight grammar symbols, so the prefix-symbol loop at
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L340-L360 stops at the first character
+      and the prefix survives into the stored name. Its effect is therefore LEXICAL - it fixes the
+      record's position in a name-sorted table and thereby the name-window bounds and the scan start -
+      and it does NOT reorder handlers within one topic, because a dispatch matches one name exactly.
+      WHAT A CORRECTION WOULD BREAK, in two directions. Strip the prefix as though it were decoration
+      and every trigger for that topic silently matches nothing: the dispatch falls through the fast
+      reject at :L797-L798 and returns the default return value, which is indistinguishable in every
+      recorded field from an event nobody subscribed to. Alternatively, PARSE the prefix into a
+      sequence field and forget to put it back, and the same silence follows. That is exactly why the
+      capture records the fused string AND the decomposed fields AND the reconstituted string, and why
+      case C-16 records a mutation that returns success having matched nothing - the whole family of
+      failures here is silent, and only a two-directional record catches it.
+
+
+      ONE SCOPE NOTE BELONGS HERE, BECAUSE THIS IS THE DEFECT PROVED FROM A LIBRARY OTHER THAN THE
+      BROKER'S OWN. THE BROKER'S LIBRARY IS A SPLIT LIBRARY: the broker object is in scope as a shared
+      library, while the dynamic-invocation objects that sit beside it in the same legacy library
+      receive no code, no test and no container in this phase. THIS WORKFLOW CHARACTERIZES ONLY THE
+      BROKER. Where the broker calls a handler through one of those neighbouring objects - the
+      subscription record's invoker field at :L21 - the capture records the broker's own outcome from
+      the call, resolved or refused, and records nothing about that object's internals. No fixture, no
+      precondition, no observed output, no mask entry and no defect in this definition targets a
+      capability area that does not ship in this phase, and the schema's member for naming such an area
+      is deliberately unused here (C-D). `../../docs/DEFERRED.md` owns those destinations.
+  - defect: >-
+      D-08. THE UNSUBSCRIBE AND DISABLE GRAMMAR IS A SMALLER GRAMMAR THAN THE SUBSCRIBE GRAMMAR, SO A
+      SUBSCRIBE-FORM NAME OFFERED TO EITHER OPERATION SUCCEEDS AND DOES NOTHING. The mutation engine
+      reads only two of the eight symbols - the namespace separator and the negation marker. It does
+      not read the two priority markers, the explicit-priority separator, the prepend marker or the two
+      capture markers at all. A caller who unsubscribes with the same string they subscribed with
+      therefore searches for a subscription whose STORED name literally begins with a marker character,
+      finds none, and gets a success code back with nothing removed.
+    locator: >-
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L1000-L1015 for the two symbols it does
+      read, against :L340-L360 for the eight the subscribe parse reads
+    note: >-
+      This is the defect a caller meets first and diagnoses last, because every signal points the wrong
+      way: the call returned success, the subscription is still in the table, and nothing anywhere
+      reports a mismatch. It is also why the two grammars must be modelled as two grammars rather than
+      one shared parser with optional members. WHAT A CORRECTION WOULD BREAK: teaching the mutation
+      engine the full symbol set would make an unsubscribe match subscriptions the legacy leaves alone,
+      silently removing handlers a legacy caller relies on continuing to fire - a change that no
+      recording of a single dispatch would reveal, only a recording of the surviving set. Case C-16
+      drives the no-op form deliberately and compares the return code together with the unchanged
+      surviving set, because either field alone reads as correct.
+  - defect: >-
+      D-09. THE NAME-WINDOW BOUNDS ARE WIDENED BY A SUBSCRIBE AND ARE NEVER NARROWED BY ONE, SO AN
+      UNSUBSCRIBED NAME CAN KEEP THE DISPATCH FAST-REJECT OPEN. The two bounds are extended on every
+      subscribe. They are recomputed only by the collector and by a mutation, and that recomputation
+      counts ENABLED, VALID subscriptions only - so disabling the alphabetically first subscription
+      narrows the window and can make a trigger for an unrelated name be rejected before the table is
+      even scanned, while removing one during a dispatch leaves the window wide until the deferred
+      compaction runs.
+    locator: >-
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L439-L440 for the widening, :L594-L597
+      and :L1080-L1085 for the two recomputations, against the fast reject at :L797-L798
+    note: >-
+      The bounds look like a private optimisation and are not: they are the only state in the broker
+      through which a change to ONE subscription alters the outcome of a dispatch for a DIFFERENT name,
+      which makes them observable and therefore behaviour. WHAT A CORRECTION WOULD BREAK: recomputing
+      the bounds eagerly on every subscribe and every removal - the obvious tidy-up - would narrow the
+      window at moments the legacy leaves it wide, so a trigger the legacy scans and finds nothing for
+      would instead be fast-rejected. Both paths return the same default value, so the difference is
+      invisible in the returned value and visible only in the recorded fast-reject outcome and scan
+      start, which is why both are recorded on every dispatch.
+  - defect: >-
+      D-10. THE EXCEPTION-HANDLING RESULT SPEAKS ITS OWN TWO-VALUE ALPHABET WHOSE DIGITS OVERLAP THE
+      VETO'S AND WHOSE MEANINGS DO NOT. When the broker offers a captured handler failure to its own
+      exception event, a result of 1 STOPS the dispatch and a result of 2 CONTINUES it with the next
+      subscription. In the veto, 1 is the shallow prevention and 2 is the DEEP prevention - the value
+      that stops the most. So 2 means "keep going" in one alphabet and "stop hardest" in the other, and
+      the two are read a few hundred lines apart in the same object.
+    locator: >-
+      ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru:L889-L895 for the exception alphabet,
+      against :L111-L112 for the veto's two named values
+    note: >-
+      Recorded as a defect because the collision is a live trap rather than a curiosity: both values
+      are bare integers in the source, both are read inside the same dispatch, and a shared enumeration
+      or a shared constant would compile perfectly and inverted. WHAT A CORRECTION WOULD BREAK:
+      unifying the two alphabets - or mapping either onto the framework's tri-state return-code algebra,
+      where 1 is a prevention that reads as SUCCEEDED - converts "continue after this failure" into
+      "prevent the whole chain" or the reverse, and in the failure path where it happens no successful
+      dispatch would ever exercise it. The recording keeps each field against its own alphabet, as a
+      raw number, and this workflow defines no mapping between them.
+
+# ==================================================================================================
+#  CAPTURE RULE, HONEST STATUS, AND CROSS-REFERENCES
+# ==================================================================================================
+
+# The rule applies. Its canonical text is `../README.md` section 2.1 and is CITED from the capture
+# phase's preconditions rather than reproduced here - the same text is owned word for word by
+# `../README.md`, `../../docs/PARITY.md` and `orchestration/README.md`, and a fourth copy would be a
+# fourth thing to drift. NO EXEMPTION IS CLAIMED. This workflow reads and writes no persistent state
+# - the broker holds only in-memory subscriptions - so the narrow exemption at `../README.md` section
+# 2.7 could arguably be read as reaching it, and it is deliberately NOT claimed: claiming it would buy
+# nothing, and the target half is captured against the running service rather than an in-process host,
+# so the stack the pair is taken against exists either way. The volume state is therefore left
+# undisturbed across both halves exactly as it would be for a workflow that did touch storage,
+# including the teardown corollary - between the two halves the stack is torn down plainly and never
+# with the flag that removes named volumes.
+sharedVolume:
+  applies: true
+
+# No paired capture has been taken, on either side. The legacy half needs a PowerBuilder toolchain
+# that is not present, no recording directory exists for this identifier, and nothing in this
+# definition may be read as reporting a parity result.
+executionStatus: "specified-not-executed"
+
+relatedWorkflows:
+  # The broker AS USED, through one consumer's twelve topics and its 22-event surface. That definition
+  # records the EFFECTS of the mechanics this one pins, and it cites the broker's own object precisely
+  # because its consumer's inline comments suggest a two-valued prevention convention that the broker
+  # does not implement. The fused-topic evidence in D-07 is read from that consumer, and the two
+  # definitions therefore share a fixture without sharing a question.
+  - "dataservices-dw-event-chain"
+  # The other shared library whose behaviour travels as an opaque packed string that must be
+  # decomposed rather than transmitted whole, and which shares this workflow's exception seam: the
+  # broker unpacks an assertion failure through that payload's own members at :L873-L877 rather than
+  # through its message text, so the two definitions meet at exactly that point.
+  - "shared-diagnostics-assert-payload"

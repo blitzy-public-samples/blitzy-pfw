@@ -1,0 +1,1540 @@
+# yaml-language-server: $schema=./workflow.schema.json
+#
+# PowerFramework -> .NET 10 | paired characterization workflow definition
+#
+# This document SPECIFIES a capture. It contains no code, no recording and no result, and it
+# asserts no run: characterization/README.md section 7 states the store-wide limitation and
+# executionStatus below states this workflow's.
+#
+# Four conventions of this file are load-bearing, none of them is obvious, and each is stated here
+# because a reader who misses one will misread the members below.
+#
+#   1. THIS WORKFLOW HAS NO DEDICATED TEST WINDOW, AND THAT IS THE STORE'S OWN FINDING RATHER THAN
+#      THIS DEFINITION'S SHORTCUT. characterization/README.md section 4.6 records the Gateway row
+#      as having no dedicated test window and names the framework application object as the
+#      lifecycle oracle, driven with the demo selector. Every other row in the roster is captured
+#      from a purpose-built test window; this one is captured from the application object itself,
+#      read as the lifecycle specification. Nobody should go looking for a purpose-built lifecycle
+#      test window: THERE IS NONE UNDER ANY PATH IN THE FIXTURE LIBRARY, and that absence is on the
+#      record here rather than left to be discovered.
+#
+#   2. THE PAYLOAD SEPARATOR IS NAMED, NEVER EMBEDDED. The system-error handler splits an incoming
+#      diagnostic payload on a two-character sequence - a carriage return followed by a line feed -
+#      and the report it then assembles joins its own lines with a lone line feed. A literal
+#      carriage return written into a scalar here would be invisible in review, would be silently
+#      rewritten by any editor that normalises line endings, and would corrupt the one distinction
+#      the fourth determinism-mask entry exists to protect. Every reference below therefore names
+#      the separator in words. NOTHING IN THIS FILE CONTAINS A CARRIAGE RETURN.
+#
+#   3. STARTUP IS CHARACTERIZED WITH NO TIMING VALUE OF ANY KIND. No elapsed value, no startup
+#      duration, no readiness latency, no throughput figure and no boot-time claim of any sort is
+#      recorded, computed or asserted anywhere in this definition - even though a workflow over
+#      process startup and shutdown invites one more strongly than any other row in the store, which
+#      is exactly why the rule is stated first here and the rationale second.
+#      characterization/README.md section 6.4 is the governing rule and the repository publishes no
+#      target one could be asserted against. The only quantitative requirement in the brief is the
+#      80% per-service line-coverage gate, and it is measured in CI from coverage.cobertura.xml
+#      rather than from this store.
+#
+#   4. EVERY LEGACY OBJECT IS NAMED BY ITS FULL REPOSITORY-ROOT-RELATIVE PATH, WITHOUT EXCEPTION
+#      ANYWHERE IN THIS FILE, because a bare filename would be genuinely ambiguous here - see the
+#      anomaly recorded against the first oracle fixture below. This is the one place that rule is
+#      stated; it is not repeated further down, because a rule written twice is a rule that can
+#      eventually disagree with itself.
+schemaVersion: "1"
+
+workflowId: "gateway-lifecycle-composition-root"
+
+title: "Framework lifecycle as the composition root: pairing, locale default and system-error protocol"
+
+capabilityArea: >-
+  The framework lifecycle that becomes Gateway's composition root - the mandatory initialize and
+  finalize pairing and the capability bitmask the initialize call is parameterised with, the
+  hardcoded locale default and the three-arm provider selection that follows it, and the
+  system-error protocol by which a decoded diagnostic payload is unpacked, rendered as a labelled
+  report and then terminates the process.
+
+targetService: "Gateway"
+
+description: >-
+  WHAT THIS WORKFLOW IS OVER, AND WHERE ITS ORACLE COMES FROM. The behaviour is the whole life of
+  the process: the ordered sequence of calls the framework application object makes when it opens,
+  the single call it makes when it closes, the pairing invariant that binds those two, and the
+  handler that runs when a structural fault reaches the runtime. There is NO dedicated test window
+  for any of it. characterization/README.md section 4.6 assigns the Gateway row the framework
+  application object as its lifecycle oracle, driven with the demo selector, and that assignment is
+  the store's rather than this definition's. The application object is therefore read as the
+  lifecycle specification and cited line by line, which is possible because the whole lifecycle is
+  fourteen lines of PowerScript across two events plus one handler.
+
+
+  WHY A COMPOSITION ROOT IS THE RIGHT TARGET FOR IT. The legacy is a library with no process of its
+  own, so these fourteen lines are the only place in the entire estate where the framework's start
+  order, its module gating, its locale selection and its fatal-fault posture are all decided
+  together. Everything Gateway does at startup is a re-expression of them, which is why the pair is
+  captured as one workflow rather than split across a lifecycle workflow and a diagnostics one.
+
+
+  WHAT IS DELIBERATELY NOT MASKED, stated explicitly because every masked field is a field a
+  regression can hide in, and because this member is the only place the schema admits the register -
+  determinismMask entries carry no note member, by design. The following are compared, always, and
+  no entry in determinismMask below may be read as covering any of them: the ORDERED STARTUP STEP
+  SEQUENCE and the position of every step within it; the INITIALIZATION FLAG VALUE, both as the
+  identifier the source names and as the arithmetic the composite resolves to; the RESOLVED LOCALE
+  STRING; which ARM of the three-arm selection was taken, and the SELECTED PROVIDER TYPE NAME; the
+  provider-install OUTCOME and the resulting active-provider state; the TERMINAL-STEP MARKER
+  recording that the selector-open call was made; the FINALIZE CALL and the PAIRING INVARIANT; the
+  ENABLED-CAPABILITY SET per case and the per-capability REACHABILITY answer; the IDENTIFIER AND
+  VALUE of all eight capability bits and the IDENTIFIER of the one the composite omits; the
+  assembled report's LABEL IDENTIFIERS and their order; the PRESENCE OR ABSENCE of the conditional
+  window line; the PRESENCE OR ABSENCE of the conditional call-stack section; the FIELD COUNT the
+  split observed and which unpack branch it opened; the display's SEVERITY INDICATOR and TITLE; and
+  the TERMINATED-VERSUS-CONTINUED outcome. The frame COUNT and ORDER of a stack trace are likewise
+  compared - only the frame TEXT is masked, and that asymmetry is the whole point of the second mask
+  entry.
+
+
+  WHAT IS NOT CAPTURED, AND WILL NOT BE. Four exclusions, each of them deliberate and each stated so
+  that a later reader cannot mistake it for an oversight. FIRST, THE DEMO SELECTOR'S NAVIGATION. The
+  selector is cited as the lifecycle's terminal step and nothing more: this workflow records THAT
+  the open call is made and stops there. Its buttons, its clicked events and the six windows they
+  open are out of scope for this workflow and for every other workflow in this store, and no capture
+  step, observed output or mask entry below covers any of them. SECOND, ANY CAPABILITY'S OWN
+  FUNCTIONALITY. Seven of the eight capability bits have no in-scope consumer in this phase; the
+  workflow records which bits the flag enabled and whether the framework reports each as reachable,
+  and it exercises no capability's behaviour - not one drop-down, not one embedded engine, not one
+  conversion. Reachability is a property of the GATE, not of the capability behind it. THIRD, ANY
+  RENDERING OR THEMING EFFECT. The theming setting is captured as a composition-root input because
+  it is a declared property of the application object; what it would have done to a rendered surface
+  is not captured, and no presentation surface is created in this phase. FOURTH, THE PRODUCING SIDE
+  OF THE DIAGNOSTIC PAYLOAD. That belongs to the sibling shared-diagnostics-assert-payload workflow,
+  which owns it end to end; this one captures the CONSUMPTION and TERMINATION half and
+  cross-references rather than duplicates. docs/DEFERRED.md is the authority for where each
+  out-of-scope capability eventually lands, and that assignment is not restated here.
+
+
+  SECRET POSTURE, AND WHY IT NEEDS SAYING FOR THIS WORKFLOW SPECIFICALLY. No key, certificate,
+  password, token or credential fragment appears in this definition, and none may appear in any
+  recording taken under it. That is the store-wide rule in characterization/README.md section 6.2
+  and docs/SECRETS.md is the locator inventory. The reason it needs restating HERE is that the
+  composition root is precisely where configuration binding happens in the target: every value the
+  legacy hardcodes moves to configuration through an options type, bound from the environment, and
+  NO LITERAL APPEARS IN SOURCE, IN APPLICATION SETTINGS OR IN A CONTAINER DEFINITION. The only
+  configuration value this workflow drives is the locale, which is not a credential and is captured
+  in full precisely because it is not one. No signing key, verification key, connection string or
+  certificate path participates in this behaviour, on either side. No redaction member is declared
+  below, and that is a finding rather than an omission: not one field this capture records is a
+  credential, a key, or a statement carrying interpolated literals, so there is nothing for the
+  three field-level rules of characterization/README.md section 6.2 to bite on.
+
+
+  THE CAPTURE RULE THAT GOVERNS THIS PAIR IS NOT RESTATED HERE. characterization/README.md section
+  2.1 carries its canonical text and is the authority for it; the same text is owned word for word by
+  docs/PARITY.md section 4.2 and orchestration/README.md section 7.2, and a fourth copy would be a
+  fourth thing to drift. sharedVolume below records that the rule applies; the README records what it
+  says.
+
+
+  ARTIFACT NAMING. Every file named in recordingArtifacts below uses a diffable text extension. This
+  workflow's output pulls harder toward a forbidden extension than most, because its principal
+  artifact is a multi-line assembled fault report and the obvious name for one is a log: the
+  repository's root .gitignore carries the *.log, *.zip, *.rar, *.bak, *.dmp and *.bat patterns
+  UNANCHORED at .gitignore:L7-L12, so they match at every depth including inside this store, and its
+  only negations at .gitignore:L14-L15 are anchored at /res and /samples and rescue nothing here. A
+  capture named that way is silently untracked - present on the machine that produced it, absent from
+  git status, from review and from CI, so the comparison looks like it was taken and cannot be found
+  by anybody else. The root .gitignore is not to be modified; the fix is to name the file correctly,
+  which the schema's own filename pattern enforces by making those six extensions unspellable.
+
+# ---------------------------------------------------------------------------------------------
+# ORACLE FIXTURES - the read-only legacy objects this pair is captured from.
+#
+# All are cited, none is edited, moved, renamed, reformatted, re-encoded or copied into this tree.
+# Every locator below was verified line by line against the file it names.
+# ---------------------------------------------------------------------------------------------
+oracleFixtures:
+  # THE LIFECYCLE ORACLE. REPOSITORY ANOMALY, AND THE REASON EVERY CITATION IN THIS FILE IS A FULL
+  # PATH: two distinct files in this repository carry the application-object extension under the
+  # same base name. This one - ws_objects/pfw.pbl.src/pfw.sra, 145 lines - is the FRAMEWORK
+  # application object and is authoritative for this workflow. The other,
+  # ws_objects/pfw.pack.pbl.src/pfw.sra, 59 lines, is the PACKAGER application object: a different
+  # file, with different contents, and no part in this behaviour. A bare filename would be ambiguous
+  # between the two, so no citation anywhere in this definition uses one. Both are read-only.
+  - path: "ws_objects/pfw.pbl.src/pfw.sra"
+    role: "oracle-window"
+    locators:
+      # -- Static configuration facts, which are composition-root INPUTS rather than side effects --
+      # L25 - the theming setting, by which the application disables its own theming outright.
+      - "L25"
+      # L34 - the declared runtime version. Recorded as provenance and masked out of the comparison.
+      - "L34"
+      # -- The split helper, defined on the application object itself rather than in a library --
+      # L45 is its prototype and L48-L69 its body. L64-L66 is the trailing-empty-segment drop, which
+      # is what makes a field count other than seven reachable from a payload that packed seven.
+      - "L45"
+      - "L48-L69"
+      - "L64-L66"
+      # -- STARTUP: the open event in full, and each of its five ordered steps --
+      - "L88-L106"
+      # L91 - step 1: the framework is initialized with the all-capabilities composite flag. The
+      # call returns a numeric code and the call site DISCARDS it.
+      - "L91"
+      # L94 - step 2: the locale variable is assigned a hardcoded literal.
+      - "L94"
+      # L95-L102 - step 3: a selector on that variable creates one of exactly three provider objects.
+      # Three arms, and no fallback arm of any kind.
+      - "L95-L102"
+      # L103 - step 4: the chosen provider is installed as the active localization provider. This
+      # call also returns a numeric code, and this call site also discards it.
+      - "L103"
+      # L105 - step 5: the selector window is opened. THE TERMINAL STEP of the lifecycle, and the
+      # only thing this workflow records about the selector.
+      - "L105"
+      # -- SHUTDOWN: the close event, whose entire body is the finalize call at L108 --
+      - "L107-L108"
+      # -- THE SYSTEM-ERROR PROTOCOL, branch by branch. The handler in full: --
+      - "L110-L144"
+      # L114 - the marker equality test that gates the unpacking, and nothing else.
+      - "L114"
+      # L115 - the split of the error text on the CRLF separator, through the helper above.
+      - "L115"
+      # L116-L118 - the two-or-more branch: number from field one, text from field two.
+      - "L116-L118"
+      # L119-L125 - the exactly-seven branch: fields three through seven. An exact equality test.
+      - "L119-L125"
+      # L129-L139 - the labelled report assembly, including both conditional lines.
+      - "L129-L139"
+      # L131-L133 - the window line, suppressed when the two names are equal.
+      - "L131-L133"
+      # L137-L139 - the call-stack section, present only when the trace text is non-empty.
+      - "L137-L139"
+      # L141 - the display, with a stop indicator and a fixed title.
+      - "L141"
+      # L143 - process termination. The last statement of the handler, and the fail-fast contract.
+      - "L143"
+
+  # THE LIFECYCLE'S TERMINAL STEP, AND NOTHING BEYOND IT. 200 lines. Cited as a supporting fixture
+  # because step 5 of the startup sequence names it, so a capture of that step is not traceable
+  # without it. SCOPE IS THE TERMINAL STEP ONLY: this workflow records that the open call at
+  # ws_objects/pfw.pbl.src/pfw.sra:L105 was made, and records nothing about what the window then
+  # does. Its six command buttons each open a different demo window from their clicked events at
+  # :L90, :L118, :L162, :L174, :L186 and :L198 - w_demo_sciter_login, w_demo_mdi_ribbonbar,
+  # w_demo_special, w_demo_login, w_demo_mdi and w_demo respectively - and NONE of those six is
+  # characterized by this workflow or by any other in this store. They are named here rather than
+  # passed over in silence for the reason the store names every refused fixture: an unnamed
+  # exclusion is indistinguishable from an oversight, and the next reader would reasonably try to
+  # add the one thing the constraint forbids. Their locators are deliberately absent from the
+  # locators list below, so that no line of this fixture is cited as relied upon except the one that
+  # establishes its identity. docs/DEFERRED.md carries the destination each of those capabilities
+  # eventually lands in; that assignment is not restated here.
+  - path: "ws_objects/pfw.demos.pbl.src/w_demo_selector.srw"
+    role: "supporting-fixture"
+    locators:
+      # L4 - the type declaration, deriving from the framework's own window base class. This is the
+      # single line this workflow relies on: it establishes that the terminal step opens a
+      # framework-derived window, which is why the open call is a lifecycle fact at all.
+      - "L4"
+
+  # THE LIFECYCLE FUNCTIONS. Cited as specification because the legacy tree is simultaneously
+  # read-only and the ONLY statement of intended behaviour in this repository. All three are bound
+  # to a closed native binary, so their prototypes are the whole of what the repository says about
+  # them - which is exactly why the capture records their OBSERVABLE results and never asserts an
+  # internal effect.
+  - path: "ws_objects/pfw.base.pbl.src/pfwinitialize.srf"
+    role: "specification"
+    locators:
+      # L3 - the function object is bound to a native binary.
+      - "L3"
+      # L7-L8 - TWO overloads: a no-argument form and a form taking the capability flags as an
+      # unsigned long. BOTH RETURN A NUMERIC CODE, which the application object's call site ignores.
+      - "L7-L8"
+
+  - path: "ws_objects/pfw.base.pbl.src/pfwfinalize.srf"
+    role: "specification"
+    locators:
+      # L3 - likewise native.
+      - "L3"
+      # L7 - ONE overload, taking no arguments and returning a numeric code. There is no flags form,
+      # so finalize cannot be asked to release a subset of what initialize enabled - which is part of
+      # why the pairing is stated as mandatory rather than advisory.
+      - "L7"
+
+  - path: "ws_objects/pfw.base.pbl.src/pfwversion.srf"
+    role: "specification"
+    locators:
+      # L3 - native. L7 - returns the framework's own version string, distinct from the runtime
+      # version the application object declares. Recorded as provenance and masked out of the
+      # comparison, for the same reason and under the same mask entry.
+      - "L3"
+      - "L7"
+
+  # THE INITIALIZER OBJECT - the framework's SECOND initialization surface, and the reason the
+  # capability inventory is captured as a set rather than as a single integer.
+  - path: "ws_objects/pfw.base.pbl.src/n_initializer.sru"
+    role: "specification"
+    locators:
+      # L8 - native, like the three functions above.
+      - "L8"
+      # L10 - a global auto-instance whose variable name SHADOWS ITS OWN TYPE NAME. One of exactly
+      # two such shadowings the flat legacy namespace tolerated; the second is in the localization
+      # install path cited from the capture phase below. In the target the type keeps a descriptive
+      # name and the instance becomes an injected dependency rather than a global.
+      - "L10"
+      # L14-L20 - SEVEN protected boolean switches, which docs/README.md:L17-L22 states are
+      # EQUIVALENT to the capability flag values. Two facts here are captured rather than assumed:
+      # the UI switch is the only one defaulting to enabled, and THERE IS NO WEBVIEW SWITCH AT ALL
+      # even though a WebView capability bit exists - a seven-versus-eight asymmetry between the two
+      # initialization surfaces that the enabled-capability set has to be able to express.
+      - "L14-L20"
+
+  # THE CAPABILITY CONSTANTS. The declaration block is cited three ways because three different
+  # claims rest on different parts of it, and a single range would make each of them unverifiable
+  # against the others.
+  - path: "ws_objects/pfw.shared.pbl.src/enums.sru"
+    role: "specification"
+    locators:
+      # L40 - the comment that names these constants as the flags argument of the initialize call,
+      # and states that they compose.
+      - "L40"
+      # L41-L49 - the block as a whole: the eight bits plus the composite.
+      - "L41-L49"
+      # L41-L48 - the eight bits alone, each a constant long. This is the range the per-bit
+      # inventory is captured from.
+      - "L41-L48"
+      # L49 - the composite, declared as a SUM OF SEVEN IDENTIFIERS rather than as a literal, which
+      # is what makes its one omission auditable both by identifier and by arithmetic.
+      - "L49"
+
+  # THE AUTHORITATIVE LEGACY SPECIFICATION FOR THE PAIRING. Prose, read as the statement of intended
+  # behaviour, and cited by line range because the ranges are short and exact.
+  - path: "docs/README.md"
+    role: "specification"
+    locators:
+      # L9-L15 - the global-function initialization form, the instruction that the initialize call
+      # goes at the very START of the application open event and the finalize call at the END of the
+      # application close event, and then the warning itself.
+      - "L9-L15"
+      # L15 - THE PAIRING STATEMENT: finalize must be used paired with initialize. This single line
+      # is the invariant the whole workflow is built to pin, and it is the only place in the
+      # repository that states it.
+      - "L15"
+      # L17-L22 - the alternative auto-instantiate route through the initializer object, whose
+      # switches are equivalent to the flag values, together with the warning that the runtime's
+      # lifetime management of a global auto-instance is outside user-code control and its release
+      # timing may cause an access violation. Cited because it is the reason the target expresses
+      # the pairing as explicit host lifetime rather than as an auto-instantiated object.
+      - "L17-L22"
+      # L26 - the reachability consequence: a module not explicitly initialized is UNUSABLE, and its
+      # native library need not ship. THIS WORKFLOW CAPTURES THE REACHABILITY CONSEQUENCE AND NOT
+      # THE SHIPPING ONE - what a build does or does not include is not a behaviour of this
+      # lifecycle.
+      - "L26"
+      # L30 - the converse, and the reason the capability cases carry a native-binary precondition:
+      # enabling a capability whose native library is absent makes INITIALIZATION ITSELF FAIL.
+      - "L30"
+
+# ---------------------------------------------------------------------------------------------
+# SEED PHASE - empty, and accounting for why.
+# ---------------------------------------------------------------------------------------------
+seedPhase:
+  steps: []
+  emptyReason: >-
+    THE LIFECYCLE IS PROCESS STARTUP AND SHUTDOWN, SO THERE IS NO PERSISTENT STATE TO SEED. Nothing
+    in the behaviour reads or writes a row, a file, a table or a connection: the startup sequence
+    initializes the framework with a capability flag, assigns a locale, creates and installs a
+    provider object and opens a window; the shutdown sequence finalizes the framework; and the
+    system-error handler unpacks a payload the runtime handed it, assembles text and terminates. Not
+    one of those steps touches storage. There is consequently nothing to delete, nothing to create
+    and nothing to pre-populate, and EACH CAPTURE CASE IS A FRESH PROCESS that carries its own
+    starting state by construction rather than by seeding.
+
+
+    THAT IS NOT THE SAME AS THE WORKFLOW HAVING NO STARTING STATE. What each case depends on is
+    process-level and configuration-level rather than data-level - which capability bits the
+    initialize call is parameterised with, whether a locale configuration value is present, and
+    whether the native libraries a given capability bit needs are available - and those belong in the
+    capture phase's preconditions, where they are declared per case. They are deliberately NOT
+    modelled as seed steps: a seed step runs once for the pair, and every one of these varies BETWEEN
+    cases, so expressing them here would make the seed phase run per case, which is exactly the
+    reseed the capture rule forbids.
+
+
+    ONE CONSEQUENCE IS OPERATIONAL AND IS RECORDED HERE AS WELL AS IN THE CAPTURE PHASE'S
+    PRECONDITIONS, because a reader who checks only the seed phase would otherwise miss it. THE
+    SYSTEM-ERROR CASE TERMINATES THE PROCESS at ws_objects/pfw.pbl.src/pfw.sra:L143, and that
+    termination is the behaviour under characterization rather than a fault in the capture. It must
+    therefore be driven as ITS OWN PROCESS INVOCATION: no other case can share a process with it and
+    no case can follow it in the same process. The same applies to the unpaired negative case, which
+    ends a process deliberately without its finalize call. A harness that retries a terminated case,
+    reports it as an error, or wraps it in anything that prevents the termination from happening has
+    misread the fail-fast posture this workflow exists to pin, and will produce a recording of a
+    different system.
+  runsOncePerPair: true
+  neverBetweenCaptures: true
+
+# ---------------------------------------------------------------------------------------------
+# CAPTURE PHASE - the behaviour, taken twice.
+# ---------------------------------------------------------------------------------------------
+capturePhase:
+  behaviourUnderTest: >-
+    THE WHOLE LIFE OF THE PROCESS, FROM THE FIRST CALL THE APPLICATION OBJECT MAKES TO THE POINT IT
+    TERMINATES, in eight cases and their sub-cases. Unless another file is named, every locator below
+    is in ws_objects/pfw.pbl.src/pfw.sra.
+
+
+    CASE A - STARTUP, THE FIVE ORDERED STEPS. The open event at :L88-L106 performs exactly five
+    observable steps and THE ORDER IS ITSELF THE BEHAVIOUR, so each is captured as its own step with
+    its position recorded rather than inferred. (1) At :L91 the framework is initialized with the
+    ALL-CAPABILITIES COMPOSITE FLAG. docs/README.md:L11 states that this call belongs at the very
+    start of the open event, and it is: nothing precedes it but the two local declarations at :L88
+    and :L89. The call returns a numeric code and THE CALL SITE DISCARDS IT - the result is not
+    assigned, not tested and not logged - so an initialization failure at this step is invisible to
+    the four steps that follow it. Both the flag value and the returned code are recorded. (2) At
+    :L94 the locale variable is assigned a HARDCODED LITERAL. (3) At :L95-L102 a selector on that
+    variable creates ONE OF EXACTLY THREE provider objects, one per arm. (4) At :L103 the chosen
+    provider is installed as the active localization provider; this call likewise returns a numeric
+    code and this call site likewise discards it. (5) At :L105 the selector window is opened, WHICH
+    IS THE TERMINAL STEP of the lifecycle - nothing in the open event follows it. What is recorded
+    for step 5 is that the call was made, and nothing else.
+
+
+    CASE B - SHUTDOWN, AND THE PAIRING INVARIANT. The close event's entire body is the finalize call
+    at :L108, and docs/README.md:L12 states that it belongs at the end of the close event, which it
+    is by virtue of being the whole of it. docs/README.md:L15 states that THE TWO CALLS MUST BE
+    PAIRED. The pairing is therefore captured as an OBSERVED INVARIANT in its own right - one
+    initialize at :L91 and one finalize at :L108 per process, in that order, with neither repeated -
+    and not merely as two independent step records, because a recording that showed both calls
+    present but transposed or duplicated would satisfy a per-step comparison while violating the
+    invariant the workflow exists to pin.
+
+
+    CASE B-NEG - INITIALIZE WITHOUT FINALIZE, the negative case, driven as its own process
+    invocation. The initialize call is made and the process is ended without reaching :L108. THE
+    OUTCOME IS RECORDED EXACTLY AS EACH SIDE PRODUCES IT AND IS NOT ASSERTED FROM THE DOCUMENTATION:
+    the legacy behaviour on an unpaired lifecycle is decided inside a closed native binary and
+    nothing in this repository states it, so the capture records what the oracle does rather than
+    what docs/README.md:L15 requires. What the TARGET side must produce is not open in the same way:
+    the pairing is a structural contract there, so an unpaired configuration is a FAIL-FAST STRUCTURAL
+    FAULT AT STARTUP RATHER THAN A SILENT CONTINUATION, and a target recorded as continuing normally
+    where the pairing was violated is a parity failure against that line whatever else agrees.
+
+
+    CASES C1, C2 AND C3 - CAPABILITY GATING. The eight capability bits are declared at
+    ws_objects/pfw.shared.pbl.src/enums.sru:L41-L48 and the composite at :L49. Every bit's identifier
+    and value is recorded, and so is which of them the composite sets. THREE FLAG CASES ARE DRIVEN.
+    C1 is case A's own flag, the composite, re-read as the capability case rather than re-driven. C2
+    sets ONLY THE STORAGE BIT, which is the only one of the eight with an in-scope consumer in this
+    phase, and is therefore the case that matters most: it is the configuration a Phase-1 deployment
+    actually runs. C3 clears the bits, AND IT HAS TWO SUB-CASES THAT MUST NOT BE CONFLATED, because
+    ws_objects/pfw.base.pbl.src/pfwinitialize.srf:L7-L8 declares two overloads. C3a passes a flags
+    value with every bit clear; C3b calls the NO-ARGUMENT overload instead. Nothing in the repository
+    states what capability set the no-argument form defaults to, so whether the two sub-cases agree
+    IS CAPTURED AND NEVER ASSUMED - and the initializer object at
+    ws_objects/pfw.base.pbl.src/n_initializer.sru:L14-L20 gives positive reason to expect they might
+    not, since its equivalent switch set defaults its UI switch to enabled while defaulting the other
+    six to disabled. What is recorded per case is the ENABLED-CAPABILITY SET and, per capability, the
+    REACHABILITY ANSWER: docs/README.md:L26 states that a module not explicitly initialized is
+    unusable, so reachability is an observable consequence of the gate. THE SHIPPING CONSEQUENCE THAT
+    THE SAME LINE ALSO STATES - that an uninitialized module's native library need not ship - IS NOT
+    CAPTURED, because what a build includes is not a behaviour of this lifecycle. NO CAPABILITY'S OWN
+    FUNCTIONALITY IS EXERCISED IN ANY CASE.
+
+
+    CASE D - THE LOCALE DEFAULT AND ITS OVERRIDE, in two sub-cases, both of which are needed. D1
+    drives startup WITH NO LOCALE CONFIGURATION PRESENT and records the value the locale resolves to:
+    it must be the same literal :L94 assigns, on both sides. D2 drives startup WITH AN EXPLICIT
+    LOCALE CONFIGURATION VALUE and records that the resolved value changed accordingly. The two
+    sub-cases together are what verify the treatment rather than merely the value, and D2 CARRIES A
+    DELIBERATE ASYMMETRY BETWEEN THE TWO SIDES WHICH IS RECORDED RATHER THAN PAPERED OVER: the legacy
+    has no configuration surface at all, so its D2 recording states the STRUCTURAL ABSENCE of one and
+    the value staying at the literal, while the target's records the override taking effect. D1 is
+    the comparable half of the pair; D2's legacy half is a recorded absence, and a reviewer must not
+    read it as a mismatch. The reasoning is in the first provesDefects entry.
+
+
+    CASE E - A LOCALE OUTSIDE THE THREE ARMS. Startup is driven with a locale value matching none of
+    the three arms at :L95-L102. There is no fallback arm, so the provider variable is never
+    assigned and the install at :L103 receives an unassigned object. THE OUTCOME IS RECORDED EXACTLY
+    AS THE LEGACY PRODUCES IT, along the whole chain: the install overload at
+    ws_objects/pfw.ui.pbl.src/i18n.srf:L12-L15 rejects an invalid object with a numeric error code
+    and leaves the active provider unset; :L103 discards that code; and the translate overloads at
+    ws_objects/pfw.ui.pbl.src/i18n.srf:L17-L23 are each guarded on a valid provider, so subsequent
+    localization returns its input text UNCHANGED. Every link in that chain is recorded separately,
+    because a comparison that only checked the final text would pass for an implementation that
+    threw, logged or flagged the string at any earlier link. NO FALLBACK ARM IS ADDED ON EITHER SIDE.
+
+
+    CASE F - THE SYSTEM-ERROR PROTOCOL, BRANCH BY BRANCH. The handler at :L110-L144 is captured as
+    the CONSUMING AND TERMINATING half of a behaviour whose producing half belongs to the sibling
+    shared-diagnostics-assert-payload workflow. That sibling owns the payload's construction and its
+    four producer-side cases; this workflow drives the payload only as far as is needed to reach each
+    consumer branch, and cross-references rather than duplicates. (a) At :L114 the handler acts ONLY
+    when the runtime error record's object field equals the assertion marker; the outcome of that
+    equality test is recorded. (b) At :L115 it splits the error text on the CRLF separator, using the
+    helper defined on the application object itself at :L48-L69; the resulting field count is
+    recorded. (c) When the count is TWO OR MORE, :L117 populates the error number from field one and
+    :L118 the error text from field two. (d) When the count is EXACTLY SEVEN, :L120-:L124
+    additionally populate the window-or-menu name from field three, the object name from field four,
+    the object-event name from field five, the line number from field six and the stack trace from
+    field seven - the seventh into a local variable rather than onto the error record, so its only
+    observable effect is downstream. (e) At :L129-:L139 it assembles a labelled report: a FIXED TYPE
+    LABEL, an information line, a WINDOW LINE ONLY WHEN the window-or-menu name differs from the
+    object name at :L131-L133, an object line, a function line, a line-number line, and a CALL-STACK
+    SECTION ONLY WHEN the stack trace is non-empty at :L137-L139. (f) At :L141 it displays the report
+    with a STOP INDICATOR under a fixed title. (g) At :L143 it TERMINATES THE PROCESS. Steps (e), (f)
+    and (g) sit OUTSIDE the marker-gated block, so they run for every system error that reaches this
+    handler whether or not the marker matched, and that scope is recorded as its own output.
+
+
+    THE REPORT'S LABELS ARE FIXED CHINESE STRINGS AND THEY ARE THE IDENTIFIERS. They are reproduced
+    verbatim in a recording and are never translated, paraphrased or transliterated: the type label
+    "类型", the information label "信息", the window label "窗口", the object label "对象", the
+    function label "函数", the line-number label "行号", the call-stack label "调用栈", the display
+    title "系统错误", and the fixed type value "SYSTEM" which is the one part of the first line that
+    is not Chinese.
+
+
+    THE STATIC CONFIGURATION FACTS ARE CAPTURED TOO, because they are composition-root INPUTS rather
+    than incidental properties: the runtime version the application object declares at :L34, and the
+    theming setting at :L25 by which THE APPLICATION DISABLES ITS OWN THEMING OUTRIGHT. Both are
+    declared properties read before any event runs, so they are recorded once per case rather than
+    per step. The framework's own version string, reachable through
+    ws_objects/pfw.base.pbl.src/pfwversion.srf:L7, is recorded alongside the runtime version as
+    provenance. All three version-shaped values are masked out of the comparison and none of the
+    three is dropped.
+
+
+    WHAT NO CASE ABOVE DOES, restated at the point a reader would look for it: no case clicks a
+    selector button, opens a demo window, exercises a capability's own functionality, renders
+    anything, measures anything, or reads or writes storage.
+
+  observedOutputs:
+    # -- STARTUP: the ordered sequence, and each step within it ----------------------------------
+    - name: "startup-step-sequence"
+      description: >-
+        The five startup steps in the order the open event performed them. THE ORDER IS THE
+        BEHAVIOUR, not a presentational detail of the recording: the framework must be initialized
+        before a provider is created, the provider must be installed before the terminal window
+        opens, and docs/README.md:L11 states that the initialize call belongs at the very start. A
+        recording whose steps are all present but transposed is a parity failure even though every
+        individual step matches, which is why the sequence is its own compared output rather than
+        something a reviewer is expected to infer from five separate records.
+      format: >-
+        An ordered array of stable step identifiers, one per step, each carrying its one-based
+        position and its legacy locator. The array's order is significant and its serialization
+        order is pinned.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L88-L106"
+
+    - name: "initialization-flag-value"
+      description: >-
+        The capability flag the initialize call was parameterised with, per case. Recorded BOTH as
+        the identifier the source names and as the integer that identifier resolves to, because the
+        two carry different signal: the identifier is what a reader recognises, and the integer is
+        what the native call actually receives. For case C1 the identifier is the composite and the
+        integer is the sum of the seven bits it includes; for C2 it is the storage bit alone; for
+        C3a a value with every bit clear; and for C3b there is NO flag argument at all, which is
+        recorded as an explicit no-argument marker rather than as a zero.
+      format: >-
+        The constant identifier verbatim in its original SCREAMING_SNAKE spelling, plus the integer
+        value, plus for the no-argument sub-case an explicit not-supplied marker distinguishable
+        from a supplied zero.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L91"
+
+    - name: "initialization-return-code"
+      description: >-
+        The numeric code the initialize call returned, AND the separately recorded fact that the
+        call site discards it. ws_objects/pfw.base.pbl.src/pfwinitialize.srf:L7-L8 declares both
+        overloads as returning a code; :L91 invokes the call as a bare statement, so the code is
+        neither assigned nor tested nor logged, and the four steps that follow run identically
+        whether initialization succeeded or failed. Recording the code and the discard as two facts
+        is what lets a reviewer tell a failed initialization from a successful one in a recording
+        where the legacy itself could not.
+      format: >-
+        The numeric code as returned, alongside a boolean recording whether the call site consumed
+        it. The boolean is expected to be false on the legacy side and is compared, not assumed.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L91"
+
+    - name: "resolved-locale-string"
+      description: >-
+        The value the locale variable actually held when the selector at :L95-L102 read it. This is
+        the output that pins the hardcoded default: in case D1, with no configuration present, it
+        must equal the literal :L94 assigns, on both sides. Compared verbatim and never normalised -
+        not case-folded, not trimmed, not mapped onto a culture identifier - because the selector's
+        arms are exact string equality tests and any normalisation would change which arm runs.
+      format: "The string verbatim, with its exact case and length."
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L94"
+
+    - name: "locale-configuration-override-outcome"
+      description: >-
+        For case D2, whether an explicit locale configuration value changed the resolved locale, and
+        what it changed it to. THE TWO SIDES ARE DELIBERATELY ASYMMETRIC HERE and the recording says
+        so rather than leaving a reviewer to discover it: the legacy has no configuration surface at
+        all, so its half records the structural absence of one and the locale staying at the
+        literal, while the target's half records the override taking effect. This is the second half
+        of what verifies the treatment of the hardcoded-locale defect - the first being that the
+        default is unchanged - and recording only the default would leave the treatment unproven.
+      format: >-
+        The resolved locale under override, plus a stable classification of the side's configuration
+        surface - present, or structurally absent - so that the asymmetry is explicit in the
+        recording rather than surfacing as an unexplained difference.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L94"
+
+    - name: "locale-selector-arm-taken"
+      description: >-
+        Which of the three arms at :L95-L102 the selector entered, or that it entered NONE. Recorded
+        as its own field rather than inferred from the provider type name, because the no-arm outcome
+        of case E produces no provider type name to infer from - and that outcome is precisely the
+        one the missing-fallback defect is about.
+      format: >-
+        One of four stable values - one per arm, plus an explicit no-arm-entered value - alongside
+        the locale string that selected it.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L95-L102"
+
+    - name: "selected-provider-type-name"
+      description: >-
+        The type name of the provider object the selected arm created. Compared verbatim: the three
+        arms create three distinct types, and which type is instantiated determines every subsequent
+        translation, including the two mistranslations one of them reproduces. In case E no object is
+        created and the field records an explicit not-created marker rather than an empty string, so
+        that a not-created outcome is distinguishable from a created object with an empty name.
+      format: >-
+        The legacy type name verbatim, or an explicit not-created marker.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L95-L102"
+
+    - name: "provider-install-outcome"
+      description: >-
+        What the install call at :L103 did: the numeric code it returned, and whether it actually
+        installed the provider. The install overload at ws_objects/pfw.ui.pbl.src/i18n.srf:L12-L15
+        validates its argument first and returns a numeric error code without installing when the
+        argument is not a valid object, so in case E this output carries the error code while the
+        active provider stays unset. As at :L91, THE CALL SITE DISCARDS THE CODE, and that discard is
+        recorded as its own boolean - the second of the two identical silences in one five-step
+        sequence.
+      format: >-
+        The numeric code as returned, a boolean for whether the provider was installed, and a
+        boolean for whether the call site consumed the code.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L103"
+
+    - name: "active-provider-after-install"
+      description: >-
+        Whether a localization provider is active once startup has finished, and which one.
+        Recorded separately from the install outcome because the two can disagree in exactly the way
+        case E produces: the install call ran, returned a code, and left no provider active. This
+        output is the state the rest of the process then operates under.
+      format: >-
+        A boolean for whether a provider is active, plus its type name when one is, plus an explicit
+        none-active value when none is.
+      locator: "ws_objects/pfw.ui.pbl.src/i18n.srf:L13"
+
+    - name: "localization-passthrough-outcome"
+      description: >-
+        For case E, what a subsequent translation call actually returns when no provider is active.
+        The translate overloads at ws_objects/pfw.ui.pbl.src/i18n.srf:L17-L23 are each guarded on a
+        valid provider and return their input text UNCHANGED when the guard fails - silently, without
+        throwing, logging, or marking the string as untranslated. Recorded as its own output because
+        a comparison of the returned text alone would pass for an implementation that threw or logged
+        first and then returned the same text, and those are different behaviours.
+      format: >-
+        The returned text verbatim alongside the input text, plus three booleans recording that
+        nothing was thrown, nothing was logged and no untranslated marker was applied.
+      locator: "ws_objects/pfw.ui.pbl.src/i18n.srf:L17-L23"
+
+    - name: "terminal-step-marker"
+      description: >-
+        That the terminal step ran: the selector-open call at :L105 was made, it was the last step of
+        the open event, and no step followed it. THE MARKER IS THE WHOLE OF WHAT THIS WORKFLOW RECORDS
+        ABOUT THE SELECTOR. Nothing about the window's contents, its buttons, their clicked events or
+        the six windows they open is recorded here or anywhere in this store, and this output must not
+        be extended to carry any of it.
+      format: >-
+        A boolean for whether the call was made, the target window's name as the source names it, and
+        the step's position in the sequence. No property of the opened window is recorded.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L105"
+
+    # -- SHUTDOWN AND THE PAIRING INVARIANT ------------------------------------------------------
+    - name: "finalize-call"
+      description: >-
+        That the finalize call at :L108 was made, and the numeric code it returned. The close event's
+        entire body is this one call, so this output is also the record that the shutdown sequence has
+        exactly one step.
+      format: >-
+        A boolean for whether the call was made, the numeric code as returned, and the count of
+        steps the close event performed.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L107-L108"
+
+    - name: "initialize-finalize-pairing-invariant"
+      description: >-
+        THE INVARIANT ITSELF, as a compared output: exactly one initialize call and exactly one
+        finalize call per process, initialize first, neither repeated. docs/README.md:L15 is the only
+        statement of this requirement in the repository and it is unqualified. Recorded as one
+        structured verdict rather than left to be reconstructed from the two call records, because
+        the failure modes it catches - a transposition, a duplicate, a missing half - would each
+        satisfy a per-call comparison while breaking the invariant.
+      format: >-
+        The ordered list of lifecycle calls observed with their counts, plus a boolean verdict for
+        whether the invariant held, plus the identifier of the violation when it did not.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L91"
+
+    - name: "unpaired-lifecycle-outcome"
+      description: >-
+        For case B-NEG, what happened when the process ended without its finalize call. THE LEGACY
+        SIDE IS RECORDED AS OBSERVED AND IS NOT ASSERTED IN ADVANCE: the outcome is decided inside a
+        closed native binary and nothing in this repository states it, so whatever the oracle does is
+        the master. THE TARGET SIDE IS NOT OPEN IN THE SAME WAY: an unpaired lifecycle is a
+        structural fault there and the contract is fail-fast at startup, never a silent continuation,
+        so a target recorded as continuing normally is a parity failure against docs/README.md:L15
+        regardless of what the legacy did.
+      format: >-
+        A stable classification of the outcome per side - faulted at startup, terminated, or
+        continued - plus any diagnostic text produced, plus an explicit marker on the legacy side
+        recording that the value is observed rather than specified.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L107-L108"
+
+    # -- CAPABILITY GATING -----------------------------------------------------------------------
+    - name: "capability-bit-inventory"
+      description: >-
+        ALL EIGHT capability bits, each with its identifier and its value, captured from the
+        declaration block rather than restated from any document. The inventory is compared in full:
+        a bit that changed value, changed spelling or disappeared changes what every flag argument in
+        the system means. The identifiers are recorded in their original SCREAMING_SNAKE spelling
+        because that exact spelling appears in serialized payloads, in log records and in this store's
+        own recordings, where a rename would silently invalidate every stored comparison.
+      format: >-
+        An ordered array of eight records, each carrying the identifier verbatim and its integer
+        value, in declaration order. Values are recorded as integers, and the array covers the bits
+        alone - the composite is a separate output because it is a different kind of thing.
+      locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L41-L48"
+
+    - name: "composite-flag-membership"
+      description: >-
+        Which of the eight bits the all-capabilities composite actually sets. The composite is
+        declared as a SUM OF IDENTIFIERS rather than as a literal, so its membership is readable from
+        source and its arithmetic is checkable against the inventory above. Recorded as a membership
+        set AND as the resulting integer, so that the one omission is auditable in two independent
+        ways: by the absent identifier, and by the integer being lower than the sum of all eight by
+        exactly the omitted bit's value.
+      format: >-
+        The set of member identifiers verbatim, the resulting integer, and the integer the composite
+        would have had if every bit were included - the difference between the two being the omitted
+        bit's value.
+      locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L49"
+
+    - name: "omitted-capability-bit-identifier"
+      description: >-
+        The identifier of the ONE bit the composite deliberately leaves out, recorded by name as its
+        own output. It is separated from the membership set because the omission is a behaviour rather
+        than an accident of arithmetic: the omitted bit and one of the included bits are alternative
+        builds of a single engine, so setting both would be meaningless, and a target that "completed"
+        the composite by adding it would be making a silent correction. Compared, and never masked.
+      format: >-
+        The single identifier verbatim, plus its value, plus a boolean recording that it was absent
+        from the composite's membership.
+      locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L49"
+
+    - name: "enabled-capability-set"
+      description: >-
+        Per case, the set of capabilities the framework reports as enabled after initialization. This
+        is the principal compared output of the capability cases: it is what a Phase-1 deployment's
+        configuration actually resolves to, and case C2 - the storage bit alone - is the configuration
+        that matters most because that bit is the only one of the eight with an in-scope consumer in
+        this phase.
+      format: >-
+        A set of capability identifiers per case, with a stable serialization order so that an
+        unpinned ordering cannot surface as a difference where no behaviour changed.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L91"
+
+    - name: "capability-reachability-per-bit"
+      description: >-
+        Per capability, whether it is REACHABLE after initialization. docs/README.md:L26 states that a
+        module not explicitly initialized is unusable, so reachability is the observable consequence
+        of the gate and is a property OF THE GATE rather than of the capability behind it. This output
+        records that answer and nothing more: no capability's own functionality is exercised in any
+        case, and the same line's shipping consequence - that an uninitialized module's native library
+        need not ship - is deliberately not recorded here, because what a build includes is not a
+        behaviour of this lifecycle.
+      format: >-
+        One boolean per capability identifier, per case, and no other property of any capability.
+      locator: "docs/README.md:L26"
+
+    - name: "cleared-flag-subcase-agreement"
+      description: >-
+        Whether case C3a - a flags value with every bit clear - and case C3b - the no-argument
+        overload - produced the same enabled-capability set. CAPTURED AND NEVER ASSUMED: nothing in
+        the repository states what capability set the no-argument overload defaults to, and the
+        initializer object's equivalent switch set gives positive reason to expect a difference,
+        since it defaults its UI switch to enabled while defaulting the other six to disabled. An
+        implementation that treated the two forms as synonyms would be indistinguishable from a
+        correct one unless both are driven.
+      format: >-
+        The two enabled-capability sets side by side, plus a boolean for whether they agreed, plus
+        the symmetric difference when they did not.
+      locator: "ws_objects/pfw.base.pbl.src/pfwinitialize.srf:L7-L8"
+
+    - name: "initializer-switch-surface"
+      description: >-
+        The second initialization surface's switch set, as declared: SEVEN protected boolean switches
+        with their default values, of which only the UI switch defaults to enabled. Recorded because
+        docs/README.md:L17-L22 states these switches are EQUIVALENT to the capability flag values, and
+        the two surfaces are therefore expected to agree - yet THERE ARE ONLY SEVEN SWITCHES AGAINST
+        EIGHT BITS, with no WebView switch at all. That seven-versus-eight asymmetry is captured rather
+        than reconciled: it is a fact about the legacy's own gating surface, and a target that
+        harmonised the two into one eight-member set would have corrected it.
+      format: >-
+        An ordered array of the switch identifiers verbatim with their declared default values, plus
+        the set difference against the eight-bit inventory above.
+      locator: "ws_objects/pfw.base.pbl.src/n_initializer.sru:L14-L20"
+
+    # -- THE SYSTEM-ERROR PROTOCOL: consumption, rendering and termination -----------------------
+    - name: "marker-gate-outcome"
+      description: >-
+        Whether the runtime error record's object field equalled the assertion marker, and therefore
+        whether the handler unpacked the payload at all. A false outcome does NOT mean the handler did
+        nothing: the report is still assembled from whatever the runtime left on the error record, it
+        is still displayed, and the process still terminates. This flag is what tells a reviewer which
+        of two very different reports they are looking at.
+      format: "Boolean, alongside the marker string the equality test compared against."
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L114"
+
+    - name: "split-field-count-observed-by-handler"
+      description: >-
+        The field count the split returned. This is the value both unpack branches are gated on and it
+        is the single most consequential number in the case: two-or-more opens the first branch,
+        exactly seven opens the second, and any count strictly between three and six opens the first
+        and not the second while discarding everything from field three onward.
+      format: "Integer."
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L115"
+
+    - name: "split-branch-taken"
+      description: >-
+        Which of the three outcomes the count produced - below two so neither branch ran, two-or-more
+        but not exactly seven so only the first ran, or exactly seven so both ran. Recorded as its own
+        field rather than left to be inferred from the count, because that inference is exactly the
+        step a reader gets wrong.
+      format: >-
+        One of three stable outcome identifiers, plus the count that produced it.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L116-L125"
+
+    - name: "error-record-fields-populated"
+      description: >-
+        Which fields of the runtime error record the handler populated, and from which payload field
+        each was taken: the number from field one and the text from field two on the two-or-more
+        branch, and the window-or-menu name, the object name and the object-event name from fields
+        three, four and five on the exactly-seven branch. Recorded field by field rather than as one
+        blob so that a difference is attributable to a specific unpack step. Field seven goes into a
+        LOCAL VARIABLE rather than onto the error record, which is why it has no entry here and why
+        its only observable effect is whether the report's call-stack section appears.
+      format: >-
+        One record per error-record field, keyed by the field name, carrying the text verbatim, the
+        one-based payload field index it came from, and an explicit not-populated marker where the
+        branch did not run.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L116-L125"
+
+    - name: "partial-unpack-discarded-field-inventory"
+      description: >-
+        The payload fields that were present and were read by nothing, for any case whose count fell
+        strictly between three and six. This is the direct proof of the partial-unpack defect on the
+        CONSUMING side: fields present in the payload, absent from every populated error-record field,
+        with no error raised and nothing logged to say data was dropped. The sibling
+        shared-diagnostics-assert-payload owns the producing side and the routes by which such a count
+        becomes reachable; this output records only what the consumer did with it.
+      format: >-
+        An ordered list of the discarded field indices with an explicit not-read marker for each,
+        alongside the observed count and the branch identifier.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L119-L125"
+
+    - name: "payload-line-number-value"
+      description: >-
+        The line-number value the handler parsed from field six. THE VALUE IS MASKED and excluded from
+        the comparison - it is a legacy PowerScript source line number with no target counterpart -
+        while the two facts about it that ARE behavioural are compared through the separate output
+        below. Recorded behind a placeholder rather than dropped, so a reviewer can see the field was
+        handled deliberately.
+      format: >-
+        A stable placeholder in place of the number, with the source text it was parsed from likewise
+        placeheld so that a parse failure cannot hide as a legitimate zero.
+      maskedAsNonBehavioural: true
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L123"
+
+    - name: "payload-line-number-population-state"
+      description: >-
+        Whether the line-number field was populated at all, and whether the text it was populated from
+        parsed as a number. COMPARED, unlike the value itself: a field that stopped being populated
+        changes which lines the report emits, and the parse matters because a non-numeric source text
+        yields a silent zero rather than an error.
+      format: "Two booleans - populated, and parsed - and no numeric value."
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L123"
+
+    - name: "stack-trace-frame-count-and-order"
+      description: >-
+        How many frames the trace carried and in what order. COMPARED - only the frame TEXT is masked,
+        per the second determinism-mask entry. A trace that loses a frame, gains one or reorders them
+        is a real behavioural difference, and it is the one thing about the trace that a masked
+        comparison can still detect. Whether the trace was empty is recorded here too, because an
+        empty trace is what suppresses the report's call-stack section downstream.
+      format: >-
+        An integer count, the ordered sequence of masked frame placeholders, and a boolean for whether
+        the trace text was empty. The frames are projected as an ordered array rather than as one
+        joined string, so count and order stay comparable after the text is gone.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L124"
+
+    - name: "assembled-report-text"
+      description: >-
+        The complete labelled report the handler assembled, as the text it would display. This is the
+        principal human-readable artifact of the case and the first thing a reviewer reads.
+      format: >-
+        The report as multi-line text, with its fixed Chinese label identifiers reproduced exactly and
+        never translated, and with the newline convention of the fourth determinism-mask entry applied
+        identically to both sides.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L129-L139"
+
+    - name: "assembled-report-label-sequence"
+      description: >-
+        The ordered list of label identifiers the report actually emitted. Recorded separately from the
+        report text so that a STRUCTURAL change - a missing line, a reordered line, a renamed label -
+        is detectable independently of the values those lines carried. COMPARED, and never masked.
+      format: >-
+        An ordered array of the label identifiers verbatim, drawn from the fixed set the handler emits
+        - the type label with its fixed "SYSTEM" value, then the information, window, object,
+        function, line-number and call-stack labels - reproduced as the identifiers they are.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L129-L139"
+
+    - name: "window-line-present"
+      description: >-
+        Whether the conditional window line appeared. It is emitted only when the window-or-menu name
+        differs from the object name, so a fault whose two names are identical produces a report with
+        one fewer line and nothing in the report says a line was omitted. COMPARED as a boolean in its
+        own right, because a mechanical port that lost the conditional would emit the line
+        unconditionally and a diff of the report text alone would not say clearly why the two sides
+        differ.
+      format: "Boolean, alongside the two names the condition compared."
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L131-L133"
+
+    - name: "call-stack-section-present"
+      description: >-
+        Whether the conditional call-stack section appeared. It is emitted only on a non-empty trace,
+        and an empty trace is genuinely reachable rather than theoretical, so both outcomes are
+        captured. COMPARED as a boolean, for the same reason as the window line.
+      format: "Boolean, alongside whether the trace text was empty."
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L137-L139"
+
+    - name: "display-severity-indicator"
+      description: >-
+        The severity indicator the report is displayed with, and the display's title. ONLY THE DELIVERY
+        CHANNEL CHANGES IN THE TARGET - a modal dialog becomes a structured machine-readable result -
+        so the indicator, the title and the text are all preserved and all compared. A target that
+        downgraded the indicator would be softening the severity of a fatal fault.
+      format: >-
+        The indicator as its legacy identifier, plus the title string verbatim as the identifier it is.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L141"
+
+    - name: "report-and-termination-scope"
+      description: >-
+        Whether the report assembly, the display and the termination ran even when the marker gate did
+        NOT match. All three sit outside the marker-gated block, so they run for every system error
+        reaching this handler - the gate governs only whether the payload is unpacked, never whether
+        the process dies. Recorded because a port that moved the termination inside the gate would
+        degrade instead of terminating for every non-assertion system error while looking correct for
+        the assertion case, which is precisely the softening the fail-fast posture forbids.
+      format: >-
+        Two booleans - marker matched, and report-plus-display-plus-termination ran - which must be
+        independent of each other.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L114-L143"
+
+    - name: "process-outcome"
+      description: >-
+        Whether the case ended in process termination or continued. THE SINGLE MOST IMPORTANT COMPARED
+        OUTPUT IN THIS WORKFLOW: it is what proves the fail-fast posture survived. A case recorded as
+        continuing where the master terminated is a parity failure even when every other field matches,
+        and it is the exact shape a well-meaning warning-and-continue change would take.
+      format: >-
+        One of two stable classifications - terminated, or continued - per case. The numeric exit code
+        is NOT a comparison value, per the sixth determinism-mask entry; the fact and the
+        classification of termination are what is compared.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L143"
+
+    # -- STATIC CONFIGURATION FACTS, which are composition-root inputs --------------------------
+    - name: "declared-runtime-version"
+      description: >-
+        The runtime version the application object declares as a property. RECORDED AND EXCLUDED FROM
+        THE COMPARISON per the fifth determinism-mask entry: the legacy declares a specific build of
+        one runtime and the target declares an entirely different runtime, so comparing the two strings
+        would be meaningless - but recording both is useful provenance for anybody reading a pair of
+        recordings months later, and dropping it would lose that for nothing.
+      format: "The version string verbatim, present in the recording and excluded from comparison."
+      maskedAsNonBehavioural: true
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L34"
+
+    - name: "framework-version-string"
+      description: >-
+        The framework's own version, distinct from the runtime version above and reached through a
+        different mechanism - a native accessor rather than a declared property. Recorded as provenance
+        alongside it and masked out of the comparison for the same reason and under the same mask
+        entry. Recorded rather than dropped because the two versions together identify exactly which
+        estate a legacy recording came from.
+      format: "The version string verbatim, present in the recording and excluded from comparison."
+      maskedAsNonBehavioural: true
+      locator: "ws_objects/pfw.base.pbl.src/pfwversion.srf:L7"
+
+    - name: "theming-setting"
+      description: >-
+        The theming setting the application object declares, by which THE APPLICATION DISABLES ITS OWN
+        THEMING OUTRIGHT. A composition-root input worth capturing on its own terms, and independent
+        evidence that no design system is in play in this estate. COMPARED verbatim as the identifier
+        string it is: the value is a specific literal rather than a boolean, and a target that mapped
+        it onto a boolean would lose the distinction between theming being disabled this particular way
+        and theming being absent. What the setting would have done to a rendered surface is not
+        captured, because no presentation surface is created in this phase.
+      format: >-
+        The setting's value verbatim as a string, alongside the property name that carries it.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L25"
+
+  preconditions:
+    - >-
+      EACH TERMINATING CASE RUNS AS ITS OWN PROCESS INVOCATION. Case F ends in process termination at
+      ws_objects/pfw.pbl.src/pfw.sra:L143 and case B-NEG ends a process deliberately without its
+      finalize call, so neither can share a process with another case and no case can follow either of
+      them in the same process. Every other case is also driven as a fresh process, because the
+      behaviour under characterization IS process startup and shutdown and a second startup inside one
+      process is not the same behaviour. The seed phase's emptyReason records the same requirement,
+      because a reader who checks only the seed phase would otherwise miss it.
+    - >-
+      THE CAPTURE HARNESS TREATS PROCESS TERMINATION AS THE EXPECTED OUTCOME of case F, not as a
+      harness failure. It must not retry a terminated case, must not report it as an error, and must
+      not wrap the case in anything that prevents the termination from happening - THE TERMINATION IS
+      THE BEHAVIOUR. A harness that suppresses it produces a recording of a different system, and the
+      suppression would look exactly like the softening the sixth provesDefects entry forbids.
+    - >-
+      THE NATIVE LIBRARIES OF EVERY CAPABILITY A CASE ENABLES ARE PRESENT ON THE LEGACY SIDE, AND
+      WHICH ONES WERE PRESENT IS RECORDED. docs/README.md:L30 states that enabling a capability whose
+      native library is absent makes INITIALIZATION ITSELF FAIL, so a composite-flag capture taken in
+      an environment missing one of those binaries records an initialization failure that is an
+      ENVIRONMENT DIFFERENCE AND NOT A BEHAVIOURAL ONE - and, because the call site at :L91 discards
+      the returned code, that failure is silent and would be indistinguishable from a genuine
+      divergence unless the binary inventory is recorded alongside it. Case C2, the storage bit alone,
+      is the case with the narrowest such dependency and is therefore the most portable of the three.
+    - >-
+      THE LOCALE CONFIGURATION STATE IS SET EXPLICITLY PER CASE AND NEVER LEFT AMBIENT. Case D1 is
+      driven with NO locale configuration value present; case D2 with exactly one, whose value is
+      authored in the harness; case E with exactly one value that matches none of the three selector
+      arms. An ambient value inherited from the host would silently convert D1 into D2 and would make
+      the hardcoded default look configurable when it is not, which is the one thing the first
+      provesDefects entry exists to distinguish.
+    - >-
+      NO CASE EXERCISES ANY CAPABILITY'S OWN FUNCTIONALITY, INCLUDING THE ONES A CASE ENABLES. The
+      capability cases drive initialization and then read the gate; they do not call into a capability
+      behind an enabled bit, and the harness must not be extended to do so. Seven of the eight bits
+      have no in-scope consumer in this phase and consequently no candidate half, so driving one would
+      produce a master with nothing to compare it against. docs/DEFERRED.md is the authority for where
+      each of those capabilities eventually lands.
+    - >-
+      CASE F IS DRIVEN WITH FIXTURE-AUTHORED PAYLOAD TEXT ONLY. The payload's message field flows
+      verbatim into the assembled report and therefore into an artifact, so the harness drives only
+      text authored in the fixture or in this definition - never text sourced from a real deployment, a
+      configuration value, an environment variable or a captured request. No key, certificate,
+      password, token or credential fragment may be passed as payload text or appear in any recording.
+      characterization/README.md section 6.2 is the governing rule and docs/SECRETS.md is the locator
+      inventory.
+    - >-
+      CASE F DRIVES THE PAYLOAD ONLY AS FAR AS EACH CONSUMER BRANCH REQUIRES. The producing side -
+      how the payload is composed, how its field count comes to be what it is, and the caught path
+      that never reaches this handler at all - belongs to the sibling shared-diagnostics-assert-payload
+      workflow, which owns it end to end. This capture must not re-derive those cases under its own
+      identifier: two definitions driving the same producer under two identifiers would give the
+      producing behaviour two masters that can drift apart.
+    - >-
+      BOTH HALVES OF THE PAIR ARE TAKEN UNDER THE PAIRED-CAPTURE SHARED-VOLUME RULE whose canonical
+      text is characterization/README.md section 2.1. This workflow reads and writes no persistent
+      state of its own, but it claims NO EXEMPTION from that rule - sharedVolume below records that it
+      applies - so the volume state is left undisturbed across both captures exactly as it would be
+      for a workflow that did touch storage.
+    - >-
+      THE DETERMINISM MASK BELOW IS CONFIGURED ONCE AND USED FOR BOTH CAPTURES. Determinism is a
+      property of the pair rather than of a run: configuring a seam differently for the second half
+      manufactures a passing comparison out of mismatched data, which is worse than not masking at all.
+    - >-
+      NO TIMING VALUE IS COLLECTED, EVEN INCIDENTALLY. The harness records no process start time, no
+      readiness moment, no elapsed value and no duration for any case, and it must not add one for
+      diagnostic convenience: a startup workflow is the one place where such a field would look
+      natural, and characterization/README.md section 6.4 forbids it because it fails for reasons
+      unrelated to behaviour and trains readers to ignore red results.
+
+  recordingArtifacts:
+    - filename: "caseA-startup-step-sequence.json"
+    - filename: "caseB-shutdown-and-pairing.json"
+    - filename: "caseBneg-unpaired-lifecycle.json"
+    - filename: "capability-bit-inventory.csv"
+    - filename: "caseC1-composite-flag.json"
+    - filename: "caseC2-storage-bit-only.json"
+    - filename: "caseC3-cleared-flag-subcases.json"
+    - filename: "caseD-locale-default-and-override.json"
+    - filename: "caseE-locale-outside-arms.json"
+    - filename: "caseF-system-error-unpack.json"
+    - filename: "caseF-assembled-report.txt"
+    - filename: "assembled-report-label-sequence.json"
+    - filename: "static-configuration-facts.json"
+    - filename: "process-outcomes.json"
+
+# ---------------------------------------------------------------------------------------------
+# DETERMINISM MASK - inline, both sides, every entry with its reason.
+#
+# The register of what is deliberately NOT masked is in the top-level description above, which is
+# the only member the schema admits it in: mask entries carry no note member, by design. Nothing
+# below may be read as covering anything on that register.
+# ---------------------------------------------------------------------------------------------
+determinismMask:
+  - seam: >-
+      Every clock read - any timestamp that reaches a recorded output, a recorded decision or an
+      artifact's content, on either side, INCLUDING anything a clock could contribute to the
+      system-error report or to a startup diagnostic.
+    method: >-
+      Inject the clock and substitute a fixed, deterministic time source, configured once per pair and
+      used for both captures. NO ELAPSED, LATENCY, DURATION, STARTUP-TIME OR THROUGHPUT VALUE IS
+      COMPUTED OR RECORDED ANYWHERE IN THIS WORKFLOW, so there is no timing field to mask - the seam
+      exists to keep one from appearing, and to catch the case where a diagnostic line acquires a
+      timestamp on one side only.
+    appliesTo:
+      - "legacy"
+      - "dotnet"
+    reason: >-
+      A clock read differs on every run BY DEFINITION RATHER THAN BY BEHAVIOUR, so any comparison
+      including one fails for reasons unrelated to the system under test and trains readers to ignore
+      red results. This entry is where the store-wide prohibition becomes concrete for THIS workflow,
+      and it needs stating more firmly here than elsewhere: NO boot-time field appears in this
+      workflow, even though a workflow over process startup is the one place in the store where such a
+      field would look like useful information rather than like the defect it is.
+      characterization/README.md section 6.4 is the rule, the repository publishes no
+      service-level agreement, latency budget, throughput target or availability commitment to assert
+      one against, and the only quantitative requirement in the brief - the 80% per-service
+      line-coverage gate - is measured in CI from coverage.cobertura.xml and not from this store.
+
+  - seam: >-
+      Stack-trace frame text inside the system-error report - the object names, event names and line
+      numbers of the individual frames, wherever the trace reaches an output: the trace field the
+      handler takes into a local variable, and the call-stack section of the assembled report that
+      renders it.
+    method: >-
+      Inject the frame source and substitute a deterministic provider, then replace EACH FRAME with its
+      own stable placeholder while PRESERVING THE FRAME COUNT AND THE FRAME ORDER exactly. The trace is
+      projected as an ordered array of placeholders rather than as one joined string, so that count and
+      order remain comparable after the text is gone, and the report's rendered call-stack section is
+      compared for its label, its presence and its frame count rather than for its frame text.
+    appliesTo:
+      - "legacy"
+      - "dotnet"
+    reason: >-
+      The frames name LEGACY SOURCE POSITIONS WITH NO TARGET COUNTERPART: the two implementations share
+      no call structure, no naming scheme and no frame-text grammar, and the legacy grammar is not even
+      knowable from this repository because the frame source is a native binding into a closed binary.
+      No substitution could make the two agree, so comparing frame text would fail on every run for a
+      reason unrelated to behaviour. BUT THE DEPTH AND ORDER OF A TRACE ARE BEHAVIOUR AND ARE COMPARED:
+      a trace that loses a frame, gains one or reorders them is a real difference, and whether the trace
+      is EMPTY decides whether the report's call-stack section appears at all. Masking the whole trace
+      would discard that signal, so the asymmetry is the entry - text masked, structure compared.
+
+  - seam: >-
+      The payload's line-number field - field six of the diagnostic payload, the value the handler
+      parses from it onto the runtime error record, and the line-number line the assembled report
+      renders from that value.
+    method: >-
+      Replace the numeric value with a stable placeholder in the recording, and compare instead the two
+      facts about it that are behavioural: whether the field was POPULATED at all, and whether the text
+      it was populated from PARSED as a number. Both are recorded as their own unmasked output. The
+      source text is placeheld alongside the value so that a parse failure cannot hide as a legitimate
+      zero, and the report's line-number LABEL and the line's presence are compared even though the
+      number on it is not.
+    appliesTo:
+      - "legacy"
+      - "dotnet"
+    reason: >-
+      It is a line number in a legacy PowerScript source file and HAS NO TARGET COUNTERPART AT ALL -
+      there is no line in the target implementation that corresponds to it, so no substitution could
+      make the two agree and comparing them would fail on every run for a reason unrelated to
+      behaviour. What IS behaviour is whether the handler populated the field and whether the parse
+      succeeded, because the parse turns a non-numeric source text into a silent zero rather than an
+      error, and a field that stopped being populated changes which lines the report emits. Masking the
+      value while comparing the population state keeps exactly the part that carries behaviour.
+
+  - seam: >-
+      Newline normalization across the whole recording - the assembled report, which is multi-line by
+      construction, plus every field that can carry a line break as content.
+    method: >-
+      Normalize line endings to a single convention at COMPARISON TIME, applied identically to both
+      sides, and never by editing a stored master. THE ORDER OF OPERATIONS IS THE WHOLE METHOD AND IT IS
+      NOT INTERCHANGEABLE: split the incoming payload into its fields FIRST, structurally, by locating
+      the CRLF separator and recording the field-boundary indices, and only THEN normalize the
+      surrounding record and the content within each field. The separator is identified by field index
+      thereafter and is never re-derived from the normalized text. Field boundaries are carried as
+      indices in the recording rather than as embedded control characters, and a line break appearing
+      inside a field is recorded as an escape sequence so that content and boundary stay visibly
+      distinct at every later step. The report's own line joins, which are lone line feeds rather than
+      CRLF sequences, are normalized as ordinary content.
+    appliesTo:
+      - "legacy"
+      - "dotnet"
+    reason: >-
+      The master is produced on Windows by PowerBuilder and the candidate runs in a Linux container, so
+      raw line endings differ BY PLATFORM RATHER THAN BY BEHAVIOUR, and a byte-exact comparison of
+      unnormalized text reports a difference on every line of every multi-line recording. NOTHING
+      UPSTREAM FIXES THIS: the repository's root .gitattributes declares only linguist-language mappings
+      and carries NO text or eol rule at all, so Git performs no line-ending translation here, and that
+      file is not in scope to change. THE SPECIAL HAZARD IS THE SAME ONE THE SIBLING DIAGNOSTICS
+      WORKFLOW CARRIES, AND IT IS WHY THE ORDER OF OPERATIONS IS FIXED: the payload's own field
+      separator IS a CRLF sequence, while the report's line joins and some field contents are LONE LINE
+      FEEDS. Normalization applied before the split is therefore destructive in BOTH directions -
+      promoting lone line feeds to CRLF sequences FABRICATES field boundaries and raises the observed
+      count, flipping which unpack branch runs; demoting CRLF sequences to line feeds DESTROYS every
+      boundary and collapses the count to one. Either corruption looks exactly like a genuine
+      partial-unpack finding, which is the defect the fifth provesDefects entry exists to prove and
+      would therefore be indistinguishable from it. Normalize the surrounding record; never touch the
+      separator that defines the payload's field boundaries.
+
+  - seam: >-
+      The declared version strings - the runtime version the application object declares as a property,
+      and the framework's own version string reached through the native accessor.
+    method: >-
+      RECORD BOTH VERBATIM AND EXCLUDE BOTH FROM THE COMPARISON, with the corresponding observed outputs
+      carrying maskedAsNonBehavioural so the exclusion is visible in the definition rather than only in
+      a comparison configuration. They are masked out, not dropped: the recording holds the real strings
+      from both sides.
+    appliesTo:
+      - "legacy"
+      - "dotnet"
+    reason: >-
+      The legacy declares a specific build of one runtime and the target declares an ENTIRELY DIFFERENT
+      RUNTIME, so the two strings have no relation a comparison could evaluate and asserting equality
+      between them would fail permanently for a reason that is not a behaviour. But recording them is
+      genuinely useful: together they identify exactly which estate and which framework build a legacy
+      recording came from, which is the first thing anybody reading a pair months later needs and the
+      one piece of provenance that cannot be reconstructed afterwards. Masking without dropping keeps
+      the provenance and discards only the impossible assertion.
+
+  - seam: >-
+      The process exit code's numeric value, on the cases that terminate - the system-error case and,
+      depending on what the oracle does, the unpaired negative case.
+    method: >-
+      Record and compare THE FACT of termination and its stable classification - terminated, or
+      continued - and mask the platform-specific numeric code out of the comparison. The code is still
+      present in the recording behind a placeholder so a reviewer can see it was handled deliberately
+      rather than dropped.
+    appliesTo:
+      - "legacy"
+      - "dotnet"
+    reason: >-
+      The numeric code a terminating process yields is a property of the runtime and the host - a legacy
+      halt on Windows PowerBuilder and a .NET process termination in a Linux container have no reason to
+      produce the same integer, and neither value is chosen by the behaviour under test. THE TERMINATION
+      ITSELF IS BEHAVIOUR AND IS COMPARED WITHOUT EXCEPTION: it is what proves the fail-fast posture
+      survived, and a case that continued where the master terminated is a parity failure regardless of
+      every other field agreeing. Masking the code while comparing the fact keeps the assertion that
+      matters and drops the one that cannot hold.
+
+# ---------------------------------------------------------------------------------------------
+# PROVES DEFECTS - the behaviours this pair exists to prove SURVIVED.
+#
+# A capture showing corrected behaviour is a parity FAILURE, not an improvement. Each entry names
+# what the legacy does including the part that looks wrong, and each note names what a well-meaning
+# correction would break.
+#
+# TWO NOTES BELOW CARRY MATERIAL A READER WOULD NOT THINK TO LOOK FOR UNDER A DEFECT, so they are
+# signposted here: the THIRD entry's note records that no authoritative legacy build definition
+# exists to translate, and the SIXTH entry's note records the asymmetry with the second application
+# object. Both are provenance for the composition root rather than defects of their own, and the
+# note member is the only place in this schema they can live.
+# ---------------------------------------------------------------------------------------------
+provesDefects:
+  - defect: >-
+      THE LOCALE IS HARDCODED IN THE OPEN EVENT. The startup sequence assigns a literal locale string
+      to a local variable and then selects a localization provider from it. Nothing reads a
+      configuration file, an environment variable, a command-line argument or the host's own locale;
+      the value is written into the source and there is no route by which a deployment could change
+      it. Every process built from this application object therefore starts in the same language,
+      whatever the machine it runs on is set to.
+    locator: "ws_objects/pfw.pbl.src/pfw.sra:L94"
+    note: >-
+      THE DEFECT IS THE HARDCODING, NOT THE VALUE, and the distinction decides how it is reproduced.
+      The value is a BEHAVIOUR: the process observably starts in that language, that provider is
+      observably installed, and its translation table - including the mistranslations it carries - is
+      observably the active one. The un-configurability is a STRUCTURAL PROPERTY: it is a fact about
+      how the source is written rather than something the running system does. So the treatment
+      preserves the first and does not re-create the second - THE LITERAL IS PRESERVED AS THE DEFAULT
+      VALUE AND MADE OVERRIDABLE THROUGH CONFIGURATION.
+
+
+      BOTH HALVES OF THE CAPTURE ARE THEREFORE REQUIRED, and recording only the first would leave the
+      treatment unverified rather than verified. Case D1 records that with NO configuration present
+      the locale resolves to the same literal, which is what proves the observable default survived.
+      Case D2 records that an EXPLICIT configuration value changes it, which is what proves the
+      default is a default rather than a second hardcoding. A pair that captured only D1 would be
+      satisfied by an implementation that hardcoded the literal all over again, and a pair that
+      captured only D2 would be satisfied by one whose default was something else entirely.
+
+
+      CASE D2 IS DELIBERATELY ASYMMETRIC BETWEEN THE TWO SIDES AND THE RECORDING SAYS SO. The legacy
+      has no configuration surface at all, so its D2 half records the structural absence of one and
+      the locale staying at the literal; the target's half records the override taking effect. D1 is
+      the comparable half of the pair. A reviewer must not read D2's asymmetry as a mismatch, which is
+      why the corresponding observed output carries an explicit per-side classification of the
+      configuration surface rather than just a value.
+
+
+      WHAT A CORRECTION WOULD BREAK: replacing the default with the host's locale, with a
+      culture-aware default, or with a configuration value that has no default at all. Each of those
+      changes WHICH OF THE THREE PROVIDERS IS INSTALLED on a machine set to anything else, and
+      therefore which translation table is active - so the correction would silently propagate into
+      every localized string the process ever emits, including the two mistranslations the store
+      requires be reproduced. It would also make the three-arm selection's no-arm outcome reachable in
+      normal operation, which is the second entry below.
+
+  - defect: >-
+      THE THREE-ARM LOCALE SELECTION HAS NO FALLBACK ARM. The selector tests the locale string against
+      exactly three values and there is no default arm of any kind. A locale outside those three
+      therefore matches nothing, the provider variable is never assigned, and the install call on the
+      next line receives an unassigned object - and the failure is silent at every step: the install
+      rejects the argument with a numeric error code, the call site discards that code, and every
+      later translation returns its input text unchanged. Nothing throws, nothing is logged, and no
+      string is marked as untranslated.
+    locator: "ws_objects/pfw.pbl.src/pfw.sra:L95-L102"
+    note: >-
+      THE OUTCOME IS THREE STACKED SILENCES, AND ALL THREE ARE PROVEN FROM SOURCE RATHER THAN INFERRED.
+      FIRST, the install overload at ws_objects/pfw.ui.pbl.src/i18n.srf:L12-L15 validates its argument
+      before doing anything and returns a numeric error code WITHOUT installing when the argument is
+      not a valid object, so the active provider is left exactly as it was. SECOND,
+      ws_objects/pfw.pbl.src/pfw.sra:L103 invokes that install as a bare statement, so THE ERROR CODE
+      IS DISCARDED - not assigned, not tested, not logged. THIRD, the translate overloads at
+      ws_objects/pfw.ui.pbl.src/i18n.srf:L17-L23 are each guarded on a valid provider and return their
+      input text unchanged when the guard fails, which is the silent-passthrough fallback
+      characterization/README.md section 5.3 requires be reproduced. Each link is recorded as its own
+      output, because a comparison of only the final text would pass an implementation that threw,
+      logged or flagged the string at either of the earlier two links.
+
+
+      THE SAME DISCARD HAPPENS ONE LINE EARLIER, AND IT IS WORTH SEEING THE PAIR TOGETHER. The
+      initialize call at ws_objects/pfw.pbl.src/pfw.sra:L91 also returns a numeric code, per
+      ws_objects/pfw.base.pbl.src/pfwinitialize.srf:L7-L8, and is also invoked as a bare statement. So
+      a five-step startup sequence discards the return code of BOTH of the two steps that can fail,
+      and neither failure is detectable from inside the sequence. That is why the capture records each
+      returned code alongside a boolean for whether the call site consumed it: the codes are the only
+      evidence, and on the legacy side nothing consumes them.
+
+
+      WHAT A CORRECTION WOULD BREAK: adding a default arm, falling back to one of the three providers,
+      throwing on an unrecognised locale, logging the rejected install, or consuming either discarded
+      return code. Every one of those makes the target MORE ROBUST THAN THE ORACLE, which in this store
+      is a bug report rather than an improvement. No fallback arm is added on either side, and the
+      no-arm outcome is captured as a first-class case precisely so that its silence is pinned rather
+      than quietly designed out.
+
+  - defect: >-
+      THE ALL-CAPABILITIES COMPOSITE DELIBERATELY OMITS ONE OF THE EIGHT BITS. The constant that reads
+      as "enable everything" is declared as the sum of only SEVEN of the eight capability
+      identifiers. The omission is intentional rather than an editing slip: the omitted bit and one of
+      the included bits select ALTERNATIVE BUILDS OF A SINGLE EMBEDDED ENGINE, so enabling both at once
+      would be meaningless. A reader who assumes the composite means all eight will mis-read every
+      capability capture in this workflow.
+    locator: "ws_objects/pfw.shared.pbl.src/enums.sru:L41-L49"
+    note: >-
+      THE EIGHT BITS, WITH THEIR IDENTIFIERS AND VALUES EXACTLY AS DECLARED, so that the composite's
+      membership and its arithmetic are both checkable without opening the source:
+      `INIT_FLAG_ENABLE_UI` = "1", `INIT_FLAG_ENABLE_SCITER` = "2", `INIT_FLAG_ENABLE_BLINK` = "4",
+      `INIT_FLAG_ENABLE_BLINKFAST` = "8", `INIT_FLAG_ENABLE_ORCA` = "256",
+      `INIT_FLAG_ENABLE_SQLITE` = "512", `INIT_FLAG_ENABLE_DPIAWARE` = "1024" and
+      `INIT_FLAG_ENABLE_WEBVIEW` = "2048". THE OMITTED BIT IS `INIT_FLAG_ENABLE_BLINKFAST`, and the
+      bit it is an alternative build of is `INIT_FLAG_ENABLE_BLINK`. The composite therefore resolves
+      to "3847" where all eight would give "3855", so THE OMISSION IS AUDITABLE TWO WAYS - by the
+      absent identifier and by an arithmetic difference of exactly "8". Note also that the values are
+      not contiguous: the four bit positions between "8" and "256" are unallocated, so a target that
+      renumbered the set densely would change every composite value in the system.
+
+
+      WHERE EACH BIT'S CAPABILITY GOES IS NOT RESTATED HERE. docs/DEFERRED.md section 9 is the
+      authority for the per-bit destinations, and two of its findings matter to reading this workflow:
+      `INIT_FLAG_ENABLE_SQLITE` is the ONLY bit with an in-scope consumer in this phase, which is why
+      case C2 drives it alone; and one of the eight is legacy packaging tooling that is PERMANENTLY out
+      of scope rather than deferred, so the seven bits without an in-scope consumer are not a single
+      homogeneous group. This definition names each bit by its own identifier and makes no claim about
+      which destination any of them lands in.
+
+
+      WHAT A CORRECTION WOULD BREAK: "completing" the composite by adding the omitted bit. It would
+      change the flag value the initialize call receives on every startup, would ask the framework to
+      load two alternative builds of one engine simultaneously, and would show up in a recording as a
+      changed integer that looks like a tidy-up rather than the behavioural change it is.
+
+
+      NO AUTHORITATIVE LEGACY BUILD DEFINITION EXISTS TO TRANSLATE, AND THAT MATTERS TO A COMPOSITION
+      ROOT. Two project objects sit beside the application object -
+      ws_objects/pfw.pbl.src/project.srj and ws_objects/pfw.pbl.src/p_pfw.srj - and they contradict
+      each other: the first declares twenty-nine library entries and the second twenty-eight, and they
+      name DIFFERENT VENDORS in their company field. Worse, BOTH reference a library that does not
+      exist anywhere in this repository - ws_objects/pfw.pbl.src/project.srj:L41 and
+      ws_objects/pfw.pbl.src/p_pfw.srj:L40 each name pfw.utility.imgcodec.pbl, for which a full-depth
+      search finds no export, no compiled library and no reference of any other kind. NEITHER WOULD
+      BUILD AS WRITTEN, so neither can adjudicate which libraries a process actually loads. They are
+      reference for build INTENT only. The consequence for
+      this workflow is precise and is the reason the point is recorded here rather than left implicit:
+      THE INITIALIZATION ORDER AND THE MODULE SET CAPTURED IN THIS PAIR ARE DERIVED FROM THE
+      APPLICATION OBJECT'S OWN SOURCE, NOT FROM A BUILD MANIFEST - the five ordered steps come from
+      ws_objects/pfw.pbl.src/pfw.sra:L88-L106 and the capability set from the flag argument at :L91,
+      and nothing in either project object was used to establish either.
+
+  - defect: >-
+      THE APPLICATION OBJECT DISABLES ITS OWN THEMING OUTRIGHT. The theming property is not left empty
+      and not pointed at a theme; it is set to a literal whose whole content is an instruction not to
+      use themes. So the framework ships a theming mechanism and its own application object opts out
+      of it before any event runs.
+    locator: "ws_objects/pfw.pbl.src/pfw.sra:L25"
+    note: >-
+      THIS IS A COMPOSITION-ROOT FACT RATHER THAN A COSMETIC ONE, which is why it is captured at all:
+      it is a declared property read before the open event, so it is an INPUT to the lifecycle in the
+      same sense the capability flag is. It is also INDEPENDENT EVIDENCE THAT NO DESIGN SYSTEM IS IN
+      PLAY in this estate - the application that would consume a theme declines to - which is one of
+      the reasons no presentation surface is created in this phase and no design-system alignment is
+      attempted.
+
+
+      THE ADJACENT SETTING IS WORTH SEEING ALONGSIDE IT. The preceding line carries a theme SEARCH PATH
+      that is an absolute path on a developer's own workstation, naming a specific vendor installation
+      directory. It is inert precisely BECAUSE theming is disabled, and it is recorded as part of the
+      static configuration facts rather than singled out, because a target that "fixed" the path would
+      be repairing a setting that has no observable effect while leaving the setting that does have one
+      untouched.
+
+
+      WHAT A CORRECTION WOULD BREAK: enabling theming, emptying the property, or projecting the literal
+      onto a boolean. The last is the subtle one and the most likely: the value is a SPECIFIC STRING,
+      and mapping it to a false-valued flag would lose the difference between theming being disabled in
+      this particular declared way and theming simply being absent - a difference that is visible in
+      the oracle and would stop being visible in the candidate.
+
+  - defect: >-
+      THE SYSTEM-ERROR HANDLER'S PARTIAL-UNPACK PATH SILENTLY DISCARDS FIELDS THREE THROUGH SEVEN. The
+      handler populates the error number and the error text whenever the split count is TWO OR MORE,
+      and populates the window-or-menu name, the object name, the object-event name, the line number
+      and the stack trace ONLY when the count is EXACTLY SEVEN. For a count of three, four, five or
+      six the first branch runs and the second does not, so every field from three onward is read by
+      nothing at all: no error is raised, nothing is logged, and no output records that data was
+      dropped. The loss is directly visible in the assembled report, because the object name then
+      retains whatever the runtime left on the error record - the assertion marker itself - so the
+      report's object line renders that literal marker instead of a real object name.
+    locator: "ws_objects/pfw.pbl.src/pfw.sra:L110-L144"
+    note: >-
+      THE PRODUCING SIDE IS OWNED BY A SIBLING AND IS NOT DUPLICATED HERE.
+      shared-diagnostics-assert-payload characterizes how the payload is composed, how its field count
+      comes to be what it is, and the two concrete counts inside the three-to-six range that are
+      reachable from source. THIS WORKFLOW CAPTURES THE CONSUMING AND TERMINATING HALF: the count the
+      split observed, which branch it opened, which error-record fields were populated from which
+      payload field, which fields were read by nothing, and what the assembled report consequently
+      rendered. The two definitions are deliberately not merged - each pair stays independently
+      comparable under its own identifier - and neither restates the other's cases.
+
+
+      ONE MECHANISM OF THE CONSUMING SIDE BELONGS TO THIS FILE THOUGH, BECAUSE IT LIVES IN THIS
+      FIXTURE: the split helper is defined on the application object itself at
+      ws_objects/pfw.pbl.src/pfw.sra:L48-L69, and at :L64-L66 it DROPS A TRAILING EMPTY SEGMENT. A
+      genuine seven-field payload whose seventh field is empty therefore ends with the separator and
+      splits into six, so the consumer discards fields three through six that the producer had
+      correctly populated. The equality test also fails open in the OTHER direction: a count above
+      seven leaves the second branch unrun just as a count of six does, because the test is exact
+      equality rather than a minimum.
+
+
+      WHAT A CORRECTION WOULD BREAK: making the second branch unpack whatever fields are present -
+      partially, defensively, or by treating seven as a minimum rather than an exact count. That
+      produces a report MORE COMPLETE THAN THE ORACLE'S, and here a better-looking result is a bug
+      report. The defect is reproduced and annotated at its point of reproduction, never repaired.
+
+  - defect: >-
+      TERMINATION IS THE CONTRACT, NOT A FAILURE OF ROBUSTNESS. After assembling and displaying the
+      report the handler halts the process: unconditionally, with no recovery path, no retry, no
+      continuation and no downgrade to a warning. The assembly, the display and the halt all sit
+      OUTSIDE the marker-gated block, so they run for EVERY system error that reaches this handler,
+      whether or not the payload was recognised - the marker gate governs only whether the payload is
+      unpacked, never whether the process dies.
+    locator: "ws_objects/pfw.pbl.src/pfw.sra:L143"
+    note: >-
+      THE FAIL-FAST POSTURE MUST SURVIVE AS FAIL-FAST. The target equivalent is fail-fast startup
+      validation and process termination on a structural fault - NEVER GRACEFUL DEGRADATION. Softening
+      the halt into a logged warning, a caught-and-continued path, a health probe that reports unready
+      while the process keeps running, or a retry is a BEHAVIOURAL CHANGE DRESSED AS ROBUSTNESS, and it
+      is the single most likely way this workflow's parity is lost, because every reviewer instinct
+      favours the softer option in a service that is expected to stay up. The process-outcome output is
+      compared without exception: a case recorded as continuing where the master terminated is a parity
+      failure even when every other field matches.
+
+
+      THE SAME POSTURE IS OWNED FROM TWO OTHER DIRECTIONS AND THE THREE MUST NOT DRIFT APART.
+      shared-diagnostics-assert-payload characterizes this same handler from the producing side, where
+      the uncaught path likewise terminates and the caught path deliberately does not.
+      persistence-thread-task-lifecycle characterizes a worker session whose CREATION FAILURE IS
+      LIKEWISE FATAL rather than degraded. A change that softens any one of the three should be
+      recognisable as a change to all three.
+
+
+      AN ASYMMETRY WITH THE SECOND APPLICATION OBJECT, RECORDED SO THAT NOBODY ASSUMES THE TWO
+      LIFECYCLES MATCH. This repository carries a second-generation application object at
+      ws_objects/pfwx.pbl.src/pfwx.sra, and its lifecycle is NOT a copy of this one. Its open event at
+      :L48-L50 opens a window and does nothing else - THERE IS NO FRAMEWORK-INITIALIZATION CALL IN IT
+      AT ALL - while its close event at :L52 does call its own finalize. So it is unpaired in the
+      OPPOSITE DIRECTION from case B-NEG: finalize without initialize, rather than initialize without
+      finalize. That object is reference-only, belongs to a capability area with no candidate in this
+      phase, and IS NOT CHARACTERIZED by this workflow or any other - docs/DEFERRED.md carries its
+      assignment. The asymmetry is recorded here and nowhere else because a reader who has just read
+      the pairing invariant would otherwise reasonably assume every application object in the estate
+      observes it, and one of the two does not.
+
+# ---------------------------------------------------------------------------------------------
+# TWO OPTIONAL MEMBERS ARE DELIBERATELY UNUSED. Each decision carries its reason, because an
+# unexplained omission is indistinguishable from an oversight and the next reader would add it back.
+#
+# `deferredCapabilities` IS NOT USED, AND SPECIFICALLY IS NOT USED FOR THE CAPABILITY BITS WITHOUT AN
+# IN-SCOPE CONSUMER. That member records the half of an IN-SCOPE capability that does not ship, so
+# that a genuine gap in something this workflow delivers stays enumerable. The seven bits other than
+# the storage bit are not a deferred half of this workflow's capability: this workflow's capability is
+# THE GATE, it delivers the gate in full, and it records every one of the eight bits and each bit's
+# reachability answer. The capabilities BEHIND those bits are simply out of scope - a different thing
+# from a deferred half, and recording them here would blur a member whose precision is the point.
+# The same applies to the demo selector's six target windows. docs/DEFERRED.md is the authority for
+# where each of those capabilities eventually lands, and this definition makes no claim about it.
+#
+# `blockedBehaviours` IS NOT USED EITHER, because nothing this pair is meant to prove is unprovable.
+# The three candidates were considered and each resolves elsewhere. The internal effect of the native
+# initialize call cannot be observed from this repository - but the workflow never claims to observe
+# it, capturing the returned code and the gate's reported state instead. A capability's own behaviour
+# is not proven - but it is out of scope rather than blocked, per the note above. And the locale
+# override has no legacy counterpart - but that is a recorded per-side asymmetry of a target-side
+# treatment, not a legacy behaviour the pair failed to pin. The one genuine environment dependency,
+# the native libraries a capability bit needs before initialization can succeed at all, is a capture
+# PRECONDITION and is declared as one above.
+# ---------------------------------------------------------------------------------------------
+
+# The rule applies. Its canonical text is characterization/README.md section 2.1 and is cited from
+# the top-level description and the capture-phase preconditions rather than reproduced here - the
+# same text is owned word for word by docs/PARITY.md section 4.2 and orchestration/README.md
+# section 7.2, and a fourth copy would be a fourth thing to drift. No exemption is claimed: this
+# workflow reads and writes no persistent state, but the exemption is narrow and claiming it would
+# add nothing, so the volume state is left undisturbed across both halves of the pair exactly as it
+# would be for a workflow that did touch storage.
+sharedVolume:
+  applies: true
+
+# No paired capture has been taken, on either side, and nothing above may be read as reporting a
+# parity outcome. The legacy half needs a PowerBuilder toolchain that is not present. For the target
+# half the position needs stating precisely, because this workflow's whole subject is process startup
+# and shutdown: THE COMPOSE BRING-UP HAS BEEN EXERCISED, so the target lifecycle has been OBSERVED -
+# all four services started, reached healthy in the documented order and answered their gates - BUT
+# IT WAS NOT RECORDED. Observed and compared are different things, and only the first happened.
+# orchestration/README.md section 10 is the only place in this repository that reports execution
+# status and is the authority for exactly what that run showed; characterization/README.md section 7
+# states the store-wide capture position.
+executionStatus: "specified-not-executed"
+
+relatedWorkflows:
+  # Owns the PRODUCING side of the diagnostic payload this workflow's system-error case consumes, and
+  # characterizes the same handler from the other end - including the caught path, which never
+  # reaches this handler and therefore never terminates. That definition already cross-references
+  # this one; the pair of cross-references is what keeps the two halves from drifting apart.
+  - "shared-diagnostics-assert-payload"
+  # The same fail-fast posture in the persistence layer, where worker-session creation failure is
+  # likewise fatal rather than degraded. Cited from the sixth provesDefects entry for that reason: a
+  # change that softens the posture in one place should be recognisable as a change to both.
+  - "persistence-thread-task-lifecycle"

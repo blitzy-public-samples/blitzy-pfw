@@ -1,0 +1,587 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/blitzy-public-samples/blitzy-pfw/characterization/workflows/workflow.schema.json",
+  "title": "PowerFramework characterization workflow definition",
+  "description": "The machine-checkable shape of one workflow definition in characterization/workflows/. A definition declares everything one paired golden-master capture needs: the read-only legacy fixtures it is taken from, the seed phase that establishes the starting state once, the capture phase that is then taken twice, the determinism mask applied identically to both halves, and the legacy defects the pair exists to prove survived. The mask is an inline member rather than a pointer to one, so that it is versioned alongside the workflow it applies to: a mask that drifts away from its workflow silently invalidates every pair captured under it. This schema encodes shape, not policy - characterization/README.md owns the store-wide conventions, including the capture rule's canonical text, the recording-file conventions, the determinism-seam register, the defect roster and what must never enter a recording, and none of that is restated here. One rule does bear repeating because it governs every member below: definitions carry locators, never values. No property in this schema accepts key material, a certificate, a password, a token or a connection secret, and the transaction descriptor's password field is write-only - never echoed in a response, never logged, and therefore never recorded.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "workflowId",
+    "title",
+    "capabilityArea",
+    "targetService",
+    "oracleFixtures",
+    "seedPhase",
+    "capturePhase",
+    "determinismMask",
+    "provesDefects",
+    "sharedVolume",
+    "executionStatus"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "1",
+      "description": "Version of the definition format this document is written against. Exactly \"1\" while this schema is at version 1. A change to the declaration set that an existing definition would not satisfy bumps this constant and the definitions together in one reviewed change, so a definition written against an older shape fails loudly rather than validating by accident."
+    },
+    "workflowId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+      "description": "The pairing key, and the only thing that makes two recordings comparable: the same identifier names characterization/recordings/legacy/<workflowId>/ and characterization/recordings/dotnet/<workflowId>/. Lower-case alphanumeric segments separated by single hyphens, beginning with a letter. Derive it from the capability area and the legacy oracle window that produces the recording, rendering that window name's underscores as hyphens, so the identifier stays traceable to its oracle while conforming to this grammar - an invented identifier is arbitrary, a window-derived one is checkable. The identifier is stable: once a recording exists under it, it is never renamed, because a rename orphans both halves of every pair already captured under the old name and nothing reports that it happened."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short human-readable name for the workflow, used in review and in report output. One line; narrative belongs in description."
+    },
+    "capabilityArea": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The capability under characterization - for example the retrieval, validation and update triple, the DataWindow event chain, the column-expression expansion engine, the paging rewriters, or the cryptographic surface. Deliberately free text rather than an enum: the capability vocabulary belongs to docs/PARITY.md, and a closed copy of it here would go stale without anybody noticing."
+    },
+    "targetService": {
+      "type": "string",
+      "enum": [
+        "Gateway",
+        "DataServices",
+        "Persistence",
+        "Security",
+        "Shared.Kernel",
+        "Shared.Diagnostics",
+        "Shared.Eventful",
+        "Shared.Localization",
+        "Shared.Containers"
+      ],
+      "description": "The in-scope service or shared library that produces the candidate half of the pair. The enum is CLOSED and its membership is the point: the four deferred capability areas receive no code, no test, no container and no partial implementation in this phase, so they have no candidate, and a pair needs a candidate as well as a master. Their names are absent here, which makes a workflow that targets one structurally unrepresentable - a validation error rather than a review comment. A permissive string type would forfeit that guarantee silently, which is why one is not used."
+    },
+    "description": {
+      "type": "string",
+      "description": "Optional prose: what the workflow exercises, why it was chosen, and anything a reviewer needs that the structured members below do not carry."
+    },
+    "oracleFixtures": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The legacy objects this workflow is captured from, at least one - a capture with no oracle has nothing to characterize. The legacy tree is read-only and is the behavioural oracle: a fixture is cited by repository locator and is never edited, moved, renamed, reformatted, re-encoded or copied into this tree. This schema accordingly has no member that can hold fixture content, and that omission is deliberate - a vendored copy is a second master, and a second master can drift from the oracle without anybody noticing.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "role"
+        ],
+        "description": "One cited fixture: where it is, what part it plays in this workflow, and optionally which of its lines are being relied on.",
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^(?![.~])(?!\\.{1,2}(?:/|$))[^/\\\\:\\s]+(?:/(?!\\.{1,2}(?:/|$))[^/\\\\:\\s]+)*$",
+            "description": "Repository-root-relative path to the fixture, forward slashes only - for example ws_objects/pfw.tests.pbl.src/dw_sqlite.srd. THE PATTERN IS A CONTAINMENT CONTROL, NOT A TIDINESS RULE, AND IT REJECTS EVERY FORM THAT COULD NAME A FILE OUTSIDE THE CHECKOUT: a POSIX-absolute path, a UNC path, any leading dot including a ./ prefix, any .. segment anywhere, a backslash, whitespace, a leading ~ that a shell would expand to a home directory, and ANY COLON - which is what rules out the Windows drive-absolute and drive-relative forms C:/Windows/System32/..., c:..., and the NTFS alternate-data-stream syntax file.srd:stream. A pattern that rejects the POSIX forms while accepting the drive-absolute one is the easy half-measure, and it reads as protection while providing none on the platform the oracle actually runs on. A colon has no legitimate use in any path in this repository, so the exclusion costs nothing; non-ASCII characters ARE legitimate and are accepted, because one cited specification is docs/PB\u591a\u7ebf\u7a0b\u7ed5\u5751\u63d0\u793a.md. THE CONSUMER STILL OWES TWO STEPS, BECAUSE A PATTERN CANNOT SEE THE FILESYSTEM: resolve this value against the repository root, CANONICALIZE the result - following symbolic links, since a link inside the checkout can point anywhere - and then VERIFY the canonical path is still beneath the canonical repository root, refusing it with a named error when it is not. Neither step is optional, and no consumer may substitute a string check on this value for them."
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "primary-fixture",
+              "oracle-window",
+              "service-object",
+              "supporting-fixture",
+              "specification"
+            ],
+            "description": "What the fixture contributes: primary-fixture for the DataWindow definition the workflow is built around, oracle-window for the legacy window that drives it, service-object for the legacy class whose behaviour is being characterized, supporting-fixture for a further definition the workflow also reads, and specification for a prose document read as the authoritative statement of intended behaviour."
+          },
+          "locators": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "description": "Line citations into that fixture, so a reviewer can check a claim instead of taking it on trust. Omit the member entirely when the whole file is relied on, or when the citation is a section of a prose specification rather than a line range.",
+            "items": {
+              "type": "string",
+              "pattern": "^L[0-9]+(-L[0-9]+)?$",
+              "description": "A single line as L450, or an inclusive range as L463-L469."
+            }
+          }
+        }
+      }
+    },
+    "seedPhase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "steps",
+        "runsOncePerPair",
+        "neverBetweenCaptures"
+      ],
+      "description": "Everything that establishes the starting state, declared separately from the capture phase because the legacy fixture's own setup is destructive - it deletes the database file before opening it and then recreates the schema. Running that a second time to start clean is exactly the reseed the capture rule forbids between the two halves of a pair, and it is the likeliest way a well-meaning engineer voids a comparison. The seed is therefore declared here and runs once; the capture phase is what runs twice.",
+      "properties": {
+        "steps": {
+          "type": "array",
+          "description": "The ordered seeding actions - the file delete, the schema creation, any row seeding. May be empty for a workflow that needs no starting state, in which case emptyReason becomes required: every definition accounts for its seed phase, including the definitions that have nothing to seed.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action"
+            ],
+            "description": "One seeding action, described in enough detail to be repeated identically by somebody who did not write it.",
+            "properties": {
+              "action": {
+                "type": "string",
+                "minLength": 1,
+                "description": "What the step does, imperatively and unambiguously - for example \"create the COMPANY table if it does not already exist\"."
+              },
+              "locator": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Where the legacy fixture performs the equivalent step, as path:line - for example ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469. Omit it for a step with no legacy counterpart, such as target-side schema provisioning."
+              }
+            }
+          }
+        },
+        "runsOncePerPair": {
+          "type": "boolean",
+          "const": true,
+          "description": "Always true. The seed runs once, before the pair begins. The constant is the mechanism rather than a formality: a seed that ran per capture would be a reseed, and a reseeded starting state makes the two recordings answer two different questions, so a definition is not permitted to declare one."
+        },
+        "neverBetweenCaptures": {
+          "type": "boolean",
+          "const": true,
+          "description": "Always true. Nothing in the seed phase runs between the legacy-side capture and the target-side capture. Like runsOncePerPair, this exists to be asserted rather than configured, so that the one arrangement which voids a pair cannot be written down in the document that defines the pair."
+        },
+        "emptyReason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Why this workflow needs no seeding. Required when steps is empty, so that an unseeded workflow is an explicit statement rather than an oversight. The clearest case is a pure string transform: the paging rewriters take a statement plus a page size and index and return statement text, reading and writing nothing."
+        },
+        "connectionUri": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "template"
+          ],
+          "description": "The connection grammar the legacy fixture documents in its own comments, recorded for a workflow that opens storage. Grammar only. The assembled URI is itself a credential wherever it carries a password, so it is never logged, never returned in an error payload and never captured into a recording - which is why no member here can hold a secret value and passwordSupported records only that the parameter position exists.",
+          "properties": {
+            "template": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The URI form the workflow opens, with nothing sensitive substituted into it - for example test.db?mode=rwc."
+            },
+            "modeOptions": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "description": "The access modes the grammar admits. The fixture opens rwc, read-write-create.",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "ro",
+                  "rw",
+                  "rwc",
+                  "memory"
+                ],
+                "description": "One access mode."
+              }
+            },
+            "checkOptions": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "description": "The integrity-check extension the fixture documents in its own comments: the bare form performs the full check, the quick form the quick variant.",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "check",
+                  "check=quick"
+                ],
+                "description": "One integrity-check form."
+              }
+            },
+            "journalOptions": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "description": "The journal modes the extension admits, exactly the six the fixture documents.",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "DELETE",
+                  "TRUNCATE",
+                  "PERSIST",
+                  "MEMORY",
+                  "WAL",
+                  "OFF"
+                ],
+                "description": "One journal mode."
+              }
+            },
+            "defaultJournal": {
+              "type": "string",
+              "enum": [
+                "DELETE",
+                "TRUNCATE",
+                "PERSIST",
+                "MEMORY",
+                "WAL",
+                "OFF"
+              ],
+              "description": "The journal mode that applies when the extension is omitted from the URI. The fixture documents DELETE as that default; record the mode this workflow actually relies on, because the mode is observable."
+            },
+            "passwordSupported": {
+              "type": "boolean",
+              "description": "Whether the grammar admits a password parameter in that position. A boolean and nothing else: this schema records that the parameter exists, never its value, and the repository carries no value for it."
+            }
+          }
+        }
+      },
+      "if": {
+        "required": [
+          "steps"
+        ],
+        "properties": {
+          "steps": {
+            "maxItems": 0
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "emptyReason"
+        ]
+      }
+    },
+    "capturePhase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "behaviourUnderTest",
+        "observedOutputs"
+      ],
+      "description": "The behaviour under characterization, and nothing else. This phase runs twice - once on the legacy side and once on the target side - both against the state the seed phase already established.",
+      "properties": {
+        "behaviourUnderTest": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The single behaviour this capture exercises, stated precisely enough that a reader can tell whether a given recorded output belongs to it or to some neighbouring behaviour."
+        },
+        "observedOutputs": {
+          "type": "array",
+          "minItems": 1,
+          "description": "What the capture records, at least one - a capture that records nothing cannot be compared, and an empty comparison must never be reported as a pass.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "description"
+            ],
+            "description": "One recorded output. Characterization compares observable outputs: returned values and numeric return codes, generated statement text, buffer contents including original values, item statuses, event sequences and their ordering, structured error payloads field by field, identity values and their array positions, and expression results. It never compares execution time. No timing value may be recorded as an assertion, and no latency, duration, throughput or availability target exists anywhere in this repository to assert one against - a timing assertion in a characterization suite is a defect in the suite, because it fails for reasons unrelated to behaviour and trains readers to ignore red results. Where the oracle emits a timing field of its own, record it with maskedAsNonBehavioural set to true so that it is present in the recording and explicitly excluded from the comparison, rather than quietly dropped.",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The output as the recording names it - stable, because a renamed field is a field that stops matching its counterpart on the other side."
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1,
+                "description": "What the value is and what a difference in it would mean. This is what turns a diff into a finding a reviewer can act on."
+              },
+              "format": {
+                "type": "string",
+                "minLength": 1,
+                "description": "How the value is projected into the recording - the numeric return code rather than a boolean projection of it, canonical JSON, a field-by-field dump, a stable serialization order. Where an output is genuinely binary, record the stable textual projection here, because a binary capture cannot be reviewed: a reviewer sees that two files differ and never what differed."
+              },
+              "maskedAsNonBehavioural": {
+                "type": "boolean",
+                "description": "True when the field is recorded but deliberately excluded from the comparison because it carries no behaviour. The canonical case is the oracle's own CPU-derived elapsed-time field, which differs on every run and asserts nothing. Absent means false: masking is the exception, since every masked field is a field in which a regression can hide."
+              },
+              "locator": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Where the legacy produces this output, as path:line, so the recorded field is traceable to the code that emits it."
+              }
+            }
+          }
+        },
+        "redaction": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Fields this capture records with their value withheld, declared rather than assumed so that a reviewer can see a sensitive field was handled deliberately. The governing generalisation: any field whose value is a credential, key material, or a statement carrying interpolated literals is write-only inbound and redacted outbound, and is therefore never recorded as it stands. docs/SECRETS.md is the authority for which treatment a specific field takes.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "field",
+              "treatment"
+            ],
+            "description": "One withheld field and the treatment applied to it.",
+            "properties": {
+              "field": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The field as the recording names it - for example the database error payload's statement field, which the legacy fills with the complete generated statement including interpolated literal values and which the legacy logger does not redact at all."
+              },
+              "treatment": {
+                "type": "string",
+                "enum": [
+                  "redacted",
+                  "omitted"
+                ],
+                "description": "redacted records the field with every literal value replaced by a placeholder, so the statement's SHAPE stays byte-comparable while no value is written; omitted records nothing for the field at all. Which one a given field takes is a contract decision rather than a schema one - this member records the decision, it does not make it. A THIRD TREATMENT WAS WITHDRAWN AND MUST NOT BE REINTRODUCED: split-statement-and-parameters recorded the statement text separately from the values it carried, which means it PERSISTED those values into a tracked, committed file, for a field the legacy fills with the complete generated statement including interpolated literals wherever the connection's bind-disabling flag is set. Its presence here was residue of wording that had already been withdrawn elsewhere. docs/SECRETS.md section 6.3 records the decision: of the two shapes AAP 0.6.3.8 permitted, the single redacted field is the one implemented and published, common.v1.proto declares string sqlsyntax = 3 and DbError has NO parameters member, and 'a parameter collection is itself the sensitive data - separating a literal from its statement moves the value, it does not protect it'. characterization/README.md section 6.2 states the same rule for recordings: one redacted string field and nothing beside it. So this member described a shape the published contract cannot produce, and the recording that used it disagreed both with its own README and with the only component that produces the value (Persistence Errors/SqlRedactor.cs, placeholder '<redacted>', idempotent). Nothing the parity comparison needs is lost by never writing the values, because the values were never part of the shape being compared."
+              }
+            }
+          }
+        },
+        "recordingArtifacts": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "The files this capture writes into its own recording directory on each side. Text-based and diffable only, so that a parity failure is legible in review rather than merely detectable. The filename pattern is an allow-list and it exists for one specific reason: the repository's root .gitignore carries *.log, *.zip, *.rar, *.bak, *.dmp and *.bat unanchored, so they match at every depth including inside this store, and its only negations are anchored elsewhere and rescue nothing here. A capture named that way is silently untracked - it exists on the machine that produced it, git status says nothing about it, and it is simply absent from review and from CI, so the comparison looks like it was taken and cannot be found by anybody else. The root .gitignore is not to be modified; the fix is to name the file correctly.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "filename"
+            ],
+            "description": "One recording file, named relative to the workflow's own recording directory on each side. One workflow's output stays in its own directory and is not shared between workflow identifiers.",
+            "properties": {
+              "filename": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.(json|jsonl|txt|csv|sql|md|yaml)$",
+                "description": "A file name, not a path: no directory separator is permitted, and the extension must be one of the seven diffable formats this store admits - .json, .jsonl, .txt, .csv, .sql, .md or .yaml. The six ignored extensions cannot be spelled here at all, which is the entire purpose of the pattern."
+              }
+            }
+          }
+        },
+        "preconditions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "What must already hold before the capture is taken, beyond the seed phase - the state of an event gate or capability flag, a service that must be reachable, a configuration value the behaviour depends on. Stated so that the second half of the pair is taken under the same conditions as the first, which is the whole basis of comparing them.",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "description": "One precondition, written as a condition a person can check before starting the capture."
+          }
+        }
+      }
+    },
+    "determinismMask": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The mask, inline. Every non-deterministic value that reaches a recorded output is declared here together with how it is neutralised and why. It is a member of the definition rather than a reference to one - there is deliberately no reference keyword, no external file, no path and no see-also member anywhere in this schema by which a definition could delegate its mask - because a mask that drifts away from its workflow silently invalidates every pair captured under it, and a mask applied to one side only is worse than no mask at all: it manufactures a passing comparison out of mismatched data. At least one entry, because line endings alone differ by platform on every multi-line recording: the master is produced on Windows by PowerBuilder and the candidate runs in a Linux container, and the repository's root .gitattributes declares only linguist-language mappings with no text or eol rule, so nothing normalises them on the way into version control.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "seam",
+          "method",
+          "appliesTo",
+          "reason"
+        ],
+        "description": "One masked seam: where variation enters, what is done about it, on which sides, and why.",
+        "properties": {
+          "seam": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Where variation enters. Deliberately not a closed list, because a workflow may find a seam specific to its own oracle that no catalogue anticipated. The known catalogue, offered as guidance rather than as a constraint: GUID generation, random string generation and random blob generation in the cryptographic surface, which are the primary non-determinism sources in the in-scope estate; the CPU-clock-based transaction-pool idle expiry, keyed on the two keep-alive settings, where whether a pooled transaction is reused or discarded is observable even though the elapsed time itself is never asserted; every clock read that reaches an output or a decision; modify-call ordering on the DataWindow modify path, where two orderings that reach the same state can emit different intermediate output; and newline normalization. docs/PARITY.md carries the authoritative register, with each seam's injection point and its own status."
+          },
+          "method": {
+            "type": "string",
+            "minLength": 1,
+            "description": "How the seam is neutralised: which dependency is injected and what deterministic double replaces it, or - where a value cannot be made reproducible without changing observable behaviour - how the field is masked out of the comparison instead. Prefer the seam to the mask. Masking removes a field from the comparison; seaming makes the field reproducible, and only the second leaves the comparison able to detect anything in that field."
+          },
+          "appliesTo": {
+            "type": "array",
+            "minItems": 2,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "legacy",
+                "dotnet"
+              ],
+              "description": "One side of the pair: legacy for the PowerBuilder master, dotnet for the target candidate."
+            },
+            "allOf": [
+              {
+                "contains": {
+                  "const": "legacy"
+                }
+              },
+              {
+                "contains": {
+                  "const": "dotnet"
+                }
+              }
+            ],
+            "description": "Both sides, always. The golden-master technique has exactly one hard prerequisite and it admits no workaround: every non-deterministic value is masked from the master and from the candidate. Masking only the candidate leaves the master holding a value that can never be matched; masking only the master inverts the same problem. Both members are therefore required by the schema rather than left to the author to remember, so that a one-sided mask cannot be written down in the first place."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Why this seam needs masking at all - what varies, and what it would do to the comparison if it were left alone. Required, because a bare list of masked values is folklore: the next reader cannot tell a necessary mask from a convenient one, and a convenient mask is where a regression hides."
+          }
+        }
+      }
+    },
+    "provesDefects": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The legacy behaviours this pair exists to prove survived, at least one: a workflow that proves nothing has no reason to exist, so an omitted or empty member is a validation failure rather than an incomplete document. The inversion this member encodes is counter-intuitive and load-bearing. A capture that shows corrected behaviour is a parity FAILURE, not an improvement - where the target produces output that looks more correct than the oracle, the finding is a divergence in the target and is filed as a defect. A legacy defect is reproduced and annotated at its point of reproduction, never repaired. docs/PARITY.md carries the authoritative catalogue of behaviour groups; this member records which of them the pair actually pins.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "defect",
+          "locator"
+        ],
+        "description": "One defect or quirk the pair demonstrates, with the legacy source that proves it is really there.",
+        "properties": {
+          "defect": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The behaviour in human-readable terms - what the legacy does, including the part that looks wrong, stated plainly enough that a reviewer can recognise it in a recording."
+          },
+          "locator": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Where the legacy source exhibits it, as path:line - for example ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L235-L237. Every behavioural claim is traceable to a legacy locator, because nothing else in the repository can adjudicate one."
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Anything a reviewer needs in order not to mistake the reproduction for an implementation error - most usefully, what a well-meaning correction would break. The inverted filter-buffer iteration is the standing example: it looks like a bug, it is not one, and correcting its direction produces wrong data that a row-count assertion still passes."
+          }
+        }
+      }
+    },
+    "blockedBehaviours": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Behaviours this workflow cannot prove, declared rather than approximated. Two are known. Pinyin first-letter matching cannot be proven bit-exact from the repository alone: its lookup table exists only inside a closed native binary, and the matching relation and the fuzzy-equivalence set are unspecified, so a substitute gets most characters right and a minority wrong and therefore returns subtly different result sets - a regression that looks like correct behaviour, passes review, and is found by a user rather than by a test. Cross-session foreign column-expression variables are the other: the legacy resolves them through a live in-process pointer to another DataWindow's expression service, which has no representation across a service boundary. A known gap is reportable; an approximation is an unknown one.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "behaviour",
+          "reason",
+          "disposition"
+        ],
+        "description": "One behaviour that is not proven, and what is done instead of guessing at it.",
+        "properties": {
+          "behaviour": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The behaviour that cannot be proven by this pair."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Why it cannot be proven - what evidence is missing, and where it would have to come from. Precision here is what keeps a blocked report from reading as an excuse."
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "blocked-report-not-approximate",
+              "narrowed-with-defined-error"
+            ],
+            "description": "blocked-report-not-approximate: the behaviour is reported BLOCKED and no substitute is shipped. narrowed-with-defined-error: the contract is deliberately narrower than the legacy and returns a defined error at the boundary rather than a value that might be wrong. Both are honest outcomes; approximating is not one of them."
+          }
+        }
+      }
+    },
+    "deferredCapabilities": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The halves of an in-scope capability that do not ship in this phase, recorded so that the gap is enumerable instead of silent - window positioning, DPI-to-pixel conversion, font measurement and actual rendering, for instance, where the headless model ships and the presentation does not. This member documents a gap and implements nothing. Naming a deferred capability area here is a note about the eventual system, and it never makes that area a legal targetService: the four names below are deliberately absent from that enum. Nothing exists behind these routes - no project, no container, no test, no partial implementation and no placeholder that throws.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "capability",
+          "deferredTo",
+          "reservedRoute"
+        ],
+        "description": "One deferred half of an in-scope capability, and where it will eventually live.",
+        "properties": {
+          "capability": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What this workflow does not cover, and what would be needed to cover it."
+          },
+          "deferredTo": {
+            "type": "string",
+            "enum": [
+              "DesignSystem",
+              "Documents",
+              "Integration",
+              "ScriptBridge"
+            ],
+            "description": "The deferred capability area that will eventually own it. A documentation string only - these four names appear here and nowhere else in this schema, so a definition can say where a gap will be filled without being able to claim that it has been."
+          },
+          "reservedRoute": {
+            "type": "string",
+            "enum": [
+              "/v1/design/**",
+              "/v1/documents/**",
+              "/v1/integration/**",
+              "/v1/scripting/**"
+            ],
+            "description": "The gateway route reserved for that capability area: /v1/design/** for DesignSystem, /v1/documents/** for Documents, /v1/integration/** for Integration and /v1/scripting/** for ScriptBridge. Each is a routing declaration answering 501 with a machine-readable body naming the deferred service - metadata about the shape of the eventual system, not a stub of it."
+          }
+        }
+      }
+    },
+    "sharedVolume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "applies"
+      ],
+      "description": "Whether the paired-capture shared-volume rule governs this workflow. characterization/README.md section 2 carries that rule's canonical text and is the authority for it; it is cited here rather than reproduced, because the same text is owned word for word by characterization/README.md, docs/PARITY.md and orchestration/README.md, and a fourth copy would be a fourth thing to drift - which is the failure this schema exists to prevent, not to commit.",
+      "properties": {
+        "applies": {
+          "type": "boolean",
+          "description": "True when the workflow touches persistent storage, which is the normal case. False only when the workflow reads and writes nothing at all, and then exemptionReason becomes required."
+        },
+        "exemptionReason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Why this workflow is exempt from the capture rule. Required whenever applies is false, so that an exemption is always stated in the definition rather than left implicit. The clearest case is a pure string transform: the paging behaviours need no instance of either dialect and mount no volume, so there is no volume state to keep still. The exemption is narrow and is not a loophole - it holds only while the workflow reads and writes nothing, and the moment one touches the persistence volume the rule applies to it in full."
+        }
+      },
+      "if": {
+        "required": [
+          "applies"
+        ],
+        "properties": {
+          "applies": {
+            "const": false
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "exemptionReason"
+        ]
+      }
+    },
+    "executionStatus": {
+      "type": "string",
+      "enum": [
+        "specified-not-executed"
+      ],
+      "description": "The honest state of this workflow, and the only legal value is specified-not-executed. No workflow in this store has been run and no paired capture has been taken on either side: the legacy half needs a PowerBuilder toolchain that is not present, and although the compose bring-up the capture rule is expressed against has itself been exercised - orchestration/README.md section 10 is the single execution-status statement for this repository - a bring-up produces no recording, so neither half of any pair exists. Nothing in this schema may imply a verified run, which is why the enum has exactly one member rather than a passed value waiting to be selected. Widening it is a deliberate act: a further value is added only in the same reviewed change that lands the recordings justifying it."
+    },
+    "relatedWorkflows": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "description": "Sibling workflow identifiers this definition relates to - one that seeds the same fixture, or one that characterizes the adjacent half of the same behaviour. A cross-reference only, so that related definitions need not duplicate each other: it never merges two workflows, and each pair stays independently comparable under its own identifier.",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+        "description": "The workflowId of a sibling definition, in the same grammar as workflowId."
+      }
+    }
+  }
+}

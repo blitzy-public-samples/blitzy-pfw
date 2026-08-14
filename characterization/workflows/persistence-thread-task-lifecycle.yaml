@@ -1,0 +1,1561 @@
+# yaml-language-server: $schema=./workflow.schema.json
+#
+# ==============================================================================
+# persistence-thread-task-lifecycle
+#
+# The golden-master workflow definition for the THREADING SUBSTRATE the SQL task
+# layer is built on: thread and task lifecycle, the ordering of the six lifecycle
+# callbacks, the veto convention carried by two of them, and the three primitives
+# that are deliberately NOT PORTED.
+#
+# ONE PRECISION ABOUT THOSE SIX, because a reader checking the declarations will
+# otherwise think this file has miscounted. FOUR of the six are declared with a long
+# return type [ws_objects/pfw.tests.pbl.src/w_test_thread.srw:L29, :L31, :L32, :L34]
+# and two carry no return type at all [:L30, :L33]. But only TWO of the four carry the
+# DOCUMENTED VETO CONVENTION - the thread-start handler and the task-start handler,
+# each of whose own trailing comment records that answering one prevents [:L54, :L71].
+# The other two typed handlers answer zero with no documented prevent meaning [:L66,
+# :L83]. "Return-valued" and "vetoing" are therefore not the same set here, and the
+# capture records them as two different things.
+#
+# WHY THIS WORKFLOW IS NOT NAMED AFTER THE TRANSACTION POOL, stated first because
+# the name is the one thing a reader meets before any evidence.
+# `ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans_pool.sru` is exercised by NO
+# test window anywhere in the repository - a search for `trans_pool` across both
+# fixture libraries returns nothing - so naming a workflow after the pool would
+# promise a capture that cannot be taken, and a promised capture that cannot be taken
+# is worse than an absent one because it reads as coverage. The pool's
+# processor-clock-based idle-expiry seam is therefore masked inside the sibling
+# `persistence-thread-sqlquery-chunked`, which is the workflow that actually sets the
+# transaction descriptor. The oracle HERE is the threading substrate in its own
+# right, and the identifier says so.
+#
+# THE KEY INSIGHT, because every member below is shaped by it. What this pair
+# characterizes is an ORDERED EVENT LOG, not a returned value. The oracle window
+# subscribes six callbacks onto two threads and two tasks and appends one labelled
+# line per callback to a single accumulating text control, so the whole observable
+# surface of the substrate is a sequence. That makes exactly one distinction
+# load-bearing, and it is asymmetric: the sequence WITHIN one thread and WITHIN one
+# task is behaviour and must match position by position, while the interleaving
+# BETWEEN independent threads is decided by the operating system's scheduler and is
+# not behaviour at all. Masking the wrong one of those two either hides a real
+# regression or manufactures a permanent false failure. The mask below draws that
+# boundary explicitly rather than leaving it to a reader's judgement.
+#
+# This is a declarative data file. It contains no code, no test and no executable
+# step. It SPECIFIES a paired capture that has NOT been run - see `executionStatus`
+# at the foot of the file, whose only legal value says so.
+#
+# Every legacy path below is cited, never touched. `ws_objects/**` is read-only and
+# is the behavioural oracle, and `docs/PB多线程绕坑提示.md` is a read-only legacy
+# specification: no fixture and no document is edited, moved, renamed, reformatted,
+# re-encoded or copied into this tree, and this file holds no fixture content for
+# exactly that reason - a vendored copy is a second master, and a second master
+# drifts from the oracle without anybody noticing.
+#
+# NO TIMING IS ASSERTED ANYWHERE IN THIS FILE, and this is THE workflow most likely
+# to tempt one. The fixture declares a platform sleep of its own
+# [ws_objects/pfw.tests.pbl.src/w_test_thread.srw:L45], the substrate reads a
+# processor clock inside its own wait loop
+# [ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L329], and the worker task's
+# body loops on a one-second wait
+# [ws_objects/pfw.tests.pbl.src/n_test_thread_task.sru:L36]. None of that is
+# recorded as an assertion. ORDERING IS BEHAVIOUR, TIMING IS NOT. No elapsed value,
+# no wait duration and no thread count per unit time is recorded or compared, and
+# the corollary is easy to miss: A COUNT THAT IS A FUNCTION OF ELAPSED TIME IS A
+# TIMING ASSERTION IN DISGUISE, which is why the iteration count has a seam of its
+# own in the mask instead of an assertion. The repository publishes no service-level
+# agreement, no latency budget, no throughput target and no availability commitment
+# to assert one against, and the only quantitative gate in the brief - 80%
+# per-service line coverage - is measured in CI from `coverage.cobertura.xml`, never
+# from this store.
+#
+# Conventions this store owns elsewhere are CITED here, never restated:
+#   - the shared-volume capture rule ....... characterization/README.md section 2.1
+#   - the volume name and its rename ....... characterization/README.md section 2.4
+#   - the one exemption, which is not this . characterization/README.md section 2.7
+#   - recording-file conventions ........... characterization/README.md section 3.4
+#   - the ignored-extension trap ........... characterization/README.md section 3.5
+#   - newline normalization ................ characterization/README.md section 3.7
+#   - a mask is not a substitute for a seam  characterization/README.md section 5.2
+#   - compared, and never compared ......... characterization/README.md section 5.4
+#   - no secret value ...................... characterization/README.md section 6.2
+#   - no performance measurement ........... characterization/README.md section 6.4
+#   - the determinism-seam register ........ docs/PARITY.md section 5.1
+#   - why the pool has no workflow of its own characterization/workflows/README.md
+#
+# There are NO user-specified rules: the project's rules document returns exactly
+# one line reporting that none were provided, and it was re-checked while this file
+# was written. No rule is invented in its place and nothing in this file exists
+# because of one. Enterprise-standard best practice applies instead, and the binding
+# constraints are the migration plan's own - C-B, C-C, C-D, C-E, C-F, C-K and C-L,
+# each honoured at the point it bites below.
+# ==============================================================================
+
+# Quoted: the schema fixes this as the STRING "1". Unquoted it would load as an
+# integer and fail validation against the constant.
+schemaVersion: "1"
+
+# The pairing key, and the only thing that makes two recordings comparable. It names
+# both characterization/recordings/legacy/persistence-thread-task-lifecycle/ and
+# characterization/recordings/dotnet/persistence-thread-task-lifecycle/, and it is
+# traceable to its oracle window `w_test_thread` with that name's underscores
+# rendered as hyphens, which is the derivation the schema prescribes. Never renamed
+# once a recording exists under it: a rename orphans both halves of every pair
+# already captured, and nothing reports that it happened.
+workflowId: persistence-thread-task-lifecycle
+
+title: Thread and task lifecycle event ordering across the caller-side and worker-side marshalling boundary
+
+capabilityArea: >-
+  Thread and task lifecycle ordering and the marshalling boundary - the six
+  lifecycle callbacks in their subscription order, the veto convention carried by the
+  two whose own comments document it, the exit code and last-error string each stop
+  callback carries, and the caller-side / worker-side boundary every one of them
+  crosses.
+
+# Closed enum. The threading substrate is assigned to Persistence because
+# Persistence is the asynchronous substrate's only in-scope consumer: the SQL task
+# layer is built on it, and no other in-scope service touches it. No deferred
+# capability area is named anywhere in this file, and the enum makes naming one as a
+# target structurally impossible rather than merely discouraged.
+targetService: Persistence
+
+description: >-
+  The golden master for the threading substrate that the SQL task layer sits on top
+  of. Its oracle creates two threading hosts in a loop, tags each, subscribes the
+  thread-level start and stop callbacks, requests a processor affinity, adds one
+  task by its CALLER-SIDE class name, tags the task, and subscribes four
+  task-level callbacks - start, stop, notify and a custom one delivering a random
+  value. Four buttons then drive the control surface: run, stop, suspend and resume,
+  with terminate driven from the window's close event. Every callback appends one
+  labelled line to a single accumulating text control, so the observable output of
+  the whole substrate is an ORDERED, APPEND-ONLY EVENT LOG rather than a returned
+  value - which is why this definition's mask is mostly about ordering and its
+  outputs are mostly sequences. This workflow is deliberately NOT named after the
+  transaction pool: the pool has no oracle window anywhere in the repository, so a
+  workflow named after it would promise a capture nobody can take, and its
+  processor-clock idle-expiry seam is masked inside the sibling
+  persistence-thread-sqlquery-chunked, which is the workflow that actually sets the
+  transaction descriptor. Three things make this pair worth its own identifier
+  rather than an appendix to that sibling. First, it is the only capture in the store
+  whose subject is the LIFECYCLE ITSELF - the sibling captures one SQL task's
+  crossings, this one captures the lifecycle those crossings sit inside. Second, it
+  is where the three deliberate non-ports are pinned as documented capability gaps
+  rather than silently dropped: the processor affinity request, thread suspend and
+  resume, and the message pump with the posted-continuation idiom it enables. Third,
+  it carries the two veto alphabets, which are genuinely different and are easy to
+  conflate: the caller-side subscription callbacks answer zero to continue and one to
+  prevent, while the worker-side task events answer the success code to continue and
+  anything else both to prevent AND to become the exit code. The seed phase is empty
+  and says why. Ordering is behaviour here; timing is not, and a count derived from
+  elapsed time is timing wearing an ordinal's clothes.
+
+# ------------------------------------------------------------------------------
+# oracleFixtures - what this workflow is captured FROM.
+#
+# All read-only (C-C). Cited by repository-root-relative path with line locators so
+# a reviewer can check every claim below instead of taking it on trust. The store's
+# own roster names `ws_objects/pfw.tests.pbl.src/w_test_thread.srw` as this
+# workflow's single oracle fixture; the two task objects are cited as supporting
+# fixtures because the proxy pair is only visible when BOTH halves are named, and the
+# three framework threading objects plus the legacy threading document are cited as
+# specification - the authoritative statement of the behaviour under
+# characterization.
+#
+# `docs/PB多线程绕坑提示.md` is written here EXACTLY as it appears on disk. It is a
+# read-only legacy specification: it is cited, never edited, and never transliterated
+# into an ASCII-safe stand-in, because a citation that does not resolve is not a
+# citation.
+# ------------------------------------------------------------------------------
+oracleFixtures:
+
+  - path: ws_objects/pfw.tests.pbl.src/w_test_thread.srw
+    role: oracle-window
+    # 247 lines. Drives the whole workflow. It creates TWO threading hosts with ONE
+    # task each, and the entire observable output is the text it accumulates into its
+    # multi-line edit control, one labelled line per callback.
+    locators:
+      - "L29"         # declares the thread-start callback, typed long - the veto channel
+      - "L30"         # declares the thread-stop callback: source, exit code, last error info
+      - "L31"         # declares the custom task-random callback: source, wparam, lparam
+      - "L32"         # declares the task-start callback, typed long - the second veto channel
+      - "L33"         # declares the task-stop callback: source, exit code, last error info
+      - "L34"         # declares the task-notify callback: source, wparam, lparam, sparam
+      - "L44"         # the tick-count prototype - a clock read, declared and unused by the handlers
+      - "L45"         # THE PLATFORM SLEEP prototype, aliased onto the system sleep
+      - "L49"         # the instance array of threading hosts the window holds
+      - "L52-L55"     # thread-start handler: appends the tag, then RETURNS ZERO
+      - "L54"         # its comment records the alphabet: ONE PREVENTS
+      - "L57-L59"     # thread-stop handler: appends the tag only - it prints neither argument
+      - "L61-L67"     # task-random handler: appends the tag and BOTH message parameters
+      - "L69-L72"     # task-start handler: appends the tag, then RETURNS ZERO
+      - "L71"         # its comment records the same alphabet: ONE PREVENTS
+      - "L74-L76"     # task-stop handler: appends the tag only - it prints neither argument
+      - "L78-L84"     # task-notify handler: appends the tag and all THREE message parameters
+      - "L107-L113"   # close: the teardown loop over every host
+      - "L110"        # TERMINATE, once per host
+      - "L111"        # the host is destroyed immediately after - its destructor terminates again
+      - "L115-L140"   # open: the whole setup sequence
+      - "L116"        # the caller-side task variable the add call fills by reference
+      - "L118"        # the loop bound - EXACTLY TWO hosts, which is why cross-thread order matters
+      - "L120"        # each host is created here
+      - "L122"        # the host tag: "THREAD ID " plus the one-based index
+      - "L124"        # subscribes the thread-start callback by event name
+      - "L125"        # subscribes the thread-stop callback by event name
+      - "L127"        # THE AFFINITY REQUEST - non-port 1, and it precedes the run for a reason
+      - "L129"        # the task is added BY CALLER-SIDE CLASS NAME, filled by reference
+      - "L131"        # the task tag: "TASK ID " plus the same one-based index
+      - "L133"        # subscribes the task-start callback
+      - "L134"        # subscribes the task-stop callback
+      - "L135"        # subscribes the task-notify callback
+      - "L136"        # comment: the next subscription is a CUSTOM task event, not a lifecycle one
+      - "L137"        # subscribes the task-random callback
+      - "L157-L162"   # the resume button's handler, over every host
+      - "L160"        # RESUME - non-port 2, second half
+      - "L179-L184"   # the suspend button's handler, over every host
+      - "L182"        # SUSPEND - non-port 2, first half
+      - "L186-L202"   # the multi-line edit control that IS the event log
+      - "L219-L224"   # the stop button's handler, over every host
+      - "L222"        # STOP, through the NO-ARGUMENT overload - which passes a null exit code
+      - "L241-L246"   # the start button's handler, over every host
+      - "L244"        # RUN
+
+  - path: ws_objects/pfw.tests.pbl.src/n_test_threading_task.sru
+    role: supporting-fixture
+    # 21 lines, and the shortest proof of the proxy pair in the repository: a
+    # CALLER-SIDE task subclass whose only override NAMES its worker-side counterpart
+    # class. The two halves are related by class name and resolved at run time, which
+    # is why the recording carries both names rather than one handle.
+    locators:
+      - "L3"          # derives from the caller-side task base
+      - "L7"          # the same derivation in the body
+      - "L9"          # a global auto-instance shadowing its own type name - a collision to resolve
+      - "L11"         # the class-name override returns the WORKER-SIDE class name
+
+  - path: ws_objects/pfw.tests.pbl.src/n_test_thread_task.sru
+    role: supporting-fixture
+    # 61 lines, the WORKER-SIDE half of that pair, and the object that actually
+    # produces the events the window records. Two of its overrides carry the
+    # worker-side veto alphabet, which is NOT the window's alphabet: a non-success
+    # return both prevents AND becomes the exit code.
+    locators:
+      - "L3"          # derives from the worker-side task base
+      - "L15"         # the task body opens; its comment calls itself the task's process
+      - "L16-L17"     # comment: it loops producing random values and exits when cancelled
+      - "L18"         # the loop counter - the ONLY state the notify payload is built from
+      - "L23-L24"     # the loop head and the counter increment
+      - "L27"         # comment: the next line triggers the common-notify reason and the notify event
+      - "L28"         # THE NOTIFY CROSSING, payload (counter, counter plus one, empty string)
+      - "L31"         # the random generator is RESEEDED FROM THE CLOCK on every iteration
+      - "L32"         # THE RANDOM CROSSING, payload (random of counter, random of counter plus one)
+      - "L34-L35"     # comment: the wait releases the processor and may collect temporaries
+      - "L36"         # the loop condition - a ONE-SECOND wait, which makes the count elapsed-derived
+      - "L38"         # the body answers the success code
+      - "L49-L52"     # prepare: a non-success return PREVENTS the task and BECOMES its exit code
+      - "L54-L57"     # thread-start: a non-success return PREVENTS the thread and BECOMES its exit code
+      - "L59-L60"     # thread-stop, a pure notification with no return
+
+  - path: ws_objects/pfw.thread.pbl.src/n_cst_threading.sru
+    role: specification
+    # 1084 lines, the threading substrate itself, and the authoritative statement of
+    # every contract this workflow captures: the two event contracts with their veto
+    # alphabet spelled out in the source, the whole control surface with its guards,
+    # and the fail-fast constructor.
+    locators:
+      - "L94-L97"     # the thread start event's contract: ZERO CONTINUES, ONE PREVENTS
+      - "L99-L104"    # the thread stop event's contract: source, exit code, last error info, no return
+      - "L161-L164"   # the three wait overloads
+      - "L170"        # the run prototype
+      - "L172-L173"   # the affinity prototypes - by mask, and by processor index
+      - "L177-L178"   # the suspend and resume prototypes
+      - "L182"        # the subscription entry point the oracle calls six times
+      - "L215"        # the task-adding overload the oracle calls, BY CALLER-SIDE CLASS NAME
+      - "L219-L222"   # the two stop overloads and the two terminate overloads
+      - "L320-L322"   # the cancellation predicate: the cancelled code, or a signalled wait handle
+      - "L324"        # the wait body opens by declaring its clock baseline
+      - "L329"        # A PROCESSOR CLOCK READ - the baseline
+      - "L334"        # the timeout comparison against that baseline - the second clock read
+      - "L339-L340"   # the yielding arm, falling back to the platform sleep
+      - "L343-L344"   # THE MESSAGE PUMP, falling back to the same sleep - non-port 3
+      - "L365"        # the common-notify trigger that precedes every specific one
+      - "L368"        # the dispatch gate: a zero or null result, and a still-valid host
+      - "L371-L373"   # the start reason triggers the start event ONLY when not cancelled
+      - "L375-L379"   # the stop reason SUBSTITUTES the cancelled code when cancelled
+      - "L461-L475"   # the run body
+      - "L463"        # run refuses with the busy code when already running
+      - "L467"        # the host's cancel handle is reset before dispatch
+      - "L469-L471"   # each task's cancel handle is reset in REVERSE index order
+      - "L473"        # THE POSTED DISPATCH - non-port 3, in the substrate itself
+      - "L488"        # affinity by index refuses with the BUSY code once running
+      - "L515"        # suspend refuses with the failure code when NOT running
+      - "L519"        # resume refuses with the failure code when NOT running
+      - "L532"        # subscription delegates to the event broker
+      - "L844-L871"   # the stop body
+      - "L846"        # stop answers the success code when not running - idempotent
+      - "L850-L855"   # it finds the FIRST RUNNING task index
+      - "L857-L861"   # and cancels only from that index ONWARD - not every task
+      - "L863"        # the host's cancel handle is signalled
+      - "L865-L866"   # STOP FORCE-RESUMES a suspended thread so it can observe the cancel
+      - "L868"        # the exit code is stored for the stop event to carry
+      - "L873-L878"   # the no-argument stop overload EXPLICITLY NULLS the exit code
+      - "L880-L884"   # terminate is stop plus wait, and answers success when not running
+      - "L886-L890"   # the no-argument terminate overload nulls the exit code the same way
+      - "L963-L1024"  # THE CONSTRUCTOR - the fail-fast site
+      - "L967"        # the creating notification, before anything can fail
+      - "L972"        # the vetoable creation hook
+      - "L975-L999"   # the registration and retrieval - SIX fatal exits inside this block
+      - "L996-L998"   # WORKER-SESSION CREATION FAILURE - its own arm, and it is fatal
+      - "L1001-L1004" # the final validity guard, also fatal
+      - "L1006-L1009" # the two wait handles and the broker are created only AFTER validation
+      - "L1017"       # the created notification, the last step of a successful construction
+      - "L1021-L1024" # THE FAIL-FAST TAIL: a stop-sign dialog, then HALT
+      - "L1027-L1034" # the destructor terminates again - which is why terminate must be idempotent
+
+  - path: ws_objects/pfw.thread.pbl.src/n_cst_threading_task.sru
+    role: specification
+    # 627 lines, the CALLER-SIDE task base that declares the event vocabulary the
+    # oracle subscribes its four task callbacks to. Cited for the task-level veto
+    # contract specifically: the start event's alphabet is documented here, not in
+    # the oracle window.
+    locators:
+      - "L80-L83"     # the task start event: ZERO CONTINUES, ONE PREVENTS
+      - "L85-L90"     # the task stop event: source, exit code, last error info, no return
+      - "L92-L95"     # the task notify event: source, then the message parameters
+
+  - path: ws_objects/pfw.thread.pbl.src/n_cst_thread_task.sru
+    role: specification
+    # 622 lines, the WORKER-SIDE task base, and the object that makes the proxy pair
+    # mechanical rather than conventional: it holds a typed handle on its caller-side
+    # half and reaches back ACROSS the boundary through it for the veto and for every
+    # notification. It is also where the reference-release step the legacy threading
+    # document requires is actually performed.
+    locators:
+      - "L22"         # declares the posted-notification event
+      - "L28"         # declares the uninitialization event - where references are released
+      - "L165"        # THE VETO IS EVALUATED BY CROSSING BACK into the caller-side half
+      - "L212-L213"   # THE POSTED CROSSING, suppressed once cancelled - non-port 3
+      - "L221-L230"   # uninitialization: every held reference is nulled
+      - "L224"        # the caller-side handle is nulled - the document's own mitigation
+      - "L225"        # the thread handle is nulled
+      - "L226"        # the broker handle is nulled
+      - "L230"        # each named datum's payload is nulled too
+      - "L248"        # the worker side's own start veto, tested with the prevented predicate
+
+  - path: docs/PB多线程绕坑提示.md
+    role: specification
+    # 5 lines, and the authoritative statement of the two cross-thread hazards that
+    # constrain how the task layer may be re-expressed. Read as specification, cited
+    # here, and never edited - it is part of the read-only legacy tree.
+    locators:
+      - "L1-L4"       # hazard 1: a synchronous worker-to-main call returning text or a blob
+      - "L5"          # hazard 2: the worker must NULL a main-thread reference on uninitialization
+
+# ------------------------------------------------------------------------------
+# seedPhase - everything that establishes the starting state. There is nothing.
+#
+# The schema requires the ACCOUNTING even when there is nothing to account for,
+# which is the right requirement: an unseeded workflow should be an explicit
+# statement rather than a member somebody forgot to fill in. `emptyReason` is
+# therefore mandatory here, and it is not a formality - it is the sentence that
+# distinguishes "this substrate holds no persistent state" from "the seed was
+# overlooked", and those two look identical in a diff.
+#
+# NOTE THE ASYMMETRY WITH `sharedVolume` BELOW, because it is the one thing about
+# this member that could be misread. An empty seed does NOT imply an exemption from
+# the capture rule. The two answer different questions: this member asks whether the
+# workflow ESTABLISHES state, and `sharedVolume` asks whether the workflow RUNS
+# INSIDE state that must be held still. This workflow establishes none and runs
+# inside the oracle application's, so the seed is empty and the rule still applies
+# in full.
+# ------------------------------------------------------------------------------
+seedPhase:
+
+  # Empty, and the reason is below rather than implied by the emptiness.
+  steps: []
+
+  emptyReason: >-
+    The threading substrate holds NO PERSISTENT STATE, so there is nothing to delete,
+    nothing to create and nothing to seed. The oracle window builds its entire
+    starting state inside its own open event - it creates two threading hosts, tags
+    them, subscribes six callbacks, requests a processor affinity and adds one task
+    per host [ws_objects/pfw.tests.pbl.src/w_test_thread.srw:L115-L137] - and it
+    destroys that state completely in its close event, terminating and then
+    destroying every host [:L107-L111]. Nothing survives the window. The fixture
+    opens no database, issues no statement, writes no file and reads no configuration
+    that this workflow supplies: its only outputs are in-memory callbacks and the
+    text control they append to. That setup is therefore declared as the CAPTURE
+    PHASE's setup rather than as a seed, deliberately and for the reason the schema
+    separates the two: a seed runs ONCE for a pair while a capture runs TWICE, and
+    the host creation must happen on both sides because it is part of the behaviour
+    being characterized - the fail-fast constructor is one of the things this pair
+    exists to pin [ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L963-L1024].
+    Declaring it as a seed would run it once and capture it never.
+
+  # Always true, both of them. Vacuously satisfied here - an empty seed cannot run
+  # twice, and it cannot run between the halves either - but asserted rather than
+  # skipped, because the schema pins both to a constant so that the one arrangement
+  # which voids a pair cannot be written down in the document defining the pair.
+  runsOncePerPair: true
+  neverBetweenCaptures: true
+
+  # `connectionUri` is deliberately ABSENT rather than present and empty. This
+  # workflow opens no storage of any kind, so there is no connection grammar to
+  # record; the member belongs to the workflows that open the SQLite binding, and
+  # inventing a template here would assert a connection this fixture never makes.
+
+# ------------------------------------------------------------------------------
+# capturePhase - the behaviour under characterization, and nothing else.
+# Runs TWICE, both times from the same starting state.
+#
+# THE DECISIVE CONSEQUENCE OF THIS ORACLE, stated once here and enforced by every
+# output below: the interesting behaviour is NOT "the threads ran". It is WHICH
+# callbacks arrived, IN WHAT ORDER WITHIN THEIR OWN THREAD OR TASK, with WHAT
+# arguments, from WHICH side of the marshalling boundary, and WHAT each
+# return-valued one answered. The oracle window holds only caller-side objects; the
+# worker half reaches back across the boundary for the veto
+# [ws_objects/pfw.thread.pbl.src/n_cst_thread_task.sru:L165] and POSTS its
+# notifications [:L213]. A recording that carried only "two threads started and
+# stopped" would compare cleanly while proving nothing about any of that.
+#
+# ORDERING IS BEHAVIOUR, TIMING IS NOT. This statement is repeated here, at the
+# member where the temptation actually bites, rather than left in the header:
+# the sequence within one thread and within one task is compared position by
+# position, the interleaving between independent threads is not compared at all, and
+# NO elapsed value, wait duration, iteration rate or thread-count-per-unit-time is
+# recorded as an assertion anywhere in this phase.
+# ------------------------------------------------------------------------------
+capturePhase:
+
+  behaviourUnderTest: >-
+    Create two threading hosts in a loop, tag each, subscribe the thread-level start
+    and stop callbacks, request a processor affinity BEFORE running, add one task per
+    host by its caller-side class name, tag the task, subscribe the four task-level
+    callbacks - start, stop, notify and the custom random one - then drive the control
+    surface and capture the ordered event log the callbacks accumulate until teardown
+    has completed. Specifically: the construction sequence including its fail-fast
+    tail, where a worker-session creation failure raises a stop-sign dialog and then
+    HALTS the process rather than degrading; the six subscriptions in registration
+    order; the affinity request's return code and the fact that it is refused with the
+    busy code once the host is running, which is why it precedes the run; the run
+    dispatch, which is POSTED rather than called and which resets the host's cancel
+    handle and then each task's in reverse index order; the ordered arrival of every
+    callback within its own thread and within its own task - a thread's start before
+    its task's start, and each task's start before its notifications and before its
+    stop; both veto channels at both of their values, where zero continues and one
+    prevents on the caller side, while on the worker side the success code continues
+    and any other value both prevents AND becomes the exit code; the notify payload,
+    built from the worker loop's counter and therefore monotonic and contiguous; the
+    random payload's arrival, which is behaviour, separately from its value, which is
+    not; suspend and resume, captured as their observable EFFECT on the event log
+    rather than as the primitives themselves, together with their refusal with the
+    failure code when the host is not running; stop, driven through the
+    no-argument overload that explicitly NULLS the exit code, including the two
+    behaviours a straightforward reading gets backwards - that it cancels tasks only
+    from the FIRST RUNNING index onward rather than all of them, and that it
+    FORCE-RESUMES a suspended thread so the cancel can be observed; the exit code and
+    last-error string each stop callback carries, recorded as the raw number with
+    null as null and with the cancelled substitution noted; terminate, which is stop
+    plus wait, answers the success code when not running, and is invoked twice per
+    host by the fixture - once from close and once again from the destructor; and the
+    reference-release step on uninitialization, where the worker nulls its caller-side
+    handle, its thread handle, its broker handle and each named datum. The capture
+    opens no storage, issues no statement and touches no credential.
+
+  observedOutputs:
+
+    - name: substrate.roster
+      description: >-
+        The hosts and tasks that exist after setup: the one-based creation index, the
+        host tag, the task tag, the CALLER-SIDE class name the host was asked for and
+        the WORKER-SIDE class name resolved from it. Both class names are recorded
+        because the pair is related by name at run time rather than by a single
+        handle, so a target that keeps only one of them has already lost half the
+        contract. The tags are recorded verbatim, including their spacing, because
+        every event record below is keyed by the tag and a tag that differs by a space
+        silently regroups the whole comparison.
+      format: >-
+        Canonical JSON, one object per host in creation order, each carrying its
+        index, its tag, its task's tag, the caller-side class name and the
+        worker-side class name
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_thread.srw:L118-L131"
+
+    - name: subscription.registrations
+      description: >-
+        The six subscriptions in REGISTRATION ORDER, each with the event name
+        subscribed, the callback object and the callback event name. Registration
+        order is recorded because the substrate delegates subscription to the event
+        broker, whose dispatch order derives from the subscription, so the order in
+        which the oracle registers is part of the input to the ordering this pair
+        compares. The fourth task subscription is distinguished from the first three:
+        the oracle's own comment marks it as a CUSTOM task event rather than a
+        lifecycle one, and it is triggered explicitly by the worker body instead of
+        being raised by the substrate.
+      format: >-
+        Canonical JSON, one object per subscription in registration order, with the
+        subscribed event name, the target object, the callback event name and whether
+        the event is a lifecycle event or a custom one
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_thread.srw:L124-L137"
+
+    - name: construction.sequenceAndFailFastArms
+      description: >-
+        The construction sequence in order - the creating notification, the vetoable
+        creation hook, the registration, the retrieval, the two wait handles, the
+        broker and its initialization, and the created notification - together with
+        the DISPOSITION of every failure arm. SEVEN exits end fatally - six inside the
+        registration-and-retrieval dispatch and one in the final validity guard that
+        follows it - and one of the six is worker-session creation failure
+        specifically. The recording carries which exit was taken, the composed
+        diagnostic's structure, and that the outcome was process TERMINATION rather
+        than a returned error, because "it degraded gracefully instead" is exactly the
+        divergence this output exists to catch. One detail is recorded per exit rather
+        than per error constant, and deliberately: THE SAME ERROR CONSTANT APPEARS
+        TWICE with two different diagnostics - once for a failed registration and once
+        for a failed retrieval - so a port that maps constants to messages one-to-one
+        loses a message. The diagnostic text is recorded as composed; no value is
+        substituted into it beyond the thread identifier the mask replaces with an
+        ordinal.
+      format: >-
+        Canonical JSON: the ordered successful step list, plus one object per failure
+        arm with the arm's name, whether it is fatal, and the structure of the
+        diagnostic it composes
+      locator: "ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L963-L1024"
+
+    - name: affinity.requestOutcome
+      description: >-
+        The processor affinity request and its return code, recorded because the
+        REQUEST is observable even though its effect is not. Two facts are pinned
+        here. The setter refuses with the BUSY code once the host is running, which
+        is precisely why the oracle issues it during setup and not after the run
+        button - so the ORDER of the request relative to the run is part of the
+        contract, not an incidental arrangement. And the request's own return code on
+        the success path is a value a caller can branch on. What is NOT recorded is
+        any scheduling consequence, because there is none to observe: see the
+        matching entry in provesDefects, where the non-port is justified.
+      format: >-
+        Canonical JSON: the requested processor index per host, the returned code, and
+        the returned code for the same call issued AFTER the run, recorded as a second
+        case
+      locator: "ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L488"
+
+    - name: callback.sequencePerTag
+      description: >-
+        THE PRIMARY OUTPUT OF THIS PAIR. The ordered sequence of callback arrivals
+        GROUPED BY OWNING TAG - one group per host tag and one per task tag - each
+        record carrying the callback name, the owning tag and every parameter value.
+        Within a group the sequence is compared POSITION BY POSITION and an
+        out-of-order arrival is a hard error: a thread's start precedes its task's
+        start, a task's start precedes its notifications, and every notification
+        precedes its stop. Across groups no order is asserted at all. The set of
+        groups is itself compared, so a missing thread or a missing task is a
+        divergence even though the interleaving between them is not.
+      format: >-
+        JSON Lines, one object per callback in arrival order within its group, with
+        the group key first so the file sorts stably by tag and then by position
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_thread.srw:L52-L84"
+
+    - name: callback.eventTranscript
+      description: >-
+        The accumulated append-only transcript exactly as the oracle assembles it -
+        one labelled line per callback, each prefixed with the label the handler uses
+        and carrying the owning tag, with the notify and random records additionally
+        carrying one line per message parameter. It is recorded IN ADDITION TO the
+        structured sequence above, not instead of it, and the reason is worth stating:
+        the transcript is what a reviewer actually reads, and the label text is itself
+        behaviour - a handler that renders "Task Notify:" where the oracle renders
+        "Task Start:" is a divergence that a structurally-keyed comparison could
+        normalise away. Newline normalization applies to this artifact and is declared
+        in the mask; nothing else about it is normalised, and it is never truncated.
+      format: >-
+        Plain text, newline-normalized at comparison time only, with the oracle's
+        labels and tag spelling preserved byte for byte and no line elided
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_thread.srw:L186-L202"
+
+    - name: veto.callerSideOutcomes
+      description: >-
+        What each caller-side callback answered, and what the substrate did as a
+        result. FOUR of the six callbacks are declared with a long return type but only
+        TWO carry the documented veto convention - the thread-start and task-start
+        handlers, whose own comments record that answering one prevents - so the
+        recording distinguishes a value that MEANS something from a value that is
+        merely returned. For the two vetoing handlers the alphabet is exactly two
+        values, zero continues and ONE PREVENTS, and both answer zero in the fixture.
+        THE CAPTURE RECORDS BOTH VALUES AS TWO DISTINCT CASES, because a prevented
+        thread produces no task start and no notification at all, and a recording that
+        only ever exercises the continue case cannot tell a working veto from a missing
+        one. The two non-vetoing typed handlers are recorded answering zero, so that a
+        port which invents a prevent meaning for them is caught. The worker side
+        evaluates a veto by CROSSING BACK into the caller-side half and applying the
+        prevented predicate, so which side the decision was made on is recorded too.
+      format: >-
+        Canonical JSON, one object per case: the callback, whether it is declared with
+        a return type, whether it carries a documented veto meaning, the integer
+        answered, whether the subject ran, and the side the predicate was applied on
+      locator: "ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L94-L97"
+
+    - name: veto.commonNotifyGate
+      description: >-
+        THE THIRD PREVENT CHANNEL, which is neither of the two alphabets above and is
+        the one a port is likeliest not to know exists. Before dispatching any specific
+        lifecycle event the substrate first triggers a COMMON NOTIFICATION carrying the
+        reason and the message parameters, and it dispatches the specific event ONLY IF
+        that common handler answered zero or null. A non-zero answer from the common
+        handler therefore suppresses the start, stop or error event entirely - no
+        callback arrives, and the event log simply has nothing where a record would
+        have been. Two further behaviours on the same path are recorded with it: the
+        specific handler's own answer OVERWRITES the notification's result when it is
+        not null, so the value a caller finally sees may come from either handler; and
+        the broker is put into SILENT mode for the whole dispatch and restored
+        afterwards, but restored only if the host is still valid - so a host destroyed
+        during dispatch leaves the broker silent.
+      format: >-
+        Canonical JSON, one object per case: the reason dispatched, the common
+        handler's answer, whether the specific event was dispatched, the specific
+        handler's answer, the final result the caller received, and the broker's silent
+        state before, during and after
+      locator: "ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L358-L395"
+
+    - name: veto.workerSideOutcomes
+      description: >-
+        The SECOND veto alphabet, which is not the first one and is the likelier of
+        the two to be conflated. The worker-side task overrides answer the SUCCESS
+        CODE to continue, and any other value BOTH prevents AND becomes the exit code
+        of the thing it prevented - so on this side the veto and the exit code are the
+        same value, whereas on the caller side they are unrelated. Two overrides carry
+        it: the prepare event, which gates the task body, and the worker's own
+        thread-start event, which gates the thread. Both are captured at the success
+        value and at a non-success value, and the recording carries the exit code that
+        the non-success value became, because that identity is the whole point.
+      format: >-
+        Canonical JSON, one object per override per case: the override, the code
+        answered, whether the subject ran, and the exit code subsequently observed
+      locator: "ws_objects/pfw.tests.pbl.src/n_test_thread_task.sru:L49-L57"
+
+    - name: stop.exitCodeAndLastError
+      description: >-
+        The exit code and last-error string delivered to each stop callback, thread
+        level and task level. THE CODE IS RECORDED AS THE RAW NUMBER AND NULL IS
+        RECORDED AS NULL, never coerced to zero and never projected to a boolean: the
+        return algebra is tri-state, so a prevention reads as a success while
+        cancelled and null are neither succeeded nor failed, and collapsing null to
+        zero converts "neither" into "succeeded". This matters concretely rather than
+        theoretically here, because the fixture's stop button calls the NO-ARGUMENT
+        overload, which explicitly nulls the exit code before passing it on. The
+        recording also carries WHICH ARM produced the code, since the cancelled path
+        SUBSTITUTES the cancelled constant for whatever was stored while the ordinary
+        path passes the stored value through unchanged.
+      format: >-
+        Canonical JSON, one object per stop arrival: the owning tag, the exit code as
+        a number with null as null, the last-error string, and the arm that produced it
+      locator: "ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L375-L379"
+
+    - name: control.returnCodes
+      description: >-
+        The return code from every control call, including the guard arms a happy-path
+        capture never reaches. Run refuses with the BUSY code when already running.
+        Affinity refuses with the BUSY code once running. Suspend and resume refuse
+        with the FAILURE code when NOT running - note the asymmetry with the previous
+        two, which refuse in the opposite state. Stop answers the SUCCESS code when
+        not running, and so does terminate, which is what makes the fixture's
+        double-terminate safe. Each of those is a distinct case and each is captured,
+        because the guards are the part of a control surface a port is likeliest to
+        omit and likeliest to get away with omitting.
+      format: >-
+        Canonical JSON, one object per call per state: the call, the host state it was
+        issued in, and the returned code by its legacy constant name and its value
+      locator: "ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L463"
+
+    - name: run.dispatchPreparation
+      description: >-
+        What the run path does BEFORE dispatching: it marks the host running, resets
+        the host's own cancel handle, and then resets each task's cancel handle in
+        REVERSE index order. The reverse order is recorded verbatim rather than
+        normalised to ascending, on the same principle as every other inverted
+        iteration in this migration - it looks incidental, and a port that ascends
+        instead produces a state that a task-count assertion still passes. The
+        dispatch itself is POSTED rather than called, which is recorded here and
+        pinned as a non-port below.
+      format: >-
+        Canonical JSON: the ordered preparation step list with the reset order's
+        direction stated explicitly, and the dispatch mode
+      locator: "ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L461-L475"
+
+    - name: stop.taskCancellationSpan
+      description: >-
+        WHICH tasks a stop cancels, which is not "all of them". The stop path scans
+        for the FIRST RUNNING task index and then cancels from that index ONWARD, so
+        a task sitting before the first running one in the roster is never cancelled
+        by that call. With one task per host the fixture cannot distinguish that from
+        cancelling everything, which is exactly why the span is recorded explicitly
+        and why the capture adds a multi-task case: the behaviour is invisible at the
+        fixture's own roster size and a port that cancels the whole roster passes
+        every single-task test.
+      format: >-
+        Canonical JSON: the roster with each task's running state at the moment of the
+        stop, the first-running index found, and the set of indices actually cancelled
+      locator: "ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L850-L861"
+
+    - name: stop.forcedResume
+      description: >-
+        That a stop FORCE-RESUMES a suspended host, looping until the suspension count
+        has fallen, so that a suspended thread can observe the cancellation it would
+        otherwise sleep through. This is the interaction between two of the three
+        non-ports and it is the one a re-expression is likeliest to break: if suspend
+        becomes a cooperative pause on a wait handle, then a cancel MUST release that
+        pause, or a suspended worker never observes the cancel and the stop never
+        completes. The recording carries the observable consequence - that a
+        suspend-then-stop sequence still reaches the stop callback - rather than the
+        suspension count itself.
+      format: >-
+        Canonical JSON: the ordered sequence for a suspend-then-stop case, naming the
+        callbacks reached after the stop and confirming the stop callback arrived
+      locator: "ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L865-L866"
+
+    - name: marshalling.sideOfEachStep
+      description: >-
+        Which side of the boundary executed each recorded step - the calling side or
+        the worker side. THIS IS THE OUTPUT THE PROXY PAIR LIVES IN. The legacy
+        encodes each half's required execution context in the objects themselves, the
+        caller-side task class names its worker-side counterpart rather than being it,
+        and the worker reaches back across the boundary for the veto and for every
+        notification. A recording that omits the side turns a contract into an
+        implementation detail, and a port that flattens the pair into a single
+        asynchronous method then passes.
+      format: >-
+        CSV with one line per recorded step: the step name, the object that ran it,
+        the side, and whether the step crossed the boundary synchronously or by
+        posting
+      locator: "ws_objects/pfw.thread.pbl.src/n_cst_thread_task.sru:L165"
+
+    - name: notify.payloadSequence
+      description: >-
+        The notify payload, which is DETERMINISTIC and therefore compared rather than
+        masked - the distinction from the random payload below is the whole reason
+        these are two outputs and not one. The worker builds it from its own loop
+        counter: the first parameter is the counter, the second is the counter plus
+        one, and the third is the empty string. The sequence is therefore monotonic
+        and contiguous from one, and THAT RELATION is what is compared - each record's
+        second parameter is its first plus one, and successive records advance by
+        exactly one with no gap. The NUMBER of records is a separate matter and is
+        seamed, for the reason the mask gives.
+      format: >-
+        JSON Lines, one object per notify arrival within its task group, carrying the
+        two numeric parameters and the string parameter verbatim
+      locator: "ws_objects/pfw.tests.pbl.src/n_test_thread_task.sru:L28"
+
+    - name: random.payloadArrival
+      description: >-
+        That the custom random callback ARRIVED, and where in its task's sequence -
+        which is behaviour, because the worker triggers it explicitly once per
+        iteration immediately after the notify, so notify-then-random is an ordering a
+        port can get wrong. The VALUES it carries are not behaviour: the callback
+        exists to deliver a random value and the worker reseeds the generator from the
+        clock on every iteration. The values are recorded under the mask's substituted
+        deterministic sequence rather than dropped, so that a divergence in how the
+        two parameters are DERIVED from the counter is still detectable.
+      format: >-
+        JSON Lines, one object per random arrival within its task group, carrying its
+        position relative to the preceding notify and the two parameters as produced
+        by the seamed generator
+      maskedAsNonBehavioural: true
+      locator: "ws_objects/pfw.tests.pbl.src/n_test_thread_task.sru:L31-L32"
+
+    - name: iteration.terminationBasis
+      description: >-
+        The SEAM'S CONFIGURATION, recorded so the pair is reproducible: the declared
+        signal that ends the worker loop, which is a recorded notify count rather than
+        an elapsed duration, and the identical value used on both sides. This is
+        compared, because a capture taken under a different termination basis is not
+        comparable with one taken under this basis, and a reader must be able to see
+        which basis a stored recording was taken under.
+      format: >-
+        Canonical JSON: the termination trigger's kind, its configured value, and a
+        statement that no duration was used to derive it
+      locator: "ws_objects/pfw.tests.pbl.src/n_test_thread_task.sru:L36"
+
+    - name: iteration.countAtCancellation
+      description: >-
+        How many loop iterations the worker completed before the cancellation was
+        observed. RECORDED BUT EXCLUDED FROM THE COMPARISON, and the reason is the
+        one this whole file is careful about: in the unseamed fixture the loop waits
+        one second per iteration, so this count is a function of how long a human
+        waited before clicking Stop - it is ELAPSED TIME WEARING AN ORDINAL'S CLOTHES,
+        and comparing it would be a timing assertion with an integer's face. It is
+        present rather than dropped so that a reviewer reading a recording can see how
+        far the loop got, which is genuinely useful context; it is masked so that no
+        comparison depends on it. What IS compared is the termination basis above and
+        the contiguity of the notify sequence.
+      format: The completed iteration count as an integer, per task
+      maskedAsNonBehavioural: true
+      locator: "ws_objects/pfw.tests.pbl.src/n_test_thread_task.sru:L23-L36"
+
+    - name: suspendResume.observableEffect
+      description: >-
+        The observable EFFECT of a suspend and a resume on the event log, never the
+        primitives themselves. A suspend is visible as the ABSENCE of further arrivals
+        for the affected group between the suspend and the resume, and a resume is
+        visible as their reappearance with the payload sequence CONTINUING from where
+        it left off rather than restarting - which is the property that distinguishes
+        a genuine pause from a stop-and-restart, and the property a cooperative-pause
+        re-expression must therefore preserve. Because "nothing arrived" is the
+        behaviour on the suspended span, the recording carries the span explicitly
+        rather than simply containing no records for it: a recording that merely omits
+        them cannot be distinguished from a capture that failed to collect them.
+      format: >-
+        JSON Lines: the ordered arrivals for the affected group with the suspended span
+        marked as an explicit empty span, and the payload value on either side of it
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_thread.srw:L182"
+
+    - name: messagePump.postedCrossings
+      description: >-
+        Every crossing the legacy makes by POSTING rather than by calling, and its
+        position relative to the synchronous crossings around it. There are two on
+        this path - the run dispatch, which the host posts to its worker, and the
+        worker's notification, which it posts back to its caller-side half and
+        suppresses entirely once cancelled - and both sit on top of a wait loop that
+        pumps messages and falls back to a platform sleep when there is nothing to
+        pump. The recording carries which crossings were posted and which were called,
+        because the difference is observable in the ORDER: a posted crossing may be
+        delivered after work that was issued later, and a re-expression that makes it
+        synchronous changes the sequence a reviewer compares.
+      format: >-
+        Canonical JSON, one object per crossing: the crossing, its mode (posted or
+        synchronous), the side it originated on, and its position in the owning
+        group's sequence
+      locator: "ws_objects/pfw.thread.pbl.src/n_cst_thread_task.sru:L212-L213"
+
+    - name: reference.releaseSteps
+      description: >-
+        The reference-release step as an OBSERVABLE LIFECYCLE EVENT, which is the
+        specific requirement the legacy threading document imposes. On
+        uninitialization the worker side nulls every reference it holds - its
+        caller-side handle, its thread handle, its broker handle, and the payload of
+        each named datum - and the document is explicit that a worker given a
+        main-thread or global object MUST null it there to release it. It is captured
+        as an event in the sequence rather than as a final state, because "the
+        reference was released, and released at that point in the teardown" is the
+        behaviour; a port that releases everything implicitly at collection time
+        produces the same final state and a different lifecycle.
+      format: >-
+        Canonical JSON, one object per released reference in release order: the
+        reference, the step it was released in, and the side that released it
+      locator: "ws_objects/pfw.thread.pbl.src/n_cst_thread_task.sru:L221-L230"
+
+    - name: teardown.terminateThenDestroy
+      description: >-
+        The teardown sequence and its DOUBLE TERMINATE. The oracle's close event
+        terminates each host and then destroys it immediately, and the host's own
+        destructor terminates again - so terminate runs twice per host in every single
+        run of this fixture, and it is only safe because terminate answers the success
+        code when the host is not running. That idempotence is therefore not a defensive
+        nicety to be tidied away; it is load-bearing, and this output is what proves it
+        survived. The recording carries both invocations, each one's return code, and
+        the ordered teardown notifications around them.
+      format: >-
+        Canonical JSON: the ordered teardown steps per host, with both terminate
+        invocations, their return codes, and the notifications that bracket them
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_thread.srw:L107-L111"
+
+    - name: thread.identityRelation
+      description: >-
+        WHICH arrivals share a thread, expressed as the stable creation-order ordinal
+        the mask assigns rather than as any runtime identifier. The RELATION is
+        behaviour - a callback that arrives on the wrong host's thread is a real
+        divergence - while the identifier that carries it is allocated by the runtime
+        and differs on every run. Recording the relation and masking the identifier is
+        what keeps the first detectable while the second cannot cause a false failure.
+        No raw identifier appears in any artifact.
+      format: >-
+        CSV: the creation-order ordinal against the owning tag, and one line per
+        arrival mapping it to its ordinal
+      locator: "ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L1012-L1015"
+
+  # ----------------------------------------------------------------------------
+  # redaction - sensitive fields, declared rather than assumed (C-F).
+  #
+  # THIS WORKFLOW CARRIES NO CREDENTIAL OF ANY KIND. It opens no storage, sets no
+  # transaction descriptor, reads no key material and issues no statement, so there is
+  # no value here to withhold: no key, no password, no certificate, no token and no
+  # connection string appears anywhere in this definition or in anything it specifies
+  # recording. That is a finding about this fixture rather than a general licence, and
+  # the single entry below exists precisely so the finding is AUDITABLE. An absent
+  # `redaction` member would say the same thing by saying nothing, and "nothing was
+  # sensitive here" and "nobody checked" look identical when both are silent.
+  # ----------------------------------------------------------------------------
+  redaction:
+
+    # REASON: NO TRANSACTION DESCRIPTOR FIELD IS RECORDED BY THIS WORKFLOW AT ALL -
+    # the fixture never sets one, and the descriptor belongs to the sibling
+    # persistence-thread-sqlquery-chunked, which does. The entry is declared anyway
+    # because the rule it encodes is unconditional: the descriptor's password field is
+    # WRITE-ONLY REGARDLESS of which workflow touches it - accepted inbound, never
+    # populated outbound, never echoed in a response, never logged and therefore never
+    # recorded. OMITTED rather than redacted, because a redaction placeholder would
+    # still assert that a value was present and roughly how long it was, which is more
+    # than this store may say about a credential. Anyone extending this capture toward
+    # a pooled transaction inherits the declaration rather than having to rediscover
+    # it.
+    #
+    # ON THE SPELLING, because it will trip a naive search of this file: the field name
+    # is the legacy structure's own, preserved verbatim as every legacy identifier in
+    # this migration is, and it happens to contain the four characters of the ignored
+    # log extension as a substring. It is a FIELD NAME, not a filename, and no
+    # recording artifact is named from it - see the artifact list below, none of whose
+    # entries contains that token in any form. The authority on whether a name is
+    # ignored is the ignore check itself rather than a substring search, and every
+    # declared artifact passes it on both sides.
+    - field: transactionDescriptor.logpass
+      treatment: omitted
+
+    # REASON: the SAME descriptor's user-name field, and it was the one exclusion this
+    # store asserted without declaring. Both recordings READMEs already rule it
+    # "equally sensitive and equally excluded from every recording", yet no workflow
+    # named it - so the exclusion rested on prose while the schema exists precisely so
+    # that a withheld field is declared rather than assumed. Declared here to close
+    # that gap.
+    #
+    # WHY OMITTED RATHER THAN REDACTED, which is not the same answer as for a statement:
+    # a user name is a credential half in its entirety, not a shape with values inside
+    # it, so there is nothing to preserve by masking. A placeholder would still assert
+    # that an account was configured and how long its name was, which is why the
+    # password field beside it takes the same treatment for the same reason.
+    - field: transactionDescriptor.logid
+      treatment: omitted
+
+  # ----------------------------------------------------------------------------
+  # recordingArtifacts - what each side writes into its own recording directory.
+  #
+  # THIS IS THE SINGLE MOST IMPORTANT PRACTICAL TRAP IN THIS FILE, and it is acute
+  # here rather than theoretical, because this workflow's observable output IS an
+  # accumulated event log and the obvious name for an event log is the one name that
+  # cannot be used. The repository's root .gitignore carries `*.log` UNANCHORED -
+  # alongside the five archive and script patterns - so it matches at every depth,
+  # INCLUDING inside this store, and its only negations are anchored elsewhere and
+  # rescue nothing here. A capture named that way is SILENTLY UNTRACKED: it exists on
+  # the machine that produced it, git status says nothing about it, and it is simply
+  # absent from review and from CI - so the comparison looks like it was taken and
+  # cannot be found by anybody else. The root .gitignore is NOT to be modified to
+  # accommodate a name; the name is correct instead. Every filename below therefore
+  # takes one of the seven diffable extensions this store admits, and none of them
+  # uses the word the trap is named after - the transcript is a `.txt`, and the two
+  # sequences are `.jsonl`.
+  #
+  # The schema's filename pattern makes the six ignored extensions literally
+  # unspellable in this member, which is a good guard and not a sufficient one: it
+  # cannot stop a capture being written under a bad name on disk, only being declared
+  # under one here.
+  # ----------------------------------------------------------------------------
+  recordingArtifacts:
+    - filename: substrate-roster.json
+    - filename: subscription-registrations.json
+    - filename: construction-sequence.json
+    - filename: affinity-request-outcome.json
+    - filename: callback-sequence-per-tag.jsonl
+    - filename: callback-event-transcript.txt
+    - filename: veto-caller-side-outcomes.json
+    - filename: veto-worker-side-outcomes.json
+    - filename: veto-common-notify-gate.json
+    - filename: stop-exit-codes.json
+    - filename: control-return-codes.json
+    - filename: run-dispatch-preparation.json
+    - filename: stop-cancellation-span.json
+    - filename: stop-forced-resume.json
+    - filename: marshalling-sides.csv
+    - filename: notify-payload-sequence.jsonl
+    - filename: random-payload-arrivals.jsonl
+    - filename: iteration-termination-basis.json
+    - filename: suspend-resume-effect.jsonl
+    - filename: posted-crossings.json
+    - filename: reference-release-steps.json
+    - filename: teardown-sequence.json
+    - filename: thread-ordinal-map.csv
+
+  # ----------------------------------------------------------------------------
+  # preconditions - what must already hold before the capture is taken, so that the
+  # second half of the pair is taken under the same conditions as the first. Every
+  # seam this workflow declares has to be CONFIGURED before a capture starts, not
+  # after, which is why several of these restate a mask entry as a checkable
+  # condition.
+  # ----------------------------------------------------------------------------
+  preconditions:
+
+    - >-
+      The volume state is identical for both halves of the pair and the volume is
+      neither recreated nor reseeded between them. The shared-volume capture rule in
+      characterization/README.md section 2.1 carries the canonical text and is the
+      authority for it; it is cited here rather than reproduced, because that text is
+      owned word for word by three upstream files and a fourth copy would be a fourth
+      thing to drift.
+
+    - >-
+      Exactly TWO threading hosts exist with exactly ONE task each, and both host tags
+      and both task tags are spelled exactly as the oracle spells them, including
+      their internal spacing. Every grouped comparison in this capture is keyed by the
+      tag, so a tag that differs by one character silently regroups the entire event
+      log and the comparison then passes on mismatched data.
+
+    - >-
+      The processor affinity request is issued BEFORE the run, because the setter
+      refuses with the busy code once the host is running. A capture that issues it
+      after the run records a refusal rather than a request and is not comparable with
+      one that does not.
+
+    - >-
+      The random generator is seamed identically on both sides and its deterministic
+      substitute is configured before the first iteration, not after. The worker
+      reseeds from the clock on EVERY iteration, so a seam installed one iteration
+      late leaves the first record unseamed on one side only.
+
+    - >-
+      The clock is seamed identically on both sides for the whole capture, including
+      the platform sleep the fixture declares and the processor clock the substrate's
+      own wait loop reads.
+
+    - >-
+      The worker loop is terminated by the DECLARED SIGNAL recorded in
+      iteration.terminationBasis - a recorded notify count - and by nothing else. No
+      capture on either side is ended by waiting a duration and then intervening,
+      because the two halves of a pair are taken at different times by construction
+      and a duration-triggered cancellation therefore produces two different
+      iteration counts for a reason unrelated to the code under test.
+
+    - >-
+      The event transcript is captured IN FULL and is never truncated, elided or
+      windowed. The oracle's control scrolls as it accumulates, and a capture that
+      records only what was on screen drops records that the comparison would
+      otherwise have caught - silently, and in a way that looks like the run simply
+      produced fewer events.
+
+    - >-
+      The multi-task case required by stop.taskCancellationSpan is configured
+      identically on both sides. At the fixture's own roster size of one task per host
+      the cancellation span is indistinguishable from cancelling everything, so a pair
+      taken only at that size cannot prove the behaviour it claims to.
+
+    - >-
+      Both halves are captured with the same capability configuration, and no
+      capability belonging to a deferred area is enabled on either side.
+
+# ------------------------------------------------------------------------------
+# determinismMask - INLINE, and inline on purpose.
+#
+# The mask is a member of this definition rather than a pointer to one, and the
+# schema provides no keyword by which it could delegate: a mask that drifts away from
+# its workflow silently invalidates every pair captured under it, and a mask applied
+# to one side only is worse than no mask at all, because it manufactures a passing
+# comparison out of mismatched data. Every entry therefore applies to BOTH sides, and
+# every entry carries the reason it is needed - a bare list of masked values is
+# folklore, and the next reader cannot tell a necessary mask from a convenient one.
+#
+# PREFER THE SEAM TO THE MASK. Masking removes a field from the comparison; seaming
+# makes the field reproducible, and only the second leaves the comparison able to
+# detect anything in that field. Four of the six entries below are seams; the first is
+# a comparison rule rather than either, and the last is a seam whose purpose is to
+# stop a count from becoming a timing assertion.
+# ------------------------------------------------------------------------------
+determinismMask:
+
+  - seam: >-
+      CROSS-THREAD ARRIVAL ORDER - the interleaving of one host's callbacks with the
+      other's, and of one task's notifications with the other task's, in the single
+      accumulating event log the oracle appends every record to. Two hosts run
+      concurrently and both append to the same control, so the log's raw global order
+      is whatever the operating system's scheduler produced on that run.
+    method: >-
+      GROUP the event log by owning tag - one group per host tag and one per task tag -
+      and compare each group's INTERNAL sequence position by position, then compare the
+      SET of groups. Never compare the raw global arrival order across independent
+      threads. Within a group an out-of-order arrival is a hard error and is never
+      reordered to make a comparison pass; across groups no order is asserted at all. A
+      missing or extra group IS a divergence, so nothing is lost by grouping. Applied
+      identically on both sides, so neither is compared on a stricter footing.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      THIS IS THE MOST IMPORTANT ENTRY IN THIS FILE AND ITS ASYMMETRY IS THE WHOLE
+      POINT. WITHIN-THREAD AND WITHIN-TASK ORDERING IS BEHAVIOUR and must match
+      exactly: a host's start precedes its task's start, a task's start precedes its
+      notifications, each notification precedes its own random trigger because the
+      worker issues them in that order in one loop body, and every arrival precedes
+      that subject's stop. Those relations are decided by the code under test, so a
+      reordering inside a group is a genuine regression. CROSS-THREAD INTERLEAVING IS
+      NOT BEHAVIOUR: it is scheduler-dependent, it differs between two runs on the
+      SAME side and the same machine - let alone between Windows PowerBuilder and a
+      Linux container - and asserting it would fail for reasons unrelated to the code
+      under test, which trains a reviewer to ignore red results. Masking the wrong one
+      of these two is the failure to guard against, and it fails in both directions:
+      mask the within-group order and a real reordering regression hides; assert the
+      cross-group order and the pair produces a permanent false failure that nobody
+      will keep looking at. The boundary is written down here rather than left to a
+      reader's judgement for exactly that reason.
+
+  - seam: >-
+      THE RANDOM CALLBACK'S PAYLOAD - the two parameters the worker's custom random
+      trigger carries, produced by the platform random function after the generator has
+      been RESEEDED FROM THE CLOCK at the top of every single loop iteration.
+    method: >-
+      Inject the random source as a dependency and substitute one fixed deterministic
+      sequence on both sides for the whole capture, including the reseed, so the same
+      iteration index yields the same pair of values on both halves. SEAMED RATHER
+      THAN MASKED OUT, deliberately: the two parameters are DERIVED from the loop
+      counter - the first from the counter and the second from the counter plus one -
+      and seaming keeps that derivation in the comparison, so a port that swaps them,
+      drops the increment or reuses one value for both is still caught. Masking the
+      field out entirely would have surrendered that.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      The callback exists in order to deliver a random value, so its payload is
+      non-deterministic BY CONSTRUCTION and no amount of care makes two runs agree on
+      it. The reseed makes it worse than ordinarily random: it is reseeded from the
+      clock on every iteration, so the values are clock-derived as well as random, and
+      an unseamed comparison would report a difference on every record of every run.
+      The ARRIVAL of the callback and its position relative to the preceding notify are
+      behaviour and stay in the comparison; only the values needed neutralising.
+
+  - seam: >-
+      MANAGED THREAD IDENTITY AND EVERY THREAD IDENTIFIER - the runtime-allocated
+      identifier the substrate obtains for the current thread, the identifier it opens
+      a handle against when the two differ, the generated session identifier it embeds
+      in each diagnostic, and any identifier a target-side equivalent exposes.
+    method: >-
+      Replace every identifier with a STABLE ORDINAL assigned in CREATION ORDER - the
+      first host created is ordinal one, the second is two - and record the mapping as
+      its own artifact so a reviewer can follow it. Every artifact carries the ordinal
+      and no artifact carries a raw identifier, on either side. The IDENTITY RELATION
+      is preserved by the ordinal: which arrivals share a thread is still compared,
+      because that is what the ordinal encodes.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      Identifiers are allocated by the runtime and differ on every run, so comparing
+      them reports a difference on every record while proving nothing. What the pair
+      actually needs from an identifier is the RELATION it carries - which callbacks
+      belong to the same thread - and an ordinal carries that relation exactly while
+      being reproducible. The generated session identifier matters here specifically
+      because it is interpolated into the construction diagnostics this capture
+      records, so a diagnostic left unmasked would differ on every run for no
+      behavioural reason and would make the fail-fast output uncomparable, which is one
+      of the outputs this pair most needs to compare.
+
+  - seam: >-
+      EVERY CLOCK READ that reaches a recorded output or a decision on this path -
+      the processor clock the substrate's wait loop takes as its baseline and then
+      compares against for its timeout, the fixed platform sleep the same loop falls
+      back to, the tick-count and platform-sleep prototypes the fixture declares for
+      itself, and anything derived from any of them.
+    method: >-
+      Inject the clock and the sleep as dependencies and substitute a controlled
+      instant and a controlled wait on both sides for the whole capture, so any DECISION
+      derived from elapsed time - notably the wait loop's timeout arm - is reproducible.
+      No elapsed value is recorded as an assertion regardless of how it was obtained:
+      the seam exists to make the decisions deterministic, not to make a duration
+      comparable.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      A clock read differs between the two captures BY DEFINITION rather than by
+      behaviour, and the two halves of a pair are taken at different times by
+      construction. The distinction the seam preserves is the one this whole file turns
+      on: whether the wait loop took its timeout arm is BEHAVIOUR and is compared,
+      while how long it waited before doing so is TIMING and is not recorded at all.
+      Unseamed, the two sides can take different arms of that decision for reasons
+      entirely unrelated to the code under test.
+
+  - seam: >-
+      LINE ENDINGS in the accumulated event transcript and in every other multi-line
+      recorded output on this path. The oracle separates every record it appends with
+      PowerScript's carriage-return-plus-newline escape, so the transcript is
+      CRLF-separated by construction, and the construction diagnostics this capture
+      records compose their lines with a bare newline escape - so both conventions
+      occur inside the material being characterized.
+    method: >-
+      Normalize to one declared convention on BOTH sides at comparison time, before any
+      diff is taken. Normalization is a comparison-time convention only: it never
+      licenses rewriting a stored master, and no artifact is re-encoded on disk.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      A PLATFORM ARTIFACT RATHER THAN A BEHAVIOUR - the master is produced on Windows
+      by PowerBuilder while the candidate runs in a Linux container. The difference is
+      concrete rather than theoretical on this path, because the fixture's own log
+      separator is a CRLF escape and the transcript is the artifact a reviewer reads
+      most. The repository's root .gitattributes declares ONLY linguist-language
+      mappings and carries NO text or eol rule, so Git performs no translation here and
+      nothing normalises them on the way into version control. Unmasked, a byte-exact
+      comparison reports a difference on every single line of every multi-line
+      recording, which buries any real finding. THAT FILE IS NOT IN SCOPE TO CHANGE,
+      and changing it would be solving this in the wrong place - the normalization
+      belongs in the mask, applied symmetrically, exactly as it is here.
+
+  - seam: >-
+      THE WORKER LOOP'S ITERATION COUNT, and therefore the NUMBER of notify and random
+      records in the log. The worker's body loops on a one-second wait for the
+      cancellation signal, so in the unseamed fixture the count is a function of how
+      long the operator waited before driving Stop.
+    method: >-
+      SEAM THE TERMINATION TRIGGER: end the loop on a DECLARED SIGNAL - cancel once a
+      recorded number of notify records has arrived - rather than after a duration, and
+      configure the identical trigger on both sides before either capture starts. The
+      trigger and its configured value are recorded as their own comparable output so a
+      stored recording states the basis it was taken under. The resulting raw count is
+      still recorded, for a reviewer's context, and is excluded from the comparison.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      THIS ENTRY EXISTS BECAUSE A COUNT DERIVED FROM ELAPSED TIME IS A TIMING
+      ASSERTION IN DISGUISE. With a one-second wait per iteration the count is
+      approximately the elapsed seconds, so comparing it would assert a duration while
+      looking like an ordinal comparison - and it would fail on every pair, since the
+      two halves are driven at different moments by different means. Dropping the
+      records instead would have been worse: their ORDERING and the CONTIGUITY of the
+      notify payload are genuine behaviour, and they are the only evidence in this
+      capture that the loop advances one step at a time. The seam is preferred to a
+      plain mask here for precisely the reason the store gives for preferring seams:
+      it converts an untestable duration into a testable signal, so what remains in
+      the comparison is the relation the code decides rather than the wall clock.
+
+# WHAT IS DELIBERATELY NOT MASKED, listed because every masked field is a field a
+# regression can hide in, so the boundary belongs in writing rather than in the
+# judgement of whoever next reads a diff:
+#   - the callback NAMES, and the label text each handler renders in the transcript;
+#   - the WITHIN-THREAD and WITHIN-TASK ordering, compared position by position -
+#     including a host's start before its task's start, and each notify before the
+#     random trigger that follows it in the same loop body;
+#   - the SET of groups, so a missing thread or a missing task is still a divergence
+#     even though the interleaving between them is not compared;
+#   - the VETO OUTCOMES on all three prevent channels - zero and one on the caller
+#     side, the success code and a non-success code on the worker side, and the
+#     common-notification gate that suppresses a specific event altogether - together
+#     with the identity between a worker-side veto value and the exit code it becomes,
+#     and which of the two handlers the caller's final result came from;
+#   - WHETHER a callback is declared with a return type, kept separate from whether it
+#     carries a documented veto meaning, since four of the six are the former and only
+#     two are the latter;
+#   - the EXIT CODES, as raw numbers with null recorded as null, together with which
+#     arm produced each one and the cancelled substitution;
+#   - the LAST-ERROR STRINGS delivered to every stop callback;
+#   - the TAGS, verbatim and including their internal spacing;
+#   - the COUNT OF THREADS AND TASKS created, and the roster's order;
+#   - every CONTROL RETURN CODE, including the busy and failure guard arms;
+#   - the NOTIFY PAYLOAD and its contiguity - the counter, the counter plus one, and
+#     the empty string parameter;
+#   - the MARSHALLING SIDE of every step, and whether each crossing was posted or
+#     synchronous;
+#   - the CONSTRUCTION SEQUENCE and every fail-fast arm's disposition;
+#   - the REFERENCE-RELEASE steps and their order;
+#   - the TERMINATION BASIS the iteration seam is configured with.
+# Every one of those is behaviour. Masking any of them would produce a pair that
+# compares cleanly while proving nothing, which is the precise failure this store
+# exists to prevent. Note the two entries that are split rather than masked whole -
+# the random callback, whose arrival is compared and whose value is not, and the
+# iteration count, whose basis is compared and whose raw total is not - because in
+# both cases masking the whole output would have discarded a behaviour along with a
+# non-behaviour.
+
+# ------------------------------------------------------------------------------
+# provesDefects - the legacy behaviours this pair exists to prove SURVIVED.
+#
+# The inversion here is counter-intuitive and load-bearing: a capture that shows
+# CORRECTED behaviour is a parity FAILURE, not an improvement. Where the target
+# produces output that looks more correct than the oracle, the finding is a divergence
+# in the target and is filed as a defect against it. A legacy behaviour is reproduced
+# and annotated at its point of reproduction, never repaired.
+#
+# SIX ENTRIES, IN TWO KINDS, and the distinction matters when reading them. The FIRST
+# THREE are DELIBERATE NON-PORTS: legacy surfaces that are not reproduced at all, each
+# recorded as a documented capability gap with the reason it is not ported, so that the
+# gap is enumerable rather than silent and so that a later reader cannot mistake the
+# absence for an oversight. The LAST THREE are BEHAVIOURS TO PRESERVE: contracts that a
+# well-meaning simplification would flatten, each with what the simplification would
+# break.
+#
+# A NON-PORT IS NOT A DEFERRAL. None of the first three is handed to another capability
+# area; each is a gap inside THIS service's own capture. See the note above
+# `sharedVolume` for why the `deferredCapabilities` member is absent rather than used
+# to record them.
+# ------------------------------------------------------------------------------
+provesDefects:
+
+  - defect: >-
+      NON-PORT 1 - THE PROCESSOR AFFINITY MASK. The oracle requests a processor
+      affinity for each host by index during setup, and the substrate exposes it both
+      by index and by raw bit mask. Neither is ported. What the capture records is the
+      REQUEST and its return code - including the refusal with the busy code once the
+      host is running, which is why the oracle must issue it before the run - and
+      nothing about any scheduling consequence, because the legacy exposes none.
+    locator: "ws_objects/pfw.tests.pbl.src/w_test_thread.srw:L127"
+    note: >-
+      WHY IT IS NOT PORTED, stated so nobody re-litigates it: no portable equivalent
+      exists, the primitive is platform-specific, the target runs in Linux containers,
+      and it is A TUNING KNOB WITH NO OBSERVABLE BEHAVIOURAL CONTRACT - nothing in the
+      legacy's own surface reports which processor a thread ran on, so no caller can
+      branch on the outcome and no recording can compare it. Removing a knob whose
+      effect cannot be observed is not a behavioural change. THIS IS EXPLICITLY NOT A
+      PERFORMANCE DECISION: no performance objective is asserted anywhere in this
+      repository, none may be, and the knob is dropped because it is unobservable
+      rather than because it was measured and found wanting - measuring it would itself
+      have been out of bounds. The setter's ordering constraint IS ported, because that
+      part is observable: the request must precede the run or it is refused, and a
+      target that accepts it at any time has widened the contract. Its return codes are
+      preserved and answered from configuration. The substrate's mask-taking overload
+      [ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L172] and its index-taking
+      overload [:L173] are both covered by this one decision; the busy guard is at
+      [:L488].
+
+  - defect: >-
+      NON-PORT 2 - THREAD SUSPEND AND RESUME. The oracle drives both from buttons, over
+      every host, and the substrate refuses each with the FAILURE code when the host is
+      not running - note that this is the opposite state from the busy refusals above,
+      an asymmetry the capture records. Neither primitive is ported. They are
+      re-expressed as a COOPERATIVE PAUSE ON A WAIT HANDLE, and the capture records the
+      observable pause-and-resume EFFECT on the event log rather than the primitive: a
+      suspended group produces no further arrivals until it is resumed, and on resume
+      its payload sequence CONTINUES from where it stopped rather than restarting.
+    locator: "ws_objects/pfw.tests.pbl.src/w_test_thread.srw:L182"
+    note: >-
+      Resume is the other half of the same decision, at
+      [ws_objects/pfw.tests.pbl.src/w_test_thread.srw:L160]; the substrate's prototypes
+      are at [ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L177-L178] and its
+      not-running guards at [:L515] and [:L519]. WHY IT IS NOT PORTED: suspending and
+      resuming another thread is unsupported in the target runtime, and no substitute
+      primitive exists - only a cooperative one, which requires the paused party's
+      participation and is therefore a different mechanism with the same observable
+      effect. THE TRAP IN THE RE-EXPRESSION, and it is a real one rather than a
+      cautionary abstraction: THE LEGACY'S STOP PATH FORCE-RESUMES A SUSPENDED THREAD,
+      looping until the suspension count has fallen, precisely so that a suspended
+      thread can observe the cancellation it would otherwise sleep through [:L865-L866].
+      A cooperative pause that a cancel does not release therefore DEADLOCKS on the
+      exact sequence the oracle's own buttons make trivially reachable - suspend, then
+      stop - and it deadlocks silently, because the stop call itself answers the success
+      code. That is why stop.forcedResume is captured as an output rather than left as
+      an implementation note. A second trap in the opposite direction: a pause
+      implemented by tearing the worker down and rebuilding it on resume produces a
+      restarted payload sequence, which the continuation check is there to catch.
+
+  - defect: >-
+      NON-PORT 3 - THE MESSAGE PUMP, AND THE POSTED-CONTINUATION IDIOM IT ENABLES. The
+      worker POSTS its notification back across the boundary to its caller-side half
+      rather than calling it, suppressing it entirely once cancelled; the host POSTS its
+      run dispatch to its worker rather than calling it; and both sit on a wait loop
+      that PUMPS MESSAGES and falls back to a fixed platform sleep when there is nothing
+      to pump. The pump is not ported. Each posted crossing becomes an EXPLICITLY
+      QUEUED CONTINUATION, and the capture records which crossings were posted and which
+      were called, together with each one's position in its group's sequence.
+    locator: "ws_objects/pfw.thread.pbl.src/n_cst_thread_task.sru:L213"
+    note: >-
+      The posted run dispatch is at
+      [ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L473] and the pump-or-sleep
+      arm of the wait loop at [:L343-L344]. WHY IT IS NOT PORTED: a headless service
+      has no message pump - there is no window, no message queue and no thread-affine
+      dispatcher to pump - so the primitive has no analogue to reproduce, and an
+      explicitly queued continuation is the mechanism that carries the same observable
+      deferral. WHAT MUST NOT BE LOST IN THE TRANSLATION: posting is OBSERVABLE IN THE
+      ORDER, because a posted crossing may be delivered after work issued later, so a
+      re-expression that makes a posted crossing synchronous changes the sequence this
+      pair compares - which is why the mode is recorded per crossing rather than assumed
+      uniform. The suppression is part of it too: the worker checks its cancellation
+      state before posting, so a cancelled task posts nothing at all, and a continuation
+      queued unconditionally would deliver a notification the legacy would have
+      swallowed. CROSS-REFERENCE: the sibling `dataservices-dw-event-chain` carries the
+      concrete instance of this idiom - the posted deferred accept in the DataWindow
+      kill-focus path - and is where the queued-continuation re-expression is pinned
+      against a behaviour that depends on the deferral rather than merely tolerating it.
+
+  - defect: >-
+      THE PROXY-PAIR DUALITY IS A CONTRACT, NOT AN IMPLEMENTATION DETAIL. Every
+      concurrency class in this substrate exists TWICE - a caller-side form and a
+      worker-side form - so that no object is ever touched from two threads, and the
+      legacy encodes each half's required execution context in the objects' own
+      comments. The halves are related BY CLASS NAME and resolved at run time: the
+      caller-side task's only override returns the name of its worker-side counterpart,
+      and the host is asked to add a task by the CALLER-SIDE name. The worker holds a
+      typed handle on its caller-side half and reaches BACK across the boundary through
+      it - for the veto, and for every notification.
+    locator: "ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L215"
+    note: >-
+      THE PAIR IS VISIBLE IN THE FIXTURE LIBRARY ITSELF, which is why both halves are
+      cited as supporting fixtures rather than one being treated as an implementation
+      of the other: the caller-side half is
+      [ws_objects/pfw.tests.pbl.src/n_test_threading_task.sru], whose override at
+      [:L11] names the worker-side class, and the worker-side half is
+      [ws_objects/pfw.tests.pbl.src/n_test_thread_task.sru], whose derivation is at
+      [:L3]. The mechanism is in the bases: the worker's typed handle on its caller-side
+      half, the veto evaluated by crossing back through it
+      [ws_objects/pfw.thread.pbl.src/n_cst_thread_task.sru:L165], and the handle nulled
+      when the worker is torn down [:L224]. DO NOT FLATTEN THE PAIR INTO A SINGLE
+      ASYNCHRONOUS METHOD. That is the specific failure mode, and it is subtle because
+      it presents as simplification rather than as a change: one method with an await
+      reaches the same final state on the happy path, passes a naive round-trip test,
+      and has silently deleted the boundary at which the affinity annotations, the
+      cross-thread hazards below and the posted-versus-synchronous distinction above all
+      live. The capture therefore makes the boundary OBSERVABLE - which callback ran on
+      which side - rather than recording only what crossed it. Two further details a
+      port must keep: both class names travel in the recording, because a target that
+      keeps only one has lost the run-time resolution that relates them; and the veto
+      decision is made on the CALLER side even though it is initiated on the worker
+      side, so a port that evaluates it locally on the worker has moved the decision
+      across the very boundary this entry exists to preserve.
+
+  - defect: >-
+      THE FAIL-FAST POSTURE - WORKER-SESSION CREATION FAILURE IS FATAL. The host's
+      constructor registers a shared object and retrieves it, and it has SEVEN FATAL
+      EXITS - six inside that registration-and-retrieval dispatch and one in the final
+      validity guard after it - one of which is specifically that THE SHARED OBJECT
+      SESSION COULD NOT BE CREATED. Every one of them composes a diagnostic naming the
+      failure and the thread identifier, raises a stop-sign dialog, and then HALTS THE
+      PROCESS. It
+      does not return an error, it does not answer a return code, and it does not
+      continue with a degraded host - and note the ordering, which is part of the
+      posture: the wait handles and the event broker are created only AFTER validation
+      succeeds, so a failed construction leaves nothing half-initialised behind.
+    locator: "ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L1021-L1024"
+    note: >-
+      The session exit is at
+      [ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L996-L998], the other six at
+      [:L979-L995] - five of them, two of which share one error constant with different
+      messages - and [:L1001-L1004], with the post-validation initialisation at
+      [:L1006-L1009]. PRESERVED AS FAIL-FAST STARTUP VALIDATION AND PROCESS TERMINATION
+      ON A STRUCTURAL FAULT, NEVER SOFTENED INTO GRACEFUL DEGRADATION. Softening it
+      would be A BEHAVIOURAL CHANGE DRESSED AS ROBUSTNESS, and it is the single most
+      likely well-intentioned divergence on this path, because "a service should not
+      exit" is a good instinct applied to the wrong category of fault: a host that
+      cannot create its worker session cannot do the one thing it exists to do, so
+      continuing means accepting work that will never be performed. The delivery channel
+      does change - the dialog becomes a structured, machine-readable fault, because a
+      container has no dialog to raise - and the change is confined to the channel: the
+      composed diagnostic's fields, the arm that produced it, and the termination
+      itself are all preserved. CROSS-REFERENCES, because this is one third of a story
+      told in three places: `shared-diagnostics-assert-payload` carries the assertion
+      payload protocol and its own termination, and
+      `gateway-lifecycle-composition-root` carries the application-level system-error
+      handler that unpacks a payload and then halts. All three must reproduce
+      termination or none of them means anything; a port that hardens two and softens
+      the third has a graceful-degradation path that swallows exactly the faults the
+      other two were built to surface.
+
+  - defect: >-
+      THE TWO DOCUMENTED CROSS-THREAD HAZARDS, which constrain how the task layer may be
+      re-expressed. FIRST: a worker thread calling a main-thread object's function or
+      event SYNCHRONOUSLY, where that member returns a string or a blob, RISKS A MEMORY
+      FAULT - the documented trigger being a main-thread object with an unexecuted
+      posted message that is itself already destroyed - and the documented mitigation is
+      to avoid such calls or to return through a REFERENCE PARAMETER instead. SECOND: a
+      worker thread given a main-thread or global object MUST CLEAR THAT REFERENCE TO
+      NULL ON UNINITIALIZATION in order to release it. The worker-side base performs
+      exactly that, nulling its caller-side handle, its thread handle, its broker handle
+      and each named datum's payload.
+    locator: "docs/PB多线程绕坑提示.md:L1-L5"
+    note: >-
+      Hazard one is at [docs/PB多线程绕坑提示.md:L1-L4] and hazard two at [:L5]; the
+      release itself is at
+      [ws_objects/pfw.thread.pbl.src/n_cst_thread_task.sru:L221-L230], with the
+      caller-side handle nulled at [:L224]. THE CAPTURE RECORDS THE REFERENCE-RELEASE
+      STEP AS AN OBSERVABLE LIFECYCLE EVENT rather than as a final state, and the reason
+      is the distinction that makes this entry worth pinning: a port that lets the
+      runtime collect those references produces the same END STATE and a different
+      LIFECYCLE, and the legacy's requirement is about WHEN the reference is dropped,
+      not whether it eventually is. HOW THE TWO HAZARDS CONSTRAIN THE RE-EXPRESSION,
+      which is the practical content of this entry: the first is why a crossing that
+      returns text or binary data must be modelled as an out-parameter or a message
+      rather than as a synchronous call with a return value - the legacy's own
+      mitigation is the design, not a workaround around it - and it is also why the
+      posted crossing of NON-PORT 3 is suppressed once cancelled, since the hazard's
+      trigger is precisely a queued message aimed at an object that no longer exists.
+      The second is why the queued-continuation re-expression must carry an explicit
+      release step at the same point in the teardown, and why that step is in the
+      recording. Neither hazard is a defect to be fixed: both are documented properties
+      of the boundary, and a port that ignores them reintroduces exactly the fault the
+      document was written to prevent.
+
+# ------------------------------------------------------------------------------
+# `deferredCapabilities` IS DELIBERATELY ABSENT, and the reason is a distinction worth
+# being exact about rather than an omission.
+#
+# That member records the half of an IN-SCOPE capability that will eventually be owned
+# by one of the four deferred capability areas - a headless model that ships beside a
+# presentation half that does not. NOTHING IN THIS WORKFLOW IS OF THAT KIND. The three
+# non-ports above are DOCUMENTED GAPS INSIDE THIS SERVICE'S OWN CAPABILITY: the
+# affinity request is dropped because it has no observable contract to reproduce, and
+# suspend, resume and the message pump are dropped because the target runtime has no
+# equivalent primitive. None of them is waiting for another area to arrive and take
+# ownership, none of them will be filled by a Phase-2 service, and none of them is
+# reachable through a reserved route.
+#
+# Recording them under `deferredCapabilities` would therefore have been a MISUSE that
+# said something false in two directions at once: it would claim a deferred area owns
+# work it does not, and it would imply these gaps are scheduled when they are
+# permanent decisions with reasons attached. It would also have forced a deferred
+# capability area's NAME into this file, which nothing here needs. They are recorded
+# where they belong - in `provesDefects`, each with the reason it is not ported -
+# and this comment is the audit trail for choosing that member over the other one.
+#
+# `blockedBehaviours` is absent for the adjacent but different reason: nothing in this
+# workflow is UNPROVABLE. Every behaviour it claims is observable in the event log
+# from the read-only oracle, and the two genuinely blocked behaviours in this store -
+# pinyin first-letter matching, and cross-session foreign column-expression variables
+# - belong to other workflows entirely and are declared there.
+# ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# sharedVolume - the paired-capture rule APPLIES to this workflow.
+#
+# characterization/README.md section 2.1 carries the canonical text of that rule and is
+# the authority for it. It is cited here and NOT reproduced, because the same text is
+# owned word for word by three upstream files, and a fourth copy would be a fourth
+# thing to drift - which is the failure this store exists to prevent, not to commit.
+#
+# WHY IT APPLIES EVEN THOUGH THIS WORKFLOW OPENS NO DATABASE, because that looks like
+# the exemption and is not. The exemption in section 2.7 is narrow and it turns on a
+# workflow reading and writing NOTHING AT ALL; the one workflow in this folder that
+# qualifies is `persistence-sql-paging-rewrite`, whose subject is a pure string
+# transform needing no instance of any engine. This fixture is different in kind: it
+# runs INSIDE the oracle application whose state the pair shares, so its capture is
+# taken against that state whether or not it issues a statement of its own. A volume
+# recreated or reseeded between the two halves therefore invalidates this pair exactly
+# as it would any other, and an empty `seedPhase` is not evidence to the contrary - see
+# the note above that member for why establishing no state and running inside none are
+# different claims. `exemptionReason` is consequently absent, which is what the schema
+# requires when `applies` is true.
+# ------------------------------------------------------------------------------
+sharedVolume:
+  applies: true
+
+# The honest state of this workflow, and the schema's enum has exactly one member so
+# that nothing here can imply otherwise. NO capture has been taken on either side. The
+# legacy half needs a PowerBuilder toolchain that is not present. The compose bring-up
+# that the capture rule is expressed against HAS been exercised - orchestration/README.md
+# section 10 is this repository's only execution-status statement and records it gate by
+# gate, including that the persistence-db volume provisioned itself and survived a plain
+# teardown - but a bring-up records nothing, so neither half of this pair exists. Nothing
+# above is a verified result: every statement in this file is either a citation of
+# read-only legacy source or a specification of a capture still to be run.
+executionStatus: specified-not-executed
+
+# Cross-references only. Naming a sibling never merges two workflows: each pair stays
+# independently comparable under its own identifier, against its own volume state,
+# under its own inline mask.
+relatedWorkflows:
+  # The asynchronous SQL query path, and the reason this workflow is not named after
+  # the transaction pool: that workflow is the one that sets the transaction
+  # descriptor, so its mask - not this one - owns the pool's processor-clock
+  # idle-expiry seam. It captures one SQL task's crossings; this one captures the
+  # lifecycle those crossings sit inside, which is why the proxy-pair duality is
+  # pinned in both and from different angles.
+  - persistence-thread-sqlquery-chunked
+  # Where the posted-continuation idiom of NON-PORT 3 has its concrete instance: the
+  # deferred accept the DataWindow kill-focus path posts, whose behaviour DEPENDS on
+  # the deferral rather than merely tolerating it. This workflow pins that the pump is
+  # not ported; that one pins what the queued continuation replacing it must still do.
+  - dataservices-dw-event-chain
+  # The other half of the fail-fast story: the assertion payload protocol and its own
+  # termination on a decoded failure. Read together with the composition-root workflow
+  # it establishes that termination on a structural fault is the posture across the
+  # whole estate rather than a local quirk of thread construction.
+  - shared-diagnostics-assert-payload

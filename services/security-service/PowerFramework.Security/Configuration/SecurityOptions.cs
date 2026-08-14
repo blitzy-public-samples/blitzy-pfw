@@ -1,0 +1,3915 @@
+// ==================================================================================================
+//  SecurityOptions - the whole configuration contract of the Security service, plus the startup
+//  validation that makes it fail-fast
+//  ------------------------------------------------------------------------------------------------
+//  LEGACY PROVENANCE, cited for decisions only. Every path below is READ ONLY: it is the behavioural
+//  oracle for parity testing and never an edit target. No legacy file is read at run time, named in a
+//  default value, or reachable from any code path in this file.
+//
+//      ws_objects/pfw.pbl.src/pfw.sra:L111-L144        the fail-fast posture (see FAIL FAST below)
+//      ws_objects/pfw.crypto.pbl.src/n_crypto.sru      the algorithm and key-shape evidence
+//                                                      L19-L20  GenRSAKey, pemformat OPTIONAL
+//                                                      L23-L29  keyed Hash, raw key argument
+//                                                      L63      RSAEncrypt, HAS a padding argument
+//                                                      L70      RSASign, hash type and NO padding
+//      ws_objects/pfw.shared.pbl.src/enums.sru:L921-L969   the preserved crypto constant catalogue
+//                                                      L927  block label naming RSASign/VerifyRSASign
+//                                                      L930  SHA-256 = 2, the RS256 anchor
+//                                                      L931  SHA-384 = 3
+//                                                      L932  SHA-512 = 4
+//                                                      L965  1024-bit RSA, a first-class legal size
+//
+//  ==================================================================================================
+//  WHAT THIS FILE IS, AND WHY IT IS ONE FILE
+//  ==================================================================================================
+//  Three types, one file, on purpose. The options type, its key-store companion and the validator
+//  are a single contract: the validator's rules are the only reason several of the properties are
+//  shaped the way they are, and splitting them across files would let one drift from the other with
+//  nothing to catch it. This folder contains exactly this file and is intended to stay that way.
+//
+//  This file declares configuration and validates it. It performs NO I/O of any kind - no file read,
+//  no network call, no environment probe - beyond one in-memory key import attempt whose only purpose
+//  is to answer "could this material sign?" before the host is allowed to start. That is what makes
+//  the whole surface unit-testable without booting a host, which the per-service coverage gate needs.
+//
+//  ==================================================================================================
+//  FAIL FAST, NEVER GRACEFUL DEGRADATION
+//  ==================================================================================================
+//  The legacy framework's application object handles a decoded assertion by unpacking a seven-field
+//  payload split on a carriage-return/line-feed pair, formatting a diagnostic, and then executing
+//  HALT CLOSE [ws_objects/pfw.pbl.src/pfw.sra:L111-L144, terminating at :L143]. Read that event
+//  looking for a recovery arm and there is none: no retry, no default, no continue path, no downgrade
+//  to a warning. A structural fault ends the process.
+//
+//  The .NET equivalent of HALT CLOSE at startup is a host that refuses to start. That is why this
+//  file's validator is registered with ValidateOnStart rather than consulted lazily on first use: a
+//  misconfigured Security service that starts is strictly worse than one that does not, because it
+//  answers health probes, satisfies the orchestration readiness gate, and then rejects or mis-signs
+//  every token in the system while looking healthy from the outside.
+//
+//  The expected registration, which the service entry point owns and which this file is shaped to
+//  make possible:
+//
+//      builder.Services
+//          .AddOptions<SecurityOptions>()
+//          .Bind(builder.Configuration.GetSection(SecurityOptions.SectionName))
+//          .ValidateDataAnnotations()
+//          .ValidateOnStart();
+//
+//      builder.Services.AddSingleton<IValidateOptions<SecurityOptions>, SecurityOptionsValidator>();
+//
+//      builder.Services.PostConfigure<SecurityOptions>(options =>
+//          options.SigningKey =
+//              builder.Configuration[SecurityOptions.SigningKeyEnvironmentVariableName]);
+//
+//  The post-configure step is not a convenience. See THE FLAT KEY below: without it the signing
+//  material never reaches the options instance at all, and this file deliberately does not pretend
+//  otherwise.
+//
+//  ==================================================================================================
+//  THE FLAT KEY: WHY CONVENTIONAL SECTION BINDING CANNOT CARRY THE SIGNING MATERIAL
+//  ==================================================================================================
+//  The environment-variable configuration provider maps a DOUBLE UNDERSCORE onto the ':' section
+//  separator, and nothing else. Every other setting in this service therefore arrives as
+//  Security__Issuer, Security__KeyStore__ConfigurationKeyPrefix and so on, and binds into the
+//  Security section by convention.
+//
+//  SECURITY_JWT_SIGNING_KEY contains no double underscore. It is consequently a FLAT configuration
+//  key of exactly that literal name - not Security:Jwt:Signing:Key, not anything inside the Security
+//  section - so section binding will never populate SigningKey however the section is bound. The name
+//  is fixed by orchestration/.env.example and the Compose manifest and must not be renamed, aliased
+//  as Security__SigningKey, or shadowed by a second spelling: the operator-facing contract is that
+//  one variable name, and three other services' ability to verify a token depends on it being read.
+//
+//  Two consequences are load bearing, and both are why the constant below exists:
+//    * SigningKey is a settable property with no default, populated by an explicit post-configure
+//      step that reads the flat key by name. Nothing here assumes binding did it.
+//    * The name is declared once, as a constant, so the entry point and every test read the same
+//      spelling and a typo cannot silently produce a service that starts and cannot sign.
+//
+//  The identical trap applies to the key store: SecurityKeyStoreOptions.ConfigurationKeyPrefix plus a
+//  keyRef is a FLAT configuration key, not a path inside Security:KeyStore. See that type.
+//
+//  ==================================================================================================
+//  THE SIGNATURE ALGORITHM: RS256 BY DEFAULT, AND A CLOSED ALLOW-LIST OF THREE
+//  ==================================================================================================
+//  SigningAlgorithm accepts RS256, RS384 or RS512 and nothing else, and the allow-list is a compiled
+//  constant rather than a configurable list. Each exclusion has a specific reason.
+//
+//  THE HMAC FAMILY IS EXCLUDED STRUCTURALLY, not stylistically. This service publishes verification
+//  material anonymously at the JWKS path, and Gateway, DataServices and Persistence hold verification
+//  material only - exactly one signing key exists in the whole system and this service holds it. A
+//  symmetric JWK in a published key set would be publishing the signing material itself, and handing
+//  it to three verifiers would make each of them a co-signer. The sole-issuer property that the whole
+//  token topology rests on would be gone. There is therefore no configuration value that selects it.
+//
+//  THE PSS FAMILY IS EXCLUDED ON LEGACY EVIDENCE. Compare two declarations in the legacy
+//  cryptographic class: RSAEncrypt takes a padding argument
+//  [ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L63], while RSASign takes a hash type and NO padding
+//  argument at all [:L70]. The legacy signing primitive has nowhere to express a probabilistic
+//  padding scheme, so it is structurally incapable of emitting one. A legacy browser-harness sample
+//  does carry a PS256 header [tests/blink/test_jws.htm:L23], and it is NOT a contract: it is the
+//  choice of the third-party JavaScript library that produced it, made in a page that also carries a
+//  hardcoded private key inline and signs with it. That page is precisely the anti-pattern this
+//  configuration surface exists to replace - key material reaching a signer from configuration
+//  injection instead of from source - so it is cited here as evidence about provenance and nothing
+//  from it is read, reproduced or accepted: PS256 appears in this file only as a rejected value.
+//
+//  THE ECDSA FAMILY IS EXCLUDED because the legacy cryptographic class exposes no elliptic-curve
+//  primitive anywhere in its declarations. There is no legacy behaviour to preserve and no evidence
+//  to preserve it from.
+//
+//  RS384 AND RS512 ARE ADMITTED because the legacy hash-type block is labelled as the argument set of
+//  RSASign and VerifyRSASign [ws_objects/pfw.shared.pbl.src/enums.sru:L927] and declares SHA-384 = 3
+//  at :L931 and SHA-512 = 4 at :L932 alongside SHA-256 = 2 at :L930. All three are legacy-expressible
+//  signatures, so admitting them adds no capability the legacy lacked. SHA-256 is the anchor and the
+//  default: RSA plus SHA-256 plus PKCS#1 v1.5 is precisely RS256, and given RSASign's missing padding
+//  argument it is the only signature the legacy could produce. Those constants are available in this
+//  tree as Enums.CRYPTO_HASH_SHA256 and its siblings in PowerFramework.Shared.Kernel; they are cited
+//  here rather than referenced because a JOSE algorithm identifier is not one of them and importing
+//  the kernel to name a value this file does not use would be a dependency for a comment.
+//
+//  ==================================================================================================
+//  WHAT THIS FILE DELIBERATELY DOES NOT DECLARE
+//  ==================================================================================================
+//  Recorded so each omission reads as a decision, and so nobody "completes" this type by adding one.
+//
+//  NO SWITCH THAT RELAXES VALIDATION. There is no option to disable issuer, audience, lifetime or
+//  signature validation, no option to permit unsigned tokens, no option to allow plaintext metadata
+//  and no option to make a route anonymous. The values declared here are what three other services
+//  validate every token against, so a switch that loosened any of them would loosen them fleet-wide
+//  from a single file - and the newly created boundaries of this decomposition are required to be
+//  authenticated from the outset rather than optionally so.
+//
+//  NO EPHEMERAL-KEY FALLBACK, IN ANY ENVIRONMENT. Generating a key when material is absent would turn
+//  one loud startup failure into a silent fleet-wide authentication outage: every token the other
+//  three services hold would stop verifying, and each restart would invalidate the previous
+//  generation's tokens too. There is no development exemption and no generate-if-absent branch.
+//
+//  NO WEAK LEGACY DEFAULT PROMOTED TO AN OPTION. The preserved electronic-codebook symmetric mode
+//  [enums.sru:L946] and PKCS#1 padding default [:L951] belong in the ported cryptographic surface as
+//  annotated constants, where they are parity obligations. Exposing either as an operator-selectable
+//  setting here would misrepresent a preserved legacy weakness as a deliberate deployment choice.
+//
+//  NO METADATA BASE ADDRESS. Absolute metadata addresses are composed from Issuer by default, which is
+//  the same value a consumer's bearer handler uses for discovery. A second BASE address setting could
+//  disagree with it, and an option nothing reads is dead configuration.
+//
+//  PublishedOrigins IS NOT THAT SETTING, AND THE DIFFERENCE IS WHY IT EXISTS. It is not an
+//  alternative base that could disagree with the issuer - it is the deployment DECLARING the further
+//  origins it answers on, so that a caller reaching this service under one of them is answered with
+//  locations under it rather than under a name that does not resolve on its side. The issuer stays the
+//  default, the fallback and the published identity; an origin nobody declared selects nothing. That is
+//  the one shape a single base address cannot express, because the deployment genuinely has two.
+//
+//  NO PROVIDER DISCRIMINATOR AND NO keyRef-TO-VALUE MAP on the key store. One resolution mechanism
+//  exists, and a map of key values in a settings-bound option is precisely the hardcoded material
+//  this refactor's secrets mandate forbids.
+//
+//  NO required MEMBER ANYWHERE. A required member turns a configuration fault into an activation-time
+//  error that names no configuration key. A presence attribute plus the validator produces a startup
+//  message that names the offending key, which is what an operator staring at a failed bring-up needs.
+//
+//  NOT A record, NO custom ToString, NO debugger display attribute and NO serialization helper. A
+//  synthesized or hand-written string rendering would print SigningKey into any log, exception or
+//  diagnostic that stringified the options instance. The type is deliberately unprintable.
+//
+//  ==================================================================================================
+//  THE SIGNING KEY HAS A FORMAT DISCRIMINATOR AND A HARD SIZE FLOOR, AND BOTH HALVES ARE DELIBERATE
+//  ==================================================================================================
+//  SigningKeyFormat is bound and enforced below: it names the closed set of accepted shapes and the
+//  acceptance ORDER, so a value outside that set is refused at startup instead of reaching an import
+//  that would fail for an unexplained reason. A declared, documented and inert leaf would be a false
+//  assurance rather than a neutral one, which is why it is bound rather than merely written down.
+//
+//  A MODULUS BELOW MinimumSigningKeySizeBits FAILS STARTUP, AND THE FLOOR IS A CONSTANT RATHER THAN A
+//  SETTING. This position was reversed once, and the reversal is worth recording rather than deleting
+//  because the mistake in it is easy to repeat. An intermediate revision removed the floor and only
+//  warned, quoting AAP 0.6.6.4 - 1024-bit RSA "remains a legal key size, and the legacy demo uses it" -
+//  and the AAP's instruction to replicate each weak cryptographic default as an ANNOTATED default rather
+//  than correct it. Every word of that quotation is accurate; the error is in what it is about.
+//
+//  AAP 0.6.6.4 IS SCOPED TO THE C-02 CRYPTOGRAPHIC SURFACE. Its subject is the set of operations
+//  n_crypto published - ECB as the default symmetric mode, PKCS#1 v1.5 as the default RSA padding, no
+//  reachable key-derivation function, no authenticated encryption, and 1024 bits as a legal generated
+//  key size [ws_objects/pfw.shared.pbl.src/enums.sru:L965]. Every one of those is behaviour a caller can
+//  observe TODAY, which is what makes C-B apply to it.
+//
+//  TOKEN ISSUANCE IS NOT ONE OF THEM. The legacy has no token issuer, no JWT, no key set and no signing
+//  identity of any kind - it "opens no listening socket, registers no route, and receives no unsolicited
+//  request" [AAP 0.1.4], and decomposition "creates the system's first-ever ingress". There is therefore
+//  no legacy behaviour here for a floor to correct, so C-B has nothing to say about it; what governs a
+//  boundary the decomposition CREATED is AAP G7 and constraint C-G - every created boundary
+//  authenticated from the outset - and the enterprise baseline of AAP 0.7.2 where no legacy behaviour
+//  speaks. This key signs every credential every service in the estate accepts and its public half is
+//  served anonymously, so it is the one modulus in the system that may not be weak.
+//
+//  WHERE THE FLOOR IS APPLIED, AND WHERE THE LEGACY ALLOWANCE STAYS:
+//    * CheckSigningMaterial below reports it as a configuration failure, so it arrives beside every
+//      other startup fault in one report rather than as a bare constructor crash.
+//    * Tokens/SigningKeyProvider REFUSES it, because that is the only place standing between the import
+//      and reachable SigningCredentials. Both read MinimumSigningKeySizeBits, so they cannot disagree.
+//    * Crypto/RsaProvider.GenRSAKey and Crypto/LegacyDefaults.RSA_SMALLEST_LEGAL_KEY_SIZE_BITS are
+//      UNCHANGED and still accept 1024 bits, which is where AAP 0.6.6.4's allowance belongs.
+//      SigningKeyPolicyTests asserts both halves in one case so neither can be harmonised into the other.
+//    * docs/SECRETS.md 4.1 states the same position in prose.
+//  A structurally unusable key remains fatal too - that is the fail-fast posture reproduced from
+//  ws_objects/pfw.pbl.src/pfw.sra:L143 - because material that cannot sign at all is not a weak
+//  configuration but a broken one.
+//
+//  ==================================================================================================
+// ==================================================================================================
+
+using System.ComponentModel.DataAnnotations;
+using System.Globalization;
+using System.Security.Cryptography;
+using Microsoft.Extensions.Options;
+
+namespace PowerFramework.Security.Configuration;
+
+/// <summary>
+/// The complete configuration contract of the Security service: the token claims it stamps, the
+/// metadata addresses it publishes, the key store it resolves opaque key references against, and the
+/// single signing key it holds.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Bound from the <c>Security</c> configuration section named by <see cref="SectionName"/>, with one
+/// exception that matters: <see cref="SigningKey"/> arrives from the FLAT configuration key named by
+/// <see cref="SigningKeyEnvironmentVariableName"/> and is applied by an explicit post-configure step,
+/// because the environment provider's double-underscore section separator means that name can never
+/// land inside the section by convention. The file header records the mechanism in full.
+/// </para>
+/// <para>
+/// VALIDATION IS FAIL-FAST AND IS NOT OPTIONAL. Presence rules are declared as annotations on the
+/// properties so that they are visible where the property is read, and every rule an annotation
+/// cannot express - and, deliberately, the presence rules again - lives in
+/// <see cref="SecurityOptionsValidator"/>. Registering the validator with <c>ValidateOnStart</c>
+/// makes a misconfiguration refuse the host rather than surface on the first token request.
+/// </para>
+/// <para>
+/// This type is sealed, carries no string rendering of any kind, and never logs. It is a value
+/// container that one of its properties makes sensitive, so it is shaped so that stringifying it
+/// cannot leak that property.
+/// </para>
+/// </remarks>
+public sealed class SecurityOptions
+{
+    /// <summary>
+    /// The configuration section this type binds from: <c>Security</c>.
+    /// </summary>
+    /// <remarks>
+    /// Declared once so that the service entry point, the settings files and every test agree on one
+    /// spelling. A mis-spelled section binds nothing, leaves every property at its default, and is
+    /// then caught by <see cref="SecurityOptionsValidator"/> as a pile of missing values rather than
+    /// as the one typo it actually is - so the constant is a diagnosability measure as much as a
+    /// tidiness one.
+    /// </remarks>
+    public const string SectionName = "Security";
+
+    /// <summary>
+    /// The FLAT configuration key that carries the signing material:
+    /// <c>SECURITY_JWT_SIGNING_KEY</c>. This is a NAME, not a value; no key material appears in this
+    /// file, in any settings file, or in any container definition.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY CONVENTIONAL SECTION BINDING CANNOT WORK. The environment-variable configuration provider
+    /// translates a double underscore, and only a double underscore, into the <c>:</c> section
+    /// separator. This name contains none, so it is a top-level configuration key of exactly this
+    /// literal spelling rather than a path into the <c>Security</c> section. Binding the section -
+    /// however it is bound - will therefore never populate <see cref="SigningKey"/>.
+    /// </para>
+    /// <para>
+    /// The resolution is an explicit post-configure step in the service entry point that reads
+    /// <c>configuration[SecurityOptions.SigningKeyEnvironmentVariableName]</c> onto the bound
+    /// instance. That is the whole reason this constant is public: the entry point and the tests that
+    /// drive configuration read one spelling from one place.
+    /// </para>
+    /// <para>
+    /// The name is fixed by <c>orchestration/.env.example</c> and the Compose manifest and must NOT
+    /// be renamed, and no <c>Security__SigningKey</c> alias may be added. Two accepted spellings for
+    /// one input is two ways for a deployment to be half-configured.
+    /// </para>
+    /// </remarks>
+    public const string SigningKeyEnvironmentVariableName = "SECURITY_JWT_SIGNING_KEY";
+
+    /// <summary>
+    /// The issuer identity: the <c>iss</c> claim stamped into every minted token and the
+    /// <c>issuer</c> member of the discovery document.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Read by the token issuer when minting and by the discovery endpoint when describing this
+    /// service. Absolute metadata addresses are composed from this value, which is why there is no
+    /// separate metadata base address to disagree with it.
+    /// </para>
+    /// <para>
+    /// This value is what Gateway, DataServices and Persistence each validate the <c>iss</c> claim
+    /// against, so changing it invalidates every token in flight and must be treated as a
+    /// coordinated change rather than a local one.
+    /// </para>
+    /// <para>
+    /// <b>ITS SHAPE IS CONSTRAINED, WHICH IS NOT OBVIOUS FROM THE FACT THAT IT IS AN IDENTIFIER.</b> The
+    /// tempting reading is that the format is a deployment decision and that a rule invented here could
+    /// reject an identity a deployment legitimately uses. That premise is wrong for this particular value,
+    /// because the format is NOT free: the discovery document's <c>jwks_uri</c> and
+    /// <c>token_endpoint</c> members are COMPOSED from it - from it, or from one of the origins
+    /// <see cref="PublishedOrigins"/> declares - so it has to be an absolute address a
+    /// consumer's bearer handler can fetch. <see cref="SecurityOptionsValidator"/> therefore requires
+    /// it to be absolute, http or https, and free of embedded credentials, a query string and a
+    /// fragment - the identical rule every sibling service already applies to every address it binds.
+    /// The consequence of leaving it unchecked is measured rather than assumed: six bogus shapes start
+    /// the host, and readiness then opens on a service whose discovery document answers 500 while its key
+    /// set answers 200 - which breaks the exact mechanism contract C-01 depends on.
+    /// </para>
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string Issuer { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Additional absolute base addresses this issuer may be reached on, which the discovery document
+    /// composes its <c>jwks_uri</c> and <c>token_endpoint</c> members from when a request arrives on one
+    /// of them. Empty by default, and the <c>issuer</c> member is never affected.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>THIS EXISTS BECAUSE ONE SERVICE IS REACHED ON TWO ADDRESSES, AND THE DOCUMENT COULD ONLY NAME
+    /// ONE.</b> On the documented Compose topology the three internal verifiers reach this service as
+    /// <c>https://security-service:5104</c> - the Compose service name, which is also
+    /// <see cref="Issuer"/> - while an operator, the end-to-end suite and any third-party consumer reach
+    /// the very same service through its published host port as <c>https://localhost:5104</c>. Composing
+    /// both addresses from <see cref="Issuer"/> alone therefore handed every host-side consumer a
+    /// <c>jwks_uri</c> naming a host that resolves only inside the Compose network: the document parsed,
+    /// looked correct, and directed the consumer at nothing it could reach. The failure is a DNS failure
+    /// on key retrieval rather than a rejected document, which is why it survived review.
+    /// </para>
+    /// <para>
+    /// <b>WHY NOT SIMPLY REFLECT THE REQUEST, WHICH IS THE IDIOMATIC ANSWER.</b> An earlier revision did
+    /// exactly that and it was removed as a defect, for a reason that still holds: a request's scheme,
+    /// host and path base are all CALLER-CONTROLLED, so a caller-chosen <c>Host</c> header was answered
+    /// with a document telling every consumer to fetch this issuer's verification keys from that host,
+    /// and a stock bearer handler follows <c>jwks_uri</c> without question. Reinstating reflection would
+    /// reintroduce that forgery. This member keeps the property that made the removal correct - <b>every
+    /// address this document can publish is one the DEPLOYMENT declared</b> - and adds only the ability
+    /// to CHOOSE among those declared addresses by which one the request actually arrived on. An
+    /// unrecognised origin is not honoured: it falls back to <see cref="Issuer"/>, so the worst a forged
+    /// <c>Host</c> header can achieve is the canonical document it would have received anyway.
+    /// </para>
+    /// <para>
+    /// <b>THE IDENTITY AND THE LOCATION ARE NOW DISTINCT, AND ONLY THE LOCATION VARIES.</b> The
+    /// <c>issuer</c> member and the <c>iss</c> claim remain <see cref="Issuer"/> verbatim on every
+    /// response, because all three consuming services compare that claim byte for byte and a document
+    /// whose identity moved with the caller would break every one of them. What varies is only where the
+    /// document says its key set and token endpoint live - which is the one thing that genuinely differs
+    /// between the two networks. A consumer fetching from either origin therefore validates against the
+    /// same identity and retrieves keys from an address it can resolve.
+    /// </para>
+    /// <para>
+    /// <b>NO HOST NAME APPEARS IN CODE (C-F).</b> Every entry is supplied by the deployment;
+    /// <c>orchestration/docker-compose.yml</c> maps <c>SECURITY_PUBLIC_BASE_URL</c> onto index 0 and
+    /// <c>orchestration/.env.example</c> declares it. The shipped default is EMPTY, which reproduces the
+    /// previous behaviour exactly - issuer-composed addresses and nothing else - so a deployment that
+    /// configures nothing is unchanged by this member's existence.
+    /// </para>
+    /// <para>
+    /// <see cref="SecurityOptionsValidator"/> holds each entry to the same shape rule as
+    /// <see cref="Issuer"/> - absolute, http or https, no embedded credentials, no query, no fragment,
+    /// no duplicate origin - and refuses startup on a malformed entry rather than silently ignoring it,
+    /// because an entry that is quietly dropped presents as the original unreachable-key-set fault with
+    /// the configuration apparently in place.
+    /// </para>
+    /// </remarks>
+    public IList<string> PublishedOrigins { get; } = [];
+
+    /// <summary>
+    /// The audience identities a minted token may be addressed to - the in-scope service identities
+    /// this issuer serves.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Read by the token issuer to populate the <c>aud</c> claim. The concrete identities are
+    /// declared in <c>appsettings.json</c> and deliberately nowhere in code: an audience is a
+    /// deployment fact, and a value baked in here would be a second source of truth able to drift
+    /// from the settings file. In this phase the roster covers the three services this issuer serves
+    /// - the gateway composition root, the DataWindow service layer and the persistence layer -
+    /// together with this service's own identity for its authenticated ping route.
+    /// </para>
+    /// <para>
+    /// GET-ONLY BY DESIGN, and it still binds. The configuration binder populates an existing
+    /// collection instance when a collection property has no setter, so section binding works exactly
+    /// as it would with a setter, while the absence of one keeps the property from being replaced
+    /// wholesale or set to null. The declared type is an interface rather than a concrete list or an
+    /// array so that no caller can rely on an implementation detail of how it is stored.
+    /// </para>
+    /// <para>
+    /// An empty roster fails validation: an issuer that may address no audience cannot mint a usable
+    /// token. No particular COUNT is required, because the roster is a deployment decision.
+    /// </para>
+    /// </remarks>
+    [MinLength(1)]
+    public IList<string> Audiences { get; } = [];
+
+    /// <summary>
+    /// What each authenticated caller is permitted to ask for: the audiences it may address and the
+    /// scopes it may hold. Bound from <c>Security:Callers</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WITHOUT THIS, A TRUSTED IDENTITY WAS AN UNLIMITED ONE. <see cref="Audiences"/> is a GLOBAL roster
+    /// - the set of identities this issuer may address at all - and on its own it says nothing about who
+    /// may address them. Any caller whose certificate chained to the configured client authority could
+    /// therefore request a token for ANY service in the system carrying ANY scope set it named, and every
+    /// requested scope was granted verbatim. That is a confused-deputy hole in the middle of the token
+    /// topology: the whole point of a sole issuer is that it decides, and it was not deciding. This
+    /// roster is what turns "authenticated" into "authorised" (CWE-862, CWE-863; constraint C-G).
+    /// </para>
+    /// <para>
+    /// IT IS A MATRIX, NOT TWO LISTS. Each entry carries a caller identity and one GRANT PER AUDIENCE, so
+    /// the scopes a caller may hold are scoped to the audience it is addressing. DataServices addresses two
+    /// audiences with entirely different scope sets, and a flat per-caller scope list would let it hold
+    /// Security's cryptographic scope inside a Persistence-audience token - harmless only because each
+    /// receiver checks the audience too, and harmful the moment two audiences share a scope name.
+    /// </para>
+    /// <para>
+    /// THE PERMITTED SET IS AN INTERSECTION, NOT A DEMAND. A caller still asks for what it wants; the
+    /// issuer grants the overlap between the request and the matching grant and reports what it granted.
+    /// That is not an invented behaviour - contract C-01 states that the granted set MAY BE NARROWER than
+    /// the requested one, that a narrowing is a successful outcome rather than an error, and that an empty
+    /// granted set is a legal response value meaning nothing requested was granted. This roster is
+    /// therefore the mechanism the published contract already anticipated.
+    /// </para>
+    /// <para>
+    /// AN AUDIENCE, BY CONTRAST, IS NOT NARROWED - IT IS REFUSED. A token carries exactly one audience by
+    /// contract, deliberately, so that it is never valid somewhere its holder did not intend; there is
+    /// nothing to intersect, and a request naming an audience the caller holds no grant for is answered
+    /// with the published forbidden response - the same response as an audience this issuer does not serve
+    /// at all, so the refusal cannot be used to enumerate which audiences exist or which callers are
+    /// configured.
+    /// </para>
+    /// <para>
+    /// IDENTITIES ONLY, AND NO MATERIAL. Every value in this group is a name - a certificate common name,
+    /// an audience identity, a scope string. There is no member here that could hold a certificate, a
+    /// key, a thumbprint or a secret, which is the same rule the mutual-TLS group follows: the CHAIN is
+    /// what establishes that a caller is who it claims, and this roster only says what that claim permits.
+    /// </para>
+    /// <para>
+    /// AN EMPTY AUTHORIZATION MATRIX FAILS VALIDATION - BUT THE MATRIX IS THE UNION OF THIS MEMBER AND
+    /// <see cref="CallerAuthorizations"/>, SO THE REQUIREMENT IS NOT EXPRESSIBLE AS AN ATTRIBUTE HERE. An
+    /// issuer that permits no caller anything can mint nothing usable, and starting in that state would
+    /// present a healthy service that refuses every issuance - which is indistinguishable from an outage.
+    /// The two members are two AUTHORING SHAPES for one matrix, though: this one nests each caller's
+    /// grants under its identity, and <see cref="CallerAuthorizations"/> states one flat caller-audience
+    /// row at a time. A <c>[MinLength(1)]</c> here would demand the nested shape specifically and reject a
+    /// deployment that authored the whole matrix in the flat one, which is a configuration this service
+    /// reads and honours. <see cref="SecurityOptionsValidator"/> therefore states the requirement over
+    /// BOTH members, names both keys in its diagnostic, and is the single place the rule lives.
+    /// </para>
+    /// <para>
+    /// GET-ONLY for the same reason as <see cref="Audiences"/>: the binder populates an existing
+    /// collection, so binding works exactly as it would with a setter while the property itself cannot be
+    /// replaced or nulled.
+    /// </para>
+    /// </remarks>
+    public IList<SecurityCallerOptions> Callers { get; } = [];
+
+    /// <summary>
+    /// How long a minted service token stays valid. Short-lived by contract.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Read by the token issuer to compute the <c>exp</c> claim. The default is five minutes, which
+    /// matches the value the settings file declares; a service token is obtained on demand from a
+    /// service that is always reachable, so a short life costs little and bounds the damage from a
+    /// leaked token to the same interval.
+    /// </para>
+    /// <para>
+    /// Clock skew is deliberately NOT modelled here. Skew tolerance belongs to the token issuer and
+    /// to each verifier's bearer handler, and expressing it as a second setting alongside this one
+    /// would invite the two to be tuned against each other.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>BOUNDED AT BOTH ENDS, AND AN EARLIER REVISION BOUNDED ONLY THE LOWER ONE.</b> Validation once
+    /// required nothing beyond "strictly positive", on the reasoning that a zero or negative lifetime mints
+    /// tokens that are already expired while a long one is a deployment's own trade-off. A security review
+    /// found what that admits: <c>Security:TokenLifetime</c> is a <see cref="TimeSpan"/> read from
+    /// configuration, so <c>365.00:00:00</c> is a perfectly valid value and mints a year-long bearer
+    /// credential from a contract whose every published description calls the token SHORT-LIVED. Nothing
+    /// else in the system bounds it - there is no refresh flow to shorten, no revocation list to fall back
+    /// on and no introspection endpoint - so a leaked token would stay valid for as long as the setting
+    /// said, and the sole-issuer topology means that one credential authenticates at every service.
+    /// </para>
+    /// <para>
+    /// THE CEILING IS <see cref="MaximumTokenLifetime"/> AND IT IS A REFUSAL TO START. It is drawn at
+    /// fifteen minutes: three times the documented five-minute posture, so a deployment with a legitimate
+    /// reason to loosen the default has room, and still short enough that a leaked credential expires
+    /// inside the window an operator would take to notice. A value above it is a configuration fault in
+    /// exactly the way a zero value is - the contract published for this operation would be false of the
+    /// service serving it.
+    /// </para>
+    /// </remarks>
+    public TimeSpan TokenLifetime { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// The longest <see cref="TokenLifetime"/> this service will start with.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A CONSTANT RATHER THAN A SETTING, for the same reason
+    /// <see cref="MinimumSigningKeySizeBits"/> is one: a ceiling a deployment can raise is not a ceiling,
+    /// and the deployment most likely to raise it is the one that wants a long-lived credential.
+    /// </para>
+    /// <para>
+    /// FIFTEEN MINUTES, AND THE NUMBER IS DERIVED RATHER THAN PICKED. The documented posture is five
+    /// minutes - it is the declared default here, the value <c>appsettings.json</c> ships, and what
+    /// contract C-01 describes - so the ceiling is that posture with headroom, not a new policy. It is also
+    /// published on the contract as the maximum <c>expires_in</c> a caller can ever be handed, so a
+    /// consumer sizing its own cache reads one number rather than inferring it.
+    /// </para>
+    /// </remarks>
+    public static readonly TimeSpan MaximumTokenLifetime = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// The key identifier: the <c>kid</c> published in the JWKS document and stamped into the header
+    /// of every minted token.
+    /// </summary>
+    /// <remarks>
+    /// Read by the signing-key provider when describing the key, by the token issuer when stamping
+    /// the header, and by the JWKS endpoint when publishing it. This is what makes rotation possible:
+    /// a new key gets a new identifier, both appear in the published set for as long as tokens minted
+    /// under the old one are still in flight, and each verifier selects by <c>kid</c> rather than
+    /// guessing. An issuer with no key identifier cannot express that, so a blank value fails
+    /// validation. It is an identifier and carries no key material.
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string SigningKeyId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The JOSE signature algorithm this issuer signs with. Defaults to <c>RS256</c> and is
+    /// restricted to the closed set published by
+    /// <see cref="SecurityOptionsValidator.PermittedSigningAlgorithms"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Read by the signing-key provider, by the token issuer when stamping the <c>alg</c> header, and
+    /// by the JWKS endpoint when describing the published key. The permitted set is
+    /// <c>RS256</c>, <c>RS384</c> and <c>RS512</c>; it is a compiled constant and cannot be extended
+    /// by configuration. Comparison is case-sensitive because JOSE algorithm identifiers are.
+    /// </para>
+    /// <para>
+    /// The exclusions are reasoned, not stylistic, and the file header records each in full: the HMAC
+    /// family is excluded structurally, because a published key set is anonymous verification
+    /// material and a symmetric key there would publish the signing material and make three verifiers
+    /// into co-signers; the PSS family is excluded on legacy evidence, because the legacy signing
+    /// primitive takes a hash type and no padding argument at all
+    /// [ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L70] while its encryption counterpart does take
+    /// one [:L63], so it cannot express a probabilistic scheme; and the elliptic-curve family is
+    /// excluded because the legacy cryptographic class declares no such primitive.
+    /// </para>
+    /// <para>
+    /// Changing this value changes what every verifier must accept, so it is a coordinated change.
+    /// </para>
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string SigningAlgorithm { get; set; } = "RS256";
+
+    /// <summary>
+    /// The closed set of private-key encodings the signing material may arrive in, and the order they
+    /// are attempted in. Defaults to <c>PemOrPkcs8Base64</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ONE PERMITTED VALUE TODAY, AND THE LEAF STILL EARNS ITS PLACE. <c>PemOrPkcs8Base64</c> names the
+    /// acceptance order: PEM first - both the PKCS#8 form <c>openssl genpkey</c> emits and the older
+    /// PKCS#1 form an existing key may already be in - then base64 of the DER encoding of a PKCS#8
+    /// structure on a single line, which is what <c>openssl genpkey ... -outform DER | base64 -w0</c>
+    /// produces and what <c>orchestration/.env.example</c> instructs, because an environment file has no
+    /// line continuation and cannot carry a multi-line PEM block at all.
+    /// </para>
+    /// <para>
+    /// NEITHER SHAPE MAY BE REFUSED, which is why the value names both rather than one: the legacy
+    /// generator's PEM output is an OPTIONAL fourth argument
+    /// [<c>ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20</c>], so legacy private-key material
+    /// genuinely exists in both encodings.
+    /// </para>
+    /// <para>
+    /// WHY VALIDATE A SINGLE-VALUED SET AT ALL. A deployment that sets this to something else -
+    /// <c>Pkcs12</c> and <c>Jwk</c> being the plausible guesses - is expressing an expectation this
+    /// service does not meet. Refusing the value at startup says so; ignoring it would let the
+    /// deployment believe its expectation had been honoured and then fail the import for a reason that
+    /// looks unrelated.
+    /// </para>
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string SigningKeyFormat { get; set; } = PermittedSigningKeyFormat;
+
+    /// <summary>The only signing-key encoding set this service implements.</summary>
+    public const string PermittedSigningKeyFormat = "PemOrPkcs8Base64";
+
+    /// <summary>
+    /// The RSA modulus size, in bits, below which this service refuses to start because its own signing
+    /// key would be too weak to mint tokens the whole estate trusts.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>A HARD FLOOR, NOT AN ANNOTATION THRESHOLD, AND IT APPLIES TO THE JWT SIGNING KEY ONLY.</b> An
+    /// earlier revision measured the modulus, warned below 2048 and signed anyway, citing AAP 0.6.6.4. A
+    /// security review found that reading MISAPPLIES the legacy allowance, and it is right. AAP 0.6.6.4
+    /// governs the <b>C-02 legacy cryptographic surface</b> - the operations <c>n_crypto</c> actually
+    /// published, where ECB, PKCS#1 v1.5, the absent key-derivation function and the legal 1024-bit key
+    /// size are all behaviours a caller can observe today and C-B forbids correcting. <b>Token issuance is
+    /// not one of them.</b> The legacy has no token issuer, no JWT, no JWKS and no signing identity of any
+    /// kind: it opens no listening socket at all [AAP 0.1.4]. There is therefore no legacy behaviour here
+    /// for a floor to correct, and what does govern this key is AAP G7 and constraint C-G - every boundary
+    /// the decomposition CREATES is authenticated from the outset - together with the enterprise baseline
+    /// of AAP 0.7.2 that applies where no legacy behaviour speaks.
+    /// </para>
+    /// <para>
+    /// WHAT A SHORT KEY WOULD HAVE COST. This key signs every credential every service in the estate
+    /// accepts, and its public half is published anonymously at the JWKS path. Forging one token forges
+    /// authentication everywhere, so the weakest link in the whole trust topology would be a modulus an
+    /// operator could set by accident and be warned about in a log line nobody reads.
+    /// </para>
+    /// <para>
+    /// THE LEGACY ALLOWANCE IS UNTOUCHED WHERE IT IS THE LEGACY'S. <c>Crypto/RsaProvider.GenRSAKey</c>
+    /// still accepts 1024 bits and <c>Crypto/LegacyDefaults.RSA_SMALLEST_LEGAL_KEY_SIZE_BITS</c> still
+    /// publishes it [<c>ws_objects/pfw.shared.pbl.src/enums.sru:L965</c>]. The two surfaces now differ
+    /// DELIBERATELY, and <c>SigningKeyPolicyTests</c> pins the difference in both directions so neither
+    /// can be "harmonised" into the other by a later edit.
+    /// </para>
+    /// <para>
+    /// A CONSTANT RATHER THAN A SETTING. A configurable floor is a floor an operator can lower, which
+    /// returns the estate to exactly the state this closes. 2048 is the smallest modulus in current
+    /// general recommendation and is the legacy catalogue's own next size above 1024, so it is
+    /// simultaneously the defensible minimum and the smallest value that changes nothing for a deployment
+    /// following the documented key-generation procedure.
+    /// </para>
+    /// </remarks>
+    public const int MinimumSigningKeySizeBits = 2048;
+
+    /// <summary>
+    /// The request path the JWKS document is published at. Defaults to
+    /// <c>/.well-known/jwks.json</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Read by the JWKS endpoint when mapping the route and by the discovery endpoint when
+    /// advertising it as <c>jwks_uri</c>, composed against <see cref="Issuer"/>.
+    /// </para>
+    /// <para>
+    /// CONSTRAINED TO THE <c>/.well-known/</c> NAMESPACE, AND THAT IS AN AUTHENTICATION CONTROL
+    /// RATHER THAN TIDINESS. The service entry point applies a default-deny authorization policy and
+    /// grants anonymous access to exactly three paths: the health probe, this one and
+    /// <see cref="OpenIdConfigurationPath"/>. An unconstrained value here could therefore point the
+    /// anonymous exemption at an authenticated route and silently remove its authentication.
+    /// Validation requires the prefix and requires something after it.
+    /// </para>
+    /// <para>
+    /// It must stay anonymous: the document contains public verification material only, and every
+    /// consumer's stock bearer handler fetches it before it holds any token to present.
+    /// </para>
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string JwksPath { get; set; } = "/.well-known/jwks.json";
+
+    /// <summary>
+    /// The request path the OpenID discovery document is published at. Defaults to
+    /// <c>/.well-known/openid-configuration</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Read by the discovery endpoint when mapping the route. Publishing it is the entire reason this
+    /// service speaks REST rather than gRPC: a consumer's stock bearer handler self-configures from
+    /// this document with no bespoke code, so the security-critical retrieval path is framework code
+    /// in three services instead of hand-written code in three services.
+    /// </para>
+    /// <para>
+    /// Constrained to the <c>/.well-known/</c> namespace for the same authentication reason as
+    /// <see cref="JwksPath"/>: it is one of exactly three anonymous exemptions, and an unconstrained
+    /// value could aim that exemption somewhere it does not belong.
+    /// </para>
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string OpenIdConfigurationPath { get; set; } = "/.well-known/openid-configuration";
+
+    /// <summary>
+    /// The request path token issuance is served at. Defaults to <c>/v1/tokens</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THIS PROPERTY IS THE SINGLE DECLARED SOURCE OF TRUTH FOR THAT PATH. The token endpoint maps
+    /// its route from it and the discovery endpoint advertises it as <c>token_endpoint</c>; if the two
+    /// disagreed, discovery would publish an address that answers nothing, and a consumer that
+    /// trusted discovery could not obtain a token at all. Neither may hardcode the path
+    /// independently.
+    /// </para>
+    /// <para>
+    /// CONSTRAINED AS THE INVERSE OF THE METADATA PATHS: it must be rooted, and it must NOT fall
+    /// inside <c>/.well-known/</c>. That is the anonymous-exemption control applied in the other
+    /// direction - the one route that mints tokens can never land inside the namespace the entry point
+    /// exempts from authorization.
+    /// </para>
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string TokenEndpointPath { get; set; } = "/v1/tokens";
+
+    /// <summary>
+    /// The key store this service resolves an opaque caller-supplied key reference against. Names
+    /// only; it never carries key material.
+    /// </summary>
+    /// <remarks>
+    /// Get-only and always present, so the descriptor can never be null and never be replaced
+    /// wholesale. The configuration binder populates the existing instance when a complex property
+    /// has no setter, so <c>Security:KeyStore</c> binds exactly as it would with a setter. See
+    /// <see cref="SecurityKeyStoreOptions"/> for what it holds and, importantly, for what it must
+    /// never hold.
+    /// </remarks>
+    public SecurityKeyStoreOptions KeyStore { get; } = new();
+
+    /// <summary>
+    /// The credential directory: WHICH identities may authenticate at the issuance edge, and under
+    /// which secret configuration key each one's secret is found. Subject names and
+    /// CONFIGURATION-KEY names only - never a secret, and never a permission.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THIS SECTION DECLARES NO PERMISSION, AND THE OMISSION IS THE POINT.</b> Per-entry
+    /// <c>Audiences</c> and <c>Scopes</c> lists here read as a natural second gate applied after the
+    /// deployment-wide audience roster, and they would be inert: the
+    /// issuance decision is taken entirely against the matrix folded from <see cref="Callers"/> and
+    /// <see cref="CallerAuthorizations"/>, so such lists would bind, freeze onto the resolved
+    /// roster entry and never be read by anything that decides. Two surfaces describing one caller's
+    /// permissions with only one of them deciding anything is a divergence waiting to happen - an
+    /// operator reading this section would conclude a caller could address an audience
+    /// it would in fact be refused for. <b>The unenforced surface is absent rather than enforced</b>,
+    /// because enforcing it would create a second permission gate able to refuse what the matrix
+    /// grants, which is the divided authority the matrix exists to avoid. One declaration, one
+    /// enforcement point, nothing to diverge.
+    /// </para>
+    /// <para>
+    /// <b>WHAT REMAINS HERE IS AUTHENTICATION, WHICH IS A DIFFERENT QUESTION FROM AUTHORIZATION.</b>
+    /// This section answers "can this identity prove it is who it says it is", and the matrix answers
+    /// "what may that identity then obtain". A deployment can get either wrong independently, so the
+    /// two are cross-checked rather than merged: a grant naming an identity no entry here declares is
+    /// reported at startup rather than refused
+    /// [see <c>IssuanceRosterAuthority.Describe</c>], because such a caller usually authenticates by
+    /// client certificate, whose identity <c>Endpoints/TokenEndpoints.cs</c> reads from the certificate
+    /// without consulting this roster at all - so refusing it would make a supported topology
+    /// unstartable. What DOES refuse the host is a second representation of the permission model: a
+    /// retired <c>Audiences</c> or <c>Scopes</c> member on an entry here
+    /// [see <c>IssuanceRosterAuthority.Require</c>].
+    /// </para>
+    /// <para>
+    /// AT LEAST ONE ENTRY IS REQUIRED, AND AN EMPTY DIRECTORY IS A STARTUP FAILURE RATHER THAN A SAFE
+    /// DEFAULT. That is the opposite of <see cref="SecurityKeyStoreOptions.PermittedKeyRefs"/>, whose
+    /// empty default is safe, and the difference is which way the fault falls: an empty key-store
+    /// allow-list refuses every reference, which is a service that works with one capability switched
+    /// off, whereas an empty credential directory refuses every caller, which is a system in which no
+    /// service can obtain a credential at all while this service's readiness probe reports healthy
+    /// throughout. A deployment that means to mint nothing does not deploy the sole issuer.
+    /// </para>
+    /// <para>
+    /// GET-ONLY, so the collection can be bound but never replaced or nulled. The configuration binder
+    /// populates the existing instance, so <c>Security:Clients</c> binds as an array of objects exactly
+    /// as it would with a setter.
+    /// </para>
+    /// <para>
+    /// NO SECRET IS DECLARABLE HERE. <see cref="SecurityClientOptions.SecretConfigurationKey"/> names a
+    /// flat configuration key; the material it names is injected from the orchestration secret layer and
+    /// appears in no source file, no settings file and no container definition. That is the same
+    /// discipline the signing key and the key store are held to, and it is what keeps this section
+    /// reviewable in a settings file at all.
+    /// </para>
+    /// </remarks>
+    [MinLength(1)]
+    public IList<SecurityClientOptions> Clients { get; } = [];
+
+    /// <summary>
+    /// The mutual-TLS trust configuration for the one edge that can authenticate by client certificate:
+    /// which authority's client certificates this service accepts on <c>POST /v1/tokens</c>. Bound from
+    /// <c>Security:MutualTls</c>. A path - never material.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY IT IS REQUIRED AND WHY ITS ABSENCE WAS A DEFECT. <c>POST /v1/tokens</c> accepts TWO caller
+    /// credentials - a shared secret presented as an HTTP <c>Basic</c> credential, or a client
+    /// certificate - and no bearer token, because a caller cannot present a bearer token in order to
+    /// obtain its first bearer token. This group is the trust half of the certificate alternative. Where
+    /// a caller authenticates that way the endpoint reads the presented certificate's common
+    /// name and reconciles it against the claimed subject - but a NAME proves nothing on its own. Unless
+    /// the certificate's chain is verified against a known authority, any caller can mint a self-signed
+    /// certificate whose common name is <c>powerframework-gateway</c> and be issued a Gateway token. The
+    /// documented topology issues caller certificates from a LOCAL authority that is in no container's
+    /// operating-system trust store, so the platform cannot make that decision either. This group is
+    /// the anchor that lets the decision be made at all.
+    /// </para>
+    /// <para>
+    /// Get-only and always present, so the group can never be null and never be replaced wholesale; the
+    /// configuration binder populates the existing instance for a complex property with no setter.
+    /// </para>
+    /// </remarks>
+    public SecurityMutualTlsOptions MutualTls { get; } = new();
+
+    /// <summary>
+    /// The signing material: the asymmetric private key this service - and only this service - signs
+    /// with. Populated from the flat configuration key named by
+    /// <see cref="SigningKeyEnvironmentVariableName"/>. Never defaulted, never logged, never echoed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// SETTABLE, AND WITH NO DEFAULT OF ANY KIND, both deliberately. Settable because the only thing
+    /// that can populate it is an explicit post-configure step in the service entry point reading the
+    /// flat key by name - the environment provider's double-underscore section separator means the
+    /// fixed variable name can never bind into the <c>Security</c> section by convention, so nothing
+    /// in this file may assume conventional binding populated it. Undefaulted because there is no
+    /// value that would be safe to fall back to: generating one would silently invalidate every token
+    /// the other three services hold, and any literal would be exactly the hardcoded credential this
+    /// refactor's secrets mandate exists to eliminate.
+    /// </para>
+    /// <para>
+    /// Read by the signing-key provider, which imports it once at startup and hands the resulting key
+    /// to the token issuer and to the JWKS endpoint - the latter publishing the PUBLIC half only,
+    /// derived from this value. There is no public-key setting and no key to distribute by hand.
+    /// </para>
+    /// <para>
+    /// TWO ENCODINGS ARE ACCEPTED, and the validator tries them in a fixed order: armoured text
+    /// first, then base64 of the bare binary encoding. Both exist in practice because the legacy key
+    /// generator's armoured output is an OPTIONAL fourth argument
+    /// [ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20], so legacy material genuinely exists in
+    /// both shapes and neither may be refused. Material that is neither - random bytes being the case
+    /// that actually happens - cannot be imported as an asymmetric key and fails startup.
+    /// </para>
+    /// <para>
+    /// HANDLING RULES, which the surrounding code is shaped to enforce. This value is never written to
+    /// a log, a trace, an exception message, a metric or a diagnostic; no failure interpolates it, any
+    /// substring of it, or even its length; and the containing type declares no string rendering, no
+    /// debugger display and no serialization helper precisely so that stringifying the options
+    /// instance cannot expose it. It appears in no source file, no settings file and no container
+    /// definition: configuration injection from the orchestration layer is the only path by which it
+    /// reaches this process.
+    /// </para>
+    /// </remarks>
+    public string? SigningKey { get; set; }
+
+    /// <summary>
+    /// The FLAT configuration key that carries the RETIRING signing material during a rollover:
+    /// <c>SECURITY_JWT_RETIRING_SIGNING_KEY</c>. A NAME, not a value.
+    /// </summary>
+    /// <remarks>
+    /// Flat for exactly the reason <see cref="SigningKeyEnvironmentVariableName"/> is - it contains no
+    /// double underscore, so the environment provider cannot fold it into the <c>Security</c> section -
+    /// and read by the same explicit post-configure step in the entry point. Like its sibling it must not
+    /// be renamed and must have no <c>Security__</c> alias.
+    /// </remarks>
+    public const string RetiringSigningKeyEnvironmentVariableName =
+        "SECURITY_JWT_RETIRING_SIGNING_KEY";
+
+    /// <summary>
+    /// The PREVIOUS signing key, published for verification during a rollover and never used to mint.
+    /// Optional; empty means no rollover is in progress.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>WHAT THIS EXISTS TO FIX.</b> With one key and one <c>kid</c>, replacing the signing material
+    /// is a HARD CUTOVER, not a rollover: the instant the new key is live, every token minted under the old
+    /// one is unverifiable at the three services that cached the previous key set, and every token minted
+    /// under the new one is refused there until each cache refreshes. There is no refresh flow to retry
+    /// through and no revocation list to consult, so the only way to rotate without a window of rejected
+    /// requests was to accept one - which meant, in practice, that the key was not rotated. A key that
+    /// cannot be rotated in an emergency is the outcome that matters here.
+    /// </para>
+    /// <para>
+    /// HOW A ROLLOVER RUNS. Set this to the OUTGOING material and
+    /// <see cref="RetiringSigningKeyId"/> to its identifier, put the INCOMING material on
+    /// <see cref="SigningKey"/> under a new <see cref="SigningKeyId"/>, and restart. The key set then
+    /// publishes BOTH, so a verifier selects by <c>kid</c> and both generations of token verify; minting
+    /// uses the active key only. Once the overlap has elapsed, clear this pair and restart again.
+    /// </para>
+    /// <para>
+    /// HOW LONG THE OVERLAP MUST BE. At least <see cref="TokenLifetime"/> plus each verifier's clock skew -
+    /// 30 seconds across this estate - plus the interval in which the three verifiers refresh their cached
+    /// key set. The last token minted under the retiring key expires one lifetime after the cutover, so an
+    /// overlap shorter than that strands it. <c>docs/SECRETS.md</c> 4.2.1 states the bound and the order.
+    /// </para>
+    /// <para>
+    /// SAME HANDLING RULES AS <see cref="SigningKey"/>: never written to a log, a trace, an exception
+    /// message, a metric or a diagnostic, and never present in source, a settings file or a container
+    /// definition. Same accepted encodings, and the SAME size floor - a retiring key is still a key this
+    /// service asks every verifier in the estate to trust.
+    /// </para>
+    /// </remarks>
+    public string? RetiringSigningKey { get; set; }
+
+    /// <summary>
+    /// The <c>kid</c> of <see cref="RetiringSigningKey"/>. Required when that material is present, and
+    /// must differ from <see cref="SigningKeyId"/>.
+    /// </summary>
+    /// <remarks>
+    /// THE DISTINCT IDENTIFIER IS THE WHOLE MECHANISM. A verifier selects a key from the published set by
+    /// <c>kid</c>, so two keys sharing one identifier is not a rollover - it is an ambiguous key set in
+    /// which a verifier may pick the wrong key and report a signature failure. It is an identifier and
+    /// carries no key material, so unlike its companion it may appear in a diagnostic.
+    /// </remarks>
+    public string RetiringSigningKeyId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The file the CLIENT-certificate trust anchor is read from: the certificate authority whose
+    /// signature a caller's certificate must chain to before the token operation will honour the
+    /// identity it carries.
+    /// </summary>
+    /// <value>
+    /// A path to a PEM file holding one or more certificate authorities, or an empty string when this
+    /// deployment configures no client trust anchor of its own - in which case the composition root
+    /// adopts the listener's anchor from <see cref="SecurityMutualTlsOptions.ClientCaPath"/> if that one
+    /// is configured, and only when NEITHER is configured does no certificate establish an identity. In
+    /// that last state the CERTIFICATE credential is unavailable and the token operation answers
+    /// <c>401</c> to a caller presenting one; the HTTP <c>Basic</c> credential from the issuance roster
+    /// is a separate scheme on the same operation and keeps minting normally.
+    /// </value>
+    /// <remarks>
+    /// <para>
+    /// A PATH, NEVER MATERIAL, AND THAT IS A SECRETS CONTROL (C-F) EVEN THOUGH A PUBLIC CERTIFICATE IS
+    /// NOT SECRET. The whole trust configuration of this service arrives the same way - the listener's
+    /// server certificate is a path pair, the caller-side identities are path pairs - so a reader looks
+    /// for trust material in exactly one kind of place. No settings file in this repository names a path,
+    /// because a path is deployment-specific; this one is supplied through
+    /// <c>SECURITY_MTLS_CLIENT_CA_PATH</c> from the orchestration layer.
+    /// </para>
+    /// <para>
+    /// 🔴 ONE PUBLISHED VARIABLE, TWO ANCHORS, AND THIS KEY IS THE ONE THAT IS NOT PUBLISHED. There are
+    /// two client-certificate anchors in this service and they serve different layers: this key is the
+    /// ISSUANCE anchor, read by <c>Tokens/ClientCertificateTrust</c> so that a completed handshake's
+    /// certificate may establish an identity, while <see cref="SecurityMutualTlsOptions.ClientCaPath"/>
+    /// is the LISTENER's, read by the composition root so Kestrel will complete such a handshake at all.
+    /// The orchestration layer publishes one variable for this authority -
+    /// <c>SECURITY_MTLS_CLIENT_CA_PATH</c> - and maps it to the listener key alone. The sentence above
+    /// therefore used to describe an intent rather than a mechanism, and the gap it left was measurable:
+    /// a deployment following the documented bootstrap completed the handshake and was then refused
+    /// <c>401</c> on every certificate, because the anchor this type reads was named nowhere an operator
+    /// would look. The composition root closes it by ADOPTING the listener's anchor when this key is
+    /// unset - the <c>PostConfigure</c> on <c>AddOptions&lt;SecurityOptions&gt;</c> in this service's
+    /// <c>Program.cs</c>. The two remain distinct settings on purpose, because a deployment may let its
+    /// listener complete handshakes for a broader authority than issuance will honour identities from, so
+    /// an explicitly configured value here is always authoritative and is never merged with the
+    /// listener's.
+    /// </para>
+    /// <para>
+    /// WHY THE ANCHOR IS NAMED HERE RATHER THAN LEFT TO THE CONTAINER'S OS TRUST STORE, which is what an
+    /// earlier plan for this service proposed. Two reasons, and both are decisive. The OS store of a
+    /// .NET base image already trusts every public root in it, so leaving the anchor implicit makes the
+    /// set of issuers who can mint a caller identity for this system as wide as the public web PKI -
+    /// nothing about that set is stated anywhere, reviewable, or under this deployment's control. And an
+    /// implicit anchor cannot be verified: there is no in-process observation that distinguishes
+    /// "correctly trusts our CA" from "trusts everything", so the property could not be tested at all.
+    /// Naming it makes the trust boundary narrow, explicit and assertable, and it is what lets the
+    /// published <c>401</c> for an untrusted certificate be a behaviour rather than a promise.
+    /// </para>
+    /// <para>
+    /// UNSET IS A LEGITIMATE STATE AND FAILS CLOSED, WHICH IS THE OPPOSITE OF FAILING OPEN. A deployment
+    /// that configures no anchor under EITHER key cannot issue tokens on the CERTIFICATE credential -
+    /// every certificate is untrusted, and the operation answers the same <c>401</c> it answers for a
+    /// caller that presented none, while the roster's <c>Basic</c> credential keeps minting - and
+    /// meanwhile <c>/health</c>,
+    /// the published key set, the discovery document and the C-02 operations all stay reachable, so the
+    /// readiness chain the other three services wait on is unaffected. A path that is SET and unreadable
+    /// is a different matter and refuses the host: the deployment stated an intent it cannot meet, which
+    /// is the same structural fault the legacy ends the process for [pfw.sra:L143].
+    /// </para>
+    /// </remarks>
+    public string ClientCertificateAuthorityPath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// How thoroughly a caller certificate's revocation status is checked while its chain is built.
+    /// </summary>
+    /// <value>
+    /// One of the names in <see cref="ClientCertificateRevocationModes.Recognised"/>. Defaults to
+    /// <see cref="ClientCertificateRevocationModes.NoCheck"/>.
+    /// </value>
+    /// <remarks>
+    /// <para>
+    /// THE DEFAULT IS THE ONE THAT KEEPS A CORRECT DEPLOYMENT WORKING, AND IT IS A DEFAULT RATHER THAN A
+    /// FIXED CHOICE. A locally issued certificate authority - including the one this repository's own
+    /// generation recipe produces - publishes no distribution point and no responder, so a chain built
+    /// with revocation checking enabled reports the status as UNKNOWN and, because this service refuses
+    /// an unknown status rather than ignoring it, would refuse every caller. Defaulting to a check that
+    /// cannot succeed would therefore turn a correctly configured deployment into a broken one.
+    /// </para>
+    /// <para>
+    /// A DEPLOYMENT THAT PUBLISHES REVOCATION DATA RAISES IT, and the two stronger modes are honoured
+    /// exactly as named: an offline check consults cached lists only, an online check may reach the
+    /// issuer's responder. Neither is silently downgraded, and an indeterminate status under either is a
+    /// REFUSAL - there is no arm anywhere that treats "could not tell" as "not revoked".
+    /// </para>
+    /// <para>
+    /// A string rather than the platform's own enumeration, for the same reason the signing-key format is
+    /// a string: an unrecognised enum name fails inside the configuration binder with the binder's
+    /// message, whereas a string plus a validator arm produces a startup failure that names the offending
+    /// configuration key and the recognised set.
+    /// </para>
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string ClientCertificateRevocationMode { get; set; } =
+        ClientCertificateRevocationModes.NoCheck;
+
+    /// <summary>
+    /// The longest total validity window a caller certificate may declare, in days, while revocation is
+    /// not being checked.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 🔴 <b>THE CONTROL THAT SUBSTITUTES FOR REVOCATION, ENFORCED RATHER THAN ASSERTED.</b> While
+    /// <see cref="ClientCertificateRevocationMode"/> is <c>NoCheck</c> - which is the default, because the
+    /// documented local authority publishes no distribution point and runs no responder - a stolen caller
+    /// certificate stays acceptable for as long as it is valid, and nothing can withdraw it (CWE-295). The
+    /// only remaining bound on that exposure is the certificate's own lifetime. Every operational surface
+    /// already RECOMMENDED a short one and the issuance recipe already used <c>-days 30</c>, but a
+    /// recommendation is not a control: a deployment that issued a ten-year caller certificate was accepted
+    /// without complaint. This is that recommendation made enforceable.
+    /// </para>
+    /// <para>
+    /// IT MEASURES THE DECLARED WINDOW, NOT THE REMAINING ONE. <c>NotAfter</c> minus <c>NotBefore</c> is a
+    /// property of the certificate and is the same on the day it is issued and the day before it expires, so
+    /// a caller cannot wait out the check; measuring the remaining validity instead would accept a ten-year
+    /// certificate for nine of those years and refuse it only at the end, which is the opposite of useful.
+    /// Expiry itself is a separate matter and is already enforced by chain building.
+    /// </para>
+    /// <para>
+    /// IT APPLIES ONLY WHILE REVOCATION IS NOT CHECKED, and that scoping is the point rather than a
+    /// loophole. A deployment that selects <c>Offline</c> or <c>Online</c> has a PKI that can withdraw a
+    /// certificate, so the compensating control is no longer compensating for anything and refusing a
+    /// year-long certificate there would be a lifetime policy invented here. The two settings are therefore
+    /// read together: strengthen the first and the second stops applying.
+    /// </para>
+    /// <para>
+    /// THE DEFAULT IS THREE TIMES THE DOCUMENTED ISSUANCE WINDOW, which is deliberate headroom: the recipe
+    /// issues 30-day material, so a deployment following it is nowhere near the ceiling and an operator who
+    /// lengthens issuance slightly is not broken by a bound they never chose. The ceiling exists to refuse
+    /// the years-long certificate, not to police the weeks-long one.
+    /// </para>
+    /// </remarks>
+    [Range(1, 3_650)]
+    public int MaxCallerCertificateLifetimeDays { get; set; } = 90;
+
+    /// <summary>
+    /// The caller-to-audience-to-scope authorization matrix: which authenticated caller may obtain a
+    /// token for which audience, and which scopes that combination may carry.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WITHOUT THIS, AUTHENTICATION WAS THE WHOLE OF AUTHORIZATION. A caller establishing itself at the
+    /// transport could request ANY audience on <see cref="Audiences"/> and ANY syntactically valid scope
+    /// set, and receive both in full - so a token minted for one service's caller was minted for every
+    /// service's caller, and the scope claim was decorative because nothing constrained what a caller
+    /// could ask for. The published <c>403</c> on the issuance operation - "the authenticated caller is
+    /// not permitted to obtain a token for the requested subject or audience" - had no mechanism behind
+    /// its audience half at all. This is that mechanism.
+    /// </para>
+    /// <para>
+    /// AN EMPTY MATRIX AUTHORISES NOTHING, AND THAT IS THE FAIL-CLOSED DIRECTION. A deployment that
+    /// declares no authorization has stated no caller it will mint for, and the only answer consistent
+    /// with that is to mint for none - the opposite reading, "nothing configured, so allow anything", is
+    /// the exact shape of the defect this exists to close. It costs nothing in practice because
+    /// <c>appsettings.json</c> SHIPS the matrix: the callers, the audiences and the scopes are this
+    /// system's own published topology rather than deployment-specific material, so the default
+    /// configuration is simultaneously closed and working. A deployment that blanks it has made a
+    /// deliberate, visible choice.
+    /// </para>
+    /// <para>
+    /// ONE ENTRY PER CALLER-AND-AUDIENCE PAIR, which mirrors the contract's own shape: the request
+    /// carries ONE audience, deliberately, so that a token is never valid somewhere its holder did not
+    /// intend. A caller that legitimately addresses two services has two entries, and the scopes it may
+    /// carry to each are stated separately - which is the property a single per-caller scope list could
+    /// not express.
+    /// </para>
+    /// <para>
+    /// A SCOPE NARROWING IS A SUCCESS, NOT A REFUSAL, and that is the published contract rather than a
+    /// choice made here: the response's granted set "may be narrower than the requested one", and a
+    /// caller is told to read it. So a request whose scopes are partly permitted is granted the
+    /// permitted part; only a request with NO permitted scope at all is refused, because there would be
+    /// nothing to grant and the response's scope member is required.
+    /// </para>
+    /// <para>
+    /// IT CARRIES NO CREDENTIAL AND CANNOT. Every value here is an identity or a protocol token -
+    /// nothing secret, nothing derived from key material - so it is legitimately expressible in a
+    /// settings file, unlike every path and every key this configuration deliberately refuses to hold.
+    /// </para>
+    /// <para>
+    /// Get-only and empty by default, so the binder populates the existing instance and the collection
+    /// can be neither replaced nor nulled - the same shape as <see cref="Audiences"/> and for the same
+    /// reason.
+    /// </para>
+    /// </remarks>
+    public IList<CallerAuthorizationOptions> CallerAuthorizations { get; } = [];
+}
+
+/// <summary>
+/// One row of the authorization matrix: a caller, the single audience it may address, and the scopes it
+/// may carry to that audience.
+/// </summary>
+/// <remarks>
+/// A CLASS WITH SETTABLE MEMBERS BECAUSE THE CONFIGURATION BINDER CONSTRUCTS IT. It carries no
+/// behaviour, performs no validation of its own, and is validated as part of the options contract by
+/// <see cref="SecurityOptionsValidator"/> - so that a malformed row refuses the host with a message
+/// naming its index and its offending key, rather than throwing from inside the binder.
+/// </remarks>
+public sealed class CallerAuthorizationOptions
+{
+    /// <summary>The authenticated caller identity this row authorises.</summary>
+    /// <value>
+    /// A non-blank identity, compared ORDINALLY against the request's subject - which the issuance
+    /// operation has already reconciled against the identity the client certificate establishes.
+    /// </value>
+    /// <remarks>
+    /// ORDINAL EVERYWHERE, WITH NO TRIMMING AND NO CASE FOLDING, because that is how every other
+    /// identity in this service is compared: the audience against its roster, the key identifier against
+    /// the published key set, and the subject against the certificate. Folding case here would authorise
+    /// a caller whose certificate establishes a different identity.
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string Caller { get; set; } = string.Empty;
+
+    /// <summary>The single audience this caller may obtain a token for.</summary>
+    /// <value>A non-blank audience identity, which must also appear on <see cref="SecurityOptions.Audiences"/>.</value>
+    /// <remarks>
+    /// REQUIRED TO BE ON THE GLOBAL ROSTER TOO, and the redundancy is deliberate: the roster is what the
+    /// issuer will mint for at all, so a row naming an audience outside it authorises something that
+    /// could never be granted - a configuration contradiction an operator should be told about at
+    /// startup rather than discover as a puzzling refusal.
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string Audience { get; set; } = string.Empty;
+
+    /// <summary>The scopes this caller may carry to this audience.</summary>
+    /// <value>At least one non-blank, white-space-free scope.</value>
+    /// <remarks>
+    /// AT LEAST ONE, because a row permitting no scope permits nothing and would be indistinguishable
+    /// from an absent row while looking like a grant. White space is refused for the same reason the
+    /// request validator refuses it: the scope claim is space-delimited, so a scope containing a space
+    /// would arrive at a verifier as two scopes.
+    /// </remarks>
+    public IList<string> Scopes { get; } = [];
+}
+
+/// <summary>
+/// The recognised values of <see cref="SecurityOptions.ClientCertificateRevocationMode"/>.
+/// </summary>
+/// <remarks>
+/// The three names are the platform's own revocation modes, spelled exactly as the platform spells them
+/// so that a reader of the settings file and a reader of the chain policy see the same word. A named
+/// holder rather than literals, for the reason recorded on <see cref="SigningKeyFormats"/>.
+/// </remarks>
+public static class ClientCertificateRevocationModes
+{
+    /// <summary>Revocation is not consulted at all.</summary>
+    public const string NoCheck = "NoCheck";
+
+    /// <summary>Only cached revocation lists are consulted; nothing is fetched.</summary>
+    public const string Offline = "Offline";
+
+    /// <summary>The issuer's revocation source may be reached over the network.</summary>
+    public const string Online = "Online";
+
+    /// <summary>The recognised names, for a failure message and for a test to enumerate.</summary>
+    public static IReadOnlyList<string> Recognised { get; } = [NoCheck, Offline, Online];
+
+    /// <summary>Whether a configured mode name is one the platform implements.</summary>
+    /// <param name="mode">The configured value.</param>
+    /// <returns><see langword="true"/> when recognised.</returns>
+    /// <remarks>
+    /// Case-insensitive, matching how the signing-key format is screened and how a settings file is
+    /// ordinarily read: a deployment writing <c>nocheck</c> has named a mode this service implements, and
+    /// refusing it would be a spelling rule invented here.
+    /// </remarks>
+    public static bool IsRecognised(string? mode) =>
+        mode is not null
+        && Recognised.Any(candidate => string.Equals(candidate, mode, StringComparison.OrdinalIgnoreCase));
+}
+
+/// <summary>
+/// The recognised values of <see cref="SecurityOptions.SigningKeyFormat"/>.
+/// </summary>
+/// <remarks>
+/// A named holder rather than literals scattered across the options type, its validator and its tests:
+/// the recognised set has to be quotable in a failure message and assertable in a test, and three
+/// copies of a spelling is how one of them drifts. Not an enum, for the reason recorded on
+/// <see cref="SecurityOptions.SigningKeyFormat"/>.
+/// </remarks>
+public static class SigningKeyFormats
+{
+    /// <summary>
+    /// Armoured text first - both the algorithm-tagged and the RSA-specific forms - then base64 of the
+    /// bare binary encoding on a single line.
+    /// </summary>
+    public const string PemOrPkcs8Base64 = "PemOrPkcs8Base64";
+
+    // NO KEY-SIZE CONSTANT LIVES IN THIS HOLDER, AND THAT IS A PLACEMENT DECISION RATHER THAN AN ABSENCE
+    // OF POLICY. There IS a floor - SecurityOptions.MinimumSigningKeySizeBits - and it lives on the
+    // options type beside the setting it constrains, because that is where a reader of the signing
+    // configuration looks. What an earlier revision declared HERE was three constants: a DEFAULT floor of
+    // 2048 plus the smallest and largest values a deployment could configure it to, because the floor was
+    // then a bound setting. It is now a single constant with no configurable bounds, for the reason
+    // recorded on it: a floor an operator can lower is not a floor. This holder therefore carries FORMAT
+    // NAMES ONLY, which is exactly what its summary says.
+
+    /// <summary>The recognised format names, for a failure message and for a test to enumerate.</summary>
+    public static IReadOnlyList<string> Recognised { get; } = [PemOrPkcs8Base64];
+
+    /// <summary>Whether a configured format name is one this service implements.</summary>
+    /// <param name="format">The configured value.</param>
+    /// <returns><see langword="true"/> when recognised.</returns>
+    /// <remarks>
+    /// Compared case-insensitively because a format name is an identifier an operator types rather than
+    /// a protocol token, and refusing a bring-up over the case of a word this service chose itself would
+    /// be a fault with no security value. The recognised SET is still closed.
+    /// </remarks>
+    public static bool IsRecognised(string? format) =>
+        format is not null
+        && Recognised.Any(candidate => string.Equals(candidate, format.Trim(), StringComparison.OrdinalIgnoreCase));
+}
+
+/// <summary>
+/// One entry in the issuance CREDENTIAL roster: a caller identity and the configuration key its shared
+/// secret is injected under. It carries no permission member, deliberately - see the note at the foot of
+/// the type.
+/// </summary>
+/// <remarks>
+/// <para>
+/// THE SUBJECT IS BOTH THE CREDENTIAL IDENTITY AND THE TOKEN SUBJECT, and collapsing the two is the
+/// property that makes the issuance edge's reconciliation meaningful. A caller presents this name as
+/// its credential identity, claims this name in the request body, and receives a token whose subject
+/// claim is this name; the endpoint compares the claim to the authenticated identity ordinally, so
+/// there is no arrangement in which a caller obtains a token for a subject other than its own.
+/// </para>
+/// <para>
+/// A top-level type rather than one nested inside <see cref="SecurityOptions"/>, so it is bindable and
+/// assertable on its own, exactly as <see cref="SecurityKeyStoreOptions"/> is. It lives in this file
+/// because a roster entry and the contract it belongs to are one decision.
+/// </para>
+/// <para>
+/// IT CARRIES NO SECRET AND HAS NOWHERE TO PUT ONE. There is deliberately no <c>Secret</c> member: a
+/// settings file able to hold one would be exactly the hardcoded credential this refactor's mandate
+/// eliminates, and the eight in-source secret sites the sweep found are what that mandate exists for.
+/// </para>
+/// </remarks>
+public sealed class SecurityClientOptions
+{
+    /// <summary>
+    /// The caller identity. Both the credential identity presented at the issuance edge and the
+    /// subject claim of every token minted for it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Compared ORDINALLY everywhere it is used - against the presented credential identity, against
+    /// the claimed subject in the request body, and against the other roster entries when duplicates
+    /// are checked. Folding case would let two entries that differ only in case collide, and a
+    /// deployment would then have two rosters' worth of permissions arbitrated by whichever entry the
+    /// binder happened to place first.
+    /// </para>
+    /// <para>
+    /// NOT TRIMMED AND NOT REPAIRED. The value reaches the token's subject claim exactly as configured,
+    /// so a leading space here would be a leading space in every token minted for this caller and in
+    /// every log record naming it.
+    /// </para>
+    /// </remarks>
+    [Required(AllowEmptyStrings = false)]
+    public string Subject { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The name of the flat configuration key this caller's shared secret is injected under - for
+    /// example <c>SECURITY_CLIENT_SECRET_GATEWAY</c>. A NAME, NEVER A VALUE.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE SAME INDIRECTION THE KEY STORE USES, for the same reason: a settings file names the key and
+    /// the orchestration secret layer supplies the material, so no credential is ever committed. The
+    /// lookup is <c>configuration[SecretConfigurationKey]</c> and nothing more elaborate.
+    /// </para>
+    /// <para>
+    /// THE DOUBLE-UNDERSCORE TRAP APPLIES. The composed lookup is a FLAT configuration key of exactly
+    /// this spelling, not a path inside the <c>Security</c> section, so a value supplied as an
+    /// environment variable resolves by its own literal name - which is what makes the name above work
+    /// unchanged as a variable name. A name containing a doubled underscore would be folded into a
+    /// section separator on the way in by the environment provider and would then simply fail to
+    /// resolve, so the validator constrains the charset to letters, digits, <c>.</c>, <c>_</c> and
+    /// <c>-</c> and the registry fails startup when a named key resolves to nothing.
+    /// </para>
+    /// <para>
+    /// OPTIONAL, AND THE ABSENCE IS MEANINGFUL RATHER THAN LAX. An entry with no secret key is a caller
+    /// that authenticates by CLIENT CERTIFICATE only: the issuance edge accepts two schemes, and a
+    /// deployment that terminates TLS and issues client certificates has no shared secret to name. Such
+    /// an entry can never be authenticated by the credential scheme, because a roster entry with no
+    /// resolved secret is not a candidate for secret comparison at all - it is not that any secret
+    /// matches it.
+    /// </para>
+    /// </remarks>
+    public string? SecretConfigurationKey { get; set; }
+
+    // ----------------------------------------------------------------------------------------------
+    //  🔴 THIS TYPE CARRIES NO PERMISSION MEMBER, AND THAT IS THE WHOLE POINT OF ITS SHAPE.
+    //
+    //  THE OBVIOUS TWO WOULD BE `Audiences` and `Scopes`, AND NEITHER MAY EXIST HERE. The issuance
+    //  decision is taken entirely against the grant matrix folded from `Security:Callers` and
+    //  `Security:CallerAuthorizations` [Tokens/TokenIssuer.cs, gate 2 of Issue], which is deliberately the
+    //  single enforcement point. Per-entry lists bound onto the resolved roster entry would therefore be
+    //  consulted by NOTHING while describing a permission decision they do not take - and settings drift
+    //  makes that worse than merely redundant, because a roster advertising an audience the matrix does
+    //  not grant reads as a permission an operator has. Editing such a list to fix an authorization
+    //  problem would change nothing at all (CWE-16, CWE-863).
+    //
+    //  ONE AUTHORITATIVE MODEL, NOT TWO DESCRIBING ONE DECISION. Declaring the lists as a SECOND enforced
+    //  gate is the other available shape and is the wrong one: it would create a second permission
+    //  surface able to refuse what the matrix grants, which is exactly the divided authority
+    //  the fold in TokenIssuer rejects in terms. So this type carries neither list: it is the CREDENTIAL
+    //  DIRECTORY - who may authenticate at the issuance edge, and under which secret. Authentication and
+    //  authorization are two questions, and this type answers only the first.
+    //
+    //  THE PERMISSION KEYS ARE REFUSED RATHER THAN IGNORED IF A DEPLOYMENT SUPPLIES THEM. An options
+    //  binder silently drops a key no property matches, so a settings file carrying
+    //  `Security:Clients[n]:Audiences` would look configured and do nothing - the same defect in a new
+    //  dress. IssuanceRosterAuthority refuses to start such a host and names both the key and the matrix
+    //  that decides in its place.
+    // ----------------------------------------------------------------------------------------------
+}
+
+/// <summary>
+/// The key-store descriptor: how this service turns an opaque, caller-supplied key reference into
+/// key material, and which references it will accept at all. NAMES ONLY - this type carries no key
+/// material and no value that could become key material.
+/// </summary>
+/// <remarks>
+/// <para>
+/// WHY A REFERENCE AND NOT A KEY. The published cryptographic contract's rule is that raw key
+/// material never crosses the wire from a caller: a caller passes an opaque <c>keyRef</c> and this
+/// service resolves it against its own configured store. The legacy surface is the shape being
+/// removed - its keyed hashing overloads take a raw key argument directly
+/// [ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L23-L29], so every caller of the legacy library had to
+/// hold, transport and therefore be trusted with the key. Moving resolution behind a reference means
+/// a compromised caller can name a key it may use and can obtain nothing it may not.
+/// </para>
+/// <para>
+/// A top-level type rather than a type nested inside <see cref="SecurityOptions"/>, so that it is
+/// bindable, constructible and assertable on its own in a test without reaching through its parent.
+/// It lives in the same file as its parent because a descriptor and the contract it belongs to are
+/// one decision.
+/// </para>
+/// </remarks>
+public sealed class SecurityKeyStoreOptions
+{
+    /// <summary>
+    /// The configuration-key NAME PREFIX that a permitted key reference is appended to in order to
+    /// resolve its material - for example <c>SECURITY_KEYSTORE_</c>. A name, never a value.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Read by the cryptographic endpoints when resolving a caller's <c>keyRef</c>. Resolution is
+    /// <c>configuration[ConfigurationKeyPrefix + keyRef]</c> and nothing more elaborate.
+    /// </para>
+    /// <para>
+    /// THE DOUBLE-UNDERSCORE TRAP APPLIES HERE TOO, and getting it wrong is the likeliest defect in
+    /// the whole key-store path. The composed lookup is a FLAT configuration key of exactly that
+    /// concatenated spelling - it is NOT a path inside <c>Security:KeyStore</c>, and the environment
+    /// provider will only fold a double underscore into a section separator. A prefix carrying no
+    /// double underscore therefore keeps resolution flat, which is the intent: material supplied as an
+    /// environment variable resolves by its own literal name, exactly as the signing key does.
+    /// </para>
+    /// <para>
+    /// REQUIRED ONLY WHEN THE STORE IS ACTUALLY USED. Validation demands a non-blank prefix if and
+    /// only if <see cref="PermittedKeyRefs"/> lists at least one reference, because a permitted
+    /// reference with no prefix to resolve it against is unresolvable configuration and should stop
+    /// the host. A deployment that permits no reference uses no prefix, and failing it for a value it
+    /// has no use for would be a fabricated requirement.
+    /// </para>
+    /// <para>
+    /// 🔴 <b>EACH COMPOSED KEY ACCEPTS A PROJECTED FILE, AND IN PRODUCTION IT MUST USE ONE.</b>
+    /// <c>&lt;ConfigurationKeyPrefix&gt;&lt;keyRef&gt;_FILE</c> names a file whose trimmed content becomes
+    /// the material, exactly as the signing key's own companion does
+    /// [<c>Configuration/FileBackedSecrets.cs</c>]. That companion did not used to cover these keys, so
+    /// the one class of material a CALLER can ask this service to use was the one class with no projected
+    /// form - and a sweep of a running deployment found a configured reference's exact material rendered
+    /// by <c>docker compose config</c>, returned by <c>docker inspect</c> and readable from
+    /// <c>/proc/&lt;pid&gt;/environ</c> at once. A production deployment supplying such a value inline is
+    /// now REFUSED at startup; every other environment keeps the inline form, so the documented bring-up
+    /// and the parity captures are unchanged.
+    /// </para>
+    /// </remarks>
+    public string ConfigurationKeyPrefix { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The closed set of key references callers may name. A reference outside this set is rejected
+    /// cleanly rather than resolved.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Read by the cryptographic endpoints before any resolution is attempted, which is the point: an
+    /// unknown reference becomes a clean, cheap rejection instead of an unbounded lookup into the
+    /// configuration tree driven by caller-supplied text. Without the allow-list, a caller chooses
+    /// which configuration key this service reads.
+    /// </para>
+    /// <para>
+    /// EVERY ENTRY IS CHARSET-CONSTRAINED. Validation requires each entry to be a conservative safe
+    /// identifier - letters, digits, dot, underscore and hyphen only, at least one character and no
+    /// more than <see cref="SecurityOptionsValidator.MaximumKeyRefLength"/> - so that a reference can
+    /// never traverse out of the intended configuration namespace or be shaped like a path. That
+    /// check is on the DECLARED set rather than only on the caller's input, because the declared set
+    /// is what the caller's input is matched against: an unsafe entry here would legitimise an unsafe
+    /// reference for every caller.
+    /// </para>
+    /// <para>
+    /// ONE OPERATIONAL NOTE ON THE UNDERSCORE, WHICH IS PERMITTED AND STAYS PERMITTED. A single
+    /// underscore is an ordinary identifier character, and a DOUBLED one is equally safe here, because
+    /// the composed lookup is a literal flat key and no traversal is possible either way. It is,
+    /// however, a footgun for material supplied as an environment variable: the environment provider
+    /// folds a doubled underscore into a section separator on the way IN, so a variable whose name
+    /// contains one lands under a different configuration key than the literal lookup asks for, and
+    /// the reference then simply fails to resolve. Prefer a single underscore, a hyphen or a dot in a
+    /// reference name. That is guidance and not a rule: rejecting a doubled underscore would be policy
+    /// invented here, and it would protect nothing.
+    /// </para>
+    /// <para>
+    /// Get-only and empty by default. The configuration binder populates the existing instance, so
+    /// <c>Security:KeyStore:PermittedKeyRefs</c> binds as usual, while the absence of a setter keeps
+    /// the collection from being replaced or nulled. An empty set is entirely valid and is what the
+    /// settings file ships: it means no caller-referenced key material is configured, so every
+    /// reference a caller could name is rejected. That is the safe default, and it is deliberately not
+    /// an error.
+    /// </para>
+    /// <para>
+    /// A REFERENCE IS NOT A KEY. Entries here are identifiers; the material they name lives outside
+    /// this file, outside every settings file and outside every container definition, reached only
+    /// through configuration injection from the orchestration layer. There is deliberately no map
+    /// from a reference to a value, because such a map bound from a settings file would be exactly
+    /// the hardcoded material this refactor's mandate eliminates.
+    /// </para>
+    /// </remarks>
+    public IList<string> PermittedKeyRefs { get; } = [];
+}
+
+/// <summary>
+/// States, once at startup, whether the configured-reference key store can resolve anything - so that a
+/// deployment learns its keyed-crypto readiness from a startup record rather than from a caller's 403.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>THE READINESS QUESTION THIS ANSWERS.</b> <c>C-02</c> resolves a caller's <c>keyRef</c> only if the
+/// reference appears in <see cref="SecurityKeyStoreOptions.PermittedKeyRefs"/>, and the shipped settings
+/// file leaves that set EMPTY while configuring a prefix beside it. The empty set is the correct closed
+/// default - an unconfigured store must resolve nothing rather than read whatever configuration key a
+/// caller names - but it is also SILENT: a deployment that intended to publish references and did not
+/// gets no signal at all until a caller is refused, and the refusal (a deliberately indistinguishable
+/// 403) cannot tell it that the store is simply empty. This type is that signal, and it is the whole of
+/// the fix: nothing here changes what resolves.
+/// </para>
+/// <para>
+/// <b>ITS SEVERITY AND WORDING FOLLOW <c>ClientCertificateTrust</c>, WHICH IS THE SAME PROBLEM ONE EDGE
+/// OVER.</b> That type records an unset trust anchor at <c>Warning</c> once at startup, qualified to the
+/// credential it actually affects and closing with the observation that the state is fail-closed rather
+/// than a fault. An empty key store is the identical shape: a capability of this service - keyed crypto
+/// against configured material - is unavailable, an adjacent capability is untouched, and the remedy is a
+/// configuration key. Reporting it at the same level in the same shape is what lets an operator read both
+/// records as one readiness statement instead of two conventions.
+/// </para>
+/// <para>
+/// <b>A RECORD, NOT A GATE - AND THAT IS WHY IT IS SEPARATE FROM THE VALIDATOR.</b>
+/// <see cref="SecurityOptionsValidator"/> refuses the host for configuration that CANNOT work: a
+/// permitted reference with no prefix to resolve it against. An empty permitted set works exactly as
+/// specified, so refusing it would make the shipped configuration unstartable and would break the
+/// independent bring-up the build documentation promises (constraints C-A and C-I).
+/// </para>
+/// <para>
+/// EXACTLY ONE RECORD IS EMITTED PER START, WHICHEVER STATE THE STORE IS IN. An available store reports
+/// what it will resolve; an unavailable one reports that it will resolve nothing and how to change that.
+/// Emitting both would make an operator read two sentences to learn one fact, and the second would always
+/// restate the first.
+/// </para>
+/// <para>
+/// NO MATERIAL IS NAMED. A permitted reference is an identifier already written in a settings file in
+/// plain text, and the prefix is reported only as PRESENT or ABSENT - never echoed - because it composes
+/// the configuration key that material arrives under. Nothing here reads a resolved value.
+/// </para>
+/// <para>
+/// PURE AND HOST-FREE, for the same reason <c>IssuanceRosterAuthority.Describe</c> is: both members are
+/// functions of the bound options alone, so the readiness wording is testable without booting a host and
+/// the caller owns the log level and the category.
+/// </para>
+/// </remarks>
+internal static class KeyStoreReadiness
+{
+    /// <summary>
+    /// Describes an AVAILABLE store: what it will resolve, and what it will still refuse.
+    /// </summary>
+    /// <param name="options">The bound options to inspect.</param>
+    /// <returns>
+    /// One message when at least one reference is permitted, otherwise an empty list - in which case
+    /// <see cref="DescribeUnavailable"/> carries the record instead.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// IT NAMES WHAT IS STILL REFUSED, because "the store is configured" is not "every reference
+    /// resolves": a caller naming an unlisted reference is refused, and a listed reference whose material
+    /// the orchestration layer never supplied fails too. An operator reading only the count would take the
+    /// first refusal after a successful start as a regression.
+    /// </para>
+    /// <para>
+    /// A LIST RATHER THAN A STRING, so the composition root's loop is identical to the one it already runs
+    /// over <c>IssuanceRosterAuthority.Describe</c>, and so this member and its sibling are called the
+    /// same way at two levels.
+    /// </para>
+    /// </remarks>
+    internal static IReadOnlyList<string> DescribeAvailable(SecurityOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        SecurityKeyStoreOptions keyStore = options.KeyStore;
+
+        if (keyStore.PermittedKeyRefs.Count == 0)
+        {
+            return [];
+        }
+
+        // The count is rendered through the invariant culture BEFORE it reaches the message, because the
+        // message is composed by concatenating fragments and the interpolated-handler overload of
+        // string.Create accepts only a single literal. Every other substitution is already a string.
+        string permittedCount = keyStore.PermittedKeyRefs.Count.ToString(CultureInfo.InvariantCulture);
+        string references = string.Join(", ", keyStore.PermittedKeyRefs);
+
+        return
+        [
+            $"Key-store readiness: {permittedCount} key reference(s) permitted ({references}), resolved "
+            + $"against the prefix '{SecurityOptions.SectionName}:KeyStore:ConfigurationKeyPrefix' names. "
+            + "A caller naming any other reference is refused, as is a permitted reference whose material "
+            + "the deployment did not supply.",
+        ];
+    }
+
+    /// <summary>
+    /// Describes an UNAVAILABLE store: no reference is permitted, so no configured material is reachable.
+    /// </summary>
+    /// <param name="options">The bound options to inspect.</param>
+    /// <returns>One message when no reference is permitted, otherwise an empty list.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// <para>
+    /// QUALIFIED TO THE CAPABILITY IT ACTUALLY AFFECTS, which is the correction
+    /// <c>ClientCertificateTrust</c> already carries and the reason its record is worth copying. Key
+    /// material this service GENERATED and retained for the calling principal is reached by a reference it
+    /// minted, which the permitted set does not gate at all - so a record reading "keyed crypto is
+    /// unavailable" without that qualification would send an operator after an outage that is not
+    /// happening.
+    /// </para>
+    /// <para>
+    /// THE PREFIX CLAUSE VARIES BECAUSE THE REMEDY DOES. With a prefix already configured - the shipped
+    /// shape - the store is half-configured and the only missing half is the reference list. With no
+    /// prefix either, both are missing and naming only the list would leave the deployment one edit short
+    /// of working. Neither variant echoes the prefix VALUE.
+    /// </para>
+    /// </remarks>
+    internal static IReadOnlyList<string> DescribeUnavailable(SecurityOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        SecurityKeyStoreOptions keyStore = options.KeyStore;
+
+        if (keyStore.PermittedKeyRefs.Count > 0)
+        {
+            return [];
+        }
+
+        string prefixKey = $"{SecurityOptions.SectionName}:KeyStore:ConfigurationKeyPrefix";
+
+        string remedy = string.IsNullOrWhiteSpace(keyStore.ConfigurationKeyPrefix)
+            ? $"Configure '{prefixKey}' and list the references it resolves under "
+                + $"'{SecurityOptions.SectionName}:KeyStore:PermittedKeyRefs' to enable it."
+            : $"'{prefixKey}' is configured and resolves nothing on its own, so the missing half is the "
+                + $"reference list: add each published reference to '{SecurityOptions.SectionName}:"
+                + "KeyStore:PermittedKeyRefs', or clear the prefix if configured material is not intended.";
+
+        return
+        [
+            "No key reference is permitted, so no configured material is reachable and CRYPTO OVER "
+            + "CONFIGURED KEY MATERIAL is unavailable. Key material this service GENERATED and retained "
+            + "for the calling principal is unaffected and remains usable by the reference it minted. "
+            + remedy
+            + " This is a fail-closed state, not a fault: every other route on this service remains "
+            + "available.",
+        ];
+    }
+}
+
+/// <summary>
+/// Which authority's client certificates this service accepts on the one mutual-TLS edge in the system.
+/// Bound from <c>Security:MutualTls</c>. One path, and nothing else.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A CA CERTIFICATE IS PUBLIC MATERIAL, SO THE PATH IS NOT ABOUT CONFIDENTIALITY. It is that the anchor
+/// is a DEPLOYMENT artefact - one local authority per environment, rotated on its own schedule, mounted
+/// read-only from the orchestration layer as <c>SECURITY_MTLS_CLIENT_CA_PATH</c> names. Embedding one in
+/// a settings file would pin every environment to a single authority and make rotation a code change.
+/// </para>
+/// <para>
+/// ONE MEMBER, AND NO KEY PATH, WHICH IS THE PROPERTY THAT MATTERS MOST HERE. Verifying a chain needs
+/// only the public root. A trust anchor with its private key beside it would mean this service could
+/// ISSUE the very client certificates it authenticates callers by, so a compromise of this service would
+/// become a compromise of every caller identity rather than of the signing key alone.
+/// </para>
+/// <para>
+/// WHAT AN UNSET PATH MEANS, STATED PLAINLY BECAUSE IT IS A SECURITY-RELEVANT DEFAULT. Unset means the
+/// PLATFORM decides whether a presented client certificate chains to something trustworthy, which is
+/// correct for a deployment whose caller certificates come from an authority already in the container's
+/// trust store, and correct for a test host that supplies a certificate directly. It is NOT a bypass:
+/// with no anchor configured the endpoint still refuses a certificate the platform rejected, because
+/// the platform's own validation runs first and an untrusted certificate never reaches the handler.
+/// </para>
+/// </remarks>
+public sealed class SecurityMutualTlsOptions
+{
+    /// <summary>
+    /// Path to the PEM-encoded certificate authority bundle caller certificates are verified against.
+    /// Empty means platform default trust.
+    /// </summary>
+    /// <remarks>
+    /// The file may carry one certificate or a concatenated chain of them; every certificate it carries
+    /// becomes an acceptable root for a CALLER identity, and nothing else does.
+    /// </remarks>
+    public string ClientCaPath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether caller-certificate trust is pinned to a mounted anchor rather than left to the platform.
+    /// </summary>
+    public bool IsConfigured => !string.IsNullOrWhiteSpace(ClientCaPath);
+}
+
+/// <summary>
+/// One entry in the issuance permission roster: a caller identity, the audiences it may address, and the
+/// scopes it may hold. Bound from an element of <c>Security:Callers</c>.
+/// </summary>
+/// <remarks>
+/// <para>
+/// THE IDENTITY IS THE PRESENTED CREDENTIAL'S, NOT THE REQUEST'S. <c>POST /v1/tokens</c> derives the caller
+/// identity from the credential the request actually presents - the user name of a verified HTTP Basic
+/// credential, or, where a deployment terminates TLS at this listener, the common name of a client
+/// certificate whose chain was built to the configured client authority - and refuses a request whose
+/// declared subject differs from it. So by the time this roster is consulted the identity has been PROVEN
+/// rather than asserted in a body. That is the property that makes an allow-list keyed on a name
+/// meaningful: without the proof the name would be self-asserted and this roster would be decoration.
+/// </para>
+/// <para>
+/// AUDIENCES ARE REFUSED; SCOPES ARE INTERSECTED. A token carries exactly one audience by contract, so a
+/// request naming an audience this caller may not address has nothing to narrow and is answered with the
+/// published forbidden response. A scope set, by contrast, is granted as the overlap with
+/// <c>Scopes</c> - contract C-01 states that the granted set may be narrower than the requested one and
+/// that a narrowing to a non-empty set is a success rather than an error. An overlap that is EMPTY is
+/// refused with the same forbidden response, because the granted scope member is required and there
+/// would be nothing truthful to report in it.
+/// </para>
+/// <para>
+/// NAMES ONLY. Every member is an identity or a scope string. There is no member that could hold a
+/// certificate, a key, a thumbprint or a secret, and there is deliberately nowhere to put one: the chain
+/// establishes WHO a caller is, and this type only records what that identity permits.
+/// </para>
+/// </remarks>
+public sealed class SecurityCallerOptions
+{
+    /// <summary>
+    /// The caller identity this entry governs - the common name of the client certificate it presents.
+    /// </summary>
+    /// <remarks>
+    /// Compared ORDINALLY against the certificate's common name, because an identity is compared exactly
+    /// everywhere else in this service: the issuer compares the audience ordinally against its roster and
+    /// trims nothing, and the issuance endpoint reconciles the declared subject against the certificate the
+    /// same way. Folding case here would honour an identity the certificate does not establish.
+    /// </remarks>
+    [Required(
+        AllowEmptyStrings = false,
+        ErrorMessage =
+            "must name the caller identity this entry governs - the common name of the client certificate "
+            + "that caller presents. An entry with no identity governs nothing and would silently permit "
+            + "nothing, so the host refuses to start instead.")]
+    public string Identity { get; set; } = string.Empty;
+
+    /// <summary>
+    /// What this caller may request, one entry per audience it may address.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A GRANT PER AUDIENCE RATHER THAN ONE SCOPE LIST FOR THE CALLER, which is what makes this roster a
+    /// matrix rather than two independent lists. DataServices addresses two audiences with entirely
+    /// different scope sets - Persistence for its read and write scopes, Security for its cryptographic
+    /// scope - and a flat per-caller scope list would permit it to hold Security's scope in a
+    /// Persistence-audience token. That particular over-grant happens to be harmless because each receiver
+    /// checks the audience as well as the scope, but the shape would licence a genuinely harmful one the
+    /// moment two audiences shared a scope name, and a permission model should not depend on a coincidence
+    /// of naming.
+    /// </para>
+    /// <para>
+    /// Empty fails validation: a caller permitted no audience can obtain no usable token, and an entry
+    /// saying so is a mistake rather than a policy - a deployment that wants a caller to hold nothing
+    /// removes the caller.
+    /// </para>
+    /// </remarks>
+    [MinLength(1)]
+    public IList<SecurityCallerGrantOptions> Grants { get; } = [];
+}
+
+/// <summary>
+/// One cell of the issuance permission matrix: an audience a caller may address, and the scopes it may
+/// hold in a token for that audience. Bound from an element of <c>Security:Callers:[n]:Grants</c>.
+/// </summary>
+/// <remarks>
+/// <para>
+/// THE AUDIENCE IS REFUSED AND THE SCOPES ARE INTERSECTED, and the asymmetry is the contract's. A token
+/// carries exactly one audience by design so that it is never valid somewhere its holder did not intend -
+/// there is nothing to narrow, so a request naming an audience this caller has no grant for is answered
+/// with the published forbidden response. A scope set is different: contract C-01 states the granted set
+/// may be narrower than the requested one and that a narrowing to a non-empty set is a successful outcome
+/// rather than an error. Only an EMPTY overlap is refused, and it is refused with that same response.
+/// </para>
+/// <para>
+/// NAMES ONLY - an audience identity and scope strings. There is nowhere here for a certificate, a key, a
+/// thumbprint or a secret, by design.
+/// </para>
+/// </remarks>
+public sealed class SecurityCallerGrantOptions
+{
+    /// <summary>
+    /// The audience this grant covers. Must also be a member of <see cref="SecurityOptions.Audiences"/>.
+    /// </summary>
+    /// <remarks>
+    /// The subset rule is enforced rather than documented: an audience this issuer cannot mint for at all
+    /// is dead configuration, so the grant would appear to permit something while permitting nothing, and
+    /// the resulting refusal reads like a permission decision when it is a roster typo.
+    /// </remarks>
+    [Required(
+        AllowEmptyStrings = false,
+        ErrorMessage =
+            "must name the audience this grant covers. A grant with no audience covers nothing while "
+            + "appearing to grant something, so the host refuses to start instead.")]
+    public string Audience { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The scopes this caller may hold in a token for <see cref="Audience"/>. A request is granted the
+    /// overlap between what it asked for and this set.
+    /// </summary>
+    /// <remarks>
+    /// Empty fails validation: a grant permitting no scope produces a token that authorises nothing, which
+    /// the receiver then refuses - a healthy-looking issuer minting useless credentials. A deployment that
+    /// wants a caller to hold nothing for an audience removes the grant.
+    /// </remarks>
+    [MinLength(1)]
+    public IList<string> Scopes { get; } = [];
+}
+
+/// <summary>
+/// Startup validation for <see cref="SecurityOptions"/>. Registered as a singleton
+/// <see cref="IValidateOptions{TOptions}"/> alongside <c>ValidateOnStart</c>, so that a
+/// misconfiguration refuses the host instead of surfacing on the first token request.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A DISCRETE TYPE RATHER THAN A VALIDATION LAMBDA, and that is a testability requirement rather than
+/// a style preference. Every rule below has to be drivable directly from the sibling test project -
+/// construct an options instance, call <see cref="Validate"/>, assert the failure - without booting a
+/// host, because that is what makes the per-service line-coverage gate reachable on this logic. A
+/// lambda registered inside the service entry point is reachable only by starting a host, so it is
+/// both slower to test and impossible to test exhaustively.
+/// </para>
+/// <para>
+/// EVERY FAILURE IS AGGREGATED, never short-circuited on the first. An operator fixing a bring-up
+/// should see all of it at once: one restart per defect is a poor experience and, worse, it hides
+/// compounded misconfiguration, so a deployment with three faults reads as three faults.
+/// </para>
+/// <para>
+/// EVERY MESSAGE NAMES THE OFFENDING CONFIGURATION KEY AND NO MESSAGE EVER ECHOES A VALUE. The key
+/// paths are composed from <see cref="SecurityOptions.SectionName"/> so they cannot drift from the
+/// section actually bound, collection failures carry the offending index, and the signing-material
+/// failure is one fixed sentence - <see cref="SigningKeyUnusableMessage"/> - that describes the
+/// accepted shapes and says nothing whatsoever about what was supplied: not the value, not a
+/// substring, not a prefix, not even its length. A startup diagnostic is written to a log that is
+/// shipped and retained, so it is exactly the wrong place to describe key material.
+/// </para>
+/// <para>
+/// THE PRESENCE RULES ARE CHECKED HERE AS WELL AS BY THE ANNOTATIONS ON THE PROPERTIES, deliberately.
+/// The annotations document each requirement where the property is declared and are enforced by
+/// <c>ValidateDataAnnotations</c>; repeating them here means this validator is sufficient ON ITS OWN,
+/// so the host still refuses to start if the annotation pass is ever left off the registration, and a
+/// test can assert the complete rejection set against a single object. The overlap costs one
+/// comparison per property and removes a whole class of registration-order defect.
+/// </para>
+/// </remarks>
+public sealed class SecurityOptionsValidator : IValidateOptions<SecurityOptions>
+{
+    /// <summary>
+    /// The closed set of JOSE signature algorithms this issuer may be configured to use.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A COMPILED CONSTANT THAT CONFIGURATION CANNOT EXTEND. It is exposed so that a test and a
+    /// diagnostic can read the same list the check reads, and it is an immutable array behind a
+    /// read-only interface so that no caller can add to it at run time. Widening this set is a source
+    /// change, reviewed as one, which is the whole point: it decides what three other services must
+    /// accept.
+    /// </para>
+    /// <para>
+    /// Ordinal, case-sensitive comparison is used against it because JOSE algorithm identifiers are
+    /// case-sensitive - <c>rs256</c> is not <c>RS256</c>, and quietly accepting the former would
+    /// publish an algorithm identifier no stock verifier recognises.
+    /// </para>
+    /// <para>
+    /// The reasoning for the three members and for every exclusion is recorded on
+    /// <see cref="SecurityOptions.SigningAlgorithm"/> and in this file's header: the HMAC family is
+    /// excluded structurally, the PSS family on the legacy signing primitive's missing padding
+    /// argument [ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L70], and the elliptic-curve family
+    /// because the legacy cryptographic class declares no such primitive. The three admitted values
+    /// correspond to the legacy hash types SHA-256, SHA-384 and SHA-512, which that library's own
+    /// constant catalogue names as the argument set of its signing and verifying primitives
+    /// [ws_objects/pfw.shared.pbl.src/enums.sru:L927, L930-L932].
+    /// </para>
+    /// </remarks>
+    public static IReadOnlyList<string> PermittedSigningAlgorithms { get; } =
+        ["RS256", "RS384", "RS512"];
+
+    /// <summary>
+    /// The request-path prefix that both published metadata documents must sit under, and that the
+    /// token endpoint must NOT sit under: <c>/.well-known/</c>.
+    /// </summary>
+    /// <remarks>
+    /// This is an authentication boundary rather than a naming convention. The service entry point
+    /// applies a default-deny authorization policy and exempts exactly three paths from it - the
+    /// health probe and the two metadata documents - so a metadata path outside this prefix would
+    /// leave a document that must be anonymous behind authentication, and a token endpoint inside it
+    /// would put the one route that mints tokens inside the anonymous namespace. Both directions are
+    /// checked.
+    /// </remarks>
+    public const string WellKnownMetadataPathPrefix = "/.well-known/";
+
+    /// <summary>
+    /// The upper bound on the length of a permitted key reference: 64 characters.
+    /// </summary>
+    /// <remarks>
+    /// A key reference is caller-supplied text that gets concatenated onto a configuration-key prefix,
+    /// so it is bounded as well as charset-constrained. Sixty-four characters comfortably admits a
+    /// descriptive identifier or a hex-encoded fingerprint while leaving no room for a value smuggled
+    /// in as a name.
+    /// </remarks>
+    public const int MaximumKeyRefLength = 64;
+
+    /// <summary>
+    /// The longest scope token an issuance-roster entry may grant.
+    /// </summary>
+    /// <remarks>
+    /// A BOUND ON DECLARED CONFIGURATION, NOT ON A CALLER'S REQUEST, and the distinction matters. A
+    /// caller's requested scope set is bounded by the request schema and by what this roster grants;
+    /// this value bounds what a deployment may WRITE DOWN, so that a scope name cannot become a
+    /// pathological string that ends up in a token claim, in a log record and in a characterization
+    /// recording. The same value as the key-reference bound, because both are identifiers a human types
+    /// into a settings file and neither has any reason to be longer.
+    /// </remarks>
+    public const int MaximumScopeLength = 64;
+
+    /// <summary>
+    /// The one fixed message reported when the signing material is present but cannot be imported as
+    /// an asymmetric private key. It describes the accepted shapes and names the configuration key;
+    /// it says nothing at all about the material that was supplied.
+    /// </summary>
+    /// <remarks>
+    /// Fixed rather than composed so that no code path can accidentally interpolate the material, a
+    /// fragment of it, or a measurement of it. The platform exception that caused the rejection is
+    /// deliberately not attached and not re-thrown either: those describe a structure rather than
+    /// their input, but there is no need to find out the hard way.
+    /// </remarks>
+    public const string SigningKeyUnusableMessage =
+        "Configuration key '" + SecurityOptions.SigningKeyEnvironmentVariableName + "' is set but " +
+        "could not be imported as an asymmetric private key. Two encodings are accepted and both " +
+        "are attempted: armoured text first, then base64 of the bare binary encoding on a single " +
+        "line. Random bytes are not an asymmetric key and cannot be used to sign; generate an RSA " +
+        "private key instead. This message never echoes the configured value.";
+
+    // The fixed rejection for a signing-key format outside the one set this service implements. One
+    // placeholder: the permitted value.
+    // The supplied value is NOT echoed, matching every other rejection in this file: naming what is
+    // accepted is what an operator needs, and repeating the rejected value would put
+    // deployment-supplied text into a startup log for no gain.
+     // THE SIGNING-KEY FORMAT IS SCREENED IN EXACTLY ONE PLACE, AND IT IS NOT HERE.
+    //
+    // Two independent screens existed: a standalone one comparing the configured value against the single
+    // permitted constant, and the arm of CheckSigningMaterial that tests it against SigningKeyFormats -
+    // the closed set, whose member order also states the ACCEPTANCE ORDER the provider actually applies
+    // (armoured text first, then single-line base64 of the bare binary encoding). Both produced a failure
+    // naming this key, so a deployment that misspelled the format was told the same thing twice and any
+    // assertion expecting one diagnostic per defect failed on the pair.
+    //
+    // CheckSigningMaterial's arm is the one retained, because the screen and the IMPORT it sits beside are
+    // one decision about one value: the shape a value is permitted to arrive in is what decides whether it
+    // can be imported at all, and nothing further can be said about a value that cannot. Splitting them
+    // let the two disagree about which single fault an unusable value should be reported as.
+    /// <summary>
+    /// <see cref="MaximumKeyRefLength"/> rendered once, culture-invariantly, for the one failure
+    /// message that quotes it.
+    /// </summary>
+    /// <remarks>
+    /// Rendered once and invariantly rather than interpolated at the call site so that the bound
+    /// appears with ASCII digits whatever culture the host happens to be running under. A startup
+    /// diagnostic is read by an operator and grepped by tooling, so its numbers must not vary with the
+    /// machine's locale. A constant cannot express this because formatting is a run-time operation.
+    /// </remarks>
+    private static readonly string MaximumKeyRefLengthText =
+        MaximumKeyRefLength.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// <see cref="MaximumScopeLength"/> rendered once, culture-invariantly, for the one failure message
+    /// that reports it.
+    /// </summary>
+    /// <remarks>
+    /// Composed from the constant rather than written out, so a message can never describe a bound the
+    /// check does not enforce, and culture-invariantly so the digits are ASCII under every host culture.
+    /// </remarks>
+    private static readonly string MaximumScopeLengthText =
+        MaximumScopeLength.ToString(CultureInfo.InvariantCulture);
+
+    private const string IssuerKey = SecurityOptions.SectionName + ":Issuer";
+    private const string PublishedOriginsKey = SecurityOptions.SectionName + ":PublishedOrigins";
+    private const string AudiencesKey = SecurityOptions.SectionName + ":Audiences";
+
+    /// <summary>The configuration path of the issuance permission roster.</summary>
+    private const string CallersKey = SecurityOptions.SectionName + ":Callers";
+    private const string ClientsKey = SecurityOptions.SectionName + ":Clients";
+    private const string TokenLifetimeKey = SecurityOptions.SectionName + ":TokenLifetime";
+    private const string SigningKeyIdKey = SecurityOptions.SectionName + ":SigningKeyId";
+    private const string RetiringSigningKeyIdKey =
+        SecurityOptions.SectionName + ":RetiringSigningKeyId";
+    private const string SigningAlgorithmKey = SecurityOptions.SectionName + ":SigningAlgorithm";
+    private const string JwksPathKey = SecurityOptions.SectionName + ":JwksPath";
+
+    private const string OpenIdConfigurationPathKey =
+        SecurityOptions.SectionName + ":OpenIdConfigurationPath";
+
+    private const string TokenEndpointPathKey = SecurityOptions.SectionName + ":TokenEndpointPath";
+
+    private const string SigningKeyFormatKey = SecurityOptions.SectionName + ":SigningKeyFormat";
+
+    private const string CallerAuthorizationsKey =
+        SecurityOptions.SectionName + ":CallerAuthorizations";
+
+    private const string ClientCertificateAuthorityPathKey =
+        SecurityOptions.SectionName + ":ClientCertificateAuthorityPath";
+
+    private const string ClientCertificateRevocationModeKey =
+        SecurityOptions.SectionName + ":ClientCertificateRevocationMode";
+    private const string KeyStoreKey = SecurityOptions.SectionName + ":KeyStore";
+    private const string ConfigurationKeyPrefixKey = KeyStoreKey + ":ConfigurationKeyPrefix";
+    private const string PermittedKeyRefsKey = KeyStoreKey + ":PermittedKeyRefs";
+
+    /// <summary>
+    /// Validates a bound <see cref="SecurityOptions"/> instance, returning every failure found rather
+    /// than only the first.
+    /// </summary>
+    /// <param name="name">
+    /// The options name being validated. Every instance is validated regardless of name, because
+    /// exactly one <see cref="SecurityOptions"/> exists in this service: a named instance that escaped
+    /// validation would be a way to configure an unvalidated issuer.
+    /// </param>
+    /// <param name="options">The bound instance to validate. Must not be <see langword="null"/>.</param>
+    /// <returns>
+    /// <see cref="ValidateOptionsResult.Success"/> when every rule holds; otherwise
+    /// <see cref="ValidateOptionsResult.Fail(IEnumerable{string})"/> carrying one message per failure,
+    /// each naming the offending configuration key and none echoing a value.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// The rules are grouped rather than inlined so that each group is independently readable and
+    /// independently assertable. Ordering within the result is stable - signing material first,
+    /// because a Security service that cannot sign is the fault that matters most - but no rule
+    /// depends on another having run, so a single call surfaces the complete picture.
+    /// </remarks>
+    public ValidateOptionsResult Validate(string? name, SecurityOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        List<string> failures = [];
+
+        CheckSigningMaterial(options, failures);
+        CheckRetiringSigningMaterial(options, failures);
+        CheckIssuer(options, failures);
+        CheckPublishedOrigins(options, failures);
+        CheckAudienceRoster(options, failures);
+        CheckCallerRoster(options, failures);
+        CheckSigningKeyIdentifier(options, failures);
+        CheckTokenLifetimeIsPositive(options, failures);
+        CheckSigningAlgorithmIsPermitted(options, failures);
+        CheckMetadataPaths(options, failures);
+        CheckTokenEndpointPath(options, failures);
+        CheckKeyStore(options, failures);
+        CheckClientCertificateTrust(options, failures);
+        CheckCallerAuthorizations(options, failures);
+        CheckClientRoster(options, failures);
+
+        return failures.Count == 0
+            ? ValidateOptionsResult.Success
+            : ValidateOptionsResult.Fail(failures);
+    }
+
+    /// <summary>
+    /// Rejections 1 and 2: the signing material must be present, and it must be usable as an asymmetric
+    /// private key. Its modulus is measured but never judged.
+    /// </summary>
+    /// <param name="options">The bound instance.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// <para>
+    /// THE TWO FAULTS ARE REPORTED SEPARATELY because they have different fixes: absent material means
+    /// the variable was never populated, whereas unusable material means it was populated with the
+    /// wrong thing - random bytes being the case that actually happens, since it looks like a
+    /// plausible way to produce a signing value. Collapsing them into one message would send an
+    /// operator to the wrong place.
+    /// </para>
+    /// <para>
+    /// THERE IS NO FALLBACK ARM HERE, IN ANY ENVIRONMENT. No key is generated, no previous key is
+    /// reused and no development exemption exists. Generating one would trade a loud startup failure
+    /// for a silent fleet-wide authentication outage in which every token the other three services
+    /// hold stops verifying, and each restart would invalidate the last generation's tokens as well.
+    /// The legacy posture this mirrors terminates the process on a structural fault rather than
+    /// continuing in a degraded state [ws_objects/pfw.pbl.src/pfw.sra:L143].
+    /// </para>
+    /// <para>
+    /// 🔴 A KEY-SIZE FLOOR IS APPLIED, AND IT IS SCOPED TO THIS KEY ALONE. A modulus below
+    /// <see cref="SecurityOptions.MinimumSigningKeySizeBits"/> fails startup. An intermediate revision
+    /// removed that floor and only warned, reasoning that AAP 0.6.6.4 keeps 1024-bit RSA legal across the
+    /// estate; a security review found that reading misapplies the allowance, and it does. AAP 0.6.6.4
+    /// governs the <b>C-02 cryptographic surface</b> - operations <c>n_crypto</c> actually published, whose
+    /// weak defaults a caller can observe and C-B forbids correcting. The legacy has <b>no token issuer,
+    /// no JWT and no signing identity</b>, so nothing about this key is a legacy behaviour: it is a
+    /// boundary the decomposition created, which is what AAP G7 and constraint C-G govern. The legacy
+    /// allowance therefore stays exactly where the legacy put it -
+    /// <c>Crypto/RsaProvider.GenRSAKey</c> and <c>LegacyDefaults.RSA_SMALLEST_LEGAL_KEY_SIZE_BITS</c> both
+    /// still accept 1024 bits [ws_objects/pfw.shared.pbl.src/enums.sru:L965] - and the two surfaces differ
+    /// deliberately. <c>SigningKeyPolicyTests</c> pins the difference in both directions.
+    /// </para>
+    /// <para>
+    /// THE FLOOR IS ALSO ENFORCED IN <c>SigningKeyProvider</c>, which is what actually refuses: it stands
+    /// between the import and the point at which <c>SigningCredentials</c> become reachable, so a key that
+    /// reached it by any path other than this validator is still refused. Reporting it here as well is not
+    /// duplication for its own sake - an exception out of a constructor reads as a crash, while a
+    /// validation failure reads as the misconfiguration it is and arrives beside every other startup fault
+    /// in one report. Both read the same constant, so the two cannot disagree.
+    /// </para>
+    /// <para>
+    /// UNUSABLE MATERIAL REPORTS EXACTLY ONE FAULT. A value that cannot be imported at all returns after
+    /// saying so, so a deployment that supplied random bytes is never additionally told anything about
+    /// their length - which would be a second message for a single defect, and would point an operator at
+    /// a rule that does not exist.
+    /// </para>
+    /// </remarks>
+    private static void CheckSigningMaterial(SecurityOptions options, List<string> failures)
+    {
+        if (!SigningKeyFormats.IsRecognised(options.SigningKeyFormat))
+        {
+            failures.Add(
+                $"Configuration key '{SigningKeyFormatKey}' names a format this service does not " +
+                "implement. The recognised values are: " +
+                string.Join(", ", SigningKeyFormats.Recognised) +
+                ". That name states the ACCEPTANCE ORDER and the closed set of shapes the signing " +
+                "material may arrive in - armoured text first, then base64 of the bare binary " +
+                "encoding on a single line - and a deployment naming anything else has stated an " +
+                "expectation this service cannot meet. This message never echoes the configured " +
+                "signing material.");
+        }
+
+        if (string.IsNullOrWhiteSpace(options.SigningKey))
+        {
+            failures.Add(
+                $"Configuration key '{SecurityOptions.SigningKeyEnvironmentVariableName}' is not " +
+                "set, is empty or contains only whitespace. It is the only signing key in the " +
+                "system and it has no default: this service cannot mint a token without it, and " +
+                "none is generated in any environment because doing so would invalidate every " +
+                "token the other services currently hold. Supply an asymmetric private key through " +
+                "the orchestration configuration layer. Note that this name is a FLAT " +
+                "configuration key rather than a member of the '" + SecurityOptions.SectionName +
+                "' section, because the environment provider only folds a double underscore into a " +
+                "section separator.");
+
+            // Nothing further to say about material that is not there. The usability check below
+            // would only add a second failure describing the same single defect.
+            return;
+        }
+
+        // The modulus is MEASURED here and used, because the floor below is a verdict rather than an
+        // annotation. Material that cannot be imported at all reports once and returns, so a deployment
+        // that supplied random bytes is never additionally told anything about their length.
+        if (!CanImportPrivateKey(options.SigningKey, out int keySizeBits))
+        {
+            failures.Add(SigningKeyUnusableMessage);
+
+            return;
+        }
+
+        // ------------------------------------------------------------------------------------------
+        // 🔴 THE SIGNING-KEY FLOOR. A modulus below SecurityOptions.MinimumSigningKeySizeBits FAILS
+        // STARTUP, and an earlier revision only warned. See that constant's remarks for the full
+        // argument: AAP 0.6.6.4's 1024-bit allowance governs the C-02 legacy cryptographic surface,
+        // which is a set of operations the oracle actually published; JWT issuance is a boundary the
+        // decomposition CREATED, the legacy has no token issuer of any kind, and constraint C-G governs
+        // a created boundary rather than C-B. The legacy allowance stays exactly where it belongs, on
+        // Crypto/RsaProvider.GenRSAKey.
+        //
+        // REPORTED HERE AS WELL AS IN THE PROVIDER, DELIBERATELY. The provider is what actually refuses,
+        // because it is the only place standing between the import and reachable credentials - but an
+        // exception out of a constructor reads as a crash, while an options-validation failure reads as
+        // the misconfiguration it is and arrives beside every other startup fault in one report. Both
+        // consult the same constant, so they cannot disagree.
+        //
+        // THE MEASURED SIZE IS NAMED AND THE MATERIAL IS NOT. A modulus length is not a secret - this
+        // service publishes it in the key set it serves anonymously - and an operator cannot act on
+        // "too short" without being told how short (constraint C-F).
+        // ------------------------------------------------------------------------------------------
+        if (keySizeBits < SecurityOptions.MinimumSigningKeySizeBits)
+        {
+            failures.Add(
+                $"Configuration key '{SecurityOptions.SigningKeyEnvironmentVariableName}' supplies a " +
+                $"{keySizeBits}-bit RSA private key, below the " +
+                $"{SecurityOptions.MinimumSigningKeySizeBits}-bit minimum this service requires of its " +
+                "own signing identity. That key signs every credential every service in this estate " +
+                "accepts and its public half is published anonymously at the key-set path, so it is the " +
+                "one modulus in the system that may not be weak. This floor is NOT the legacy " +
+                "1024-bit allowance being corrected: AAP 0.6.6.4 governs the C-02 cryptographic " +
+                "surface, which the oracle published and which still accepts 1024 bits, whereas the " +
+                "legacy has no token issuer at all and constraint C-G governs a boundary this " +
+                "decomposition created. Generate a longer key with the procedure in " +
+                "docs/ARCHITECTURE.md. This message never echoes the configured signing material.");
+        }
+    }
+
+    /// <summary>
+    /// The signing-key encoding must name the one set this service implements.
+    /// </summary>
+    /// <param name="options">The bound instance.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// <para>
+    /// Presence is left to the declared annotation, which already refuses a blank value, so this check
+    /// speaks only to a value that is present and unrecognised. The comparison is ordinal and
+    /// case-INSENSITIVE: unlike a JOSE algorithm identifier, this value is a name this project coined
+    /// for its own settings file, so there is no external specification making its casing significant
+    /// and refusing a deployment over one is pedantry that costs a bring-up.
+    /// </para>
+    /// <para>
+    /// WHY A SINGLE-VALUED SET IS WORTH VALIDATING. The alternative is to ignore the leaf, which is
+    /// precisely the defect this check exists to prevent: a declared, documented setting that the
+    /// binder reads and nothing consults. A deployment naming an encoding this service does not
+    /// implement holds an expectation that will not be met, and the cheapest honest answer is to say so
+    /// at startup rather than to fail the import later for a reason that looks unrelated to the setting
+    /// the operator actually changed.
+    /// </para>
+    /// </remarks>
+     /// <summary>
+    /// Rejection 3: the issuer identity must be present, and it must be an absolute http or https
+    /// address shaped like an identity rather than like a request.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Blank includes whitespace-only, because a whitespace issuer would be stamped into the
+    /// <c>iss</c> claim and published in the discovery document as though it were an identity. Three
+    /// other services validate that claim, so an empty issuer does not fail locally - it fails
+    /// everywhere, later, as an authentication error with no obvious cause.
+    /// </para>
+    /// <para>
+    /// <b>AND THE SHAPE IS CHECKED HERE RATHER THAN AT REQUEST TIME.</b> Checking only for blankness -
+    /// on the reasoning that the format is a deployment decision - lets <c>not-a-uri</c>,
+    /// <c>javascript:alert(1)</c>, <c>file:///etc/passwd</c>, <c>ftp://h/p</c>, a whitespace-padded value
+    /// and a value carrying a query and a fragment ALL START THE HOST, with readiness then opening on a
+    /// service whose OIDC discovery document answers 500 while its key set still answers 200. That is
+    /// measured, not hypothesised. Contract C-01's whole mechanism is that a consumer's stock bearer
+    /// handler self-configures from that document with zero bespoke code, so the one artifact every
+    /// verifier must fetch is the one that breaks - and a merely MISTYPED but absolute issuer is worse
+    /// still, because the document publishes cleanly and makes every issued token unverifiable with no
+    /// signal anywhere.
+    /// </para>
+    /// <para>
+    /// THE RULE IS THE SIBLING SERVICES' RULE, NOT A NEW ONE. Gateway refuses exactly these shapes on
+    /// every address it binds
+    /// [<c>services/gateway-service/PowerFramework.Gateway/Configuration/GatewayOptions.cs</c>,
+    /// <c>AddressValidation.Check</c>], and this service was the outlier. Each of the four component
+    /// rules earns its place:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item><description>
+    ///   ABSOLUTE, because a relative value cannot be an identity three other services compare a claim
+    ///   against, and because the discovery and key-set addresses are COMPOSED from it - a relative
+    ///   issuer composes to nothing a consumer can fetch.
+    ///   </description></item>
+    ///   <item><description>
+    ///   HTTP OR HTTPS, because the addresses composed from it are fetched over HTTP by a bearer
+    ///   handler. A <c>javascript:</c>, <c>file:</c> or <c>ftp:</c> issuer parses as absolute and
+    ///   composes into a <c>jwks_uri</c> no consumer can retrieve.
+    ///   </description></item>
+    ///   <item><description>
+    ///   NO USERINFO, which is a secrets control rather than tidiness: an issuer carrying
+    ///   <c>user:secret@</c> is stamped into every token's <c>iss</c> claim and published anonymously
+    ///   in the discovery document, so the credential would leave the process in both directions (C-F).
+    ///   </description></item>
+    ///   <item><description>
+    ///   NO QUERY AND NO FRAGMENT, because both are dropped rather than merged when a well-known path
+    ///   is composed onto the issuer, so a deployment that configured either would be wrong with no
+    ///   diagnostic - and a fragment is never transmitted at all.
+    ///   </description></item>
+    /// </list>
+    /// <para>
+    /// A TRAILING OR LEADING SPACE IS REFUSED RATHER THAN TRIMMED. The <c>iss</c> claim is compared
+    /// BYTE-IDENTICALLY by three verifiers, so silently trimming here would make this service mint
+    /// tokens carrying a value the operator did not configure - and the operator would have no way to
+    /// see which of the two spellings was in force.
+    /// </para>
+    /// <para>
+    /// <see cref="Endpoints.JwksEndpoints"/> keeps its own request-time absoluteness guard, and that is
+    /// not redundancy to be removed: it is the guard for a value reaching that endpoint by some path
+    /// this validator did not see, and it is the only place that can answer the contract's error shape
+    /// to an anonymous caller. What this validator adds is that no configuration can reach it.
+    /// </para>
+    /// <para>
+    /// NO MESSAGE ECHOES THE VALUE, for the same reason the userinfo rule exists - a rejected issuer is
+    /// exactly the shape that may carry a credential. The scheme is the one exception, and it is a
+    /// fixed token from a small set that carries nothing.
+    /// </para>
+    /// </remarks>
+    private static void CheckIssuer(SecurityOptions options, List<string> failures)
+    {
+        if (string.IsNullOrWhiteSpace(options.Issuer))
+        {
+            failures.Add(
+                $"Configuration key '{IssuerKey}' is required and must not be blank. It is the " +
+                "'iss' claim of every minted token, the 'issuer' member of the discovery document, " +
+                "and the value the other services validate every token against.");
+
+            return;
+        }
+
+        if (!Uri.TryCreate(options.Issuer, UriKind.Absolute, out Uri? issuer)
+            || !string.Equals(options.Issuer, options.Issuer.Trim(), StringComparison.Ordinal))
+        {
+            failures.Add(
+                $"Configuration key '{IssuerKey}' must be an absolute address with no surrounding " +
+                "whitespace, for example 'https://security-service:5104'. It is composed with the " +
+                "well-known paths to produce the 'jwks_uri' and 'token_endpoint' members of the " +
+                "discovery document, so a relative or padded value produces a document that describes " +
+                "nothing a consumer can fetch. The configured value is deliberately not quoted here, " +
+                "because a rejected address may carry a credential.");
+
+            return;
+        }
+
+        // Uri.Scheme is lower-cased by the parser, so an ordinal comparison is both correct and free of
+        // any culture dependency.
+        if (!string.Equals(issuer.Scheme, Uri.UriSchemeHttp, StringComparison.Ordinal)
+            && !string.Equals(issuer.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal))
+        {
+            failures.Add(
+                $"Configuration key '{IssuerKey}' must use the http or https scheme; " +
+                $"'{issuer.Scheme}' cannot be fetched by a consumer's bearer handler, so the " +
+                "discovery document composed from it would describe an unreachable key set.");
+
+            return;
+        }
+
+        if (issuer.UserInfo.Length > 0)
+        {
+            failures.Add(
+                $"Configuration key '{IssuerKey}' must not embed credentials in the address. Remove " +
+                "the 'user:password@' portion: this value is stamped into the 'iss' claim of every " +
+                "minted token and published in the anonymous discovery document, so a credential here " +
+                "would leave the process in both directions. The configured value is deliberately not " +
+                "quoted here.");
+
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(issuer.Query) || !string.IsNullOrEmpty(issuer.Fragment))
+        {
+            failures.Add(
+                $"Configuration key '{IssuerKey}' is an identity composed with the well-known paths " +
+                "and must carry neither a query string nor a fragment. Both are dropped rather than " +
+                "merged when a path is composed onto it, so a deployment that configured either would " +
+                "have no effect and no diagnostic, and a fragment is never transmitted at all. The " +
+                "configured value is deliberately not quoted here.");
+        }
+    }
+
+    /// <summary>
+    /// Holds every additional published base address to the same shape rule as the issuer, and rejects a
+    /// duplicate origin.
+    /// </summary>
+    /// <param name="options">The bound instance.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// <para>
+    /// AN EMPTY COLLECTION IS THE SHIPPED DEFAULT AND IS NOT A FAULT. It reproduces the behaviour that
+    /// preceded <see cref="SecurityOptions.PublishedOrigins"/> exactly - every published address composed
+    /// from the issuer - so a deployment that configures nothing is not required to.
+    /// </para>
+    /// <para>
+    /// THE SAME FIVE RULES AS THE ISSUER, AND DELIBERATELY NOT A LOOSER SET. Each entry is composed with
+    /// the well-known paths in exactly the way the issuer is, so an entry the issuer's own rule would
+    /// reject produces exactly the same unfetchable document. Applying a weaker rule here would mean the
+    /// two sources of one published address disagreed about what a valid address is.
+    /// </para>
+    /// <para>
+    /// A MALFORMED ENTRY REFUSES STARTUP RATHER THAN BEING SKIPPED, and that choice is the point. A
+    /// skipped entry leaves the deployment believing an origin is published while consumers arriving on
+    /// it receive the canonical document - which presents as the ORIGINAL unreachable-key-set fault with
+    /// the configuration apparently correct, and is therefore the hardest possible way to discover a
+    /// typo. The failing INDEX is named so a deployment can find the entry in an indexed environment
+    /// variable, and the value is never quoted, matching the posture every sibling check takes.
+    /// </para>
+    /// <para>
+    /// DUPLICATES ARE COMPARED ON ORIGIN - scheme, host and port - rather than on the whole string,
+    /// because the origin is what a request is matched against when the document is composed. Two
+    /// entries differing only by a trailing separator or by case in the host are one origin, so they are
+    /// a configuration mistake rather than two published locations, and the issuer's own origin counts as
+    /// already taken: it needs no entry, and an entry restating it is redundant rather than harmful to
+    /// leave unreported.
+    /// </para>
+    /// </remarks>
+    private static void CheckPublishedOrigins(SecurityOptions options, List<string> failures)
+    {
+        if (options.PublishedOrigins.Count == 0)
+        {
+            return;
+        }
+
+        // Seeded with the issuer's own origin when it parses, so an entry restating it is reported as the
+        // duplicate it is. A malformed issuer is already reported by CheckIssuer, so it is simply not
+        // seeded here rather than reported twice.
+        HashSet<string> origins = new(StringComparer.OrdinalIgnoreCase);
+
+        if (Uri.TryCreate(options.Issuer, UriKind.Absolute, out Uri? configuredIssuer))
+        {
+            origins.Add(configuredIssuer.GetLeftPart(UriPartial.Authority));
+        }
+
+        for (int index = 0; index < options.PublishedOrigins.Count; index++)
+        {
+            string entryKey = IndexedKey(PublishedOriginsKey, index);
+            string? entry = options.PublishedOrigins[index];
+
+            if (string.IsNullOrWhiteSpace(entry))
+            {
+                failures.Add(
+                    $"Configuration key '{entryKey}' must not be blank. An empty entry publishes no " +
+                    "address and is indistinguishable at runtime from the member being unconfigured, " +
+                    "so it is a configuration mistake rather than a way to leave a slot open. Remove " +
+                    "the entry.");
+
+                continue;
+            }
+
+            if (!Uri.TryCreate(entry, UriKind.Absolute, out Uri? origin)
+                || !string.Equals(entry, entry.Trim(), StringComparison.Ordinal))
+            {
+                failures.Add(
+                    $"Configuration key '{entryKey}' must be an absolute address with no surrounding " +
+                    "whitespace, for example 'https://localhost:5104'. It is composed with the " +
+                    "well-known paths to produce the 'jwks_uri' and 'token_endpoint' members this " +
+                    "service publishes to a consumer arriving on that address, so a relative or padded " +
+                    "value produces a document describing nothing fetchable. The configured value is " +
+                    "deliberately not quoted here, because a rejected address may carry a credential.");
+
+                continue;
+            }
+
+            // Uri.Scheme is lower-cased by the parser, so an ordinal comparison is both correct and free
+            // of any culture dependency - the same reasoning CheckIssuer records.
+            if (!string.Equals(origin.Scheme, Uri.UriSchemeHttp, StringComparison.Ordinal)
+                && !string.Equals(origin.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal))
+            {
+                failures.Add(
+                    $"Configuration key '{entryKey}' must use the http or https scheme; " +
+                    $"'{origin.Scheme}' cannot be fetched by a consumer's bearer handler, so a " +
+                    "discovery document composed from it would describe an unreachable key set.");
+
+                continue;
+            }
+
+            if (origin.UserInfo.Length > 0)
+            {
+                failures.Add(
+                    $"Configuration key '{entryKey}' must not embed credentials in the address. Remove " +
+                    "the 'user:password@' portion: this value is published in the anonymous discovery " +
+                    "document, so a credential here would leave the process. The configured value is " +
+                    "deliberately not quoted here.");
+
+                continue;
+            }
+
+            if (!string.IsNullOrEmpty(origin.Query) || !string.IsNullOrEmpty(origin.Fragment))
+            {
+                failures.Add(
+                    $"Configuration key '{entryKey}' is a base address composed with the well-known " +
+                    "paths and must carry neither a query string nor a fragment. Both are dropped " +
+                    "rather than merged when a path is composed onto it, so a deployment that " +
+                    "configured either would have no effect and no diagnostic, and a fragment is never " +
+                    "transmitted at all. The configured value is deliberately not quoted here.");
+
+                continue;
+            }
+
+            // NO RULE AGAINST A PATH, AND THAT IS MEASURED RATHER THAN OVERLOOKED. A well-known path is
+            // absolute, so the tempting rule is that a configured prefix would be REPLACED by it and vanish
+            // silently. It is not: the composer concatenates - the configured base with one trailing
+            // separator trimmed, then the path - so 'https://proxy.example/security' publishes
+            // 'https://proxy.example/security/.well-known/jwks.json'. Refusing a prefix would refuse the
+            // one spelling by which a path-prefixing proxy is declared, which is exactly what the issuer's
+            // own rule permits and what this member's remarks call the honest place for it.
+
+            if (!origins.Add(origin.GetLeftPart(UriPartial.Authority)))
+            {
+                failures.Add(
+                    $"Configuration key '{entryKey}' repeats an origin that is already published - " +
+                    "either the configured issuer's own origin, which never needs an entry, or an " +
+                    "earlier entry in this list. One origin resolves to one published address, so a " +
+                    "second entry for it cannot take effect and its presence suggests a different " +
+                    "address was intended. The configured value is deliberately not quoted here.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rejection 4 plus the roster coherence rules: at least one audience, no blank entry, and no
+    /// case-insensitive duplicate.
+    /// </summary>
+    /// <param name="options">The bound instance.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// <para>
+    /// NO PARTICULAR COUNT IS REQUIRED, only that the roster is not empty: which services this issuer
+    /// serves is a deployment decision, and a hardcoded count here would break the moment a service is
+    /// added or a deployment narrows the roster deliberately. An EMPTY roster is different in kind - an
+    /// issuer that may address no audience cannot mint a usable token at all.
+    /// </para>
+    /// <para>
+    /// DUPLICATES ARE COMPARED CASE-INSENSITIVELY because an audience is a service identity rather
+    /// than a case-sensitive protocol token, so two spellings of one identity are a configuration
+    /// mistake however they differ in case. The offending index is named so the fault is locatable in
+    /// a settings file; the value is not echoed, because an audience list is the sort of thing that
+    /// gets pasted between deployments and the message should not become a second copy of it.
+    /// </para>
+    /// </remarks>
+    private static void CheckAudienceRoster(SecurityOptions options, List<string> failures)
+    {
+        if (options.Audiences.Count == 0)
+        {
+            failures.Add(
+                $"Configuration key '{AudiencesKey}' must list at least one audience. An issuer " +
+                "that may address no audience cannot mint a usable token.");
+
+            return;
+        }
+
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+
+        for (int index = 0; index < options.Audiences.Count; index++)
+        {
+            string audience = options.Audiences[index];
+
+            if (string.IsNullOrWhiteSpace(audience))
+            {
+                failures.Add(
+                    $"Configuration key '{IndexedKey(AudiencesKey, index)}' is blank. Every audience must " +
+                    "be " +
+                    "a non-blank service identity.");
+
+                continue;
+            }
+
+            if (!seen.Add(audience.Trim()))
+            {
+                failures.Add(
+                    $"Configuration key '{IndexedKey(AudiencesKey, index)}' repeats an audience " +
+                    "already " +
+                    "listed earlier, ignoring case. Each service identity must appear exactly once.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The permission roster rules: at least one caller, and for each one a non-blank identity that
+    /// appears once, at least one permitted audience drawn from the global roster, and at least one
+    /// permitted scope.
+    /// </summary>
+    /// <param name="options">The bound instance.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// <para>
+    /// THIS ROSTER IS WHAT TURNS "AUTHENTICATED" INTO "AUTHORISED", so its coherence is a security
+    /// property rather than a tidiness one. Without it any caller whose certificate chained to the
+    /// configured client authority could request a token for ANY service carrying ANY scope set, and every
+    /// requested scope was granted verbatim - a confused deputy in the middle of the token topology
+    /// (CWE-862, CWE-863). Each rule below closes a way that intent could be silently lost.
+    /// </para>
+    /// <para>
+    /// THE SUBSET RULE IS THE ONE WORTH DWELLING ON. A caller entry naming an audience that is not in
+    /// <see cref="SecurityOptions.Audiences"/> is dead configuration: the issuer refuses that audience for
+    /// every caller, so the entry grants nothing while appearing to grant something. Left unchecked it
+    /// produces a forbidden response that reads like a permission decision when it is a roster typo, and
+    /// the operator's instinct would be to widen the caller entry that is already correct. It is compared
+    /// ORDINALLY against the global roster because the issuer's own membership check is ordinal, so a
+    /// case-insensitive check here would pass an entry the issuer will later refuse.
+    /// </para>
+    /// <para>
+    /// DUPLICATE IDENTITIES ARE COMPARED CASE-INSENSITIVELY, unlike the audience subset check, and the
+    /// asymmetry is deliberate. Two entries for one caller differing only in case are unambiguously a
+    /// mistake - one of them is unreachable, and which one wins is an implementation detail nobody should
+    /// have to know. Within one entry, duplicate audiences and duplicate scopes are likewise refused: a
+    /// repeated permission is either a paste error or a half-finished edit, and a roster is exactly the
+    /// artifact where such a thing hides.
+    /// </para>
+    /// <para>
+    /// NO MESSAGE ECHOES A VALUE - only the offending key path and index. A permission roster is pasted
+    /// between deployments, and a startup log should not become a second copy of one.
+    /// </para>
+    /// </remarks>
+    private static void CheckCallerRoster(SecurityOptions options, List<string> failures)
+    {
+        // ------------------------------------------------------------------------------------------
+        // NO EMPTINESS RULE IS APPLIED TO THE MATRIX, AND THE ABSENCE IS DELIBERATE.
+        //
+        // REFUSING AN EMPTY MATRIX - the union of this member and `Security:CallerAuthorizations` - is
+        // the tempting rule, on the reasoning that an issuer deciding nothing cannot decide correctly. It
+        // would refuse a state that is coherent and occasionally wanted: a host serving the published key
+        // set, the discovery document, health and the whole of contract C-02 while issuing no token at
+        // all. Every unit-test host is in that state, and so is a local bring-up of the other three
+        // services against an issuer that mints nothing.
+        //
+        // FAIL-CLOSED IS PRESERVED WITHOUT IT. An empty matrix grants nobody anything: TokenIssuer folds
+        // both shapes into one dictionary and answers every request CallerNotPermitted when that
+        // dictionary is empty. Accepting the configuration is not the same as granting anything, and the
+        // two halves are asserted as a pair so that neither reads as leniency on its own.
+        //
+        // THE ROSTER THAT MAY NOT BE EMPTY IS A DIFFERENT MEMBER, and conflating the two is what makes an
+        // emptiness rule look right here. `Security:Clients` is the credential directory rather than a permission
+        // statement: empty, no caller can authenticate at all, so this - the SOLE token issuer - can give
+        // no service a credential while its readiness probe reports healthy for as long as nobody tries.
+        // That emptiness IS refused, in CheckIssuanceRoster, and its diagnostic names that key.
+        // ------------------------------------------------------------------------------------------
+
+        // The per-entry checks below apply to the nested shape only; the flat shape has its own pass in
+        // CheckCallerAuthorizations. Returning early when nothing is nested keeps the two independent, so
+        // a deployment using only the flat shape is not walked here at all.
+        if (options.Callers.Count == 0)
+        {
+            return;
+        }
+
+        // Ordinal, because the issuer's own audience membership check is ordinal: a case-insensitive
+        // subset check here would accept an entry the issuer will refuse at run time.
+        HashSet<string> roster = new(StringComparer.Ordinal);
+
+        foreach (string audience in options.Audiences)
+        {
+            if (!string.IsNullOrWhiteSpace(audience))
+            {
+                _ = roster.Add(audience.Trim());
+            }
+        }
+
+        HashSet<string> identities = new(StringComparer.OrdinalIgnoreCase);
+
+        for (int index = 0; index < options.Callers.Count; index++)
+        {
+            SecurityCallerOptions caller = options.Callers[index];
+            string entryKey = IndexedKey(CallersKey, index);
+
+            if (caller is null)
+            {
+                failures.Add(
+                    $"Configuration key '{entryKey}' is bound to an explicit null. Remove the entry " +
+                    "rather than declaring it empty; a null entry grants nothing and reads as though it " +
+                    "grants something.");
+
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(caller.Identity))
+            {
+                failures.Add(
+                    $"Configuration key '{entryKey}:{nameof(SecurityCallerOptions.Identity)}' is blank. " +
+                    "It must name the caller identity this entry governs - the common name of the client " +
+                    "certificate that caller presents.");
+            }
+            else if (!identities.Add(caller.Identity.Trim()))
+            {
+                failures.Add(
+                    $"Configuration key '{entryKey}:{nameof(SecurityCallerOptions.Identity)}' repeats an " +
+                    "identity already listed earlier, ignoring case. One of the two entries is " +
+                    "unreachable and which one wins is not something a deployment should have to know, " +
+                    "so each caller identity must appear exactly once.");
+            }
+
+            CheckCallerGrants(caller, entryKey, roster, failures);
+        }
+    }
+
+    /// <summary>
+    /// Checks one caller entry's grants: at least one, each naming a distinct audience that is a member of
+    /// the global roster, and each carrying at least one non-blank, non-repeated scope.
+    /// </summary>
+    /// <param name="caller">The entry being checked.</param>
+    /// <param name="entryKey">The entry's configuration path, for the messages.</param>
+    /// <param name="roster">The global audience roster, already trimmed.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// AUDIENCES ARE COMPARED ORDINALLY AGAINST THE GLOBAL ROSTER, matching the issuer's own membership
+    /// check, so this validator cannot accept a grant the issuer will later refuse. DUPLICATES within one
+    /// caller - two grants for the same audience, or one scope twice in a grant - are reported
+    /// case-insensitively instead: two spellings of one identity in one place is unambiguously a mistake
+    /// however they differ, and which of two grants took effect should never be an implementation detail.
+    /// </remarks>
+    private static void CheckCallerGrants(
+        SecurityCallerOptions caller,
+        string entryKey,
+        HashSet<string> roster,
+        List<string> failures)
+    {
+        string grantsKey = $"{entryKey}:{nameof(SecurityCallerOptions.Grants)}";
+
+        if (caller.Grants.Count == 0)
+        {
+            failures.Add(
+                $"Configuration key '{grantsKey}' must carry at least one grant. A caller permitted no " +
+                "audience can obtain no usable token, so an entry saying so is a mistake rather than a " +
+                "policy - remove the caller instead.");
+
+            return;
+        }
+
+        HashSet<string> audiencesSeen = new(StringComparer.OrdinalIgnoreCase);
+
+        for (int index = 0; index < caller.Grants.Count; index++)
+        {
+            SecurityCallerGrantOptions grant = caller.Grants[index];
+            string grantKey = IndexedKey(grantsKey, index);
+
+            if (grant is null)
+            {
+                failures.Add(
+                    $"Configuration key '{grantKey}' is bound to an explicit null. Remove the grant " +
+                    "rather than declaring it empty; a null grant permits nothing and reads as though it " +
+                    "permits something.");
+
+                continue;
+            }
+
+            CheckGrantAudience(grant, grantKey, roster, audiencesSeen, failures);
+            CheckGrantScopes(grant, grantKey, failures);
+        }
+    }
+
+    /// <summary>
+    /// Checks one grant's audience: present, not already granted to this caller, and on the global roster.
+    /// </summary>
+    /// <param name="grant">The grant being checked.</param>
+    /// <param name="grantKey">The grant's configuration path, for the messages.</param>
+    /// <param name="roster">The global audience roster, already trimmed.</param>
+    /// <param name="audiencesSeen">The audiences already granted to this caller.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    private static void CheckGrantAudience(
+        SecurityCallerGrantOptions grant,
+        string grantKey,
+        HashSet<string> roster,
+        HashSet<string> audiencesSeen,
+        List<string> failures)
+    {
+        string key = $"{grantKey}:{nameof(SecurityCallerGrantOptions.Audience)}";
+
+        if (string.IsNullOrWhiteSpace(grant.Audience))
+        {
+            failures.Add(
+                $"Configuration key '{key}' is blank. Every grant must name the audience it covers, " +
+                "because a grant with no audience covers nothing while appearing to grant something.");
+
+            return;
+        }
+
+        string trimmed = grant.Audience.Trim();
+
+        if (!audiencesSeen.Add(trimmed))
+        {
+            failures.Add(
+                $"Configuration key '{key}' repeats an audience this caller already has a grant for, " +
+                "ignoring case. One of the two grants would be unreachable and which one took effect " +
+                "would be an implementation detail governing a permission decision, so the roster is " +
+                "refused rather than merged. Combine the two scope lists into one grant.");
+
+            return;
+        }
+
+        if (!roster.Contains(trimmed))
+        {
+            failures.Add(
+                $"Configuration key '{key}' names an audience that is not a member of '{AudiencesKey}'. " +
+                "This issuer refuses that audience for every caller, so the grant permits nothing while " +
+                "appearing to permit something - and the resulting refusal reads like a permission " +
+                "decision when it is a roster typo. Add the identity to the global roster, or correct " +
+                "this grant. Neither value is echoed here.");
+        }
+    }
+
+    /// <summary>
+    /// Checks one grant's scopes: at least one, none blank, and none repeated.
+    /// </summary>
+    /// <param name="grant">The grant being checked.</param>
+    /// <param name="grantKey">The grant's configuration path, for the messages.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// A scope is matched ORDINALLY at issuance because RFC 6749 scope tokens are case-sensitive, but
+    /// DUPLICATES are reported case-insensitively: two spellings of one scope in one grant is a mistake
+    /// however they differ, and missing it leaves a roster nobody can read confidently.
+    /// </remarks>
+    private static void CheckGrantScopes(
+        SecurityCallerGrantOptions grant,
+        string grantKey,
+        List<string> failures)
+    {
+        string scopesKey = $"{grantKey}:{nameof(SecurityCallerGrantOptions.Scopes)}";
+
+        if (grant.Scopes.Count == 0)
+        {
+            failures.Add(
+                $"Configuration key '{scopesKey}' must list at least one scope. A grant permitting no " +
+                "scope produces a token that authorises nothing, which the receiver then refuses - a " +
+                "healthy-looking issuer minting useless credentials. Remove the grant instead.");
+
+            return;
+        }
+
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+
+        for (int index = 0; index < grant.Scopes.Count; index++)
+        {
+            string scope = grant.Scopes[index];
+            string key = IndexedKey(scopesKey, index);
+
+            if (string.IsNullOrWhiteSpace(scope))
+            {
+                failures.Add(
+                    $"Configuration key '{key}' is blank. Every permitted scope must be a non-blank " +
+                    "scope token.");
+
+                continue;
+            }
+
+            // THE CHARSET SCREEN BELONGS TO THIS SURFACE BECAUSE THIS SURFACE IS THE AUTHORITY. Applying
+            // it to a per-credential-entry scope list instead would attach a real check to configuration
+            // that takes no permission decision, so the check would screen a value nothing reads.
+            if (!IsScopeToken(scope.Trim()))
+            {
+                failures.Add(
+                    $"Configuration key '{key}' is not a usable scope token. It must be 1 to " +
+                    $"{MaximumScopeLengthText} characters, each a visible ASCII character other than " +
+                    "'\"' or '\\' - the RFC 6749 section 3.3 scope-token charset. The granted set " +
+                    "travels as one space-delimited value in the response and in the token claim, so a " +
+                    "scope outside that charset could not be recovered by a reader. This message does " +
+                    "not echo the configured value.");
+
+                continue;
+            }
+
+            if (!seen.Add(scope.Trim()))
+            {
+                failures.Add(
+                    $"Configuration key '{key}' repeats a scope already permitted by this grant, " +
+                    "ignoring case. A repeated permission is a paste error rather than a stronger grant.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rejection 4b: the RETIRING signing key and its identifier are a matched, optional pair, and the
+    /// identifier must differ from the active one.
+    /// </summary>
+    /// <param name="options">The bound instance.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// <para>
+    /// 🔴 THIS PAIR IS WHAT MAKES ROLLOVER POSSIBLE, AND A HALF-CONFIGURED PAIR IS WORSE THAN AN ABSENT
+    /// ONE. Material with no identifier cannot be published - a key set entry has to carry a <c>kid</c> -
+    /// and an identifier with no material publishes nothing while suggesting a rollover is under way. So
+    /// either both are present or neither is, and anything else fails startup.
+    /// </para>
+    /// <para>
+    /// THE IDENTIFIERS MUST DIFFER, and that is the mechanism rather than tidiness. A verifier selects a
+    /// key from the published set BY <c>kid</c>; two keys sharing one identifier is an ambiguous set in
+    /// which a verifier may select the wrong key and report a signature failure that looks like forgery.
+    /// </para>
+    /// <para>
+    /// THE SAME IMPORT AND THE SAME FLOOR APPLY. A retiring key is still a key this service asks every
+    /// verifier in the estate to trust, so material that cannot be imported, or that is below
+    /// <see cref="SecurityOptions.MinimumSigningKeySizeBits"/>, is refused exactly as the active key's is.
+    /// A rollover is the moment a deployment is most likely to paste the wrong thing.
+    /// </para>
+    /// <para>
+    /// NO MESSAGE ECHOES THE MATERIAL. The identifiers may appear - they are identifiers - but they are
+    /// deliberately not quoted either, so that one rule covers every message in this validator.
+    /// </para>
+    /// </remarks>
+    private static void CheckRetiringSigningMaterial(SecurityOptions options, List<string> failures)
+    {
+        bool hasMaterial = !string.IsNullOrWhiteSpace(options.RetiringSigningKey);
+        bool hasIdentifier = !string.IsNullOrWhiteSpace(options.RetiringSigningKeyId);
+
+        if (!hasMaterial && !hasIdentifier)
+        {
+            // No rollover in progress. The ordinary steady state.
+            return;
+        }
+
+        if (hasMaterial != hasIdentifier)
+        {
+            failures.Add(
+                $"Configuration keys '{SecurityOptions.RetiringSigningKeyEnvironmentVariableName}' and " +
+                $"'{RetiringSigningKeyIdKey}' are a matched pair: either both are set, which publishes " +
+                "the previous key alongside the active one for the duration of a rollover, or neither " +
+                "is, which is the steady state. One without the other is a half-applied rollover - " +
+                "material with no identifier cannot be published at all, and an identifier with no " +
+                "material publishes nothing while suggesting a rollover is under way. This message " +
+                "never echoes either configured value.");
+
+            return;
+        }
+
+        if (string.Equals(
+                options.RetiringSigningKeyId.Trim(),
+                options.SigningKeyId.Trim(),
+                StringComparison.Ordinal))
+        {
+            failures.Add(
+                $"Configuration key '{RetiringSigningKeyIdKey}' repeats the value of " +
+                $"'{SigningKeyIdKey}'. A verifier selects a key from the published set by its 'kid', so " +
+                "two keys under one identifier is not a rollover - it is an ambiguous key set in which a " +
+                "verifier may select the wrong key and report a signature failure that looks like " +
+                "forgery. Give the incoming key a new identifier and leave the outgoing one with its " +
+                "own.");
+        }
+
+        if (!CanImportPrivateKey(options.RetiringSigningKey!, out int retiringKeySizeBits))
+        {
+            failures.Add(
+                $"Configuration key '{SecurityOptions.RetiringSigningKeyEnvironmentVariableName}' " +
+                "cannot be imported as an RSA private key. " + SigningKeyUnusableMessage);
+
+            return;
+        }
+
+        if (retiringKeySizeBits < SecurityOptions.MinimumSigningKeySizeBits)
+        {
+            failures.Add(
+                $"Configuration key '{SecurityOptions.RetiringSigningKeyEnvironmentVariableName}' " +
+                $"supplies a {retiringKeySizeBits}-bit RSA private key, below the " +
+                $"{SecurityOptions.MinimumSigningKeySizeBits}-bit minimum. A retiring key is still " +
+                "published as verification material every service in this estate trusts, so it is held " +
+                "to the same floor as the active key. If the outgoing key is below the floor, that is " +
+                "the reason to rotate rather than a reason to publish it: cut over without an overlap " +
+                "and accept the window instead. This message never echoes the configured material.");
+        }
+    }
+
+    /// <summary>
+    /// Rejection 5: the key identifier must be present.
+    /// </summary>
+    /// <param name="options">The bound instance.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// Without it the published key set carries no <c>kid</c> and every verifier is left guessing
+    /// which key to select, which also makes rotation impossible: overlapping an old and a new key
+    /// depends entirely on the two being distinguishable by identifier.
+    /// </remarks>
+    private static void CheckSigningKeyIdentifier(SecurityOptions options, List<string> failures)
+    {
+        if (string.IsNullOrWhiteSpace(options.SigningKeyId))
+        {
+            failures.Add(
+                $"Configuration key '{SigningKeyIdKey}' is required and must not be blank. It is " +
+                "the 'kid' published in the key set and stamped into every token header, and it is " +
+                "what makes key rotation possible.");
+        }
+    }
+
+    /// <summary>
+    /// Rejection 6: the token lifetime must be strictly positive AND no longer than
+    /// <see cref="SecurityOptions.MaximumTokenLifetime"/>.
+    /// </summary>
+    /// <param name="options">The bound instance.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// <para>
+    /// This rule lives in the validator rather than in an attribute because a range attribute cannot
+    /// express a <see cref="TimeSpan"/> bound - it compares against numeric bounds, and a duration parsed
+    /// from configuration is neither a number nor comparable to one without stringly-typed conversion.
+    /// </para>
+    /// <para>
+    /// Zero and negative are both rejected: either mints tokens that are already expired at the instant
+    /// they are issued, which every verifier then rejects, so the service would appear healthy while
+    /// nothing it produced ever worked.
+    /// </para>
+    /// <para>
+    /// 🔴 AND A VALUE ABOVE THE CEILING IS REJECTED TOO, which an earlier revision did not do. The member
+    /// name is kept for its call site's sake while the check now bounds both ends; see the ceiling's own
+    /// remarks for why an unbounded lifetime is a security fault rather than a deployment preference.
+    /// </para>
+    /// </remarks>
+    private static void CheckTokenLifetimeIsPositive(SecurityOptions options, List<string> failures)
+    {
+        if (options.TokenLifetime <= TimeSpan.Zero)
+        {
+            failures.Add(
+                $"Configuration key '{TokenLifetimeKey}' must be a positive duration. A zero or " +
+                "negative lifetime mints tokens that are already expired when they are issued.");
+
+            // One fault, one message. A non-positive value is not additionally "too long".
+            return;
+        }
+
+        // ------------------------------------------------------------------------------------------
+        // 🔴 THE CEILING. An earlier revision bounded only the lower end, which admitted a year-long
+        // bearer credential from a contract that calls its token short-lived - and with one issuer for the
+        // whole estate, no refresh flow and no revocation list, that credential authenticates everywhere
+        // for as long as the setting says. See SecurityOptions.MaximumTokenLifetime for why the ceiling is
+        // a constant and why fifteen minutes is derived from the documented five-minute posture rather
+        // than picked.
+        //
+        // THE MESSAGE NAMES BOTH DURATIONS. Unlike a credential, a lifetime is not sensitive, and an
+        // operator cannot act on "too long" without being told how long is too long.
+        // ------------------------------------------------------------------------------------------
+        if (options.TokenLifetime > SecurityOptions.MaximumTokenLifetime)
+        {
+            failures.Add(
+                $"Configuration key '{TokenLifetimeKey}' is " +
+                options.TokenLifetime.ToString("c", CultureInfo.InvariantCulture) +
+                ", longer than the maximum this service will start with of " +
+                SecurityOptions.MaximumTokenLifetime.ToString("c", CultureInfo.InvariantCulture) +
+                ". Contract C-01 publishes a SHORT-LIVED service token and this estate has one issuer, no " +
+                "refresh flow and no revocation list, so a token's lifetime is the entire bound on the " +
+                "damage a leaked one can do - at every service, not only at the one it was stolen from. " +
+                "The documented posture is five minutes; the maximum is that with headroom. A caller " +
+                "needing another token calls the operation again.");
+        }
+    }
+
+    /// <summary>
+    /// Hardening 7: the signature algorithm must be a member of the closed allow-list.
+    /// </summary>
+    /// <param name="options">The bound instance.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// <para>
+    /// Presence is reported on its own when the value is blank, so a deployment that omitted the key
+    /// is not also told its value is unrecognised. Otherwise the value is matched ordinally and
+    /// case-sensitively against <see cref="PermittedSigningAlgorithms"/>, because JOSE algorithm
+    /// identifiers are case-sensitive.
+    /// </para>
+    /// <para>
+    /// THE FAILURE LISTS WHAT IS ACCEPTED AND NEVER ECHOES WHAT WAS SUPPLIED. Naming the permitted
+    /// values is what an operator needs; repeating the rejected value adds nothing and would put
+    /// caller-influenced text into a startup log.
+    /// </para>
+    /// </remarks>
+    private static void CheckSigningAlgorithmIsPermitted(
+        SecurityOptions options,
+        List<string> failures)
+    {
+        if (string.IsNullOrWhiteSpace(options.SigningAlgorithm))
+        {
+            failures.Add(
+                $"Configuration key '{SigningAlgorithmKey}' is required and must not be blank. " +
+                $"Permitted values are {DescribePermittedAlgorithms()}.");
+
+            return;
+        }
+
+        bool permitted = false;
+
+        foreach (string candidate in PermittedSigningAlgorithms)
+        {
+            if (string.Equals(candidate, options.SigningAlgorithm, StringComparison.Ordinal))
+            {
+                permitted = true;
+
+                break;
+            }
+        }
+
+        if (!permitted)
+        {
+            failures.Add(
+                $"Configuration key '{SigningAlgorithmKey}' is not one of the permitted signature " +
+                $"algorithms. The permitted set is closed and is exactly {DescribePermittedAlgorithms()}, " +
+                "compared case-sensitively. Symmetric algorithms are excluded because this service " +
+                "publishes its verification material anonymously, so a symmetric key in that " +
+                "document would publish the signing key itself and make every verifier a co-signer. " +
+                "Probabilistic RSA padding and elliptic-curve signatures are excluded because the " +
+                "legacy cryptographic surface can express neither. This message never echoes the " +
+                "configured value.");
+        }
+    }
+
+    /// <summary>
+    /// Hardening 8: both published metadata paths must sit under
+    /// <see cref="WellKnownMetadataPathPrefix"/>.
+    /// </summary>
+    /// <param name="options">The bound instance.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// An authentication control, not a naming rule. The service entry point applies a default-deny
+    /// authorization policy and exempts exactly three paths - the health probe and these two - so a
+    /// value outside the prefix would either leave a document that must be anonymous behind
+    /// authentication, breaking every consumer's bearer handler before it holds a token, or move the
+    /// anonymous exemption onto a path that should have been authenticated.
+    /// </remarks>
+    private static void CheckMetadataPaths(SecurityOptions options, List<string> failures)
+    {
+        CheckWellKnownPath(options.JwksPath, JwksPathKey, "the key set", failures);
+
+        CheckWellKnownPath(
+            options.OpenIdConfigurationPath,
+            OpenIdConfigurationPathKey,
+            "the discovery document",
+            failures);
+    }
+
+    /// <summary>
+    /// One published metadata path.
+    /// </summary>
+    /// <param name="value">The configured path.</param>
+    /// <param name="configurationKey">The full configuration key path, for the message.</param>
+    /// <param name="documentDescription">What the path publishes, for the message.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// The prefix must be present AND something must follow it: the bare prefix names a directory
+    /// rather than a document, so it would register a route that publishes nothing while passing a
+    /// naive prefix test.
+    /// </remarks>
+    private static void CheckWellKnownPath(
+        string value,
+        string configurationKey,
+        string documentDescription,
+        List<string> failures)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            failures.Add(
+                $"Configuration key '{configurationKey}' is required and must not be blank. It is " +
+                $"the request path {documentDescription} is published at.");
+
+            return;
+        }
+
+        bool rootedInWellKnown =
+            value.StartsWith(WellKnownMetadataPathPrefix, StringComparison.Ordinal) &&
+            value.Length > WellKnownMetadataPathPrefix.Length;
+
+        if (!rootedInWellKnown)
+        {
+            failures.Add(
+                $"Configuration key '{configurationKey}' must begin with " +
+                $"'{WellKnownMetadataPathPrefix}' and must name a document beneath it. The service " +
+                "grants anonymous access to exactly this path, the discovery path and the health " +
+                $"probe, so a value outside '{WellKnownMetadataPathPrefix}' would either hide " +
+                $"{documentDescription} behind authentication or aim the anonymous exemption at a " +
+                "route that must stay authenticated. This message never echoes the configured value.");
+        }
+    }
+
+    /// <summary>
+    /// Hardening 9: the token endpoint must be rooted and must NOT fall inside
+    /// <see cref="WellKnownMetadataPathPrefix"/>.
+    /// </summary>
+    /// <param name="options">The bound instance.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// The same anonymous-exemption control as <see cref="CheckMetadataPaths"/>, inverted. The route
+    /// that mints tokens is the single most sensitive one this service exposes, and the entry point
+    /// exempts the metadata namespace from authorization wholesale, so a token endpoint inside that
+    /// namespace would become anonymous without anything in the endpoint's own declaration changing.
+    /// Rootedness is required as well, because an unrooted value is not a request path.
+    /// </remarks>
+    private static void CheckTokenEndpointPath(SecurityOptions options, List<string> failures)
+    {
+        if (string.IsNullOrWhiteSpace(options.TokenEndpointPath))
+        {
+            failures.Add(
+                $"Configuration key '{TokenEndpointPathKey}' is required and must not be blank. It " +
+                "is the single declared source of truth for the token endpoint: the endpoint maps " +
+                "its route from it and the discovery document advertises it, and the two must agree.");
+
+            return;
+        }
+
+        if (!options.TokenEndpointPath.StartsWith('/'))
+        {
+            failures.Add(
+                $"Configuration key '{TokenEndpointPathKey}' must be a rooted request path " +
+                "beginning with '/'. This message never echoes the configured value.");
+        }
+
+        if (options.TokenEndpointPath.StartsWith(WellKnownMetadataPathPrefix, StringComparison.Ordinal))
+        {
+            failures.Add(
+                $"Configuration key '{TokenEndpointPathKey}' must not begin with " +
+                $"'{WellKnownMetadataPathPrefix}'. That namespace is exempted from authorization so " +
+                "that the key set and the discovery document can be fetched anonymously, so a token " +
+                "endpoint inside it would be reachable without authentication. This message never " +
+                "echoes the configured value.");
+        }
+    }
+
+    /// <summary>
+    /// Hardening 10 plus the key-store coherence rule: every permitted key reference must be a safe
+    /// bounded identifier, and a prefix must be configured whenever any reference is permitted.
+    /// </summary>
+    /// <param name="options">The bound instance.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// <para>
+    /// THE CHARSET RULE IS THE POINT. A permitted reference is concatenated onto a configuration-key
+    /// prefix to resolve material, so an entry containing a separator, a path segment or whitespace
+    /// would let a caller naming that reference reach a configuration key the key store was never
+    /// meant to expose. Constraining the DECLARED set is what makes the caller-side match safe, since
+    /// the declared set is exactly what a caller's input is matched against.
+    /// </para>
+    /// <para>
+    /// AN EMPTY SET IS VALID AND IS THE SHIPPED DEFAULT. It means no caller-referenced material is
+    /// configured, so every reference a caller could name is rejected - the safe state, and
+    /// deliberately not an error. The prefix is therefore required only when the set is non-empty: a
+    /// permitted reference with no prefix to resolve it against is unresolvable configuration and
+    /// should stop the host, whereas demanding a prefix from a deployment that permits nothing would
+    /// be a fabricated requirement.
+    /// </para>
+    /// <para>
+    /// NO DEFERRED-CAPABILITY DENY-LIST EXISTS HERE, and none may be added. Nothing outside the
+    /// declared set is reachable in the first place, so the allow-list already carries the whole
+    /// policy; a list of names not to accept would add no protection while writing capability areas
+    /// this phase does not implement into a file that would then have to name them.
+    /// </para>
+    /// </remarks>
+    private static void CheckKeyStore(SecurityOptions options, List<string> failures)
+    {
+        SecurityKeyStoreOptions keyStore = options.KeyStore;
+
+        for (int index = 0; index < keyStore.PermittedKeyRefs.Count; index++)
+        {
+            if (!IsSafeKeyRef(keyStore.PermittedKeyRefs[index]))
+            {
+                failures.Add(
+                    $"Configuration key '{IndexedKey(PermittedKeyRefsKey, index)}' is not a safe " +
+                    $"key reference. Each entry must be 1 to {MaximumKeyRefLengthText} " +
+                    "characters of ASCII letters, ASCII digits, '.', '_' or '-' only. A reference is " +
+                    "concatenated onto the key-store prefix to resolve material, so anything looking " +
+                    "like a path or carrying a separator could reach a configuration key this store " +
+                    "does not own. This message never echoes the configured value.");
+            }
+        }
+
+        bool prefixRequired = keyStore.PermittedKeyRefs.Count > 0;
+
+        if (prefixRequired && string.IsNullOrWhiteSpace(keyStore.ConfigurationKeyPrefix))
+        {
+            failures.Add(
+                $"Configuration key '{ConfigurationKeyPrefixKey}' is required because " +
+                $"'{PermittedKeyRefsKey}' permits at least one key reference. A permitted reference " +
+                "with no prefix to resolve it against is unresolvable configuration.");
+        }
+    }
+
+    /// <summary>
+    /// Rejection: every row of the authorization matrix must name a caller, an audience the roster
+    /// carries, and at least one usable scope - and no caller-and-audience pair may appear twice.
+    /// </summary>
+    /// <param name="options">The bound instance.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// <para>
+    /// AN EMPTY MATRIX IS NOT A FAILURE HERE, DELIBERATELY, even though it authorises nothing. It is the
+    /// fail-closed posture recorded on <see cref="SecurityOptions.CallerAuthorizations"/>, and it is the
+    /// state every host that does not issue tokens legitimately runs in - refusing to start for it would
+    /// make a bring-up of the rest of the stack impossible for a service that, with no matrix, could not
+    /// have minted anything anyway.
+    /// </para>
+    /// <para>
+    /// A ROW NAMING AN AUDIENCE OUTSIDE THE ROSTER IS A FAILURE, AND THAT IS THE ONE RULE HERE THAT IS
+    /// ABOUT COHERENCE RATHER THAN SHAPE. The roster is what the issuer will mint for at all, so such a
+    /// row authorises something that can never be granted: the request would be refused by the roster
+    /// check before this matrix was ever consulted. An operator reading only the matrix would see a
+    /// permission that does not work, with nothing to explain why - so it is reported at startup instead.
+    /// </para>
+    /// <para>
+    /// THE DUPLICATE RULE IS ABOUT AMBIGUITY, NOT TIDINESS. Two rows for one caller-and-audience pair
+    /// would leave the effective scope set dependent on which row is consulted first, and a permission
+    /// model whose answer depends on ordering is not a permission model. First-wins or union would both
+    /// be inventions; refusing the configuration is the only answer that needs no invented rule.
+    /// </para>
+    /// <para>
+    /// EVERY MESSAGE NAMES THE OFFENDING ROW'S INDEX and no message echoes an identity or a scope. An
+    /// index is a position rather than a value, which is what lets a failure be locatable in a settings
+    /// file without putting configured content into a log record.
+    /// </para>
+    /// </remarks>
+    private static void CheckCallerAuthorizations(SecurityOptions options, List<string> failures)
+    {
+        // KEYED ON A PAIR RATHER THAN A JOINED STRING, so that no separator has to be trusted not to
+        // occur inside an identity. A joined key would make caller "a" with audience "b:c" collide with
+        // caller "a:b" and audience "c", and no separator choice removes that: every printable character
+        // is legal inside a service identity, and even a control character is only excluded by argument.
+        // The pair's default comparer compares each member with the ordinal string comparer, which is
+        // what every other identity comparison in this service uses.
+        HashSet<(string Caller, string Audience)> seenPairs = [];
+
+        for (int index = 0; index < options.CallerAuthorizations.Count; index++)
+        {
+            CallerAuthorizationOptions row = options.CallerAuthorizations[index];
+
+            if (string.IsNullOrWhiteSpace(row.Caller))
+            {
+                failures.Add(
+                    $"Configuration key '{IndexedKey(CallerAuthorizationsKey, index)}:Caller' is " +
+                    "required and must not be blank. A row authorising no caller authorises nothing " +
+                    "while looking like a grant. This message never echoes the configured value.");
+            }
+
+            if (string.IsNullOrWhiteSpace(row.Audience))
+            {
+                failures.Add(
+                    $"Configuration key '{IndexedKey(CallerAuthorizationsKey, index)}:Audience' is " +
+                    "required and must not be blank. Each row authorises exactly one audience, which " +
+                    "mirrors the contract's one-audience-per-request shape. This message never echoes " +
+                    "the configured value.");
+            }
+            else if (!options.Audiences.Contains(row.Audience, StringComparer.Ordinal))
+            {
+                failures.Add(
+                    $"Configuration key '{IndexedKey(CallerAuthorizationsKey, index)}:Audience' names " +
+                    $"an audience that is not on '{AudiencesKey}'. The roster is what this issuer will " +
+                    "mint for at all, so this row authorises a combination that could never be " +
+                    "granted. This message never echoes the configured value.");
+            }
+
+            if (row.Scopes.Count == 0)
+            {
+                failures.Add(
+                    $"Configuration key '{IndexedKey(CallerAuthorizationsKey, index)}:Scopes' must " +
+                    "carry at least one scope. A row permitting no scope permits nothing, which is " +
+                    "indistinguishable from an absent row while looking like a grant.");
+            }
+
+            for (int scopeIndex = 0; scopeIndex < row.Scopes.Count; scopeIndex++)
+            {
+                string scope = row.Scopes[scopeIndex];
+
+                // THE SAME CHARSET SCREEN THE NESTED SURFACE APPLIES, AND FOR THE SAME REASON: the two
+                // shapes state one decision and fold into one matrix, so a scope legal in one spelling
+                // and illegal in the other would make the rule depend on where an operator wrote it.
+                // It is applied on BOTH shapes for that reason, rather than on whichever one an operator
+                // is expected to prefer.
+                if (IsScopeToken(scope?.Trim()))
+                {
+                    continue;
+                }
+
+                failures.Add(
+                    "Configuration key " +
+                    $"'{IndexedKey(IndexedKey(CallerAuthorizationsKey, index) + ":Scopes", scopeIndex)}' " +
+                    "is not a usable scope token. It must be 1 to " +
+                    $"{MaximumScopeLengthText} characters, each a visible ASCII character other than " +
+                    "'\"' or '\\' - the RFC 6749 section 3.3 scope-token charset - because the scope " +
+                    "claim is space-delimited and a scope outside that charset could not be recovered " +
+                    "by a reader. This message never echoes the configured value.");
+            }
+
+            // Checked even when a member above was reported blank: a second blank row is a second
+            // defect, and reporting it as a duplicate rather than swallowing it tells an operator that
+            // fixing the first row alone will not be enough.
+            if (!seenPairs.Add((row.Caller, row.Audience)))
+            {
+                failures.Add(
+                    $"Configuration key '{IndexedKey(CallerAuthorizationsKey, index)}' repeats a " +
+                    "caller-and-audience pair declared by an earlier row. Two rows for one pair would " +
+                    "make the effective scope set depend on which is consulted first, and a permission " +
+                    "model whose answer depends on ordering is not one. This message never echoes the " +
+                    "configured values.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rejection: the client-certificate trust settings must be internally coherent - a named
+    /// revocation mode this service implements, and an anchor path that is either unset or readable.
+    /// </summary>
+    /// <param name="options">The bound instance.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// <para>
+    /// THE MODE IS CHECKED HERE AND THE ANCHOR IS LOADED ELSEWHERE, DELIBERATELY. A validator's job is to
+    /// reject a configuration that cannot be honoured, and a mode name outside the recognised set is
+    /// exactly that - it is decidable from the value alone, with no file system involved. Whether the
+    /// anchor path resolves to real certificates is decidable only by reading the file, which is the
+    /// trust layer's own responsibility and is where that failure refuses the host; duplicating the read
+    /// here would open the file twice and give two places to disagree about what counts as readable.
+    /// </para>
+    /// <para>
+    /// AN UNSET ANCHOR IS NOT A FAILURE. It is the fail-closed state recorded on
+    /// <see cref="SecurityOptions.ClientCertificateAuthorityPath"/>: a deployment that configures none
+    /// issues no tokens and serves everything else. Refusing the host for it would make every host that
+    /// does not need issuance - a unit-test host, a local bring-up of the other three services against a
+    /// stubbed issuer - unstartable, which is a cost with no security benefit, because a host with no
+    /// anchor cannot honour a certificate anyway.
+    /// </para>
+    /// <para>
+    /// WHITE SPACE IS NOT AN UNSET PATH, AND IT IS REPORTED. A path consisting of blanks is a populated
+    /// variable holding nothing usable - the shape a substitution that expanded to nothing produces - and
+    /// silently treating it as unset would turn a deployment that intended mutual TLS into one that
+    /// quietly refuses every caller. The message names the key and never echoes the value.
+    /// </para>
+    /// </remarks>
+    private static void CheckClientCertificateTrust(SecurityOptions options, List<string> failures)
+    {
+        if (!ClientCertificateRevocationModes.IsRecognised(options.ClientCertificateRevocationMode))
+        {
+            failures.Add(
+                $"Configuration key '{ClientCertificateRevocationModeKey}' names a revocation mode " +
+                "this service does not implement. The recognised values are " +
+                $"{string.Join(", ", ClientCertificateRevocationModes.Recognised)}, compared without " +
+                "regard to case. This message never echoes the configured value.");
+        }
+
+        string anchor = options.ClientCertificateAuthorityPath;
+
+        if (anchor.Length > 0 && string.IsNullOrWhiteSpace(anchor))
+        {
+            failures.Add(
+                $"Configuration key '{ClientCertificateAuthorityPathKey}' is present but holds only " +
+                "white space, which is a populated setting carrying no usable path rather than an " +
+                "unset one. Leave it entirely unset to run without a client trust anchor - in which " +
+                "case no caller certificate establishes an identity and token issuance answers 401 - " +
+                "or point it at a readable PEM file holding the issuing certificate authority. This " +
+                "message never echoes the configured value.");
+        }
+    }
+
+    /// <summary>
+    /// Rejections covering the issuance roster: it must not be empty, every entry must name a distinct
+    /// subject, every named secret key must be a resolvable flat key name, and every audience and scope
+    /// an entry grants must be a value this deployment can actually honour.
+    /// </summary>
+    /// <param name="options">The bound instance.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// <para>
+    /// THE MOST IMPORTANT RULE HERE IS THE CROSS-CHECK, not any of the shape rules. An entry may grant
+    /// an audience only if the deployment-wide roster serves it, because the issuer applies BOTH gates
+    /// and the deployment-wide one first: an entry granting an audience the deployment does not serve is
+    /// a permission that can never be exercised, and it reads in a settings file as though it can. That
+    /// is the failure mode this check exists for - unreachable configuration that looks like working
+    /// configuration - and it is exactly the class of defect a validator can catch and a test of the
+    /// happy path cannot.
+    /// </para>
+    /// <para>
+    /// AN EMPTY ROSTER IS REFUSED, AND IT IS REFUSED LOUDLY. The alternative reading - "no clients
+    /// configured, so mint for nobody" - is safe in the narrow sense and catastrophic in the useful
+    /// sense: this is the sole issuer, so a deployment in that state cannot give any service a
+    /// credential, while its readiness probe reports healthy for as long as nobody tries. The legacy
+    /// posture this mirrors ends a structural fault in process termination rather than in a warning
+    /// [ws_objects/pfw.pbl.src/pfw.sra:L111-L144].
+    /// </para>
+    /// <para>
+    /// DUPLICATE SUBJECTS ARE REFUSED because the registry keys by subject: a second entry for the same
+    /// subject would either be silently dropped or silently win, and in both readings one of the two
+    /// permission sets an operator wrote down is not the one being enforced. Ordinal comparison, matching
+    /// every other identity comparison in this service.
+    /// </para>
+    /// <para>
+    /// NO MESSAGE ECHOES A VALUE, and that discipline extends further here than elsewhere in this file
+    /// because one of these members names a credential key. A failure reports the configuration key path
+    /// - composed from the section name and the offending index so it can be pasted into a search - and
+    /// the RULE that was broken, and nothing else. Not the subject, not the audience, not the scope and
+    /// not the secret key name.
+    /// </para>
+    /// </remarks>
+    private static void CheckClientRoster(SecurityOptions options, List<string> failures)
+    {
+        if (options.Clients.Count == 0)
+        {
+            failures.Add(
+                $"Configuration key '{ClientsKey}' is empty. At least one issuance-roster entry is " +
+                "required: this service is the sole token issuer, so an empty roster is a deployment " +
+                "in which no service can obtain a credential at all while this one continues to " +
+                "report healthy. Declare one entry per calling identity, each naming the subject and " +
+                $"the configuration key its shared secret arrives under; what each identity may " +
+                $"REQUEST is stated once, in '{CallerAuthorizationsKey}'.");
+
+            return;
+        }
+
+        HashSet<string> seenSubjects = new(StringComparer.Ordinal);
+
+        for (int index = 0; index < options.Clients.Count; index++)
+        {
+            SecurityClientOptions client = options.Clients[index];
+
+            if (client is null)
+            {
+                failures.Add(
+                    $"Configuration key '{IndexedKey(ClientsKey, index)}' bound to nothing. Every " +
+                    "roster entry must be an object declaring a subject, and optionally the " +
+                    "configuration key its shared secret is injected under.");
+
+                continue;
+            }
+
+            CheckClientSubject(client, index, seenSubjects, failures);
+            CheckClientSecretKeyName(client, index, failures);
+        }
+    }
+
+    /// <summary>
+    /// Checks one roster entry's subject: present, and not already claimed by an earlier entry.
+    /// </summary>
+    /// <param name="client">The roster entry.</param>
+    /// <param name="index">Its zero-based position, for the failure message.</param>
+    /// <param name="seenSubjects">The subjects earlier entries claimed. Mutated.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    private static void CheckClientSubject(
+        SecurityClientOptions client,
+        int index,
+        HashSet<string> seenSubjects,
+        List<string> failures)
+    {
+        if (string.IsNullOrWhiteSpace(client.Subject))
+        {
+            failures.Add(
+                $"Configuration key '{IndexedKey(ClientsKey, index)}:Subject' is required and must " +
+                "carry at least one non-whitespace character. It is both the credential identity the " +
+                "caller presents and the subject claim of every token minted for it.");
+
+            return;
+        }
+
+        if (!seenSubjects.Add(client.Subject))
+        {
+            failures.Add(
+                $"Configuration key '{IndexedKey(ClientsKey, index)}:Subject' repeats a subject an " +
+                "earlier entry already declares. The roster is keyed by subject, so a duplicate means " +
+                "one of the two permission sets is not the one being enforced. This message does not " +
+                "echo the configured value.");
+        }
+    }
+
+    /// <summary>
+    /// Checks one roster entry's secret-key NAME, when it declares one.
+    /// </summary>
+    /// <param name="client">The roster entry.</param>
+    /// <param name="index">Its zero-based position, for the failure message.</param>
+    /// <param name="failures">The accumulating failure list.</param>
+    /// <remarks>
+    /// An absent name is valid - such an entry authenticates by client certificate only - but a name
+    /// that is present and blank is not: it is a deployment that meant to name a key and named nothing,
+    /// which would otherwise be indistinguishable from meaning to name none. The charset rule is the
+    /// same conservative identifier rule the key store applies, and for the same reason: the value is a
+    /// configuration-key name that must survive the environment provider's own name mangling intact.
+    /// </remarks>
+    private static void CheckClientSecretKeyName(
+        SecurityClientOptions client,
+        int index,
+        List<string> failures)
+    {
+        if (client.SecretConfigurationKey is null)
+        {
+            return;
+        }
+
+        if (!IsSafeKeyRef(client.SecretConfigurationKey))
+        {
+            failures.Add(
+                $"Configuration key '{IndexedKey(ClientsKey, index)}:SecretConfigurationKey' is not a " +
+                $"usable configuration-key name. It must be 1 to {MaximumKeyRefLengthText} characters " +
+                "of ASCII letters, ASCII digits, '.', '_' or '-'. Omit the member entirely for a " +
+                "caller that authenticates by client certificate rather than by a shared secret. This " +
+                "message never echoes the configured value, and the value is a NAME rather than a " +
+                "secret in any case.");
+        }
+    }
+
+    /// <summary>
+    /// Renders the full configuration key path of one element of a bound collection, so that a failure
+    /// about element <paramref name="index"/> is locatable in a settings file.
+    /// </summary>
+    /// <param name="configurationKey">The collection's own configuration key path.</param>
+    /// <param name="index">The zero-based index of the offending element.</param>
+    /// <returns>The element's key path, for example <c>Security:Audiences[2]</c>.</returns>
+    /// <remarks>
+    /// One renderer for all three indexed failures, and culture-invariant, for two reasons. The index
+    /// must appear with ASCII digits whatever culture the host runs under, since the whole value of the
+    /// message is that it can be pasted into a search of a settings file. And the bracketed form is the
+    /// spelling the configuration providers themselves use for a collection element, so a single
+    /// renderer keeps all three messages speaking the operator's own notation rather than three
+    /// approximations of it. The index is a position, never a value, so nothing sensitive passes
+    /// through here.
+    /// </remarks>
+    private static string IndexedKey(string configurationKey, int index) =>
+        string.Create(CultureInfo.InvariantCulture, $"{configurationKey}[{index}]");
+
+    /// <summary>
+    /// Renders the permitted algorithm set for a failure message.
+    /// </summary>
+    /// <returns>The permitted values, comma separated.</returns>
+    /// <remarks>
+    /// Composed from <see cref="PermittedSigningAlgorithms"/> rather than written out, so a message can
+    /// never describe a set the check does not enforce. The values are algorithm identifiers and carry
+    /// nothing sensitive.
+    /// </remarks>
+    private static string DescribePermittedAlgorithms() =>
+        string.Join(", ", PermittedSigningAlgorithms);
+
+    /// <summary>
+    /// Determines whether a key reference is a safe, bounded identifier.
+    /// </summary>
+    /// <param name="value">The declared key reference.</param>
+    /// <returns>
+    /// <see langword="true"/> when the reference is 1 to <see cref="MaximumKeyRefLength"/> characters
+    /// of ASCII letters, ASCII digits, <c>.</c>, <c>_</c> or <c>-</c>; otherwise
+    /// <see langword="false"/>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// Hand-written rather than expressed as a regular expression, deliberately. The rule is a
+    /// four-clause character test, so a character loop is shorter than the pattern would be, allocates
+    /// nothing, needs no pattern cache and cannot be misread; a pattern would additionally invite the
+    /// classic anchoring mistake in which a partially matching value is accepted.
+    /// </para>
+    /// <para>
+    /// ASCII-ONLY BY DESIGN. The general Unicode letter and digit categories would admit characters
+    /// that are visually confusable with the permitted set, and a configuration-key name is machine
+    /// input rather than human text, so the conservative reading is the correct one. A
+    /// <see langword="null"/> entry - possible in a bound collection - is rejected here rather than
+    /// dereferenced.
+    /// </para>
+    /// </remarks>
+    private static bool IsSafeKeyRef(string? value)
+    {
+        if (value is null || value.Length == 0 || value.Length > MaximumKeyRefLength)
+        {
+            return false;
+        }
+
+        foreach (char character in value)
+        {
+            bool permitted =
+                char.IsAsciiLetterOrDigit(character) ||
+                character is '.' or '_' or '-';
+
+            if (!permitted)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Determines whether a declared scope grant is a usable scope token.
+    /// </summary>
+    /// <param name="value">The declared scope.</param>
+    /// <returns>
+    /// <see langword="true"/> when the value is 1 to <see cref="MaximumScopeLength"/> characters, each a
+    /// visible ASCII character other than <c>"</c> or <c>\</c>; otherwise <see langword="false"/>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// THE CHARSET IS RFC 6749 SECTION 3.3's, NOT ONE INVENTED HERE - the printable ASCII range with the
+    /// double quote and the backslash removed. Taking the standard's own definition rather than reusing
+    /// the conservative configuration-key rule is deliberate: a scope name is a protocol value that
+    /// travels in a token claim and is read by three other services, so the set of names a deployment may
+    /// declare should be the set the protocol permits. Narrowing it to the key-reference charset would
+    /// refuse names the standard allows and that a future deployment may legitimately need.
+    /// </para>
+    /// <para>
+    /// WHITE SPACE IS THE EXCLUSION THAT CARRIES THE WEIGHT, and it is excluded by construction rather
+    /// than by a separate test, because the space character is not a visible ASCII character. The granted
+    /// set is joined into ONE space-delimited value for the response and the claim, so a scope containing
+    /// a space could not be recovered by a reader and would silently become two scopes - the identical
+    /// constraint the issuance request type enforces on the caller's side.
+    /// </para>
+    /// <para>
+    /// A <see langword="null"/> entry - possible in a bound collection - is rejected here rather than
+    /// dereferenced, matching how the key-reference check treats one.
+    /// </para>
+    /// </remarks>
+    private static bool IsScopeToken(string? value)
+    {
+        if (value is null || value.Length == 0 || value.Length > MaximumScopeLength)
+        {
+            return false;
+        }
+
+        foreach (char character in value)
+        {
+            // The visible ASCII range, less the two characters the grammar excludes.
+            bool permitted =
+                character is >= '\u0021' and <= '\u007E' &&
+                character is not ('"' or '\\');
+
+            if (!permitted)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+
+    /// <summary>
+    /// Determines whether the configured signing material can be imported as an asymmetric private
+    /// key, without disclosing anything about it.
+    /// </summary>
+    /// <param name="material">The configured signing material. Never logged or echoed.</param>
+    /// <param name="keySizeBits">
+    /// Receives the modulus size in bits of the imported key, so a caller that wants to REPORT the size
+    /// need not import the material a second time; zero when nothing imported. This file's own caller
+    /// discards it, because no size produces a startup refusal here - the annotation is made in
+    /// <c>Tokens/SigningKeyProvider</c> against the key that will actually sign.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the material imports as a private key in either accepted encoding;
+    /// otherwise <see langword="false"/>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// BOTH ENCODINGS ARE ACCEPTED, IN A FIXED ORDER, AND NEITHER MAY BE REFUSED. Armoured text is
+    /// attempted first, then base64 of the bare binary encoding. Both shapes genuinely occur because
+    /// the legacy key generator's armoured output is an OPTIONAL fourth argument
+    /// [ws_objects/pfw.crypto.pbl.src/n_crypto.sru:L19-L20]: material produced without it is bare, and
+    /// material produced with it is armoured. The single-line base64 form is additionally the only
+    /// shape an environment file can carry, since that format has no line continuation.
+    /// </para>
+    /// <para>
+    /// THE ACCEPTED SET IS FIXED IN CODE AND IS NOT SELECTED BY CONFIGURATION. Every path is attempted
+    /// and only a value that fails all of them is rejected, so there is no setting that could tell this
+    /// check to expect the wrong shape and reject a valid key.
+    /// </para>
+    /// <para>
+    /// A PUBLIC KEY IS NOT SUFFICIENT AND IS REJECTED. Armoured import will happily read public
+    /// material, so the armoured path additionally asserts that a private component is present; the
+    /// bare paths need no such check because the two structures they attempt are private-key structures
+    /// by definition. An issuer holding only a public key would start and then fail to sign, which is
+    /// precisely the outcome fail-fast validation exists to prevent.
+    /// </para>
+    /// <para>
+    /// KEY HYGIENE. Nothing here logs, traces, re-throws or returns any part of the material: the
+    /// method's entire vocabulary is <see langword="true"/>, <see langword="false"/> and ONE
+    /// MEASUREMENT - the modulus length, which is not a secret, since this service publishes it in the
+    /// key set it serves anonymously. No byte of the key itself is returned or measured. Every key
+    /// instance is disposed, including every rejected candidate, and every decoded or exported byte
+    /// buffer is zeroed before it is released rather than left for the garbage collector. The lambdas
+    /// passed below are <see langword="static"/> so that no key material can be captured in a closure.
+    /// </para>
+    /// <para>
+    /// This is the only operation in the file that is not a pure comparison, and it performs no I/O:
+    /// the import is entirely in memory, so validation stays runnable in a unit test with no host, no
+    /// file system and no network.
+    /// </para>
+    /// </remarks>
+    private static bool CanImportPrivateKey(string material, out int keySizeBits)
+    {
+        if (TryImportArmoured(material, out keySizeBits))
+        {
+            return true;
+        }
+
+        byte[]? bare = TryDecodeBase64(material);
+
+        if (bare is null)
+        {
+            // Neither armoured nor valid base64, so there is no third encoding left to attempt.
+            keySizeBits = 0;
+
+            return false;
+        }
+
+        try
+        {
+            return TryImportBareStructures(bare, out keySizeBits);
+        }
+        finally
+        {
+            // The decoded buffer holds the key in the clear. Clear it rather than waiting for
+            // collection, which is non-deterministic and may copy the buffer while compacting.
+            CryptographicOperations.ZeroMemory(bare);
+        }
+    }
+
+    /// <summary>
+    /// Attempts the armoured encoding.
+    /// </summary>
+    /// <param name="material">The configured signing material.</param>
+    /// <param name="keySizeBits">
+    /// Receives the modulus size in bits when the material imported and carries a private component;
+    /// otherwise zero.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the material is armoured AND carries a private component;
+    /// otherwise <see langword="false"/>.
+    /// </returns>
+    /// <remarks>
+    /// No delimiter literal is tested for and none appears anywhere in this file. The attempt is
+    /// simply made and its failure interpreted, which is both simpler than sniffing for a header and
+    /// deliberate: a delimiter string is exactly what a credential scanner matches on, so writing one
+    /// here would trip the scan that protects this file for no functional gain. Two exception types
+    /// are handled because the platform reports unreadable content as a cryptographic failure and text
+    /// carrying no usable block as an argument failure; both mean the same thing to this caller.
+    /// </remarks>
+    private static bool TryImportArmoured(string material, out int keySizeBits)
+    {
+        keySizeBits = 0;
+
+        using RSA candidate = RSA.Create();
+
+        try
+        {
+            candidate.ImportFromPem(material);
+        }
+        catch (CryptographicException)
+        {
+            return false;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+
+        if (!HasPrivateComponent(candidate))
+        {
+            return false;
+        }
+
+        // Read from the IMPORTED key rather than from the platform default, and read only after the
+        // private-component assertion has passed: a public-only key imports on this platform and would
+        // report a perfectly respectable modulus length, so measuring before that check would publish a
+        // measurement for a verification-only key that can never sign anything.
+        keySizeBits = candidate.KeySize;
+
+        return true;
+    }
+
+    /// <summary>
+    /// Attempts each bare binary private-key structure in turn.
+    /// </summary>
+    /// <param name="bare">The decoded key bytes.</param>
+    /// <param name="keySizeBits">
+    /// Receives the modulus size in bits of whichever structure imported; otherwise zero.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when one of the attempted structures imported; otherwise
+    /// <see langword="false"/>.
+    /// </returns>
+    /// <remarks>
+    /// The order is evidence-led rather than arbitrary: the documented generation command in
+    /// <c>orchestration/.env.example</c> produces the modern algorithm-tagged structure, so that is
+    /// attempted first and the overwhelmingly common case costs one attempt. The older RSA-specific
+    /// structure is attempted second, because an existing key may already be in it. Both are
+    /// PRIVATE-key structures, so a public key cannot pass through this path and no separate private
+    /// component check is required here. Public-key structures are deliberately not attempted at all:
+    /// this method answers "can this sign?", and a public key cannot.
+    /// </remarks>
+    private static bool TryImportBareStructures(byte[] bare, out int keySizeBits) =>
+        TryImportBareStructure(
+            bare,
+            static (key, bytes) => key.ImportPkcs8PrivateKey(bytes, out _),
+            out keySizeBits) ||
+        TryImportBareStructure(
+            bare,
+            static (key, bytes) => key.ImportRSAPrivateKey(bytes, out _),
+            out keySizeBits);
+
+    /// <summary>
+    /// Attempts exactly one bare binary key structure.
+    /// </summary>
+    /// <param name="bare">The decoded key bytes.</param>
+    /// <param name="import">The single platform import to attempt.</param>
+    /// <param name="keySizeBits">
+    /// Receives the modulus size in bits when the structure imported; otherwise zero.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the bytes hold that structure; otherwise <see langword="false"/>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// Returns a verdict rather than raising, so the caller can attempt the next structure without
+    /// exception control flow spanning the whole set. The candidate instance is disposed on both paths
+    /// by the using declaration, so a partially initialised key is never left behind for the next
+    /// attempt to inherit.
+    /// </para>
+    /// <para>
+    /// EXACTLY ONE EXCEPTION TYPE IS HANDLED, and that was MEASURED on this platform rather than
+    /// assumed: both bare imports report every rejection - random bytes, empty input, a public-key
+    /// structure, and the other private structure's encoding - as a cryptographic exception or a
+    /// platform-specific subclass of it, which this catch covers. No second arm is written for an
+    /// exception type the platform does not raise here: an unreachable catch is dead code that cannot
+    /// be tested and quietly claims to handle something. Anything genuinely unexpected propagates,
+    /// which still refuses the host - the fail-fast outcome - rather than being swallowed.
+    /// </para>
+    /// </remarks>
+    private static bool TryImportBareStructure(
+        byte[] bare,
+        Action<RSA, byte[]> import,
+        out int keySizeBits)
+    {
+        keySizeBits = 0;
+
+        using RSA candidate = RSA.Create();
+
+        try
+        {
+            import(candidate, bare);
+        }
+        catch (CryptographicException)
+        {
+            return false;
+        }
+
+        // Both attempted structures are PRIVATE-key structures, so unlike the armoured path there is
+        // no public-only case to exclude before the modulus can be measured.
+        keySizeBits = candidate.KeySize;
+
+        return true;
+    }
+
+    /// <summary>
+    /// Determines whether an imported key carries a private component, and therefore whether it can
+    /// sign.
+    /// </summary>
+    /// <param name="key">The imported key.</param>
+    /// <returns>
+    /// <see langword="true"/> when a private component is present; otherwise <see langword="false"/>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// Asked by attempting the private-key export and interpreting its failure, which is the platform's
+    /// own answer to the question rather than an inference from key parameters. The exported buffer is
+    /// key material in the clear and is therefore ZEROED in a finally block before being released,
+    /// whichever way the attempt went; it is never returned, inspected, measured or logged. The export
+    /// exists solely to be discarded.
+    /// </para>
+    /// <para>
+    /// WHY THIS CHECK EXISTS AT ALL, measured rather than assumed: armoured import of a PUBLIC key
+    /// SUCCEEDS on this platform. Without this assertion an issuer configured with the public half
+    /// would pass validation, start, satisfy the readiness gate and then fail to sign every token -
+    /// exactly the outcome fail-fast validation exists to prevent. A single exception type is handled
+    /// because a public-only export is the one way this can fail and the platform reports it as a
+    /// cryptographic exception; anything else propagates and still refuses the host.
+    /// </para>
+    /// </remarks>
+    private static bool HasPrivateComponent(RSA key)
+    {
+        byte[]? exported = null;
+
+        try
+        {
+            exported = key.ExportPkcs8PrivateKey();
+
+            return true;
+        }
+        catch (CryptographicException)
+        {
+            return false;
+        }
+        finally
+        {
+            if (exported is not null)
+            {
+                CryptographicOperations.ZeroMemory(exported);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Decodes base64 signing material, returning <see langword="null"/> rather than raising when the
+    /// text is not base64 at all.
+    /// </summary>
+    /// <param name="material">The configured signing material.</param>
+    /// <returns>The decoded bytes, or <see langword="null"/> when the text is not valid base64.</returns>
+    /// <remarks>
+    /// The platform decoder tolerates embedded whitespace and line breaks, so material that arrived
+    /// wrapped across lines by a secret store or an editor still decodes. A failure here is not an
+    /// error to report on its own: it simply means this encoding is not the one, and the caller turns
+    /// it into the single fixed rejection message that names no part of the value.
+    /// </remarks>
+    private static byte[]? TryDecodeBase64(string material)
+    {
+        try
+        {
+            return Convert.FromBase64String(material);
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
+}

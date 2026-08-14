@@ -1,0 +1,1099 @@
+# yaml-language-server: $schema=./workflow.schema.json
+#
+# ==============================================================================
+# persistence-sqlite-retrieve-update
+#
+# The golden-master workflow definition for the retrieval, validation and update
+# triple. Its oracle fixture is the ONLY updatable DataWindow in the entire
+# repository, so this one definition anchors the parity story for the hardest
+# contract in the refactor: preserving `updatewhereclause` optimistic-concurrency
+# semantics across a network boundary that the legacy never had.
+#
+# This is a declarative data file. It contains no code, no test and no
+# executable step. It SPECIFIES a paired capture that has not been run - see
+# `executionStatus` at the foot of the file, whose only legal value says so.
+#
+# Every legacy path below is cited, never touched. `ws_objects/**` is read-only
+# and is the behavioural oracle: no fixture is edited, moved, renamed,
+# reformatted, re-encoded or copied into this tree, and this file holds no
+# fixture content for exactly that reason - a vendored copy is a second master,
+# and a second master drifts.
+#
+# Conventions this store owns elsewhere are cited here, not restated:
+#   - the shared-volume capture rule ....... characterization/README.md section 2.1
+#   - recording-file conventions ........... characterization/README.md section 3.4
+#   - the determinism-seam register ........ docs/PARITY.md section 5.1
+#   - the C-06 update contract ............. docs/CONTRACTS.md section 9
+# ==============================================================================
+
+# Quoted: the schema fixes this as the STRING "1". Unquoted it would load as an
+# integer and fail validation against the constant.
+schemaVersion: "1"
+
+# The pairing key, and the only thing that makes two recordings comparable. It
+# names both characterization/recordings/legacy/persistence-sqlite-retrieve-update/
+# and characterization/recordings/dotnet/persistence-sqlite-retrieve-update/, and
+# it is traceable to its oracle window `w_test_sqlite`. Never renamed once a
+# recording exists under it: a rename orphans both halves of every pair already
+# captured, and nothing reports that it happened.
+workflowId: persistence-sqlite-retrieve-update
+
+title: SQLite retrieve, validate and update against the only updatable DataWindow
+
+capabilityArea: >-
+  The retrieval, validation and update triple, and the optimistic-concurrency
+  contract it must preserve once the three stop being in-process calls.
+
+# Closed enum. Persistence is the only service that generates or executes SQL and
+# the only one holding a storage provider, so it is the only legal candidate for
+# this workflow's target half.
+targetService: Persistence
+
+description: >-
+  The golden master for the retrieval, validation and update triple. The oracle
+  is the framework's own SQLite test window driving
+  ws_objects/pfw.tests.pbl.src/dw_sqlite.srd, which is the single updatable
+  DataWindow definition in the repository: it is the only one carrying
+  table-level update settings, so it is the only fixture from which the update
+  contract can be characterized at all. All six of its columns are marked
+  update=yes updatewhereclause=yes and it declares updatewhere=1, which makes the
+  optimistic-concurrency check span all six columns' ORIGINAL values, and it
+  declares updatekeyinplace=no, which puts the legacy's own documented
+  self-assignment workaround on the fixture's main path rather than on a rare
+  branch. The seed phase is declared separately from the capture phase and that
+  separation is the load-bearing decision in this definition, not a tidiness
+  preference: the oracle's own setup deletes the database file before recreating
+  the schema, so re-running it to "start clean" between the two halves of a pair
+  is precisely the reseed the capture rule forbids, and it is the likeliest way a
+  well-meaning engineer voids a comparison. The seed therefore runs once; the
+  capture phase is what runs twice. This workflow characterizes SQLite and
+  nothing else - the SQL Server and Oracle paging behaviours are pure string
+  transforms needing no instance of either dialect and are characterized by the
+  sibling workflow persistence-sql-paging-rewrite.
+
+# ------------------------------------------------------------------------------
+# oracleFixtures - what this workflow is captured FROM.
+# All read-only (C-C). Cited by repository-root-relative path with line locators
+# so a reviewer can check every claim below instead of taking it on trust.
+# ------------------------------------------------------------------------------
+oracleFixtures:
+
+  - path: ws_objects/pfw.tests.pbl.src/dw_sqlite.srd
+    role: primary-fixture
+    # 37 lines, release 12.5. The only DataWindow in the repository with
+    # table-level update settings, hence the only possible primary fixture here.
+    locators:
+      - "L2"        # release 12.5
+      - "L8"        # id: number, update=yes updatewhereclause=yes key=yes identity=yes, dbname="id"
+      - "L9"        # name: char(100), update=yes updatewhereclause=yes
+      - "L10"       # age: number, update=yes updatewhereclause=yes
+      - "L11"       # address: char(200), update=yes updatewhereclause=yes
+      - "L12"       # salary: decimal(2), update=yes updatewhereclause=yes
+      - "L13"       # birth: date, update=yes updatewhereclause=yes
+      - "L14"       # retrieve/update table, updatewhere=1, updatekeyinplace=no, sort="age A salary A "
+      - "L26"       # birth carries editmask.ddcalendar=yes and mask "yyyy-mm-dd"
+      - "L27"       # footer compute, expression "sum(salary for page)", name compute_1
+
+  - path: ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw
+    role: oracle-window
+    # 515 lines. Drives the fixture. Its CONNECT handler is the destructive
+    # setup that forces the seed/capture split declared below.
+    locators:
+      - "L189"        # Update(dw_1,true,false) - accept-text true, reset-flag FALSE
+      - "L196"        # Commit()
+      - "L203"        # dw_1.ResetUpdate()
+      - "L222"        # Query(dw_1) - retrieve into the DataWindow
+      - "L263"        # Query(ref ds,"SELECT * FROM COMPANY") - retrieve into a datastore
+      - "L283"        # Update(ds)
+      - "L312-L317"   # Exec with positional binding, wrapped in autocommit toggling
+      - "L337-L340"   # n_sqliterecordset progressive result delivery
+      - "L381-L388"   # multi-statement batch insert - four rows in one call
+      - "L396-L400"   # leading-@ statement-cache form with positional binding, ten iterations
+      - "L450"        # FileDelete on the database file - the destructive first statement
+      - "L452-L455"   # the connection URI grammar, in the fixture's own comments
+      - "L456"        # Open with mode=rwc; the password element appears only as a comment
+      - "L461"        # SetAutoCommit(true) for schema creation
+      - "L463-L469"   # CREATE TABLE IF NOT EXISTS COMPANY - the only DDL in the repository
+      - "L473"        # SetAutoCommit(false)
+      - "L513"        # ondberror - surfaces code, error text AND the full generated statement
+
+  - path: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru
+    role: service-object
+    # 409 lines. The class whose behaviour the update half of this workflow
+    # characterizes, and the source of seven of the eight defects below.
+    locators:
+      - "L98-L145"    # _of_updateprepare: reset every column, then re-enable from the table descriptor array
+      - "L145-L149"   # the modify call reports failure as a NON-EMPTY error string
+      - "L151-L167"   # the updatekeyinplace=no self-assignment workaround, FIXME comment and all
+      - "L186"        # of_ClearState before the update
+      - "L188-L193"   # empty or placeholder update table synthesizes a database error
+      - "L195-L202"   # the vetoed-before-update discrimination - two outcomes from one veto
+      - "L204"        # Data.Update(true,false)
+      - "L208-L210"   # a claimed success is defensively rewritten into a failure
+      - "L214"        # success is tested as the value 1
+      - "L215-L226"   # first-wins identity-column resolution by lower-cased table-name prefix
+      - "L229-L233"   # primary buffer collected FORWARD
+      - "L235-L241"   # filter buffer collected BACKWARD, because its row order is inverted
+      - "L243"        # identity column plus two ref array out-parameters
+      - "L247"        # inserted, updated and deleted counts
+
+  - path: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlbase.sru
+    role: service-object
+    # 736 lines. Supplies the connection-parameter parsing that decides whether
+    # the generated statement carries bind parameters or interpolated literals -
+    # which is what makes the literal-value mask entry below necessary.
+    locators:
+      - "L128-L129"   # DBParm parsed for the bind-disabling and national-character-binding flags
+
+  - path: ws_objects/pfw.utility.sqlite.pbl.src/n_sqlite.sru
+    role: service-object
+    # The storage binding the oracle window calls throughout: open, query,
+    # update, exec, commit, rollback and error-text retrieval. Whole file relied
+    # on, so no locators member.
+
+  - path: ws_objects/pfw.utility.sqlite.pbl.src/n_sqliterecordset.sru
+    role: service-object
+    # The progressive result carrier the recordset capture exercises.
+
+  - path: ws_objects/pfw.utility.sqlite.pbl.src/sqlitegetitemdouble.srf
+    role: service-object
+    # Numeric item retrieval from a recordset. In scope because the salary column
+    # is the one whose DataWindow type and DDL type disagree.
+
+  - path: ws_objects/pfw.thread.ext.pbl.src/dberrordata.srs
+    role: specification
+    # 10 lines, read as the authoritative statement of the database-error payload
+    # shape. Five fields, and the third of them is the one that must never be
+    # recorded as it stands.
+    locators:
+      - "L4-L8"       # sqldbcode, sqlerrtext, sqlsyntax, buffer, row
+
+  - path: ws_objects/pfw.thread.ext.pbl.src/transactiondata.srs
+    role: specification
+    # 14 lines, read as the authoritative statement of the transaction descriptor.
+    # Nine fields, one of which is write-only and is never recorded.
+    locators:
+      - "L4-L12"      # dbms, servername, database, logid, logpass, dbparm, lock, autocommit, userparm
+
+# ------------------------------------------------------------------------------
+# seedPhase - everything that establishes the starting state.
+#
+# WHY THIS IS DECLARED SEPARATELY, stated here because the schema has no member
+# for it and because getting it wrong is silent: the oracle's own CONNECT handler
+# is DESTRUCTIVE. It deletes the database file at :L450 before opening it at
+# :L456 and then recreates the COMPANY table at :L463-L469. Running that a second
+# time to "start clean" is exactly the reseed the shared-volume capture rule
+# forbids between the two halves of a pair. The seed is therefore declared here
+# and runs ONCE, before the pair begins; the capture phase below is what runs
+# TWICE. Nothing in this phase runs between the legacy-side and target-side
+# captures, and the two boolean assertions below exist to make that
+# unrepresentable rather than merely discouraged.
+# ------------------------------------------------------------------------------
+seedPhase:
+
+  steps:
+
+    - action: >-
+        Delete the database file so the starting state is built from nothing.
+        This is the destructive step: it establishes the pair's starting state
+        and must never run again while that pair is open.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L450"
+
+    - action: >-
+        Open the database in read-write-create mode through the SQLite binding.
+        The grammar is recorded under connectionUri below; no password value
+        exists anywhere in the repository to supply.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L456"
+
+    - action: Turn autocommit on for the duration of schema creation.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L461"
+
+    - action: >-
+        Create the COMPANY table if it does not already exist, with six columns
+        in this order: an auto-increment integer primary key that is not null; a
+        required text name; a required integer age; a fixed-width character
+        address; a real salary; and a text birth field. FOUR of those column
+        types disagree with the DataWindow's own declarations - the name, address,
+        salary and birth columns - and that disagreement is a defect this pair
+        exists to preserve rather than harmonize; note that the two declared
+        widths bind nothing in storage, because a SQLite column type sets affinity
+        only. See provesDefects below. The DDL spells its column names in upper
+        case while the DataWindow's database names are lower case.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469"
+
+    - action: >-
+        Turn autocommit off, which is the state the update capture then begins
+        from. The oracle leaves it off deliberately, so the update and commit
+        calls in the capture phase are explicit rather than implicit.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L473"
+
+    - action: >-
+        Seed four rows with one multi-statement batch call, the statements
+        separated by semicolons inside a single execution.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L381-L388"
+
+    - action: >-
+        Seed ten further rows through the leading-at-sign statement-cache
+        execution mode with positional parameter binding, one row per iteration.
+        The prefix asks the binding to cache the parsed statement for
+        re-execution; the oracle's own comment records that as a deliberate
+        space-for-time trade.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L396-L400"
+
+    # No locator on this step: it has no legacy counterpart. The target side
+    # provisions the schema through the migration path rather than through DDL
+    # issued by a test window, and that path is idempotent and non-destructive -
+    # re-running it reports the database already up to date and leaves existing
+    # rows untouched, which is what makes it safe to re-run at all. It is still
+    # part of the seed and still runs before the pair begins.
+    - action: >-
+        On the target side, provision the COMPANY schema with the idempotent,
+        non-destructive migration path described in docs/BUILD.md section 5.6,
+        against the same volume state the legacy half is to be captured from.
+
+  # Always true, both of them. The seed runs once, before the pair begins, and
+  # nothing in it runs between the two halves. These are assertions rather than
+  # settings: the schema pins both to a constant so that the one arrangement
+  # which voids a pair cannot be written down in the document defining the pair.
+  runsOncePerPair: true
+  neverBetweenCaptures: true
+
+  # The connection grammar exactly as the fixture documents it in its own
+  # comments at :L452-L455, which cite the SQLite URI specification at :L452.
+  # GRAMMAR ONLY. No member here can hold a value, and none does.
+  connectionUri:
+
+    template: "test.db?mode=rwc"
+
+    # Only rwc is declared, because rwc is the only mode the fixture opens and
+    # therefore the only one this workflow relies on. Declaring the modes the URI
+    # specification admits generally would assert support this repository does
+    # not demonstrate for this binding, and the mode is observable.
+    modeOptions:
+      - rwc
+
+    # The integrity-check extension, documented at :L454: the bare form performs
+    # the full check, the quick form performs the quick variant.
+    checkOptions:
+      - "check"
+      - "check=quick"
+
+    # The six journal modes documented at :L455. Every one is quoted because YAML
+    # 1.1 loads a bare OFF as the boolean false - unquoted, this list would
+    # silently stop being a list of journal modes.
+    journalOptions:
+      - "DELETE"
+      - "TRUNCATE"
+      - "PERSIST"
+      - "MEMORY"
+      - "WAL"
+      - "OFF"
+
+    # The mode that applies when the extension is omitted, which is what this
+    # workflow relies on: the fixture omits it. Recorded because the journal mode
+    # is observable, so a capture taken under a different one is not comparable.
+    defaultJournal: "DELETE"
+
+    # A boolean and nothing else. The grammar admits a password parameter in the
+    # same position - it appears in the oracle at :L456 only inside an inline
+    # comment - and the repository carries no value for it. Where a password IS
+    # supplied the assembled URI is itself a credential: never logged, never
+    # returned in an error payload, and never captured into a recording. That is
+    # why this records that the parameter position exists and stops there.
+    passwordSupported: true
+
+# ------------------------------------------------------------------------------
+# capturePhase - the behaviour under characterization, and nothing else.
+# Runs TWICE, both times against the state the seed phase already established.
+#
+# THE DECISIVE CONSEQUENCE OF THE FIXTURE, stated once here and enforced by the
+# observedOutputs below: updatewhere=1 is the key-plus-updateable-columns
+# concurrency mode, so the generated statement's where-clause carries the key
+# column PLUS THE ORIGINAL VALUES of every marked updateable column. All six of
+# this fixture's columns are marked, so the check spans all six columns' original
+# values. The recording must therefore carry, PER ROW, BOTH the current AND the
+# original value of every marked column, plus that row's item status and the
+# buffer it sits in. A flat rowset capture is not merely thinner - it silently
+# discards the exact state the concurrency contract is built on, and a pair taken
+# that way would compare cleanly while proving nothing. The legacy result carrier
+# derives from a datastore, so it IS a DataWindow with buffers and item statuses,
+# not a result set.
+# ------------------------------------------------------------------------------
+capturePhase:
+
+  behaviourUnderTest: >-
+    Retrieve the COMPANY table through the SQLite binding into both a DataWindow
+    and a datastore; modify, insert and delete rows across the primary and filter
+    buffers; then run the update path end to end - prepare the update contract by
+    resetting every column and re-enabling from the table descriptor, apply the
+    changeset with accept-text true and reset-flag false, discriminate a vetoed
+    before-update hook, apply the two result-inverting overrides, resolve the
+    identity column and collect its values from both buffers, and clear the
+    update state afterwards. Alongside that: execute a direct statement with
+    positional parameter binding wrapped in autocommit toggling, execute the
+    leading-at-sign statement-cache form, and read a result progressively through
+    the recordset carrier. The capture covers the SQLite path only; no other
+    database is provisioned, required or reachable.
+
+  observedOutputs:
+
+    - name: retrieve.returnCode
+      description: >-
+        The numeric code returned by the retrieval call. Recorded as the number
+        and never as a boolean projection of it, because the return algebra is
+        tri-state: a prevention reads as a success, and cancelled and null are
+        neither succeeded nor failed. A boolean projection collapses exactly the
+        distinction a divergence would show up in.
+      format: The integer code verbatim, with null recorded as null rather than as zero
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L222"
+
+    - name: retrieve.rowOrder
+      description: >-
+        The order rows arrive in, which the fixture's own sort specification
+        fixes as ascending age then ascending salary. NOT masked: this ordering is
+        behaviour, it is declared by the fixture rather than incidental, and a
+        difference in it is a genuine finding.
+      format: The ordered list of key values as retrieved, positions significant
+      locator: "ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14"
+
+    - name: buffer.primary
+      description: >-
+        The primary buffer, per row, carrying BOTH the current and the original
+        value of all six marked columns. The original values are what the
+        concurrency where-clause is built from, so a recording missing them cannot
+        detect a concurrency divergence at all.
+      format: >-
+        Canonical JSON, one object per row in retrieved order, each column
+        carrying its current value, its original value and an explicit null flag
+        for each, with a stable column order fixed by the fixture's declaration
+        order
+      locator: "ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8-L14"
+
+    - name: buffer.delete
+      description: >-
+        The delete buffer, with the same per-row current-and-original shape.
+        Deleted rows carry the original values the delete statement's where-clause
+        is generated from, so they are recorded rather than counted.
+      format: Canonical JSON, one object per row, same column shape as the primary buffer
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L98-L145"
+
+    - name: buffer.filter
+      description: >-
+        The filter buffer, with the same per-row shape, recorded IN THE ORDER THE
+        BUFFER PRESENTS IT rather than re-sorted into source order. That order is
+        inverted relative to the data source, and the inversion is behaviour - see
+        the backward-traversal defect below. Re-sorting this on the way into the
+        recording would hide the very thing the pair is meant to pin.
+      format: Canonical JSON, one object per row, buffer order preserved verbatim
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L235-L241"
+
+    - name: itemStatus.matrix
+      description: >-
+        The item status of every row and column, INCLUDING the row-level status
+        the legacy reads at column zero - that column-zero convention is how the
+        update path decides whether a row participates at all, so a recording
+        that only carries per-column statuses cannot explain a divergence in which
+        rows were updated. Both the modified and the new-modified statuses are
+        distinguished, never collapsed into a single dirty flag.
+      format: >-
+        CSV with one line per row and column pair, the status recorded by its
+        legacy name, column zero present as its own line per row
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L229-L233"
+
+    - name: counts.bufferPopulation
+      description: >-
+        The modified, deleted and filtered counts as the buffers report them
+        before the update is applied. NOT masked: these are behaviour, and they
+        are the numbers the identity collection loops are bounded by.
+      format: Three integers, named
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L235-L241"
+
+    - name: updatePrepare.modifyErrorString
+      description: >-
+        The string returned by the modify call that writes the update contract
+        onto the DataWindow. Empty means success; any non-empty string is a
+        failure that raises an internal error. Recorded as the string, not as a
+        boolean, because its content is the diagnostic.
+      format: The string verbatim, with empty recorded as an empty string rather than as null
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L145-L149"
+
+    - name: updatePrepare.contractApplied
+      description: >-
+        The update contract as it stands after preparation - which columns are
+        updatable, which are keys, which is the identity column, the update-where
+        mode, the key-in-place setting and the update table name. Recorded because
+        the contract is RE-DERIVED at run time rather than read from the
+        DataWindow's static definition: preparation first switches update, key and
+        identity off on every column and then selectively re-enables them from a
+        table descriptor array, so what the fixture declares and what the update
+        actually runs under are two different things that must both be visible.
+        The descriptor is an array, so multi-table update from one DataWindow is a
+        real capability the recording has to be able to represent.
+      format: >-
+        Canonical JSON, one object per table descriptor, columns listed in
+        declaration order with their resolved column identifiers
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L98-L145"
+
+    - name: selfAssignment.keyColumnStatusAfter
+      description: >-
+        The item status of each modified key column after the key-in-place
+        workaround has run. The legacy assigns each such column to itself purely
+        to flip that status so the update generates delete-and-insert statements
+        instead of an in-place update. The fixture declares updatekeyinplace=no
+        itself, so this path is on the main line and the recorded status is the
+        only direct evidence that the workaround fired.
+      format: The status by row and column, recorded by its legacy name
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L151-L167"
+
+    - name: update.returnCode
+      description: >-
+        The raw numeric result of the update call. SUCCESS IS THE VALUE 1 here,
+        not the zero of the return-code algebra, and the recording carries the raw
+        number so that a target returning zero-for-success is visible as the
+        divergence it is rather than being normalised away.
+      format: The integer verbatim, before and after the two overrides, both values recorded
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L204"
+
+    - name: update.generatedStatements
+      description: >-
+        The statement text the update path generates, per row and per buffer, with
+        its parameter values split out rather than interpolated - see redaction
+        below. The where-clause of every update and delete statement must carry
+        the key column plus the original values of all six marked columns; that is
+        the single most important thing in this recording, because it is the whole
+        of the optimistic-concurrency contract made observable.
+      format: >-
+        Statement text with parameter placeholders, in a stable emission order,
+        with the values carried in a separate parallel structure
+      locator: "ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14"
+
+    - name: update.counts
+      description: >-
+        The inserted, updated and deleted counts the update path reports on
+        success. Behaviour, not statistics: they are the legacy's own account of
+        what it did, and they are reported through a callback rather than returned.
+      format: Three integers, named, in the order the callback carries them
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L247"
+
+    - name: identity.columnIndex
+      description: >-
+        The one-based column index the identity resolver selects. Recorded because
+        the resolution is first-wins and can therefore select a column from the
+        wrong table - see the defect below - so the selected index is itself a
+        finding rather than a detail.
+      format: The integer index, with zero recorded when no identity column was selected
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L215-L226"
+
+    - name: identity.primaryValues
+      description: >-
+        The identity values collected from the primary buffer, in the order
+        collected. ARRAY POSITIONS ARE SIGNIFICANT and are compared: the values
+        are handed back through a reference array whose ordering is part of the
+        contract, so a set comparison would pass on a wrongly ordered array.
+      format: An ordered list of numbers, positions significant, never sorted
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L229-L233"
+
+    - name: identity.filterValues
+      description: >-
+        The identity values collected from the filter buffer, in the order
+        collected - which is BACKWARD, because that buffer's row order is inverted
+        relative to the source. Positions are significant and are compared. This
+        is the output in which a well-meaning "correction" of the traversal
+        direction shows up, and it is the only place it shows up: the row count is
+        identical either way.
+      format: An ordered list of numbers, positions significant, never sorted or reversed
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L235-L241"
+
+    - name: conflict.detail
+      description: >-
+        The conflict outcome on an optimistic-concurrency mismatch, carrying the
+        current row state. The status and payload are the update contract's, and
+        docs/CONTRACTS.md section 9.8 is the authority for them - it is cited here
+        rather than restated so that this definition cannot drift from the
+        contract. What this recording adds is the legacy-side evidence the
+        contract was built on: the mismatch reaches the caller through the
+        defensive override that rewrites a claimed success into a failure.
+      format: >-
+        The status code and the conflict payload field by field, plus the raw
+        legacy driver code and result that produced it
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L208-L210"
+
+    - name: veto.outcome
+      description: >-
+        Which of the two outcomes a prevented before-update hook produced - a
+        database error when the transaction itself had failed, or a clean
+        cancellation when it had not. One veto, two outcomes, discriminated by the
+        transaction's own failure predicate; a recording that collapses them to
+        "cancelled" loses the distinction entirely.
+      format: The numeric code, plus which discrimination arm was taken
+      locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L195-L202"
+
+    - name: dbError.payload
+      description: >-
+        The database-error payload field by field: the driver code, the error
+        text, the statement field, the offending buffer and the offending row. The
+        statement field is split rather than recorded as it stands - see redaction
+        below. The buffer and row are what make an error attributable to a
+        specific row, so they are never dropped.
+      format: Canonical JSON, one object per error, all five fields present with the statement field split
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L513"
+
+    - name: resetUpdate.stateAfter
+      description: >-
+        The buffer contents and item statuses after the explicit update-state
+        clear. Recorded because the update is applied with the reset flag FALSE,
+        which leaves the caller owning the state afterwards and makes the
+        subsequent clear an observable, separately triggered step rather than a
+        side effect of the update.
+      format: The same per-row shape as the buffer outputs, captured after the clear
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L203"
+
+    - name: exec.positionalBindingResult
+      description: >-
+        The outcome of the direct statement executed with positional parameter
+        binding while autocommit is toggled on around it, and the row state it
+        leaves behind. The binding is positional, so parameter ORDER is part of
+        the behaviour.
+      format: The numeric code, the parameter values in positional order, and the resulting row state
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L312-L317"
+
+    - name: recordset.progressiveRows
+      description: >-
+        The rows as the recordset carrier delivers them progressively, together
+        with the column count and the per-column values. Recorded in delivery
+        order, one row per line, because progressive delivery is the behaviour
+        under characterization here and a whole-result capture would erase it.
+      format: JSON Lines, one object per delivered row, delivery order preserved
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L337-L340"
+
+    - name: footer.pageAggregate
+      description: >-
+        The value of the fixture's footer computation, which aggregates salary
+        over the page. Included because it exercises the expression engine even in
+        this fixture, and because the salary column is one of the four whose
+        DataWindow type and DDL type disagree - a two-place decimal declared over
+        REAL storage - so the aggregate is computed over values that crossed a type
+        mismatch on the way in and are not guaranteed to round trip identically.
+      format: The computed value as the expression yields it, unrounded
+      locator: "ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L27"
+
+  # NOTE ON TIMING, recorded because its absence is a decision rather than an
+  # oversight: this oracle emits no elapsed-time, duration or rate field of its
+  # own - the oracle window contains no clock read at all - so no output above
+  # carries maskedAsNonBehavioural, and none needs to. No timing value is
+  # recorded as an assertion anywhere in this definition. The repository publishes
+  # no service-level commitment of any kind - no time budget, no rate target, no
+  # availability figure - to assert one against, and a timing assertion in a
+  # characterization suite fails for reasons unrelated to behaviour, which trains
+  # a reviewer to ignore red results.
+  # Execution time is never compared. Should a future capture surface a timing
+  # field from the oracle, it is recorded WITH maskedAsNonBehavioural set true -
+  # present in the recording, explicitly excluded from the comparison - rather
+  # than quietly dropped.
+
+  # ----------------------------------------------------------------------------
+  # redaction - fields recorded with their value withheld, declared rather than
+  # assumed so a reviewer can see each was handled deliberately.
+  # ----------------------------------------------------------------------------
+  redaction:
+
+    # REASON: the oracle's own database-error handler at :L513 concatenates the
+    # driver code, the error text AND the complete generated statement into one
+    # message, and the legacy logger performs no redaction whatever. That
+    # statement text carries interpolated literal values wherever the connection's
+    # bind-disabling flag is set, so recording the field as it stands would copy
+    # row data - and potentially anything a caller spliced into a where-clause -
+    # straight into a tracked file.
+    #
+    # REDACTED, NOT SPLIT. This entry read split-statement-and-parameters, whose
+    # own justification was that it keeps the statement text comparable while the
+    # values travel separately. The first half is right and the second half is the
+    # defect: the values still get written, into a tracked file, and a parameter
+    # collection IS the sensitive data - separating a literal from its statement
+    # moves the value, it does not protect it (docs/SECRETS.md section 6.3). A
+    # placeholder-redacted statement keeps the SHAPE byte-comparable, which is the
+    # only property this recording compares, and writes no value at all. It is also
+    # the only shape the published contract can produce: common.v1.DbError declares
+    # sqlsyntax and has no parameters member.
+    - field: dbError.sqlsyntax
+      treatment: redacted
+
+    # REASON: same interpolation exposure, same treatment. Byte-comparable
+    # statement text is exactly what this pair needs to prove; the literal values
+    # are not part of that shape, so the placeholder preserves everything the
+    # comparison reads and the values are never recorded.
+    - field: update.generatedStatements
+      treatment: redacted
+
+    # REASON: the transaction descriptor's password field is WRITE-ONLY - never
+    # echoed in a response, never logged, and therefore never recorded. Omitted
+    # rather than redacted, because a redaction placeholder would still assert
+    # that a value was present and how long it was.
+    - field: transactionDescriptor.logpass
+      treatment: omitted
+
+    # REASON: the SAME descriptor's user-name field, and it was the one exclusion this
+    # store asserted without declaring. Both recordings READMEs already rule it
+    # "equally sensitive and equally excluded from every recording", yet no workflow
+    # named it - so the exclusion rested on prose while the schema exists precisely so
+    # that a withheld field is declared rather than assumed. Declared here to close
+    # that gap.
+    #
+    # WHY OMITTED RATHER THAN REDACTED, which is not the same answer as for a statement:
+    # a user name is a credential half in its entirety, not a shape with values inside
+    # it, so there is nothing to preserve by masking. A placeholder would still assert
+    # that an account was configured and how long its name was, which is why the
+    # password field beside it takes the same treatment for the same reason.
+    - field: transactionDescriptor.logid
+      treatment: omitted
+
+    # REASON: where a password parameter is supplied in its position the assembled
+    # URI IS a credential in its entirety, so it cannot be recorded even in part.
+    # The grammar is declared under seedPhase.connectionUri instead, which is a
+    # description of the shape and holds no value.
+    - field: connection.assembledUri
+      treatment: omitted
+
+  # ----------------------------------------------------------------------------
+  # recordingArtifacts - what each side writes into its own recording directory.
+  # Text-based and diffable only, so a parity failure is legible in review rather
+  # than merely detectable. Every extension below is one of the seven this store
+  # admits. None of the six extensions the root .gitignore carries UNANCHORED can
+  # appear here: a capture named that way is silently untracked - it exists on the
+  # machine that produced it, git reports nothing, and it is simply absent from
+  # review and from CI, so the comparison looks taken and cannot be found. The
+  # root .gitignore is not modified to accommodate a name; the name is correct
+  # instead.
+  # ----------------------------------------------------------------------------
+  recordingArtifacts:
+    - filename: retrieve-buffers.json
+    - filename: item-status-matrix.csv
+    - filename: update-contract-applied.json
+    - filename: update-generated-statements.sql
+    - filename: update-statement-parameters.json
+    - filename: update-result.json
+    - filename: identity-round-trip.json
+    - filename: db-error-payload.json
+    - filename: recordset-progressive-rows.jsonl
+
+  # ----------------------------------------------------------------------------
+  # preconditions - what must already hold before the capture is taken, so the
+  # second half of the pair is taken under the same conditions as the first.
+  # ----------------------------------------------------------------------------
+  preconditions:
+
+    - >-
+      The seed phase has run exactly once for this workflow identifier and has not
+      run again since, on either side.
+
+    - >-
+      The volume state is identical for both halves of the pair and the volume is
+      neither recreated nor reseeded between them. The shared-volume capture rule
+      in characterization/README.md section 2.1 carries the canonical text and is
+      the authority for it; it is cited here rather than reproduced, because a
+      further copy would be a further thing to drift. This workflow touches a real
+      SQLite file, so the rule governs it in full and no exemption applies.
+
+    - >-
+      Every determinism mask entry below is configured ONCE for this workflow and
+      that same configuration is used for both captures. Determinism is a property
+      of the pair, not of a run: a single reproducible run proves nothing.
+
+    - >-
+      Autocommit is off when the update capture begins, which is the state the
+      seed phase leaves behind; the direct-statement capture toggles it on and off
+      around itself, and that toggling is part of the behaviour rather than setup.
+
+    - >-
+      The fixture's own table settings are in force and are not overridden: the
+      key-plus-updateable-columns concurrency mode, and key-in-place disabled. Both
+      are what put the concurrency check across all six columns and the
+      self-assignment workaround on the main path.
+
+    - >-
+      The SQLite connection is open through the framework's own binding and the
+      unencrypted path is in use. No other database engine is provisioned,
+      required or reachable, and the encrypted path is out of scope for this phase
+      - see blockedBehaviours below.
+
+# ------------------------------------------------------------------------------
+# determinismMask - INLINE, and deliberately not a pointer to a shared catalogue.
+# A mask that drifts away from its workflow silently invalidates every pair
+# captured under it, so it is versioned beside the workflow it applies to.
+# docs/PARITY.md section 5.1 is the authoritative register of seams and carries
+# each one's injection point; it is context for the entries below, not a
+# substitute for them.
+#
+# EVERY entry applies to BOTH sides. That is the golden-master technique's one
+# hard prerequisite and it admits no workaround: masking only the candidate leaves
+# the master holding a value that can never be matched, and masking only the
+# master inverts the same problem. A one-sided mask is worse than no mask at all,
+# because it manufactures a passing comparison out of mismatched data.
+#
+# Seaming is preferred to masking throughout: masking removes a field from the
+# comparison, seaming makes the field reproducible, and only the second leaves the
+# comparison able to detect anything in that field.
+# ------------------------------------------------------------------------------
+determinismMask:
+
+  - seam: >-
+      Every clock read that reaches a recorded output or a decision - the birth
+      column's value where it is derived rather than seeded, any timestamp in a
+      database-error payload, and any wall-clock value reachable through the
+      connection.
+    method: >-
+      Inject the clock as a dependency and substitute a fixed instant on both
+      sides for the whole capture. Seamed rather than masked, so the field stays
+      in the comparison and a genuine divergence in a date value is still
+      detectable.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      A clock read differs between the two captures by definition rather than by
+      behaviour, and the two halves of a pair are taken at different times by
+      construction. Left alone it reports a difference on every run, which trains
+      a reviewer to ignore the one run where the difference was real.
+
+  - seam: >-
+      The transaction pool's idle expiry, which the legacy derives from a
+      processor clock and keys on its two keep-alive settings - the enable flag
+      and the idle lifetime, whose default is 30 seconds.
+    method: >-
+      Seam the clock behind the pool and hold its notion of the current instant
+      fixed for the capture, so the reuse-or-discard decision is reproducible.
+      The elapsed value itself is never recorded and never asserted; only the
+      decision it produces is.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      Whether a pooled transaction is reused or discarded IS observable - a
+      discarded one is rebuilt and a reused one is not - even though the elapsed
+      time that triggers the decision is not behaviour and is never compared.
+      Unseamed, the two sides would take different arms of that decision for
+      reasons unrelated to the code under test, perturbing pool reuse across the
+      pair.
+
+  - seam: >-
+      The order in which the update path issues the property modifications that
+      write the update contract onto the DataWindow.
+    method: >-
+      Fix the emission order once, identically on both sides, so the generated
+      statement text and the intermediate modify output are stable. Seamed by
+      pinning the order rather than masked, because the statement text is one of
+      the things this pair most needs to compare.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      The contract is re-derived at run time from a table descriptor array rather
+      than read from the DataWindow's static definition, and two modification
+      orderings that arrive at the same final state can emit different
+      intermediate output. An unpinned order therefore surfaces as a difference
+      where no behaviour changed.
+
+  - seam: >-
+      Line endings in every multi-line recorded output.
+    method: >-
+      Normalize to one declared convention on both sides at comparison time,
+      before any diff is taken. Normalization is a comparison-time convention
+      only: it never licenses rewriting a stored master.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      A platform artifact rather than a behaviour - the master is produced on
+      Windows by PowerBuilder, whose own assertion payload is split on a
+      carriage-return-plus-newline pair, while the candidate runs in a Linux
+      container. The repository's root .gitattributes declares only
+      linguist-language mappings and carries no text or eol rule, so Git performs
+      no translation here and nothing normalizes them on the way into version
+      control. Unmasked, a byte-exact comparison reports a difference on every
+      single line of every multi-line recording. That file is not in scope to
+      change, and changing it would be solving this in the wrong place.
+
+  - seam: >-
+      The literal values interpolated into generated statement text, on the path
+      where the connection's bind-disabling parameter suppresses bind variables
+      so that values are spliced into the statement instead of bound to it.
+    method: >-
+      Split every recorded statement into its text and its parameter values, and
+      compare the text as text while comparing the values as values. Applied
+      identically on both sides so the statement shape stays byte-comparable.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      Two reasons, both binding. First, an interpolated statement carries row data
+      into a tracked recording and the legacy logger performs no redaction
+      whatever, so the value must not be recorded inside the text. Second, the
+      target uses parameterized commands internally where the legacy interpolates
+      - a change that is deliberately unobservable in the generated statement's
+      shape - so comparing raw text without splitting would report that safety
+      improvement as a parity failure.
+
+# WHAT IS DELIBERATELY NOT MASKED, listed because every masked field is a field a
+# regression can hide in, so the boundary belongs in writing:
+#   - the row order the fixture's sort specification produces (ascending age then
+#     ascending salary) - declared by the fixture, therefore behaviour;
+#   - the item statuses, including the row-level status read at column zero;
+#   - the buffer contents, including every original value;
+#   - the modified, deleted and filtered counts, and the inserted, updated and
+#     deleted counts;
+#   - the identity value arrays AND their array positions;
+#   - the inverted filter-buffer traversal order.
+# Every one of those is behaviour. Masking any of them would produce a pair that
+# compares cleanly while proving nothing, which is the precise failure this store
+# exists to prevent.
+
+# ------------------------------------------------------------------------------
+# provesDefects - the legacy behaviours this pair exists to prove SURVIVED.
+#
+# The inversion here is counter-intuitive and load-bearing: a capture that shows
+# CORRECTED behaviour is a parity FAILURE, not an improvement. Where the target
+# produces output that looks more correct than the oracle, the finding is a
+# divergence in the target and is filed as a defect against it. A legacy defect is
+# reproduced and annotated at its point of reproduction, never repaired.
+# docs/PARITY.md section 7 is the authoritative catalogue; this member records
+# which of it THIS pair actually pins.
+# ------------------------------------------------------------------------------
+provesDefects:
+
+  - defect: >-
+      FOUR of the fixture's six columns are declared with types its own DDL
+      contradicts, and the four are the authoritative set - docs/PARITY.md section
+      3.5 enumerates them. The DataWindow declares a 100-character name where the
+      table creates an UNBOUNDED text column; a 200-character address where the
+      table creates CHAR(50); a two-place decimal salary where the table creates a
+      real column; and a date birth field where the table creates a text column.
+      Only the id and age columns agree. SQLite's flexible typing lets all four
+      through without complaint, so the mismatch never surfaces as an error - and
+      it does not surface as truncation either. A declared width is not a
+      constraint in SQLite: the declared type sets AFFINITY only and the length is
+      ignored entirely, so a 200-character address is stored IN FULL, unpadded and
+      untruncated, which docs/PARITY.md section 3.6 records as measured through the
+      published contract. What the target must reproduce is therefore the observable
+      behaviour of each side: whatever bound the DataWindow itself enforces, against
+      storage that enforces none, plus real-affinity rounding for the salary and
+      text-storage semantics - ordering, comparison and format - for the birth
+      field.
+    locator: >-
+      ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L9, L11, L12, L13 against
+      ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L463-L469
+    note: >-
+      The precise DDL lines in ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw are the
+      name column at :L465, the address column at :L467, the salary column at :L468
+      and the birth column at :L469, inside the single CREATE TABLE spanning
+      :L463-L469. The DataWindow's own declarations in
+      ws_objects/pfw.tests.pbl.src/dw_sqlite.srd are the name column at :L9, the
+      address column at :L11, the salary column at :L12 and the birth column at
+      :L13. The name row is the one an earlier revision of this entry omitted, and
+      the truncation claim it carried for the address was wrong in the direction that
+      matters: expecting a 50-character value back from a 200-character write would
+      encode an invalid golden-master expectation and fail a target that stores what
+      SQLite actually stores. Preserved as defects and
+      never harmonized: a target that widens a column to match the DataWindow,
+      narrows the DataWindow to match the column, enforces either width in storage,
+      or "helpfully" coerces the birth field into a real date type has diverged,
+      however much more correct the result looks. A fifth row does NOT belong here -
+      id is declared number, key and identity at
+      ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L8 against ID INTEGER PRIMARY KEY
+      NOT NULL at ws_objects/pfw.tests.pbl.src/w_test_sqlite.srw:L464, which is
+      consistent because INTEGER PRIMARY KEY aliases the rowid; the DDL simply
+      carries no AUTOINCREMENT keyword, so assignment reuses the rowids of deleted
+      rows and the identity round trip must not assume monotonicity. That CREATE
+      TABLE is the only DDL in the repository, so there is
+      no second schema to reconcile against and no way to read the disagreement as a
+      transcription slip.
+
+  - defect: >-
+      The update path assigns each modified key column TO ITSELF, purely to flip
+      that column's item status. The legacy documents the reason against itself in
+      a fix-me comment: when the key field the request asks for is not marked as a
+      key, the modified state will not generate delete and insert statements, so
+      the internal modified state has to be force-refreshed to compensate. The
+      assignment is a no-op on the value and its entire purpose is the hidden
+      state change it causes.
+    locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L151-L167"
+    note: >-
+      The fix-me comment is at :L151-L154, the whole workaround is gated at :L155
+      on the key-in-place setting reading no, and the self-assignment itself is at
+      :L163. THE PRIMARY FIXTURE SETS KEY-IN-PLACE TO NO ITSELF at
+      ws_objects/pfw.tests.pbl.src/dw_sqlite.srd:L14, so this is on the fixture's
+      main path and is not a rare branch that can be deferred. There is no
+      managed analogue for a self-assignment that mutates hidden state, so the
+      target must model original-value and item-status tracking explicitly and
+      reproduce the same statement generation; the recorded key-column status is
+      the only direct evidence the workaround fired at all.
+
+  - defect: >-
+      Success is the value 1, not the zero of the framework's own return-code
+      algebra. The update path calls the DataWindow's update with accept-text true
+      and the reset flag false, then tests the result against 1 rather than
+      against the algebra's success constant.
+    locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L204-L214"
+    note: >-
+      The call is at :L204 and the comparison against 1 is at :L214. Two distinct
+      numeric vocabularies meet ten lines apart, and normalising them into one -
+      whether by mapping the update result onto the algebra or the algebra onto the
+      update result - changes which branch runs. The reset flag being false is part
+      of the same behaviour: the caller owns the update state afterwards, which is
+      why the state clear is a separate observable step.
+
+  - defect: >-
+      A claimed success is defensively rewritten into a failure. When the
+      transaction's own driver code reports an error and the update nonetheless
+      reported success, the result is forced to the failure value.
+    locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L208-L210"
+    note: >-
+      An implementation that trusts the update call's own return value reports
+      SUCCESS ON A FAILED UPDATE. This is the arm through which an
+      optimistic-concurrency mismatch reaches the caller, so it is also the arm the
+      conflict outcome depends on - which is why the recording carries the update
+      result both before and after the override rather than only the final value.
+
+  - defect: >-
+      The identity column is discovered by lower-casing the update table name into
+      a prefix and scanning for a column whose identity attribute is set - but the
+      column is accepted either when the prefix matches ITS database name OR when
+      no identity column has been chosen yet. That second arm is a first-wins
+      fallback, and it can select an identity column belonging to a different
+      table.
+    locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L215-L226"
+    note: >-
+      The prefix is built at :L217, the identity attribute is tested at :L220, and
+      the first-wins disjunction is the second condition at :L221. A CASE
+      DISCOVERY THAT BELONGS IN THE CAPTURE: the DDL spells its column names in
+      upper case at :L463-L469 of the oracle window, while the DataWindow's own
+      database names are lower case at :L8-L14 of the fixture. SQLite tolerates the
+      difference, but this resolver lower-cases the table name and prefix-matches
+      against database names, so the case difference is an OBSERVABLE INPUT to the
+      resolution rather than cosmetic - which is why the selected column index is
+      recorded as an output in its own right. Since the fixture declares a single
+      table whose sole key column is also its identity column, the fallback arm is
+      what actually selects here, and the multi-table descriptor array the contract
+      carries is exactly where a wrong-table selection would become visible.
+
+  - defect: >-
+      The filter buffer is traversed BACKWARDS when collecting identity values -
+      from the last row down to the first - while the primary buffer is traversed
+      forwards. The legacy records why in a comment immediately above the loop:
+      the filter buffer's row order is inverted relative to the data source it was
+      taken from.
+    locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L235-L241"
+    note: >-
+      THIS LOOKS LIKE A BUG AND IS NOT ONE. The explanatory comment is at :L235,
+      the descending loop at :L237, and the four-argument item accessor that reads
+      from the buffer without touching the current row at :L239. It is the single
+      most dangerous line in this refactor for one-based-to-zero-based array
+      translation: PowerBuilder arrays are one-based and the upper-bound function
+      returns the last valid index, so a mechanical rewrite invites both an
+      off-by-one and a "tidy up the backwards loop" correction. Correcting the
+      direction produces WRONG IDENTITY VALUES IN THE RIGHT QUANTITY - a row-count
+      assertion still passes, and only the recorded array positions reveal it,
+      which is why identity.filterValues is compared position by position and is
+      never sorted or reversed on the way into the recording.
+
+  - defect: >-
+      One veto, two outcomes. A prevented before-update hook yields a DATABASE
+      ERROR when the transaction itself has failed, and a clean CANCELLATION when
+      it has not - the two arms discriminated by the transaction's own failure
+      predicate rather than by anything the hook returned.
+    locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L195-L202"
+    note: >-
+      The veto is tested at :L195, the discrimination at :L196, the database-error
+      arm at :L197-L199 and the cancellation arm at :L201. Collapsing the two into
+      one outcome - the obvious simplification, since both stop the update - loses
+      the distinction between "the caller declined" and "the database was already
+      broken", which are the two things a caller most needs to tell apart. It
+      compounds the tri-state algebra the recording already has to preserve:
+      cancelled is neither succeeded nor failed.
+
+  - defect: >-
+      The call that writes the update contract onto the DataWindow reports failure
+      as a NON-EMPTY ERROR STRING rather than through a return code. An empty
+      string means success; any content at all is a failure that raises an internal
+      error carrying that string.
+    locator: "ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlupdate.sru:L145-L149"
+    note: >-
+      The call is at :L145 and the emptiness test at :L146. The inversion is easy
+      to reproduce backwards, because every neighbouring call in the same function
+      signals failure with a negative number: here a falsy-looking empty value is
+      the SUCCESS case. The other failure path in the very same function signals
+      the opposite way round - a column-name lookup yielding a non-positive
+      identifier raises an internal error with its own diagnostic at :L118-L122 -
+      so one function carries a numeric failure vocabulary and a string one at
+      once, and the two must not be unified into either.
+
+# ------------------------------------------------------------------------------
+# blockedBehaviours - what this pair cannot prove, declared rather than
+# approximated. A known gap is reportable; an approximation is an unknown one.
+# ------------------------------------------------------------------------------
+blockedBehaviours:
+
+  - behaviour: >-
+      Parity for the ENCRYPTED SQLite path - the optional password element the
+      connection grammar admits alongside the mode parameter, and the page format
+      a cipher-enabled database carries.
+    reason: >-
+      The repository ships a plain and a cipher-enabled native SQLite library at
+      materially different versions, the cipher one being the older of the two,
+      and its key-derivation and per-page integrity options are not reachable
+      through any framework API - nothing in the binding exposes the pragmas that
+      would configure them. The target provider tracks a current SQLite and
+      therefore cannot produce the older page format at all, so there is no
+      configuration of the target under which a byte-comparable encrypted database
+      could be written. characterization/README.md section 5.6 is the authority,
+      and docs/PARITY.md carries it as a tracked risk.
+    disposition: blocked-report-not-approximate
+
+# ------------------------------------------------------------------------------
+# sharedVolume
+#
+# THE CITATION, which belongs in a comment because the schema deliberately gives
+# this member no prose field: the paired-capture shared-volume rule is stated
+# canonically, word for word, in characterization/README.md section 2.1, which is
+# the authority for it. It is CITED here and NOT reproduced - the same text is
+# already owned word for word by characterization/README.md, docs/PARITY.md and
+# orchestration/README.md, and a fourth copy would simply be a fourth thing to
+# drift, which is the failure this store exists to prevent rather than to commit.
+# One of the preconditions above carries the same citation at the point of use.
+#
+# It APPLIES here, and emphatically so. This workflow opens a real SQLite file on
+# the persistence volume, so it is not the pure-string-transform case the one
+# narrow exemption covers - that case is the paging behaviours, which mount no
+# volume and are characterized by the sibling workflow named below. Because
+# applies is true, no exemptionReason is required and none is given: stating one
+# would imply an exemption that does not exist.
+# ------------------------------------------------------------------------------
+sharedVolume:
+  applies: true
+
+# The honest state of this workflow, and the schema's enum has exactly one member
+# so that nothing here can imply otherwise. NO capture has been taken on either
+# side. The legacy half needs a PowerBuilder toolchain that is not present, and
+# the environment this store was authored in had no Docker daemon available, so
+# the compose bring-up the capture rule is expressed against could not have been
+# exercised there in any case. Nothing above is a verified result; every statement
+# in this file is either a citation of read-only legacy source or a specification
+# of a capture still to be run.
+executionStatus: specified-not-executed
+
+# Cross-references only. Naming a sibling never merges two workflows: each pair
+# stays independently comparable under its own identifier, against its own volume
+# state, under its own inline mask.
+relatedWorkflows:
+  # Seeds and reads the same COMPANY table through the same binding, and
+  # characterizes chunked progressive retrieval and the chunk-size guard.
+  - persistence-thread-sqlquery-chunked
+  # The other dialects' behaviour, and the reason this definition needs no
+  # reference to either of them: those paging rewriters are PURE STRING
+  # TRANSFORMS - statement plus page size and index in, statement text out -
+  # needing no instance of either engine, which is what makes that workflow the
+  # one narrow case exempt from the shared-volume rule that governs this one.
+  - persistence-sql-paging-rewrite
+  # The consumer side of the same triple: the ordered DataWindow event chain and
+  # the validation session that carries the cross-event state this update path is
+  # driven from.
+  - dataservices-dw-event-chain

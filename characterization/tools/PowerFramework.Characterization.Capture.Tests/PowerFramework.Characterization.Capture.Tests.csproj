@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Test project for the target-side characterization capture driver.
+
+    HAND-AUTHORED ON PURPOSE, for the same reason every other test project in this tree is:
+    `dotnet new xunit3` does not exist in the pinned SDK, and `dotnet new xunit` scaffolds the
+    xunit v2 line with an older test SDK and coverage package, so templating would silently
+    downgrade the test stack.
+
+    WHAT THIS PROJECT COVERS, AND WHY IT MATTERS MORE THAN A TOOL'S TESTS USUALLY DO. The driver
+    is the only thing standing between a reviewer and a recording they will trust as a golden
+    master. Four of its behaviours are load-bearing and none of them is observable from a
+    successful run:
+
+      1. THE PLAN IS REFUSED BEFORE THE FIRST REQUEST when it is incoherent, so a fault cannot
+         leave a partial recording on disk - a partial recording is indistinguishable from a
+         capture of a broken service.
+      2. A MEMBER CAPTURED AS A SHAPE CANNOT BE CHAINED, which is what stops key material being
+         threaded through a plan into a later request that echoes it.
+      3. A VALUE-REVEALING DERIVATION IS REFUSED OVER AN OPAQUE VALUE, because rendering an
+         opaque value as hexadecimal would put it into the artifact by a route the screen cannot
+         see - the screen rewrites exact spellings, not the same bytes in another encoding.
+      4. AN UNPAIRED CAPTURE IS REFUSED INSIDE THE STORE, which is the store's own pairing rule
+         expressed as code rather than as documentation.
+
+    Everything else - net10.0, nullable, implicit usings, warnings as errors, analysers, central
+    package management - is inherited from the repository-root Directory.Build.props by directory
+    walk-up. Those are mandatory quality gates and are deliberately not restated or relaxed here.
+  -->
+
+  <PropertyGroup>
+    <!-- MANDATORY for xunit.v3, which runs tests from a self-hosting executable. Without Exe the
+         project compiles but no test is discovered, and the coverage gate then reads a Cobertura
+         report containing no data. -->
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup Label="Test stack : all versionless, versions from the repository-root Directory.Packages.props">
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="coverlet.collector" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The subject under test. It declares no package reference of its own, so nothing arrives
+         transitively through it. -->
+    <ProjectReference Include="..\PowerFramework.Characterization.Capture\PowerFramework.Characterization.Capture.csproj" />
+  </ItemGroup>
+
+  <!--
+    REPOSITORY ROOT, EMBEDDED SO THIS PROJECT'S ON-DISK LOCATORS DO NOT DEPEND ON WHERE ITS OUTPUT
+    WENT. Several rows read real files from the store - the schema, the workflow roster, the plan -
+    and find them by walking up from the base directory for a marker. That walk holds only while
+    the output sits inside the checkout, so a run whose artifacts path is outside the tree would
+    otherwise leave every locator with no ancestor carrying the marker. The value comes from the
+    PowerFrameworkRepositoryRoot property in the repository-root Directory.Build.props; it is
+    turned into assembly metadata here, per test project, exactly as the other test projects do it.
+  -->
+  <ItemGroup>
+    <AssemblyMetadata Include="PowerFrameworkRepositoryRoot" Value="$(PowerFrameworkRepositoryRoot)" />
+  </ItemGroup>
+
+</Project>

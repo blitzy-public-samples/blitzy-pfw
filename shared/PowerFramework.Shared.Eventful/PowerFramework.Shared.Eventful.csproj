@@ -1,0 +1,201 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    PowerFramework.Shared.Eventful
+    =============================
+
+    Shared library: the publish and subscribe event broker. One of the six shared libraries under
+    shared/ (Kernel, Diagnostics, Eventful, Localization, Containers, Contracts) that sit BENEATH the
+    four Phase 1 services. AAP §0.1.5 requires that layer to carry "only pure behaviour and no I/O",
+    and this project holds to it literally: no host, no socket, no endpoint, no serializer.
+
+    Legacy sources ported into this folder, per AAP §0.3.1 and §0.4.2.3:
+
+        EventBroker.cs          ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru
+                                1,328 lines of PowerScript. Preserves the subscription priorities,
+                                the lexical ordering symbols, the persistence namespace and the
+                                exception capture at :L865 to :L890 verbatim.
+        SubscriptionTopic.cs    ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L47-L76
+                                ws_objects/pfw.thread.pbl.src/n_cst_threading.sru:L544, :L596
+                                Decomposes the fused legacy topic string into its three independent
+                                encodings, sequence and name and lifetime, and reconstitutes the
+                                fused form only at the compatibility edge.
+        VetoResult.cs           the broker's veto protocol. Tri valued (PREVENT_ONCE is 1,
+                                PREVENT_DEEP is 2, continue is the third state) and never flattened
+                                to a boolean, because flattening silently converts a deep prevention
+                                into a shallow one.
+        SubscriptionOptions.cs  the priority, ordering symbol and namespace surface.
+
+    WHY THIS IS A SHARED LIBRARY RATHER THAN A MEMBER OF ONE SERVICE
+    Both in scope services consume the broker, verified two independent ways, so neither DataServices
+    nor Persistence can own it:
+        ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L6-L7 declares
+            "type eventful from n_cst_eventful within se_cst_dw", and :L33 holds the instance member.
+        ws_objects/pfw.thread.pbl.src/n_cst_threading_eventful.sru:L4 declares
+            "global type n_cst_threading_eventful from n_cst_eventful".
+    It holds shared IMPLEMENTATION, consumed in process through a ProjectReference. It is NEVER a
+    cross service channel: AAP §0.7.3 C-A makes shared/PowerFramework.Contracts the only published
+    cross service coupling in the refactor, and this project must not become a back door around it.
+    Hence no gRPC package, no OpenAPI package, no ASP.NET Core framework reference, and no hosting or
+    dependency injection package here, and none may be added.
+
+    THE LEGACY TREE IS READ ONLY (AAP §0.7.3 C-C) AND SHARES THIS WORKING DIRECTORY
+    The .sru paths above are the behavioural oracle: read as specification, never edited, moved or
+    reformatted, and never a build input. Nothing under ws_objects/ and no *.pbl, *.pbt, *.pbw, *.pbr
+    or *.pbd is compiled or embedded by this project, which is why there is no ItemGroup below naming
+    a legacy path. The root .dockerignore also keeps ws_objects/ out of the build context, so such a
+    read would fail in a container and in CI even if it happened to work locally.
+
+    PROVENANCE: A CLEAN CREATION, NOT A TRANSLATED BUILD FILE
+    The legacy library pfw.utility.invoker.pbl appears on the pfw target's ordered library list
+    [pfw.pbt:L8], which is the only "build definition" the legacy has for this code. That ordering is
+    semantically significant in PowerBuilder because it resolves one flat global namespace, and
+    ProjectReference has no ordering analogue, so it is deliberately not encoded here. The two
+    PowerBuilder project objects are not translated either: AAP §0.4.2.1 and §0.8.6 R5 record that
+    they disagree on library count and on vendor and that both declare pfw.utility.imgcodec.pbl,
+    which does not exist anywhere in the repository, so neither would build as written. They are
+    REFERENCE for build intent only. PowerBuilder has no namespaces and no import statements
+    (AAP §0.4.5.1), so there is nothing to rewrite: this project file is what establishes
+    PowerFramework.Shared.Eventful as that namespace's compilation unit.
+
+    GOVERNING CONSTRAINTS. review_rules reports "No user rules provided", so no user specified rule
+    governs this file and none was invented; that absence is not latitude. In their place AAP §0.7.2
+    (the enterprise baseline) and §0.7.3 (the twelve binding non rule constraints) apply, and each
+    decision below cites the constraint it discharges. Structural authorities: §0.3.1 names this file,
+    §0.5.4.3 classifies every project file as a CREATE, §0.3.2.1 fixes the validated build mechanism,
+    and §0.5.4.1 makes central package management mandatory rather than optional.
+
+    DELIBERATELY NOT DECLARED HERE, because every one is inherited by MSBuild directory walk up from
+    the repository root Directory.Build.props, the single point of control for every project
+    (there is no intervening Directory.Build.props under shared/):
+
+        TargetFramework net10.0, LangVersion, Nullable enable, ImplicitUsings enable,
+        TreatWarningsAsErrors true, EnableNETAnalyzers, AnalysisLevel,
+        ManagePackageVersionsCentrally true, Deterministic, ContinuousIntegrationBuild,
+        Product, Company, Copyright.
+
+    Those names appear immediately above as documentation and nowhere else: not one of them is
+    declared in this file. Strip the comments and what remains is three properties and one item.
+
+    Restating any of them would be a defect even where the value happened to match, because it
+    silently decouples this project from that single point of control. AAP §0.7.3 C-I is the reason:
+    each service must build and test independently from a clean checkout, so the documented per
+    service command succeeds transitively wherever a service reaches this library, and a locally
+    restated property is exactly the seam through which one project drifts from the other fifteen.
+    Nullable reference types and warnings as errors therefore apply here in full: under the inherited
+    gate a single compiler or analyzer warning fails this build, and no NoWarn blanket softens it.
+  -->
+
+  <PropertyGroup>
+    <!-- Both values equal the defaults MSBuild derives from this file name, and are stated anyway so
+         that a future directory rename cannot silently change the namespace and assembly identity
+         that the four .cs files here, the sibling test project and the consuming services all
+         resolve against. The string is fixed by the AAP §0.4.5.1 namespace scheme
+         PowerFramework.Shared.{Kernel, Diagnostics, Eventful, Localization, Containers} and must
+         stay exactly this: shared/PowerFramework.Shared.Eventful.Tests references this project by
+         this exact path, and the produced assembly must be PowerFramework.Shared.Eventful.dll. -->
+    <RootNamespace>PowerFramework.Shared.Eventful</RootNamespace>
+    <AssemblyName>PowerFramework.Shared.Eventful</AssemblyName>
+    <Description>PowerFramework shared event broker: publish and subscribe dispatch with subscription priorities, lexically ordered delivery, a decomposed subscription topic carrying sequence and name and lifetime separately, and the tri valued veto protocol. Ported from the pfw.utility.invoker.pbl n_cst_eventful object.</Description>
+  </PropertyGroup>
+
+  <ItemGroup Label="Project references: exactly one, and it must stay that way">
+    <!--
+      Constraint discharged here: AAP §0.7.3 C-I, each service builds and tests independently.
+
+      Kernel is the SOLE dependency of this library, and that is a measured finding rather than a
+      convention. Counted over all 1,328 lines of n_cst_eventful.sru, the broker consumes:
+
+          RetCode.OK, RetCode.FAILED, RetCode.E_INVALID_ARGUMENT, RetCode.E_INVALID_OBJECT and
+          RetCode.E_EVENT_NOT_FOUND     24 use sites
+          Predicates.IsValidObject       4 use sites
+          Predicates.IsPrevented         2 use sites
+          Predicates.IsFailed            1 use site
+          ThrowException                 1 use site
+
+      All five land in PowerFramework.Shared.Kernel. The tri state boundary those predicates carry
+      (a prevention reads as a success; cancelled and null are neither) is behaviour preserved by
+      REUSE, never reimplemented locally where it could drift from the algebra every other project
+      shares. Predicates.IsPrevented matters twice over here, because the broker's veto is the
+      producer of the PREVENT value that boundary is built around.
+
+      It is DELIBERATELY NOT a reference to PowerFramework.Shared.Diagnostics, even though the
+      broker's exception path handles an assertion failure. n_cst_eventful.sru:L873 tests
+      ClassName(ex) = "assertionfailed", a STRING class name comparison, and :L876 then reads the
+      detail members off it. EventBroker.cs reproduces that with a runtime type test plus a locally
+      declared detail carrier abstraction precisely so this project takes no second reference:
+      adding one would contradict the measured single dependency and couple two shared libraries for
+      a coupling the legacy itself never expressed in its type system.
+
+      C-I also bounds this list. Nothing outside shared/ may be referenced, and within shared/
+      nothing but Kernel: no PowerFramework.Contracts (that is the published boundary, not shared
+      implementation), no other PowerFramework.Shared.* project, and nothing under services/. Nor
+      any of the four deferred services (DesignSystem, Documents, Integration, ScriptBridge), which
+      AAP §0.2.2.2 forbids implementing even as a stub and which therefore have no project to name.
+      Relative path only: never an absolute path, and never a package standing in for a project.
+
+      Left deliberately public rather than hidden behind PrivateAssets. The sibling test project
+      takes no direct Kernel reference of its own and reaches RetCode, Predicates and ThrowException
+      transitively through this edge, so narrowing it would break that project.
+    -->
+    <ProjectReference Include="..\PowerFramework.Shared.Kernel\PowerFramework.Shared.Kernel.csproj" />
+  </ItemGroup>
+
+  <!--
+    ZERO PackageReference elements, and zero is the correct count (AAP §0.7.3 C-A, §0.1.5).
+
+    This is a verified finding, not an oversight. The broker is the largest pure PowerScript object
+    in the in scope set and it binds nothing native: searching n_cst_eventful.sru for a native class
+    binding returns no match across all 1,328 lines, and its "type prototypes" block is empty, so it
+    declares no classic external function either. AAP §0.6.5 states the same conclusion structurally,
+    recording that the shared kernel, the DataWindow service layer and both threading libraries
+    contain zero PBNI objects. With no native binding to replace there is no substitution to buy, and
+    the port needs only the Base Class Library: collections for the subscription table, System.Type
+    and System.String for the class name chain the legacy builds, System.Exception and its Data
+    dictionary for the exception capture, and composite formatting for the message assembly.
+
+    Nothing in this project performs I/O, networking, logging, serialization or database access, so no
+    ASP.NET reference, no web SDK and no third party package belongs in it. Do not add one "to be
+    safe": an unnecessary reference would drag a NuGet audit surface onto a library that both in scope
+    services depend on. If a package ever does become genuinely necessary, add it VERSIONLESS and pin
+    the version in the repository root Directory.Packages.props. ManagePackageVersionsCentrally is
+    enabled repository wide (AAP §0.5.4.1), so an inline Version attribute here is a restore error
+    (NU1008) rather than a shortcut, and a floating, wildcard or "latest" version is barred outright
+    by the §0.7.2 baseline. Because this project declares no package, no NU1903 advisory can originate
+    in it; one appearing at restore would have arrived transitively through Kernel and must be
+    reported, never suppressed from here.
+  -->
+
+  <!--
+    Also deliberately absent, each for a stated reason, so the omissions read as decisions:
+
+      * OutputType. This is a class library and must stay one; the SDK default of Library is correct.
+        Directory.Build.props:L203 to L206 reserves OutputType as a per project concern precisely
+        because the tree needs three different answers, and the Exe value belongs ONLY to the hand
+        authored xunit.v3 test projects, which fail to build without it. Setting it here would turn a
+        library into an application and break every consumer.
+      * EnableDefaultCompileItems, and any explicit Compile, Content, None, EmbeddedResource or
+        Remove item. SDK style projects glob the four .cs files in this directory automatically and
+        they all sit flat here, so there is nothing to add and nothing to exclude. An explicit list
+        would be worse than redundant: it would silently drop any file added later.
+      * InternalsVisibleTo. Every type and member of the broker is public, because the legacy object
+        is a global class whose whole surface is called from other objects, so the sibling test
+        project and the consuming services reach all of it without one.
+      * NoWarn, WarningsNotAsErrors and any project wide analyzer suppression. The only suppressions
+        this refactor needs are the naming ones for the preserved SCREAMING_SNAKE constant
+        identifiers, and AAP §0.4.5.3 keeps those file glob scoped in the repository root
+        .editorconfig. A suppression here would broaden that scope to this whole project.
+      * GenerateDocumentationFile. Inherited TreatWarningsAsErrors turns a missing XML documentation
+        comment (CS1591) into a build error, and no requirement asks for a documentation file.
+      * PackageId, Version, IsPackable, GeneratePackageOnBuild and all other packaging metadata.
+        Nothing in this refactor publishes these libraries as NuGet packages; they are consumed by
+        ProjectReference, and the shipped artifacts are four container images, one per in scope
+        service.
+      * Any solution filter. .NET 10 emits the XML .slnx solution format, and no .slnf filter is
+        authored because a filter's project list must be kept in exact agreement with the solution
+        BY HAND and every drift fails hard. AAP §0.3.2.1's MSB4014-in-all-three-verbs claim was
+        measured false on the pinned SDK; docs/BUILD.md section 2 carries the correction.
+        Build scoping is done by the per service .slnx files together with the root property sheets.
+  -->
+
+</Project>

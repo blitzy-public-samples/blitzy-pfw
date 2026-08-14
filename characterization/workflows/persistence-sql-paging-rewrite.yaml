@@ -1,0 +1,1022 @@
+# yaml-language-server: $schema=./workflow.schema.json
+#
+# PowerFramework characterization workflow definition
+# ---------------------------------------------------
+# Capability: the two dialect paging rewrites - the SQL Server family and the Oracle form -
+# together with the row-count wrapper that stands beside them, all of them PURE STRING
+# TRANSFORMS: a statement plus a page size and a page index in, statement text out.
+#
+# This file DECLARES one paired golden-master capture. It contains no code, no expectation
+# value and no recording: it states what is captured, from which read-only legacy oracle,
+# under which mask, and which legacy behaviours the pair exists to prove survived.
+#
+# It conforms to ./workflow.schema.json - draft 2020-12, additionalProperties false, closed
+# enums - and that schema is the authority on shape. characterization/README.md is the
+# authority on the store-wide conventions this file obeys and deliberately does not
+# restate: the capture rule's canonical text (section 2.1), THE ONE EXEMPTION and why it is
+# not a loophole (section 2.7), the recording-file conventions (section 3.4), the extension
+# trap (section 3.5), the newline-normalization convention (section 3.7), the
+# determinism-seam register (section 5.1), the defect roster (section 5.3), what is compared
+# and what is never compared (section 5.4), and what must never enter a recording
+# (section 6).
+#
+# THIS IS THE ONE EXEMPT WORKFLOW IN THE STORE, and the exemption is the reason it is a
+# separate definition rather than a section of its sibling. It is claimed explicitly in the
+# sharedVolume member at the foot of this file, never inferred from silence: the schema makes
+# exemptionReason mandatory whenever applies is false precisely so that it cannot be.
+#
+# One discipline note, because this file has to hold two things at once. The store's rule is
+# that definitions carry LOCATORS, never values. The sentinel identifiers below are the
+# single deliberate exception, and they are not an exception to the spirit of it: an
+# identifier that must survive a rewrite character for character is part of the CONTRACT
+# rather than an expected result, and the reviewer's checklist is useless if the thing being
+# checked off is not spelled out. Everything that genuinely is a result - every generated
+# statement, every error message text, every returned code - is cited by locator and is
+# never reproduced here.
+#
+# Two optional schema members are deliberately absent, and each absence is a decision.
+# blockedBehaviours is absent because nothing in this capability is BLOCKED: there is no
+# missing evidence to go and find. The generators are pure PowerScript, they are present in
+# full in the read-only tree, and the two gaps this workflow carries are ORACLE-COVERAGE
+# gaps - inputs the legacy authors never exercised - which is a different thing and is
+# recorded as such under provesDefects, exactly as the sibling clause-model workflow records
+# its own never-exercised modification style. deferredCapabilities is absent for a harder
+# reason: no half of this capability is deferred, since a string transform has no
+# presentation half to leave behind, and the member's own two enums are the four deferred
+# capability-area names, so using it at all would write one of those names into a definition
+# that has no business naming any of them.
+
+schemaVersion: "1"
+
+workflowId: persistence-sql-paging-rewrite
+
+title: >-
+  Dialect paging rewrites and the row-count wrapper - the four-arm SQL Server matrix, the
+  Oracle nested form, the not-implemented arm, and byte-exact generated SQL
+
+capabilityArea: >-
+  The dialect paging rewrites owned by Persistence, characterized as PURE STRING TRANSFORMS:
+  the dispatch on database type, the four-arm SQL Server paging matrix, the single Oracle
+  triple-nested row-number form, the empty-order-by substitution each of them applies when
+  the input statement carries no ordering, the not-implemented arm the dispatch reserves for
+  any other database type, and the row-count wrapper that reduces the same statement to a
+  single aliased projected column. Input is a statement plus a page size and a page index;
+  output is statement text. Nothing is read and nothing is written. The acceptance criterion
+  for the capability is BYTE-EXACT generated SQL - every emitted statement must agree
+  character for character, whitespace included, and every sentinel identifier must survive
+  spelled exactly as the legacy spells it.
+
+targetService: Persistence
+
+description: >-
+  Why this pair exists. The two dialect rewriters are reimplemented in-repo as a focused
+  clause-level model rather than delegated to a package, and this definition is the evidence
+  that the reimplementation matches. The rewriters are the one place in Persistence where
+  the entire observable contract IS a string: there is no rowset to compare, no buffer state
+  and no return payload beyond a code, so if the generated text is not compared character
+  for character then nothing about these behaviours is compared at all. That is why the
+  criterion is byte-exact rather than semantic, and why a "cleaner" statement that a
+  database would execute identically is still a parity failure.
+
+  The storage position, which is what makes this definition unusual and is stated first
+  because everything else in it follows from it. THE SHARED-VOLUME CAPTURE RULE DOES NOT
+  APPLY TO THIS WORKFLOW. sharedVolume.applies is false and sharedVolume.exemptionReason
+  carries the reason in full; characterization/README.md section 2.7 is the authority for the
+  exemption and section 2.1 is the authority for the rule being exempted from, and both are
+  cited rather than restated because three upstream files already carry that rule's text word
+  for word and a fourth copy would be a fourth thing to drift. This is the ONLY exempt
+  workflow of the fifteen in the roster. The exemption is narrow and it is not a loophole: it
+  holds only while the workflow reads and writes nothing, and the moment any part of it
+  touched the persistence volume the rule would govern it in full.
+
+  The no-database position, stated as a prohibition rather than as an observation. Neither
+  SQL Server nor Oracle has a schema, a connection string or any DDL anywhere in this
+  repository - only two dialect constants and two statement generators exist - and NO
+  INSTANCE OF EITHER DIALECT IS PROVISIONED, REQUIRED OR REACHABLE, here or anywhere in this
+  refactor, and none may be. Standing one up in order to "really test" a rewriter would
+  fabricate a database that the repository has no evidence for, which is forbidden outright,
+  and it would not improve the comparison by a single byte: the transform is complete before
+  any statement is sent, so a captured statement is the whole of the observable behaviour.
+  Nothing in this definition or in any recording taken under it carries a connection string,
+  a server or service name, a data-source name or a credentialed URI for either dialect, and
+  the seed phase is empty for the same reason the exemption holds.
+
+  The oracle position, which is the second unusual thing about this definition. NO ORACLE
+  WINDOW DRIVES THIS BEHAVIOUR. No window in the 47-window corpus exercises the paging
+  rewrites end to end, so every fixture below carries the specification role rather than
+  oracle-window: the objects are read as the authoritative statement of intended behaviour,
+  not executed by a fixture. The evidence is unusually direct. The one window that carries
+  the paging setter surface has all three of its paging calls COMMENTED OUT, and a
+  repository-wide search finds no live call to any paging setter anywhere in the legacy tree
+  - the only other references are the caller-side proxy forwarders, which forward and drive
+  nothing. Two of the setters, the native-implementation flag and the unique-index column
+  list, are not referenced even in commented form, and those two are precisely the inputs
+  that select among the four SQL Server arms. The legacy master side of this pair is
+  therefore produced by exercising the legacy generators DIRECTLY through the public
+  caller-side setter surface the read-only tree already exposes, driven from a harness that
+  lives outside the legacy tree - never by driving a window, and never by editing the legacy
+  tree to create one. The commented-out calls stay commented out.
+
+  The timing position. A pure string transform is exactly the sort of behaviour that invites
+  a throughput claim, and this definition records none. NO TIMING VALUE IS AN ASSERTION
+  ANYWHERE IN IT, no elapsed, duration, latency or throughput figure is recorded as a result,
+  and unlike the sibling clause-model workflow the oracle emits no timing field of its own on
+  this path, so there is not even a masked figure to carry. Characterization compares
+  observable outputs and never compares execution time. The repository publishes no
+  service-level agreement, no latency budget, no throughput target and no availability
+  commitment, so there would be nothing to assert one against; the only quantitative gate in
+  the whole brief is the 80 per cent per-service line-coverage floor, and it is measured in CI
+  from coverage.cobertura.xml, never from this store.
+
+  The redaction position. The statements this capture records are synthetic inputs built over
+  the supporting fixture's own six column names and its own retrieve statement, so they are
+  neither credentials nor interpolated user data and are recorded as they stand. The
+  contingency is nevertheless declared under capturePhase.redaction rather than left to
+  judgement: if a captured statement ever carries an interpolated literal that could be
+  sensitive, the treatment for this workflow's own recorded statement fields is redacted - the
+  same single redacted field the published payload takes, so this recording and the contract
+  agree rather than diverging. That treatment read split-statement-and-parameters until the
+  final security review: splitting withholds nothing, because it writes the values into a
+  tracked file, and a parameter collection is itself the sensitive data (docs/SECRETS.md
+  section 6.3 is the record of that being considered and rejected). A placeholder keeps the
+  statement SHAPE byte-comparable, which is the only property this workflow compares. The
+  scoping note still holds: this decision governs this recording's own fields and does not
+  reach the published database-error payload's statement field, which characterization/README.md
+  section 6.2 rules is carried as one redacted field with nothing beside it. No key, password,
+  certificate, token or fragment of one appears anywhere in this definition or in any
+  recording taken under it.
+
+  The not-masked position, stated positively because on this workflow the mask is very nearly
+  empty and a reader is entitled to know what that leaves exposed rather than to infer it. The
+  mask below has three entries and covers only platform and enumeration artifacts. NOTHING
+  ELSE IS MASKED, and specifically: no sentinel identifier is masked, in whole or in part, and
+  none is normalized for case or spelling; no interior whitespace inside a generated statement
+  is masked; no keyword casing is masked; no nesting depth and no derived-table alias is
+  masked; no arithmetic on the page bounds is masked; and no strategy-selection outcome is
+  masked. Those are exactly the bytes the criterion compares, and masking any of them would
+  leave the comparison unable to detect the only kind of regression this workflow can have.
+  The determinismMask member carries no prose member in which to state this, which is why it
+  is stated here and repeated as a comment beside the mask itself.
+
+# Four cited fixtures, and EVERY ONE of them carries the specification role. That is not an
+# oversight and it is not a downgrade: no window in the corpus drives the paging rewrites, so
+# there is no oracle-window to cite and borrowing one would misrepresent where the behaviour
+# is actually written down. The two generator objects are the behaviour; the window is cited
+# for its setter surface and its default page size, both of which are real even though its
+# calls are commented out; the DataWindow definition is cited for a concrete column shape and
+# a concrete base statement to page over. All four are read-only and none is edited, moved,
+# renamed, reformatted, re-encoded or copied into this tree.
+oracleFixtures:
+  - path: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru
+    role: specification
+    locators:
+      - "L34"
+      - "L35-L39"
+      - "L46"
+      - "L303"
+      - "L307-L309"
+      - "L312"
+      - "L314-L316"
+      - "L320"
+      - "L321"
+      - "L323"
+      - "L327"
+      - "L328-L338"
+      - "L339"
+      - "L341-L342"
+      - "L343"
+      - "L345-L346"
+      - "L348"
+      - "L350"
+      - "L353"
+      - "L355-L356"
+      - "L358"
+      - "L360"
+      - "L362"
+      - "L364"
+      - "L366"
+      - "L367-L371"
+      - "L372-L373"
+      - "L375-L380"
+      - "L381-L383"
+      - "L386"
+      - "L388-L391"
+      - "L392"
+      - "L394-L395"
+      - "L396-L398"
+      - "L401"
+      - "L403"
+      - "L406"
+      - "L410"
+      - "L440"
+      - "L445"
+      - "L450"
+      - "L457"
+      - "L462"
+      - "L723-L724"
+      - "L731"
+      - "L818"
+      - "L820-L823"
+      - "L826-L828"
+      - "L830"
+      - "L831-L832"
+      - "L834"
+      - "L853"
+  - path: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru
+    role: specification
+    locators:
+      - "L60-L61"
+      - "L356-L359"
+  - path: ws_objects/pfw.tests.pbl.src/w_test_thread_sqlquery.srw
+    role: specification
+    locators:
+      - "L242"
+      - "L259"
+      - "L264"
+      - "L266"
+      - "L285"
+  - path: ws_objects/pfw.tests.pbl.src/dw_sqlite.srd
+    role: supporting-fixture
+    locators:
+      - "L2"
+      - "L8-L13"
+      - "L14"
+
+# The seed phase is genuinely empty, and the accounting is explicit rather than omitted -
+# the schema requires emptyReason whenever steps is empty precisely so that an unseeded
+# workflow is a statement and not an oversight.
+seedPhase:
+  steps: []
+  emptyReason: >-
+    Nothing is seeded, because there is nothing for a seed step to establish. The paging
+    rewrites are pure string transformations: the whole input is the original statement text,
+    the page size, the page index, the native-implementation flag, the unique-index column
+    list and the dialect selector, and the whole output is statement text and a numeric return
+    code. THERE IS NO FILE TO DELETE, NO SCHEMA TO CREATE AND NO ROW TO INSERT. The generator
+    opens no connection of its own, executes nothing, and reaches its transaction argument for
+    exactly one purpose - to read the database type through the type accessor - so even that
+    argument is an input rather than a resource. This is the same fact that grounds the
+    shared-volume exemption at the foot of this file, stated once here in seeding terms and
+    once there in capture terms: a workflow with no starting state has no starting state to
+    keep still between the two halves of its pair. Contrast the storage fixture, whose own
+    setup deletes the database file before recreating the schema - that destructiveness is
+    exactly why the seed phase is declared apart from the capture phase in the first place,
+    and this workflow is the case that shows the separation is not merely ceremonial. The six
+    inputs are supplied as preconditions of the capture, not as seed steps, because they are
+    arguments to the behaviour rather than state behind it.
+  runsOncePerPair: true
+  neverBetweenCaptures: true
+
+
+capturePhase:
+  behaviourUnderTest: >-
+    One paged-statement generation is driven per matrix case, and the matrix is enumerated
+    rather than sampled. THE DISPATCH: the generator is driven once with each of the two
+    declared database types and once with an undeclared type value, so the not-implemented arm
+    is exercised as a FIRST-CLASS CASE rather than left as unreached code. THE SQL SERVER
+    FAMILY IS A 2x2 MATRIX OVER TWO INDEPENDENT BOOLEANS - the emptiness of the unique-index
+    column list and the state of the native-implementation flag - giving FOUR ARMS, each captured
+    separately together with the two inputs that selected it and the reason that selection was
+    made. Naming it three strategies, as the migration plan's prose does, invites merging a pair
+    of them, and all four emit DIFFERENT statement text, so a merge breaks byte-exact parity
+    outright. The four: unique-index columns PRESENT with the native flag SET, an offset-fetch
+    form inside an inner-join sub-query; PRESENT with the flag CLEAR, a top-plus-row-number form
+    inside the same inner-join sub-query; ABSENT with the flag SET, offset-fetch appended to the
+    order-by clause; and ABSENT with the flag CLEAR, the top-plus-row-number wrapper - the only
+    arm carrying a trailing order-by, and the arm the field defaults select. THE ORACLE FORM, one strategy, the
+    triple-nested row-number statement, captured twice - once with an input statement that
+    carries an ordering and once with an input statement that carries none - because the
+    empty-order-by substitution is invisible in the first case and is the whole point of the
+    second. THE ROW-COUNT WRAPPER as its own case: the statement reduced to a single aliased
+    projected column, its ordering stripped if it had one, and the reduced statement wrapped
+    in an outer count - plus the partial-page case in which the wrapper is not emitted at all.
+    AND THE THREE REJECTION ARMS driven deliberately: a non-positive page size, a non-positive
+    page index, and an unparseable input statement. Paging inputs varied across the matrix:
+    page size; page index at the first page, a middle page and the last page; an input
+    statement with an order-by clause and one without; a unique-index column list present and
+    absent, and present in both unqualified and table-qualified spellings; and a multi-select
+    input statement. Comparison criterion for the whole capture, stated once and applying to
+    every output below - BYTE-EXACT STRING EQUALITY, WHITESPACE INCLUDED. Every generated
+    statement, every sentinel identifier, every alias, every keyword's casing, every nesting
+    level and every computed page bound must agree character for character between the two
+    halves of the pair after the mask has been applied identically to both. Numeric return
+    codes are compared as integers, never as boolean projections of themselves.
+  preconditions:
+    - >-
+      THIS WORKFLOW IS EXEMPT from the paired-capture shared-volume rule.
+      characterization/README.md section 2.7 is the authority for the exemption and section
+      2.1 for the rule it exempts from; both are cited, not restated and not paraphrased,
+      because three upstream files already carry that rule's text word for word and a fourth
+      copy would be a fourth thing to drift. sharedVolume.exemptionReason at the foot of this
+      file states the reason in full. Every other workflow in the roster is captured under the
+      rule; this one is the single exception, and it is an exception because it reads and
+      writes nothing rather than because it would be inconvenient to comply.
+    - >-
+      No instance of either dialect is provisioned, started, connected to or reachable on
+      either side of the pair, and none is needed. A capture that required one would not be
+      this workflow. No connection string, server or service name, data-source name or
+      credentialed URI for either dialect is supplied, recorded or referenced.
+    - >-
+      No edit is made to the legacy tree in order to obtain the master. The paging inputs are
+      supplied through the public caller-side setter surface that the read-only tree already
+      exposes, driven from a harness outside that tree. The three commented-out paging calls in
+      the setter-surface window are left exactly as they are and are NOT uncommented -
+      uncommenting them would edit the oracle, which is forbidden, and it would also destroy
+      the evidence that no fixture drives this behaviour.
+    - >-
+      Both halves of the pair use the identical original statement text per case, and the case
+      list is fixed before the first half is captured. The base statement is the supporting
+      fixture's own retrieve statement, which carries no ordering of its own - so the
+      no-ordering input case is the fixture's DEFAULT rather than a contrived one - and the
+      with-ordering and multi-select variants are derived from it over the same six column
+      names and recorded as capture inputs so the second half can reuse them exactly.
+    - >-
+      Both halves use the identical page size and page index per case, and both indices are
+      strictly positive, since a non-positive value is a rejection case rather than a paging
+      case and is captured as one.
+    - >-
+      Both halves use the identical native-implementation flag and the identical unique-index
+      column list per case, in the same order. These two inputs are the two axes of the 2x2
+      matrix that selects the SQL Server arm, and no legacy caller sets either of them anywhere, so the
+      capture must set them explicitly and record what it set - a case whose selecting inputs
+      are not recorded cannot be reproduced on the other side.
+    - >-
+      The undeclared-type case supplies its dialect value to the dispatch directly. The type
+      accessor cannot produce one: it returns the Oracle constant when the database-management
+      -system string contains that vendor's name and the SQL Server constant in every other
+      case, so it has no third outcome. Driving the not-implemented arm therefore means
+      supplying the dispatch input rather than configuring a connection, and the recording
+      states which value was supplied.
+    - >-
+      The unique-index column list is enumerated in a fixed, declared order on both sides,
+      because the generator concatenates it positionally into three separate fragments - a
+      column list, a join predicate and an appended ordering - and an unpinned enumeration
+      order would surface as a text difference where no behaviour changed. This is the
+      clause-emission-ordering seam of the mask, pinned here as a precondition as well, since
+      seaming it is preferable to masking it.
+    - >-
+      The row-count wrapper cases declare their row-count and page-index inputs explicitly,
+      because the wrapper is emitted only when the returned row count for the page is not
+      short of the page size. The partial-page case is captured deliberately so that
+      "no statement was emitted" is recorded as an outcome rather than read as a missing
+      recording.
+
+  observedOutputs:
+    - name: captureInputs
+      description: >-
+        The six inputs every generated statement is a function of - the original statement
+        text, the page size, the page index, the native-implementation flag, the unique-index
+        column list and the dialect selector - recorded first, per case, and recorded verbatim
+        so that the second half of the pair is demonstrably driven with the same arguments as
+        the first. A difference here means the two recordings answer two different questions
+        and the comparison is void rather than failing. The two selecting inputs are the ones
+        to watch: no legacy caller sets either of them anywhere in the tree, so a case whose
+        flag and column list are not recorded cannot be reproduced by anybody else.
+      format: >-
+        Canonical JSON, one object per case in a stable case order, with six named fields in a
+        fixed order - originalStatement as a string, pageSize and pageIndex as integers,
+        pageNative as a boolean, pagedUniqueIndexColumns as an ordered array of strings, and
+        dialectSelector recorded both as the integer supplied and by its constant identifier in
+        its original screaming-snake spelling, or as the marker for the undeclared value.
+      locator: >-
+        ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L303, :L406, :L450,
+        :L457, :L462
+    - name: dispatchOutcome
+      description: >-
+        Which arm of the database-type dispatch was selected for each case, recorded as the arm
+        identity and not merely as its consequence. Three outcomes are recorded and all three
+        are compared: the SQL Server arm, the Oracle arm, and the not-implemented arm reached
+        by the undeclared value. Recording the arm separately from the generated statement is
+        what makes a mis-dispatch legible - a case that produced plausible statement text from
+        the wrong arm would otherwise be indistinguishable from a case that produced wrong text
+        from the right one.
+      format: >-
+        Canonical JSON keyed by case, each value naming the selected arm and carrying the
+        dialect constant's integer value and its identifier spelling, with the not-implemented
+        arm named explicitly rather than recorded as an absence.
+      locator: >-
+        ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L320, :L321, :L386,
+        :L396
+    - name: strategySelection
+      description: >-
+        Which of the FOUR SQL Server arms of the 2x2 matrix was selected, and the two input
+        values that made the selection - the emptiness of the unique-index column list and the
+        state of the native-implementation flag. The selection is itself behaviour and is compared, never masked: a candidate that
+        produced correct text by a different route has diverged, because the route determines
+        what happens for every input the matrix does not contain. The field defaults select the
+        top-plus-row-number fallback, so the recording states for each case whether the
+        selection followed a default or an explicit input.
+      format: >-
+        Canonical JSON per case - the arm by name, its two matrix coordinates, the
+        two selecting input values, and a short recorded reason naming the branch condition
+        that decided it.
+      locator: >-
+        ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L323, :L343, :L366,
+        :L375, :L35-L39, :L46
+    - name: generatedStatement
+      description: >-
+        The generated statement text for every case - THE PRIMARY OUTPUT OF THE CAPTURE and the
+        one the byte-exact criterion exists for. One value per case, carried out of the
+        generator's reference output parameter. Everything observable about a paging rewrite is
+        in this string: the projected column list and any list the strategy substituted for it,
+        the derived-table nesting, the join predicate, the row-number window and its ordering,
+        the page bounds, the emitted keywords and their casing, and every sentinel identifier.
+        A difference of one character is a finding. A difference that a database engine would
+        execute identically is still a finding, because this capability's contract is the text
+        and not the result set.
+      format: >-
+        The statement text verbatim, one recorded value per case, with only line endings and
+        line-end trailing whitespace normalized by the mask and NO other transformation - no
+        re-indentation, no whitespace collapsing, no keyword re-casing and no identifier
+        normalization of any kind. Written to the per-case statement recordings rather than
+        embedded in a single aggregate field, so a reviewer diffs one case at a time.
+      locator: >-
+        ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L346, :L350,
+        :L355-L356, :L362, :L364, :L372-L373, :L381-L383, :L394-L395
+    - name: sentinelIdentifiers
+      description: >-
+        The reviewer's checklist, recorded as an explicit list so that each identifier can be
+        checked off rather than hunted for. SIX distinct sentinel identifiers occur in the
+        generated statements and every one must appear in the candidate spelled exactly as the
+        legacy spells it - pfwPagedSQL_OutterTbl, pfwPagedSQL_RN, pfwPagedSQL_Tbl,
+        pfwPagedSQL_TblInner, pfwPagedSQL_TblInnerInner and pfwPagedSQL_TblOuter - together
+        with the row-count wrapper's two aliases, the single-character alias its reduced
+        projection introduces and the alias on its outer count expression. Note the count: the
+        migration plan names five, and pfwPagedSQL_Tbl is the sixth, which is also the alias
+        the row-count wrapper reuses on its derived table. Note also that pfwPagedSQL_OutterTbl
+        contains a MISSPELLING of the word "outer" - that spelling is the contract and is
+        preserved letter for letter.
+      format: >-
+        Canonical JSON listing each identifier and each alias verbatim, with its occurrence
+        count and the cases in which it appeared, so both a missing identifier and an
+        unexpected extra occurrence are visible. Compared as an exact set and as exact counts;
+        never normalized for case, never spell-corrected, never masked.
+      locator: >-
+        ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L333, :L350, :L355,
+        :L356, :L362, :L381, :L382, :L383, :L394, :L395, :L830, :L834
+    - name: emptyOrderBySubstitution
+      description: >-
+        Whether the empty-order-by substitution fired for a case, and which substitute text was
+        used. It fires whenever the input statement carries no ordering, because a row-number
+        window and an offset-fetch clause both require one, and the substitute is
+        DIALECT-ASYMMETRIC: the SQL Server strategies use one substitute expression and the
+        Oracle form uses a different one. Both are recorded as observed text rather than as a
+        boolean, because the substitute is emitted into the statement and is therefore part of
+        the byte-exact comparison. The with-ordering cases record that the substitution did not
+        fire and record the original ordering that was carried through instead.
+      format: >-
+        Canonical JSON per case - a fired flag, the substitute expression as emitted, and the
+        original ordering text where one was present - with the substitute recorded once per
+        dialect so the asymmetry is visible in the recording itself.
+      locator: >-
+        ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L367-L371,
+        :L375-L380, :L388-L392
+    - name: uniqueIndexOrderingAppended
+      description: >-
+        For the unique-index optimization only: which unique-index columns were APPENDED to the
+        statement's ordering, which were judged already ordered and therefore omitted, the join
+        predicate built from them, and the ordering text that is finally emitted. Three things
+        are observable here and all three are compared. The already-ordered test is a SUBSTRING
+        containment test against the lowercased ordering text rather than a token test, so a
+        column whose name occurs as a substring of any other token is judged already ordered
+        and silently omitted, and a table-qualified column name will not be found in an ordering
+        written unqualified and is therefore appended a second time. The appended ordering is
+        read back AFTER the append, so what the non-native inner variant later restores is the
+        appended ordering and not the statement's original one. And the ordering the
+        optimization leaves in the final statement is consequently not the ordering the input
+        carried.
+      format: >-
+        Canonical JSON per case - the ordered list of columns appended, the ordered list omitted
+        with the matched substring recorded for each, the join predicate verbatim, the ordering
+        text as read back after the append, and the ordering text present in the final
+        statement.
+      locator: >-
+        ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L327, :L328-L338,
+        :L341-L342, :L360
+    - name: pageBounds
+      description: >-
+        The computed page bounds as they appear in the emitted text - the skip count and the
+        take count of the offset-fetch forms, the upper row limit of the top-and-row-number
+        forms, and the inclusive lower and upper bounds of the row-number range predicates.
+        Recorded as the emitted numerals rather than as the inputs that produced them, because
+        the arithmetic is one-based on the page index and an off-by-one in it produces a
+        statement that is valid, executes without error and returns the wrong page - the single
+        most plausible silent regression in this capability.
+      format: >-
+        Canonical JSON per case, each bound recorded as the numeral exactly as emitted into the
+        statement, alongside the page size and page index it was derived from, with the first,
+        middle and last page cases distinguished.
+      locator: >-
+        ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L346, :L355, :L356,
+        :L372, :L381, :L382, :L394-L395
+    - name: countWrapperStatement
+      description: >-
+        The row-count wrapper's generated statement, captured as its own case. Three emissions
+        make it up and all three are compared byte-exactly: the reduction of the projected
+        column list to a single constant with a one-character alias, the removal of the ordering
+        when the reduced statement carried one, and the outer count wrapped around the reduced
+        statement with an alias on the count expression and a sentinel alias on the derived
+        table. The reduction is what makes the wrapper cheap and it is also what makes it
+        observable - a candidate that counted over the original projection would produce a
+        statement that returns the same number and does not match.
+      format: >-
+        The wrapped statement text verbatim in its own recording, plus a canonical JSON
+        companion carrying the reduced projection, the removed-ordering flag, the count
+        expression's alias and the derived-table alias as separate fields so each is checkable
+        on its own.
+      locator: >-
+        ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L826-L828, :L830,
+        :L831-L832, :L834
+    - name: countWrapperSuppression
+      description: >-
+        Whether the row-count wrapper was emitted at all, and the page count and record count
+        derived when it was not. The wrapper is skipped when the page returned fewer rows than
+        the page size, or returned none on the first page, and the totals are then computed
+        arithmetically from the page index and the returned row count instead - including the
+        arm that forces a page count of zero when the computed record count is zero. Recorded
+        as an outcome so that "no statement was emitted" is legible as a result rather than
+        read as a missing recording, and so that a candidate which issues a count query where
+        the legacy issues none is caught.
+      format: >-
+        Canonical JSON per case - an emitted flag, the returned row count and page index that
+        decided it, and the derived page count and record count as integers. Where the wrapper
+        was emitted, the derived page count is recorded together with the counting expression
+        that produced it.
+      locator: >-
+        ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L818, :L820-L823,
+        :L853
+    - name: returnCodes
+      description: >-
+        The numeric return code from every case, and specifically from the four failure arms
+        driven deliberately: a non-positive page size or page index rejected before any parsing
+        happens, an unparseable input statement, and the undeclared dialect type reaching the
+        not-implemented arm. The numeric code is what is recorded, never a boolean projection
+        of it - the algebra is tri-state, a prevention reads as a success and a cancellation is
+        neither succeeded nor failed, so a boolean would erase the distinction between these
+        codes and every other code in it. The success arm's code is recorded too, so that the
+        successful and the rejected cases are told apart by a recorded value rather than by the
+        presence or absence of a statement.
+      format: >-
+        Canonical JSON per case - the code as an integer and by its constant identifier in its
+        original screaming-snake spelling. Never a boolean, and never a projection.
+      locator: >-
+        ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L307-L309,
+        :L314-L316, :L396-L398, :L403, :L450, :L462
+    - name: errorEventPayloads
+      description: >-
+        The error events the generator raises alongside those codes, recorded as code-and-
+        message pairs in the order raised. The message texts are legacy-language literals and
+        are compared byte-exactly like any other output; they are cited here by locator and are
+        deliberately NOT reproduced in this definition, because a definition carries locators
+        rather than values and an expectation embedded in a definition is an expectation that
+        can drift away from the recording it is supposed to describe. One asymmetry is itself
+        the finding: the not-implemented arm raises its error with an EMPTY message string
+        while every other arm carries a diagnostic, so a caller reaching that arm gets a code
+        and nothing else. That error ergonomic is preserved, and a candidate that helpfully
+        supplied a message there has recorded an improvement, which in this store is a bug
+        report.
+      format: >-
+        Canonical JSON - an ordered array per case, each entry carrying the code as an integer
+        and by its identifier spelling, and the message text verbatim as raised, with the empty
+        message recorded as an empty string rather than omitted so that its emptiness is
+        visible.
+      locator: >-
+        ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L308, :L315, :L397
+    - name: parserInstanceLifetime
+      description: >-
+        Whether the statement-model instance the generator creates was destroyed before the
+        generator returned, recorded per case. The pairing is the observable and it is not
+        symmetric across the arms: the instance is created after the page-setting guard has
+        already passed, and it is destroyed on the success path only, so the parse-failure
+        return and the not-implemented return both leave it undestroyed. Recorded per case so
+        that the two leaking arms are visible as leaking arms rather than inferred, and so that
+        a candidate which disposes deterministically on every path is recognised as the
+        divergence it is rather than praised as a fix.
+      format: >-
+        Two ordered event records per case where they occur, created and destroyed, each with
+        the instance ordinal and NO timestamp of any kind, plus an explicit destroyed flag so
+        that an absent destruction is recorded as absent rather than as missing data.
+      locator: >-
+        ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L312, :L316, :L398,
+        :L401
+  redaction:
+    - field: >-
+        This workflow's own recorded statement fields - captureInputs.originalStatement, every
+        generatedStatement value and the countWrapperStatement value - and only in the
+        contingency that a captured statement carries an interpolated literal that could be
+        sensitive. The matrix's inputs carry none: they are synthetic statements built over the
+        supporting fixture's own six column names and its own retrieve statement, so under the
+        matrix as declared all three fields are recorded as they stand. This entry is scoped to
+        this recording and is NOT the published database-error payload's statement field, which
+        characterization/README.md section 6.2 rules is carried as a single redacted field with
+        nothing beside it. The contingency treatment is that same single redacted field: this
+        entry read split-statement-and-parameters, which contradicted the ruling it cites one
+        sentence earlier, and which docs/SECRETS.md section 6.3 records as considered and
+        rejected because a parameter collection is itself the sensitive data.
+      treatment: redacted
+  recordingArtifacts:
+    - filename: capture-inputs.json
+    - filename: dispatch-outcomes.json
+    - filename: strategy-selection.json
+    - filename: mssql-unique-index-inner-join.sql
+    - filename: mssql-offset-fetch.sql
+    - filename: mssql-top-rownumber.sql
+    - filename: oracle-nested-rownumber.sql
+    - filename: count-wrapper.sql
+    - filename: sentinel-checklist.json
+    - filename: order-by-substitution.json
+    - filename: page-bounds.json
+    - filename: return-codes.json
+    - filename: error-events.json
+    - filename: parser-lifetime.json
+    - filename: mask-applied.json
+
+
+# The mask is inline, in full, and every entry applies to BOTH sides. There is no pointer, no
+# external mask file and no see-also anywhere below: a mask that drifts away from its workflow
+# silently invalidates every pair captured under it, and a mask applied to one side only is
+# worse than no mask at all because it manufactures a passing comparison out of mismatched
+# data.
+#
+# THIS IS THE SMALLEST MASK IN THE STORE, and that is worth stating rather than leaving to be
+# noticed. A pure string transform has almost no non-determinism in it: there is no clock, no
+# random source, no identity allocation, no pooled resource whose reuse is timing-dependent and
+# no database whose row order could vary. What remains is a platform artifact, an emission
+# artifact and one enumeration order - three entries, and nothing else.
+determinismMask:
+  - seam: >-
+      Line endings across the whole recording, wherever a generated statement or a recorded
+      companion field spans more than one line.
+    method: >-
+      Normalize line endings to a single declared convention on both sides at comparison time,
+      immediately before the byte-exact string comparison, and apply the identical normalization
+      to the master and to the candidate. Normalization is a comparison-time convention only: it
+      never licenses rewriting a stored master.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      The difference is a platform artifact rather than a behaviour. The master is produced on
+      Windows by PowerBuilder while the candidate runs in a Linux container, and the
+      repository's root .gitattributes declares only linguist-language mappings with no text
+      rule and no eol rule, so version control performs no translation on the way in and nothing
+      normalizes them for us. That file is NOT IN SCOPE to change, and changing it would be
+      solving this in the wrong place in any case. Left unmasked, an unnormalized byte-exact
+      comparison reports a difference on every line of every multi-line recording while no
+      generated statement differed at all - which is how a suite loses the ability to detect
+      anything, because a reviewer who sees red on every capture stops reading the red.
+  - seam: >-
+      Trailing whitespace at the end of a line of a recorded generated statement.
+    method: >-
+      Normalize TRAILING whitespace only - whitespace between the last non-whitespace character
+      of a line and that line's ending - and NEVER interior whitespace. Do not collapse a run of
+      spaces, do not re-indent, do not trim a leading run, and do not expand or contract the
+      single spaces the generator concatenates around its keywords, its aliases and its page
+      bounds. Applied identically on both sides. BE CONSERVATIVE: where it is not certain
+      whether a space is at a line end or inside the statement, do not normalize it - an
+      unmasked artifact produces one reviewable false difference, whereas an over-broad mask
+      silently removes a real one from the comparison for good.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      The two kinds of whitespace here are not the same kind of thing and must not be treated
+      alike. Interior spacing is BEHAVIOUR: the generators build their statements by string
+      concatenation, so every space between a keyword and its operand, around each derived-table
+      alias and on either side of each page bound is emitted deliberately and is part of the
+      byte-exact criterion - collapsing it would let a re-spaced statement pass and would erase
+      exactly the class of difference this workflow exists to catch. Whitespace at a line end is
+      an emission and round-trip artifact of how the text is carried out of the oracle and into
+      a recording, carries no behaviour, and would otherwise produce a difference on lines whose
+      visible content is identical. Masking the second while preserving the first is the
+      narrowest treatment that leaves the statement comparison able to detect anything.
+  - seam: >-
+      Clause-emission ordering wherever the generator draws from a collection whose order is not
+      pinned by the input - specifically the unique-index column list, which is concatenated
+      positionally into three separate fragments of the emitted statement: the substituted
+      projection list, the join predicate, and the ordering appended to the statement.
+    method: >-
+      FIX THE ENUMERATION ORDER and declare it, on both sides identically, rather than masking
+      the emitted text. The order is pinned as a capture precondition and the pinned order is
+      recorded with the capture inputs, so the emitted fragments stay byte-comparable instead of
+      being excluded from comparison. This entry is a seam and not a mask in the strict sense,
+      and it is preferred for exactly that reason: seaming makes the field reproducible, whereas
+      masking would only remove three of the most interesting fragments in the statement from
+      the comparison.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      The order affects the generated text without affecting behaviour. Any permutation of the
+      same unique-index columns produces a statement a database would execute identically, but
+      the three concatenated fragments come out in a different character sequence, so an
+      unpinned order surfaces as a difference where nothing changed - and, worse, an order that
+      differs between the two halves of the pair would report a false difference in the single
+      most strategy-specific part of the output. There is a second reason to pin it rather than
+      mask it: the ordering the generator appends depends on which columns its already-ordered
+      test judged present, and that test is a substring containment test, so the enumeration
+      order also determines the recorded omission list. Masking the emitted text would hide
+      both the fragments and that list; pinning the order keeps both comparable.
+
+# NOT MASKED, stated positively so that the narrowness of the mask above is a decision a
+# reviewer can check rather than an omission they have to trust. Nothing else in this workflow
+# is masked, on either side, and in particular NONE of the following is:
+#   - any sentinel identifier, in whole or in part, and none is normalized for case or spelling
+#     - including the misspelling of "outer" in the outer-table sentinel, which is the contract
+#   - interior whitespace inside a generated statement (see the second mask entry's reason)
+#   - keyword casing anywhere in an emitted statement
+#   - nesting depth, or any derived-table alias, or the count expression's alias
+#   - the computed page bounds, or any arithmetic that produced them
+#   - the strategy-selection outcome, the dispatch outcome, or the inner-variant choice
+#   - any numeric return code, or the emptiness of the not-implemented arm's message
+# Those are exactly the bytes the criterion compares. There is also nothing to mask that a
+# clock or a random source would have contributed, because this capability reads neither: the
+# oracle emits no timing field on this path, so unlike the sibling clause-model workflow there
+# is not even a masked-as-non-behavioural figure to carry, and no output below sets that flag.
+
+
+# What this pair exists to prove SURVIVED. The inversion is load-bearing: a recording that
+# shows corrected behaviour is a parity FAILURE, not an improvement, and is filed as a
+# divergence in the target. Nothing below is repaired. The first five entries are the roster
+# characterization/README.md section 5.3 already names for this capability; the last three were
+# found by reading the generators line by line and are recorded to the same standard, because
+# discovery rigour is not relaxed on the parts nobody named in advance.
+provesDefects:
+  - defect: >-
+      The sentinel identifiers are emitted verbatim and must survive verbatim. Six distinct
+      names are concatenated into the generated statements as derived-table aliases and as a
+      row-number column alias - pfwPagedSQL_OutterTbl, pfwPagedSQL_RN, pfwPagedSQL_Tbl,
+      pfwPagedSQL_TblInner, pfwPagedSQL_TblInnerInner and pfwPagedSQL_TblOuter - and one of
+      them, pfwPagedSQL_OutterTbl, contains a plain MISSPELLING of the word "outer". They are
+      not internal names: they reach generated statement text, which reaches log records and
+      reaches every recording in this store.
+    locator: >-
+      ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L323-L381, :L392-L395
+    note: >-
+      RENAMING ONE TO A TIDIER IDENTIFIER IS A PARITY FAILURE even though it changes no
+      semantics whatever - and that is precisely why it needs saying, because a reviewer who
+      knows the rewrite is semantically neutral is the reviewer most likely to wave it through.
+      Correcting the misspelled sentinel to "Outer", collapsing the three
+      near-identically-named nested aliases into a numbered series, or shortening the common
+      prefix would each produce statements that execute identically and match nothing. What a
+      well-meaning correction would break: every stored master, every log record a support
+      engineer greps for a paging statement, and the sentinel checklist this capture records -
+      all of which are keyed on the exact spelling. Note also that the migration plan enumerates
+      five of these and pfwPagedSQL_Tbl is a sixth, so a candidate validated against the
+      five-name list alone would still be free to rename the sixth; the capture records all six
+      with occurrence counts for that reason.
+  - defect: >-
+      The database-type dispatch reserves a not-implemented arm for any type other than the two
+      it declares, and that arm returns the no-implementation code - it does not fall back to
+      one of the two dialects, does not attempt a best-effort rewrite and does not pass the
+      statement through unpaged. It also raises its error event with an EMPTY message string,
+      alone among the generator's error arms, so a caller that reaches it receives a code and no
+      diagnostic at all.
+    locator: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L396-L398
+    note: >-
+      Preserved as behaviour, not replaced by a fallback and not softened into a pass-through: a
+      generator that returned the original statement unchanged for an unrecognised dialect would
+      silently return the whole result set where the legacy refuses to page at all, which is a
+      correctness change disguised as robustness. The empty message is preserved with it - a
+      candidate that helpfully supplied a diagnostic there would be recording an improvement,
+      which in this store is a bug report. One honest note about how this arm is reached, which
+      is also why the capture drives it explicitly: THE ARM IS UNREACHABLE THROUGH THE TYPE
+      ACCESSOR. The accessor returns the Oracle constant when the connection's
+      database-management-system string names that vendor and the SQL Server constant in every
+      other case, so it has no third outcome and no configuration can make it produce one. The
+      arm is live code guarding an input the accessor cannot supply, and the capture reaches it
+      by supplying the dispatch input directly. See also the parser-lifetime entry below: this
+      arm is one of the two that returns without destroying the instance it created.
+  - defect: >-
+      The empty-order-by substitution. When the input statement carries no ordering, each
+      strategy invents one, because a row-number window and an offset-fetch clause both require
+      an ordering and neither dialect will accept an absent one. It looks like a workaround
+      because it is one, and it is preserved: the substituted expression is emitted into the
+      statement and is therefore part of the byte-exact comparison.
+    locator: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L392
+    note: >-
+      Two things make this sharper than it first appears. First, THE SUBSTITUTE IS
+      DIALECT-ASYMMETRIC: the Oracle form at the locator above substitutes one expression while
+      the two SQL Server forms substitute a different one at :L370 and :L379, and neither
+      substitute is derived from the other. A candidate that unified them onto a single
+      "portable" substitute would produce statements that both dialects accept and that match
+      neither master. Second, this path is not an edge case: the supporting fixture's own
+      retrieve statement carries no ordering at all, so the substitution fires for the
+      repository's only concrete base statement, and the with-ordering cases in the matrix are
+      the contrived ones. What a well-meaning correction would break: raising an error instead of
+      substituting, or omitting the ordering and letting the dialect complain, would turn a
+      working paged retrieve into a failure - and normalizing the two substitutes to one would
+      break byte-exactness on every no-ordering case in the matrix.
+  - defect: >-
+      SQLite is absent from the database-type enumeration entirely. The transaction object
+      declares exactly two database types, and SQLite - the only engine for which this repository
+      carries a connection, a schema or any DDL, and the only one the refactor provisions - is
+      not one of them. The paging path is therefore unreachable for the only engine actually
+      provisioned, while the paging code itself is fully present and maintained.
+    locator: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_trans.sru:L60-L61
+    note: >-
+      A genuine legacy inconsistency, preserved and documented rather than smoothed over BY
+      ADDING A SQLITE ARM - which is the obvious repair and is forbidden twice over: it would
+      invent behaviour the oracle has none of, and it would fabricate a dialect mapping for an
+      engine the legacy never paged. The inconsistency is worse than mere absence, and the
+      capture records the dispatch outcome so that this is visible: because the type accessor
+      returns the SQL Server constant for every database-management-system string that does not
+      name Oracle, a SQLite connection is not rejected by the dispatch at all - it is silently
+      CLASSIFIED AS SQL SERVER, and the SQL Server strategies would emit that dialect's
+      row-limiting syntax against it. That is preserved too. What a well-meaning correction would
+      break: a candidate that detected SQLite and either refused or emitted that dialect's own
+      limit-and-offset syntax would be inventing a third arm and a third statement form with no
+      master to compare either against, and the divergence would be invisible in any test that
+      only asked whether the paged query returned the right rows.
+  - defect: >-
+      The row-count wrapper reduces the statement to a single aliased projected column before
+      wrapping it. It replaces the whole projection with one constant expression carrying a
+      one-character alias, strips the ordering if the statement had one, and wraps the reduced
+      statement in an outer count that carries its own alias and reuses a sentinel name for the
+      derived table. Every part of that is an observable SQL fragment.
+    locator: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L830
+    note: >-
+      Byte-exact INCLUDING THE ALIASES - the one-character alias on the reduced projection, the
+      alias on the outer count expression, and the sentinel alias on the derived table - and
+      including the fact that the reduction happens at all. A candidate that counted over the
+      original projection would return the identical number from a statement that does not match,
+      and a candidate that named the reduced column something more descriptive would too. The
+      wrapper is completed at :L834 and the ordering removal it depends on is at :L831-L832.
+      Recorded alongside it, because it is the same behaviour seen from the other side: the
+      wrapper is NOT EMITTED AT ALL when the page returned fewer rows than the page size, or
+      returned none on the first page, and the totals are computed arithmetically instead
+      [:L820-L823] - including the arm that forces the page count to zero when the computed
+      record count is zero. A candidate that always issued the count query would be strictly more
+      consistent and strictly wrong.
+  - defect: >-
+      The already-ordered test in the unique-index optimization is a substring containment test
+      against the lowercased ordering text, not a token or identifier comparison. A unique-index
+      column is omitted from the appended ordering whenever its lowercased name occurs anywhere
+      inside the existing ordering text, so a short column name that happens to occur inside an
+      unrelated token is judged already ordered and silently omitted, while a table-qualified
+      column name will not be found in an ordering written unqualified and is therefore appended
+      a second time.
+    locator: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L334
+    note: >-
+      Preserved exactly, including both of its failure directions, and the capture records the
+      omission list with the matched substring for each omitted column so that the test's
+      behaviour is legible in the recording rather than inferred from the emitted ordering. A
+      related consequence is recorded with it: the ordering is read back AFTER the unique-index
+      columns have been appended to it [:L341-L342], so what the non-native inner variant later
+      "restores" [:L360] is the APPENDED ordering rather than the statement's original one, and
+      the optimization therefore leaves an ordering in the final statement that the input never
+      carried. What a well-meaning correction would break: replacing the substring test with a
+      proper identifier comparison changes which columns are appended, which changes the emitted
+      ordering, which changes the row-number window, which changes which rows land on which page
+      - a data-correctness change that every byte-exact comparison in this matrix would catch and
+      that a row-count assertion would not.
+  - defect: >-
+      The generator leaks its statement-model instance on two of its return paths. It creates the
+      instance after the page-setting guard has passed and destroys it only where control reaches
+      the end of the function, so the parse-failure return and the not-implemented return both
+      leave it undestroyed. The page-setting guard itself returns before the instance is created
+      and therefore leaks nothing, which is what makes the other two arms an inconsistency rather
+      than a uniform policy.
+    locator: >-
+      ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L312, :L316, :L398, :L401
+    note: >-
+      The same ownership quirk the sibling clause-model workflow records at the statement model's
+      factory function, seen here from the consumer side, and preserved for the same reason: it is
+      an observable of the legacy's lifetime behaviour and the capture records the create-and-
+      destroy pairing per case so the two leaking arms are visible AS leaking arms. What a
+      well-meaning correction would break: nothing in the generated text, which is exactly the
+      hazard - a candidate that disposed deterministically on every path would look strictly
+      better, would pass every statement comparison in this matrix, and would still be a
+      divergence in recorded lifetime behaviour. It is recorded rather than repaired so that the
+      divergence is a finding instead of an invisible improvement.
+  - defect: >-
+      The strategy-selecting inputs are never exercised by the legacy. Paging is switched on, the
+      page size and the page index are set, the native-implementation flag is set and the
+      unique-index column list is supplied through five public setters, and NO LIVE CALL TO ANY OF
+      THEM EXISTS ANYWHERE IN THE LEGACY TREE. The one window carrying the paging surface has its
+      three calls commented out; the only other references are the caller-side proxy forwarders,
+      which forward and drive nothing; and the two setters that choose among the four SQL Server
+      arms are not referenced even in commented form.
+    locator: >-
+      ws_objects/pfw.tests.pbl.src/w_test_thread_sqlquery.srw:L259, :L264, :L266
+    note: >-
+      ORACLE COVERAGE GAP, stated rather than papered over, and it is a different thing from a
+      blocked behaviour - which is why it is recorded here and why blockedBehaviours is absent
+      from this definition. Nothing is missing: the generators are pure PowerScript, present in
+      full in the read-only tree, and they can be driven through the public caller-side setter
+      surface from a harness outside that tree. What is missing is only an input the legacy
+      authors never supplied, exactly as the sibling clause-model workflow's third modification
+      style is declared, legal and never passed. Two consequences the capture records rather than
+      assumes. First, the field defaults decide the default behaviour: the native flag is declared
+      without an initializer and the unique-index list starts empty, so the strategy a caller gets
+      without setting anything is the top-plus-row-number fallback, and the other two strategies
+      are reachable only by supplying inputs nothing in the legacy supplies. Second, the commented
+      calls are evidence and are treated as evidence: they are NOT uncommented to make the capture
+      easier, both because editing the oracle is forbidden and because uncommenting them would
+      destroy the proof that no fixture drives this behaviour. The window is cited for its setter
+      surface and its default page size of five hundred, which are real, and it is given the
+      specification role rather than oracle-window, which is honest.
+      BUILD-NOT-BUY, recorded here because it is the decision this whole pair is the evidence for:
+      no managed SQL-parser package was adopted for any of this. The leading managed candidate
+      parses one dialect's grammar and therefore cannot serve the Oracle rewriter at all, no
+      base-library SQL parser exists, and the acceptance criterion is byte-exact clause-level
+      output - which a focused in-repo clause model satisfies more verifiably than a general
+      parser whose emission style is not ours to pin. The sibling workflow
+      persistence-sqlparser-clause-model characterizes that clause model directly, at the level of
+      its six clause accessors and six clause modifiers; this workflow characterizes the paging
+      rewriter that sits on top of it and reaches it through them.
+
+
+# THE EXEMPTION. This is the one member that makes this definition different from every other
+# in the folder, and it carries the fullest reason in the file. characterization/README.md
+# section 2.7 is the authority for the exemption and section 2.1 is the authority for the rule
+# being exempted from; both are CITED and neither is restated, because three upstream files
+# already carry that rule's text word for word and a fourth copy would be a fourth thing to
+# drift - which is the failure the schema exists to prevent, not to commit.
+#
+# The schema makes exemptionReason mandatory whenever applies is false. That conditional is the
+# mechanism, not a formality: it is what makes an exemption impossible to claim by silence, and
+# removing the reason below while leaving applies false does not produce a terser document, it
+# produces a document that fails validation.
+sharedVolume:
+  applies: false
+  exemptionReason: >-
+    THIS WORKFLOW READS AND WRITES NOTHING, which is the only ground on which the paired-capture
+    shared-volume rule is ever waived, and it is the whole reason this workflow is a separate
+    definition rather than a section of its sibling.
+
+    What is being exempted from, cited so that a reader can see exactly what this reason is
+    answering. The rule this workflow is exempt from is the paired-capture shared-volume rule
+    whose canonical text characterization/README.md section 2.1 owns, and the exemption itself is
+    the one characterization/README.md section 2.7 records - that section names this very
+    capability, and this member is the definition-level claim it requires. Both sections are
+    CITED AND NEITHER IS RESTATED, not even paraphrased: characterization/README.md,
+    docs/PARITY.md and orchestration/README.md already carry that rule's text word for word, and
+    a fourth copy would be a fourth thing to drift, which is the failure this store is arranged
+    to prevent rather than to commit.
+
+    What the behaviour actually is. The two dialect paging rewrites and the row-count wrapper are
+    PURE STRING TRANSFORMS: a statement plus a page size and a page index go in, statement text
+    comes out. There is no query, no connection, no transaction, no cursor, no file and no row.
+    The generator touches its transaction argument for exactly one purpose - reading the database
+    type through the type accessor - so even that argument is an input value rather than a
+    resource being used. Consequently there is NO VOLUME MOUNTED, no database file opened and no
+    persistent state of any kind for the two halves of the pair to share, which means there is
+    nothing to keep still between them: the rule pins volume state so that the master and the
+    candidate answer the same question, and a workflow with no state cannot have that question
+    change underneath it. This is the same fact stated in seeding terms by seedPhase.emptyReason
+    and in capability terms by capabilityArea, and it is stated a third time here because the
+    exemption stands or falls on it.
+
+    Why no database instance is provisioned, and why none may be. NEITHER SQL SERVER NOR ORACLE
+    HAS A SCHEMA, A CONNECTION STRING OR ANY DDL ANYWHERE IN THIS REPOSITORY. Only two dialect
+    constants and two statement generators exist. NO INSTANCE OF EITHER DIALECT IS PROVISIONED,
+    REQUIRED OR REACHABLE - here, in the orchestration manifest, in continuous integration, or
+    anywhere in this refactor - AND NONE MAY BE. Standing one up in order to "really test" a
+    rewriter would fabricate a database the repository carries no evidence for, which is
+    forbidden outright, and it would buy nothing: the transform is complete before any statement
+    is sent, so the emitted text is the entire observable behaviour and executing it would add no
+    comparable output while adding a fabricated dependency. Nothing in this definition or in any
+    recording taken under it carries a connection string, a server or service name, a data-source
+    name, a credential or a credentialed URI for either dialect.
+
+    And the inconsistency that makes the exemption sharper rather than more convenient: SQLITE -
+    the only engine this repository carries a connection and a schema for, and the only one the
+    refactor provisions - IS ABSENT FROM THE LEGACY DATABASE-TYPE ENUMERATION ENTIRELY. The two
+    declared types are the two dialects for which no instance exists, and the one engine that
+    does exist is not among them, so the dialects that would need a volume have none and the
+    engine that has one is never paged. That is recorded as a preserved legacy inconsistency
+    under provesDefects rather than repaired.
+
+    The limits of this exemption, stated so it cannot be read as a precedent. It is NARROW AND IT
+    IS NOT A LOOPHOLE. It holds only while the workflow reads and writes nothing, it is claimed
+    by this workflow alone among the fifteen in the roster, and it confers nothing on any
+    neighbour: the sibling clause-model workflow's parse and clause manipulation also touch no
+    database, and that workflow is still captured under the rule in full, because its oracle is a
+    window inside the same oracle application whose volume state both halves of its pair share.
+    Being exempt from the volume rule exempts this workflow from NOTHING ELSE - the mask still
+    applies identically to both sides, the recordings are still text-based and diffable, the
+    defect roster is still what the pair must prove, and no timing value is an assertion here any
+    more than anywhere else. If any part of this workflow ever touches the persistence volume,
+    the exemption lapses at that moment and section 2.1 governs it in full.
+
+# The honest state of this workflow, and the only value the schema admits. Nothing here has been
+# run: no paired capture has been taken on either side. The legacy half needs a PowerBuilder
+# toolchain that is not present, and this workflow additionally needs a harness outside the
+# read-only tree to reach a generator that no fixture drives. Note that the missing container
+# runtime is NOT among this workflow's reasons - it is the one definition in the store that would
+# need no compose bring-up and no volume even if everything else were available, which is exactly
+# what the exemption above says. Nothing in this file may be read as implying a verified run or a
+# passing comparison.
+executionStatus: specified-not-executed
+
+# Cross-references only. Neither sibling is merged with this one and each pair stays independently
+# comparable under its own identifier. The clause-model workflow characterizes the six-clause
+# statement model this rewriter sits on and reaches through its accessors and modifiers - it is
+# the layer below. The chunked-query workflow is the consumer that runs this rewriter for real, in
+# a paged retrieval against the one engine the repository provisions, and it IS captured under the
+# shared-volume rule; the boundary between the two is precisely the boundary this definition's
+# exemption is drawn along.
+relatedWorkflows:
+  - persistence-sqlparser-clause-model
+  - persistence-thread-sqlquery-chunked

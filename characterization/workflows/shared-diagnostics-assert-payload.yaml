@@ -1,0 +1,1110 @@
+# yaml-language-server: $schema=./workflow.schema.json
+#
+# PowerFramework -> .NET 10 | paired characterization workflow definition
+#
+# This document SPECIFIES a capture. It contains no code, no recording and no result, and it
+# asserts no run: characterization/README.md section 7 states the store-wide limitation and
+# executionStatus below states this workflow's.
+#
+# Two conventions of this file are worth stating before it is read, because both are load-bearing
+# and neither is obvious.
+#
+#   1. THE PAYLOAD SEPARATOR IS NAMED, NEVER EMBEDDED. The behaviour under characterization packs
+#      seven fields into one string joined by a CRLF sequence, and two of those fields carry lone
+#      line-feed characters as ordinary content. A literal carriage return written into a scalar
+#      here would be invisible in review, would be silently rewritten by any editor that
+#      normalises line endings, and would corrupt the one distinction the workflow exists to pin.
+#      Every reference below therefore names the separator in words and identifies its positions
+#      by field index. Nothing in this file contains a carriage return.
+#
+#   2. "ASSERTION" MEANS A RUNTIME PRECONDITION CHECK. The legacy construct characterized here is
+#      a precondition check that packs a diagnostic payload and terminates the process. It is not
+#      a test assertion, and this workflow records no elapsed, latency, duration or throughput
+#      value of any kind - characterization/README.md section 6.4 forbids it, and the repository
+#      publishes no target one could be asserted against.
+schemaVersion: "1"
+
+workflowId: "shared-diagnostics-assert-payload"
+
+title: "Assertion payload protocol and the fail-fast posture it enforces"
+
+capabilityArea: >-
+  The assertion payload protocol - a runtime precondition check that packs a seven-field diagnostic
+  payload into a single delimited string, throws it as a typed failure, and is unpacked by the
+  framework application object's system-error handler - together with the fail-fast posture that
+  handler enforces by terminating the process rather than degrading.
+
+targetService: "Shared.Diagnostics"
+
+description: >-
+  THE WORKFLOW SPANS A PRODUCER AND A CONSUMER THAT LIVE IN DIFFERENT LIBRARIES, AND NEITHER HALF
+  IS THE BEHAVIOUR ON ITS OWN. The producer is the global assertion function object in the common
+  library: it composes a numbered field list, packs it into one string joined by a CRLF sequence,
+  attaches four of those fields to a typed failure object as public members, sets the packed string
+  as that object's message, and throws. The consumer is the framework application object's
+  system-error handler: it recognises the throw by an equality test against a fixed marker, splits
+  the message back into fields, populates the runtime error record from some of them, assembles a
+  labelled human-readable report from what it populated, displays that report with a stop
+  indicator, and then terminates the process. Characterizing either half alone would miss the
+  point. The producer's field list is only observable through what the consumer unpacks, and the
+  consumer's report is only meaningful against the payload the producer packed - so the pair is
+  captured end to end, and the caught path is captured alongside the uncaught one precisely
+  because the two paths surface DIFFERENT SUBSETS of the same payload.
+
+
+  WHAT IS DELIBERATELY NOT MASKED, stated explicitly because every masked field is a field a
+  regression can hide in, and because this member is the only place the schema admits the register
+  (determinismMask entries carry no note member by design). The following are compared, always,
+  and no entry in determinismMask below may be read as covering any of them: the FIELD COUNT that
+  the consumer's split observed, and the count the producer packed; the assembled report's LABEL
+  IDENTIFIERS and their order; the PRESENCE OR ABSENCE of the conditional window line; the
+  PRESENCE OR ABSENCE of the conditional call-stack section; the four public member values the
+  caught path surfaces, apart from the frame text inside the stack-trace member and the line-number
+  value, both of which have their own mask entries; the CAUGHT-VERSUS-TERMINATED outcome; the
+  assertion marker string; the fixed number-field literal; the message field's text; and the three
+  literal separators the caught path composes its record with. The frame COUNT and ORDER of a stack
+  trace are likewise compared - only the frame TEXT is masked, and that asymmetry is the whole
+  point of the first mask entry.
+
+
+  THE CAPTURE RULE THAT GOVERNS THIS PAIR IS NOT RESTATED HERE. characterization/README.md section
+  2.1 carries its canonical text and is the authority for it; the same text is owned word for word
+  by docs/PARITY.md section 4.2 and orchestration/README.md section 7.2, and a fourth copy would be
+  a fourth thing to drift. sharedVolume below records that the rule applies; the README records
+  what it says.
+
+
+  SECRET POSTURE. An assertion message is arbitrary caller-supplied text, so in a real deployment
+  the message field and the composed report could carry anything the caller passed - including
+  data that must never be written to an evidence store. This workflow therefore drives
+  FIXTURE-AUTHORED MESSAGES ONLY, which is stated as a precondition rather than left to judgement,
+  and no key, certificate, password, token or credential fragment appears in this definition or may
+  appear in any recording taken under it. characterization/README.md section 6.2 is the governing
+  rule and docs/SECRETS.md is the locator inventory. No redaction member is declared below, and
+  that is a deliberate finding rather than an omission: under the fixture-authored-messages
+  precondition no field this capture records is a credential, and redacting the fixture's own
+  message text would destroy the very signal the one-argument-versus-two-argument defect exists to
+  prove.
+
+
+  ARTIFACT NAMING. Every file named in recordingArtifacts below uses a diffable text extension. The
+  captured output includes a multi-frame stack trace and a multi-line assembled report, which pulls
+  hard toward a log or a dump extension, and both are forbidden: the repository's root .gitignore
+  carries the *.log, *.zip, *.rar, *.bak, *.dmp and *.bat patterns UNANCHORED, so they match at
+  every depth including inside this store, and its only negations are anchored at /res and
+  /samples and rescue nothing here. A capture named that way is silently untracked - present on the
+  machine that produced it, absent from git status, from review and from CI. The root .gitignore is
+  not to be modified; the fix is to name the file correctly, which the schema's own filename
+  pattern enforces by making those six extensions unspellable.
+
+oracleFixtures:
+  # The oracle window. characterization/README.md section 4.6 assigns this window to the shared
+  # libraries row as the Diagnostics oracle, so the fixture choice is the store's own, not this
+  # definition's invention. 139 lines; four command buttons drive the four capture cases.
+  - path: "ws_objects/pfw.tests.pbl.src/w_test_assert.srw"
+    role: "oracle-window"
+    locators:
+      # L39 - the one-argument helper: the boolean assertion form with no message.
+      - "L39"
+      # L42 - the two-argument helper: the same form carrying a fixture-authored message.
+      - "L42"
+      # L79 - the stack-trace accessor called on demand with an indent-prefix argument.
+      - "L79"
+      # L97-L101 - the try-catch over the typed failure, the only path that does not terminate.
+      - "L97-L101"
+      # L100 - the composed record, which reads four public members and no others.
+      - "L100"
+      # L119 - two-argument, uncaught.
+      - "L119"
+      # L137 - one-argument, uncaught.
+      - "L137"
+
+  # The consuming application object. REPOSITORY ANOMALY, AND THE REASON EVERY CITATION IN THIS
+  # FILE IS A FULL PATH: two distinct files in this repository carry the application-object
+  # extension under the same base name. This one - ws_objects/pfw.pbl.src/pfw.sra, 145 lines - is
+  # the FRAMEWORK application object and is authoritative for this workflow. The other,
+  # ws_objects/pfw.pack.pbl.src/pfw.sra, 59 lines, is the packager application object: a different
+  # file with different contents and no part in this behaviour. A bare filename would be ambiguous
+  # between them, so no citation anywhere in this definition uses one.
+  - path: "ws_objects/pfw.pbl.src/pfw.sra"
+    role: "oracle-window"
+    locators:
+      # L45 and L48-L69 - the split function, defined on the application object itself. L64-L66 is
+      # the trailing-empty-segment drop that makes a non-seven field count reachable.
+      - "L45"
+      - "L48-L69"
+      - "L64-L66"
+      # L110-L144 - the system-error handler in full: the consumer half of the behaviour.
+      - "L110-L144"
+      # L114 - the marker equality test that gates the unpacking.
+      - "L114"
+      # L115 - the split on the CRLF separator.
+      - "L115"
+      # L116-L118 - the two-or-more branch: number from field one, text from field two.
+      - "L116-L118"
+      # L119-L125 - the exactly-seven branch: fields three through seven.
+      - "L119-L125"
+      # L129-L139 - the labelled report assembly, including both conditional lines.
+      - "L129-L139"
+      # L131-L133 - the window line, suppressed when the two names are equal.
+      - "L131-L133"
+      # L137-L139 - the call-stack section, present only when the trace text is non-empty.
+      - "L137-L139"
+      # L141 - display with the stop indicator. L143 - process termination.
+      - "L141"
+      - "L143"
+
+  # The producer, in the common library. Cited as specification because the legacy tree is
+  # simultaneously read-only and the ONLY statement of intended behaviour in this repository -
+  # there is no prose document that specifies the payload's construction, so these objects are the
+  # authoritative statement of it and are read as one.
+  - path: "ws_objects/pfw.common.pbl.src/assert.srf"
+    role: "specification"
+    locators:
+      # L3 - the global function object is itself named "assert", which is why the consumer's
+      # marker literal has exactly that spelling.
+      - "L3"
+      # L7-L13 - the seven prototypes: the failure entry point plus six assertion overloads
+      # across boolean, return-code and object conditions, each in a one- and two-argument form.
+      - "L7-L13"
+      # L16-L87 - the payload producer in full.
+      - "L16-L87"
+      # L19 - the delimiter constant: the CRLF sequence that separates the packed fields.
+      - "L19"
+      # L22 - field one, a fixed literal.
+      - "L22"
+      # L24-L27 - field two: the default message, and the line-feed-joined argument suffix.
+      - "L24-L27"
+      # L29-L32 - the native stack-trace call, with an empty catch that swallows its failure.
+      - "L29-L32"
+      # L37 - the gate that decides whether two fields or seven are packed.
+      - "L37"
+      # L38-L59 - frame selection and the dot-count parse that decides whether the window-or-menu
+      # name and the object name come out equal.
+      - "L38-L59"
+      # L61-L65 - the frame array and the line-feed-joined trace text that becomes field seven.
+      - "L61-L65"
+      # L66-L70 - fields three through seven.
+      - "L66-L70"
+      # L71 - the location suffix appended to the public information member and NOT to field two.
+      - "L71"
+      # L74-L80 - the join with the delimiter, and the packed string set as the failure's message.
+      - "L74-L80"
+      # L83 - the throw.
+      - "L83"
+      # L89-L99 - the two boolean overloads the fixture's helpers call.
+      - "L89-L99"
+
+  - path: "ws_objects/pfw.common.pbl.src/assertionfailed.sru"
+    role: "specification"
+    locators:
+      # L8-L13 - the failure type derives from the runtime error type.
+      - "L8-L13"
+      # L18-L24 - the seven public members, of which the fixture's caught composition reads four.
+      - "L18-L24"
+
+  - path: "ws_objects/pfw.common.pbl.src/stacktraceinfo.srf"
+    role: "specification"
+    locators:
+      # L7-L10 - four overloads across an offset and a prefix.
+      - "L7-L10"
+      # L16 - the prefix-only overload the fixture calls, delegating with a fixed offset.
+      - "L16"
+      # L22-L30 - the implementation's entry, the offset arithmetic, and the two guards that each
+      # return an empty string rather than a trace.
+      - "L22-L30"
+      # L32-L36 - the prefix applied per frame, frames joined by a line feed.
+      - "L32-L36"
+      # L38-L39 - the catch that returns an empty string, making an empty trace reachable.
+      - "L38-L39"
+
+  - path: "ws_objects/pfw.common.pbl.src/stacktrace.srf"
+    role: "specification"
+    locators:
+      # L7 - the frame source is a native binding into a closed binary. Its frame-text grammar is
+      # documented nowhere in this repository, which is why frame TEXT is masked below while frame
+      # count and order are compared.
+      - "L7"
+
+# ---------------------------------------------------------------------------------------------
+# SEED PHASE - empty, and accounting for why.
+# ---------------------------------------------------------------------------------------------
+seedPhase:
+  steps: []
+  emptyReason: >-
+    THE ASSERTION MACHINERY HOLDS NO PERSISTENT STATE, so there is nothing to delete, nothing to
+    create and nothing to seed. Every field of the payload is derived at the moment of failure from
+    the condition's outcome, the caller-supplied message and the native frame list; nothing is read
+    from or written to storage on either the producing or the consuming side, and no row, file,
+    table or connection participates in the behaviour. Each capture case is therefore a fresh
+    invocation against a fresh process and carries its own starting state by construction.
+
+
+    ONE CONSEQUENCE OF THAT IS OPERATIONAL AND IS RECORDED HERE AS WELL AS IN THE CAPTURE PHASE'S
+    PRECONDITIONS, because a reader who checks only the seed phase would otherwise miss it. Two of
+    the four capture cases end in process termination at ws_objects/pfw.pbl.src/pfw.sra:L143 - that
+    termination is the behaviour under characterization, not a fault. Each such case must therefore
+    be driven as its OWN process invocation, and the capture harness must treat the process exiting
+    as the expected outcome of that case rather than as a harness failure. A harness that retries a
+    terminated case, or that reports it as an error, has misread the fail-fast posture this workflow
+    exists to pin. The remaining two cases do not terminate, and the difference between the two
+    groups is itself a recorded output.
+  runsOncePerPair: true
+  neverBetweenCaptures: true
+
+# ---------------------------------------------------------------------------------------------
+# CAPTURE PHASE - the behaviour, taken twice.
+# ---------------------------------------------------------------------------------------------
+capturePhase:
+  behaviourUnderTest: >-
+    A FAILING RUNTIME PRECONDITION CHECK, FROM THE POINT THE PAYLOAD IS PACKED TO THE POINT THE
+    PROCESS TERMINATES, in four cases plus their sub-cases. Every case drives the same underlying
+    failure - a boolean condition that evaluates false - and the cases differ only in which
+    assertion form is used, whether the throw is caught, and whether the payload is examined through
+    the typed failure's public members or through the packed string the system-error handler
+    unpacks.
+
+
+    CASE 1 - ONE ARGUMENT, UNCAUGHT. ws_objects/pfw.tests.pbl.src/w_test_assert.srw:L137 invokes the
+    one-argument helper at :L39, which calls the boolean assertion form with no message. Because no
+    message is supplied, field two of the payload takes whatever the producer defaults it to at
+    ws_objects/pfw.common.pbl.src/assert.srf:L24 - the default is captured, never assumed. The throw
+    is not caught, so it reaches the system-error handler and the process terminates.
+
+
+    CASE 2 - TWO ARGUMENTS, UNCAUGHT. :L119 invokes the message-carrying helper at :L42. The throw
+    propagates and the process terminates exactly as in case 1. The two assembled reports are then
+    differenced, and THAT DIFFERENCE IS THE MESSAGE FIELD'S ENTIRE CONTRIBUTION - which is why both
+    reports are recorded in full rather than only the second.
+
+
+    CASE 2B - TWO ARGUMENTS, UNCAUGHT, WITH A NON-SEVEN FIELD COUNT. A variant of case 2 driven with
+    a fixture-authored message that itself contains one occurrence of the payload's own delimiter
+    sequence. The producer still packs its normal field list, but the consumer's split at
+    ws_objects/pfw.pbl.src/pfw.sra:L115 returns a count that is not seven, so the exactly-seven
+    branch at :L119 does not run and every field from three onward is read by nothing. This is the
+    case that proves the partial-unpack defect, and it is a variant rather than a fifth case because
+    it exercises the identical code path with different input.
+
+
+    CASE 3 - TWO ARGUMENTS, CAUGHT. :L97-L101 wraps the same call in a try-catch over the typed
+    failure and, at :L100, emits a single composed record built from FOUR of the failure's public
+    members joined by three fixed literal separators. Both the composed record and each of the four
+    members individually are recorded, so that a difference can be attributed either to the
+    composition or to a member value. This case never reaches the system-error handler, so it
+    produces no assembled report and does not terminate.
+
+
+    CASE 4 - STACK TRACE ON DEMAND. :L79 calls the stack-trace accessor with an indent-prefix
+    argument and displays the result. No precondition fails, no payload is packed, nothing
+    terminates. Sub-case 4A uses the fixture's own prefix; sub-case 4B repeats the call with a
+    different prefix so that the argument's effect on the output is proven rather than assumed; and
+    a boundary sub-case uses the empty prefix, because the producer applies the prefix only when it
+    is non-empty at ws_objects/pfw.common.pbl.src/stacktraceinfo.srf:L34.
+
+
+    THE CONSUMING SIDE, STEP BY STEP, is the same for cases 1, 2 and 2B and is recorded per case.
+    All locators are in ws_objects/pfw.pbl.src/pfw.sra. (a) At :L114 the handler acts on the payload
+    ONLY when the error record's object field equals the assertion marker; the outcome of that
+    equality test is recorded. (b) At :L115 it splits the error text on the CRLF separator into a
+    string array using the split function defined on the application object itself at :L48-L69. (c)
+    When the resulting count is TWO OR MORE, :L117 populates the error number from field one and
+    :L118 the error text from field two. (d) When the count is EXACTLY SEVEN, :L120-:L124
+    additionally populate the window-or-menu name from field three, the object name from field four,
+    the object-event name from field five, the line number from field six, and the stack trace from
+    field seven - the seventh going into a local variable rather than onto the error record, which
+    is why it has no error-record counterpart below. (e) At :L129-:L139 it assembles a labelled
+    report: a fixed type label, an information line, a WINDOW LINE ONLY WHEN the window-or-menu name
+    differs from the object name at :L131-L133, an object line, a function line, a line-number line,
+    and a CALL-STACK SECTION ONLY WHEN the stack trace is non-empty at :L137-L139. (f) At :L141 it
+    displays the report with a stop indicator and at :L143 it terminates the process. Steps (e), (f)
+    and the termination sit OUTSIDE the marker-gated block and therefore run for every system error
+    that reaches this handler, whether or not the marker matched - that scope is itself recorded.
+
+
+    The report's labels are fixed Chinese strings. They are the identifiers, so they are reproduced
+    verbatim and are never translated, paraphrased or transliterated in a recording.
+
+  observedOutputs:
+    # -- The payload as the producer packed it ---------------------------------------------------
+    - name: "packed-payload-field-inventory"
+      description: >-
+        The payload exactly as produced, recorded as an ordered inventory of its seven fields:
+        field one the fixed number literal, field two the message, field three the window-or-menu
+        name, field four the object name, field five the object-event name, field six the line
+        number, field seven the stack-trace text. A difference in which fields are present, or in
+        their order, means the producer's field list changed - which changes what every downstream
+        branch can see.
+      format: >-
+        One record per field, keyed by its one-based field index, with the field's text as the
+        value. THE DELIMITER IS NAMED, NOT EMBEDDED: the recording carries a separate list of the
+        field-boundary indices at which the CRLF separator occurred, and never a raw carriage
+        return, so the projection stays diffable and cannot be mangled by an editor. Lone line-feed
+        characters that appear INSIDE a field are content, not boundaries, and are recorded as an
+        escape sequence so that the two are visibly distinct.
+      locator: "ws_objects/pfw.common.pbl.src/assert.srf:L74-L78"
+
+    - name: "packed-payload-field-count-as-produced"
+      description: >-
+        How many fields the producer actually packed - two when the native frame list was not deeper
+        than two, seven otherwise. Recorded separately from the count the consumer observed, because
+        the two can disagree and the disagreement is the partial-unpack defect.
+      format: "Integer."
+      locator: "ws_objects/pfw.common.pbl.src/assert.srf:L37"
+
+    - name: "message-field-default-one-argument-form"
+      description: >-
+        The value field two takes when no message argument is supplied. Captured from the oracle
+        rather than assumed to be empty: the producer seeds field two with a fixed default before it
+        considers the argument at all, so the one-argument form's payload is NOT the two-argument
+        form's payload minus a message.
+      format: "The field's text, verbatim."
+      locator: "ws_objects/pfw.common.pbl.src/assert.srf:L24"
+
+    - name: "message-field-with-argument-two-argument-form"
+      description: >-
+        The value field two takes when a message argument is supplied - the same fixed default,
+        followed by a LINE-FEED character and then the argument. The joining character here is a
+        lone line feed, NOT the CRLF sequence that separates fields, so field two legitimately
+        contains a line break as content. A recording that shows the two joined by the field
+        separator instead has fabricated a field boundary.
+      format: >-
+        The field's text, with the embedded line feed recorded as an escape sequence so it is
+        visibly distinguishable from a field boundary.
+      locator: "ws_objects/pfw.common.pbl.src/assert.srf:L25-L27"
+
+    # -- The consumer's marker gate and split ----------------------------------------------------
+    - name: "marker-gate-outcome"
+      description: >-
+        Whether the error record's object field equalled the assertion marker, and therefore whether
+        the handler unpacked the payload at all. A false outcome here means the report is assembled
+        from whatever the runtime left on the error record rather than from the payload, so this flag
+        is what tells a reviewer which of two very different reports they are looking at.
+      format: "Boolean, alongside the marker string the test compared against."
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L114"
+
+    - name: "split-field-count-observed-by-consumer"
+      description: >-
+        The count the consumer's split returned. This is the value both unpack branches are gated on,
+        and it is the single most important number in the whole capture: two-or-more opens the first
+        branch, exactly seven opens the second, and anything else in between silently discards
+        everything from field three onward.
+      format: "Integer."
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L115"
+
+    - name: "split-branch-taken"
+      description: >-
+        Which of the three outcomes the count produced - below two so neither branch ran, two-or-more
+        but not seven so only the first ran, or exactly seven so both ran. Recorded as its own field
+        rather than left to be inferred from the count, because the inference is exactly the step a
+        reader gets wrong.
+      format: >-
+        One of the three outcomes as a stable identifier, plus the count that produced it.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L116-L125"
+
+    # -- Each populated error-record field ------------------------------------------------------
+    - name: "error-record-number-from-field-one"
+      description: >-
+        The error number, parsed from field one. Note that it is populated and then NEVER RENDERED -
+        no line of the assembled report displays it - so field one is invisible in the human-readable
+        output of both the caught and the uncaught path and is only observable here.
+      format: >-
+        The numeric value as parsed, alongside the source text it was parsed from, so a failed parse
+        is visible as a mismatch between the two rather than as a bare zero.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L117"
+
+    - name: "error-record-text-from-field-two"
+      description: >-
+        The error text, taken from field two. This is what the report's information line renders. It
+        is the message field WITHOUT the location suffix that the caught path's information member
+        carries, and that discrepancy is recorded separately below.
+      format: >-
+        The text verbatim, with any embedded line feed recorded as an escape sequence.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L118"
+
+    - name: "error-record-window-menu-name-from-field-three"
+      description: >-
+        The window-or-menu name, populated only on the exactly-seven branch. Its value relative to
+        the object name is what decides whether the window line appears, so it is recorded even when
+        that line is suppressed.
+      format: >-
+        The text verbatim, or an explicit not-populated marker when the branch did not run.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L120"
+
+    - name: "error-record-object-name-from-field-four"
+      description: >-
+        The object name, populated only on the exactly-seven branch. WHEN THAT BRANCH DOES NOT RUN
+        THIS FIELD RETAINS THE ASSERTION MARKER, because the marker is what the runtime put on the
+        error record in the first place and nothing overwrites it - so the report's object line then
+        renders the literal marker instead of a real object name. That substitution is a directly
+        visible symptom of the partial-unpack defect and is one of the things case 2B proves.
+      format: >-
+        The text verbatim, plus a flag recording whether the value is the marker rather than an
+        unpacked field.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L121"
+
+    - name: "error-record-object-event-name-from-field-five"
+      description: >-
+        The object-event name, populated only on the exactly-seven branch. The report's function line
+        renders it. Note that the producer derives it by position within the native frame text rather
+        than from any structured source, so on a frame carrying a single separating dot it holds the
+        control name rather than an event name - a quirk of the parse, reproduced not corrected.
+      format: >-
+        The text verbatim, or an explicit not-populated marker when the branch did not run.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L122"
+
+    - name: "error-record-line-number-from-field-six"
+      description: >-
+        The line-number value. THE VALUE IS MASKED and excluded from the comparison - it is a legacy
+        source line number with no target counterpart - while its population state is compared
+        through the separate output below. Recorded rather than dropped so a reviewer can see the
+        field was handled deliberately.
+      format: >-
+        A stable placeholder in place of the number, with the source text it was parsed from
+        likewise placeheld.
+      maskedAsNonBehavioural: true
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L123"
+
+    - name: "error-record-line-number-population-state"
+      description: >-
+        Whether the line-number field was populated at all, and whether the text it was populated
+        from parsed as a number. THIS IS COMPARED, unlike the value itself: a field that stopped
+        being populated, or that began failing to parse, is a behavioural change, and the parse
+        matters because a non-numeric source text yields a silent zero rather than an error.
+      format: >-
+        Two booleans - populated, and parsed - with no numeric value.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L123"
+
+    - name: "stack-trace-text-from-field-seven"
+      description: >-
+        Field seven, the trace text. It is taken into a LOCAL VARIABLE rather than onto the error
+        record, which is why it has no error-record counterpart above and why its only observable
+        effect is whether the report's call-stack section appears. Its frames are joined by lone line
+        feeds, so like field two it legitimately contains line breaks as content.
+      format: >-
+        The frame list as an ordered array of frames rather than as one joined string, so that frame
+        count and order are comparable independently of frame text; each frame's text is masked per
+        the first determinism-mask entry, and embedded line feeds are recorded as escape sequences.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L124"
+
+    - name: "stack-trace-frame-count-and-order"
+      description: >-
+        How many frames the trace carried and in what order. COMPARED - only the frame text is
+        masked. A trace that loses a frame, gains one, or reorders them is a behavioural difference,
+        and it is the one thing about the trace that a masked comparison can still detect.
+      format: >-
+        An integer count plus the ordered sequence of masked frame placeholders.
+      locator: "ws_objects/pfw.common.pbl.src/assert.srf:L61-L65"
+
+    # -- The assembled report -------------------------------------------------------------------
+    - name: "assembled-report-text"
+      description: >-
+        The complete labelled report the handler assembled, as the text it would display. This is the
+        principal human-readable output of the uncaught path and the artifact a reviewer reads first.
+      format: >-
+        The report verbatim as multi-line text, with its fixed Chinese label identifiers reproduced
+        exactly and never translated, and with the newline convention of the fourth determinism-mask
+        entry applied identically to both sides.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L129-L139"
+
+    - name: "assembled-report-label-sequence"
+      description: >-
+        The ordered list of label identifiers the report actually emitted. Recorded separately from
+        the report text so that a structural change - a missing line, a reordered line, a renamed
+        label - is detectable independently of the values those lines carried. COMPARED, and never
+        masked.
+      format: >-
+        An ordered array of the label identifiers, drawn from the fixed set the handler emits -
+        "类型: SYSTEM", "信息: ", "窗口: ", "对象: ", "函数: ", "行号: " and "调用栈:" - reproduced
+        verbatim as the identifiers they are.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L129-L139"
+
+    - name: "window-line-present"
+      description: >-
+        Whether the conditional window line appeared. It is suppressed whenever the window-or-menu
+        name equals the object name, which the producer's frame parse can make happen structurally
+        rather than by accident. COMPARED as a boolean in its own right, because a mechanical port
+        that drops the condition would emit the line unconditionally and no comparison of the report
+        text alone would say clearly why the two sides differ.
+      format: "Boolean, alongside the two names the condition compared."
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L131-L133"
+
+    - name: "call-stack-section-present"
+      description: >-
+        Whether the conditional call-stack section appeared. It is present only when the trace text
+        is non-empty, and an empty trace is genuinely reachable because two separate sites swallow a
+        native failure and yield an empty string. Both outcomes are captured. COMPARED as a boolean.
+      format: "Boolean, alongside whether the trace text was empty."
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L137-L139"
+
+    - name: "report-and-termination-scope"
+      description: >-
+        Whether the report assembly, the display and the termination ran even though the marker gate
+        did not match. They sit outside the marker-gated block, so they run for EVERY system error
+        reaching this handler - the gate governs only the unpacking. Recorded because a port that
+        moves the termination inside the gate would degrade instead of terminating for every
+        non-assertion system error, which is precisely the softening the fail-fast posture forbids.
+      format: >-
+        Two booleans - marker matched, and report-plus-termination ran - which must be independent.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L114-L143"
+
+    - name: "display-severity-indicator"
+      description: >-
+        The severity indicator the report is displayed with, and the display's title. Only the
+        DELIVERY CHANNEL changes in the target - a dialog becomes a structured machine-readable
+        result - so the indicator, the title and the text are all preserved and all compared.
+      format: >-
+        The indicator as its legacy identifier, plus the title string verbatim - the handler's
+        title is "系统错误", reproduced as the identifier it is.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L141"
+
+    - name: "process-outcome"
+      description: >-
+        Whether the case ended in process termination or in a caught failure that continued. THE
+        SINGLE MOST IMPORTANT COMPARED OUTPUT IN THIS WORKFLOW: it is what proves the fail-fast
+        posture survived. A case recorded as continuing where the master terminated is a parity
+        failure even if every other field matches, and it is the exact shape a well-meaning
+        warning-and-continue change would take.
+      format: >-
+        One of two stable classifications - terminated, or caught-and-continued. The numeric exit
+        code is NOT recorded as a comparison value, per the fifth determinism-mask entry; the fact
+        and the classification of termination are what is compared.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L143"
+
+    # -- Case-differential outputs --------------------------------------------------------------
+    - name: "one-argument-versus-two-argument-report-delta"
+      description: >-
+        The difference between case 1's assembled report and case 2's. That delta IS the message
+        field's contribution, isolated: the two cases differ in nothing else. Recorded as its own
+        output so the contribution is stated rather than left to a reader to diff by eye.
+      format: >-
+        A line-oriented difference between the two reports, with both reports also present in full
+        in their own artifacts.
+      locator: "ws_objects/pfw.common.pbl.src/assert.srf:L25-L27"
+
+    - name: "non-seven-count-discarded-field-inventory"
+      description: >-
+        For case 2B, the fields the producer packed that the consumer never read. This is the direct
+        proof of the partial-unpack defect: the inventory shows fields present on the producing side
+        and absent from every consumer-side output, with no error raised and nothing logged.
+      format: >-
+        An ordered list of the discarded field indices, each with the value the producer packed and
+        an explicit not-read marker on the consumer side, alongside the observed count.
+      locator: "ws_objects/pfw.pbl.src/pfw.sra:L119-L125"
+
+    # -- The caught path -------------------------------------------------------------------------
+    - name: "caught-composed-record"
+      description: >-
+        The single composed record the caught path emits, built from four public members joined by
+        three fixed literal separators. Recorded in full so that a difference can be attributed to
+        the composition itself - a changed separator, a reordered member - and not only to a member
+        value.
+      format: >-
+        The composed text verbatim, with the three literal separators preserved exactly and embedded
+        line feeds recorded as escape sequences.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_assert.srw:L100"
+
+    - name: "caught-member-information"
+      description: >-
+        The failure's information member, recorded individually. It is field two PLUS a location
+        suffix naming the object, the object-event and the line - a suffix the producer appends to
+        this member and NOT to field two - so this member and the uncaught path's error text are
+        deliberately different values drawn from the same source.
+      format: >-
+        The member's text verbatim, with the location suffix's line number masked per the second
+        determinism-mask entry and its embedded line feed recorded as an escape sequence.
+      locator: "ws_objects/pfw.common.pbl.src/assert.srf:L71"
+
+    - name: "caught-member-object"
+      description: >-
+        The failure's object member, recorded individually so the composed record and the member
+        value can be compared independently.
+      format: "The member's text verbatim."
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_assert.srw:L100"
+
+    - name: "caught-member-object-event"
+      description: >-
+        The failure's object-event member, recorded individually.
+      format: "The member's text verbatim."
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_assert.srw:L100"
+
+    - name: "caught-member-stack-trace-info"
+      description: >-
+        The failure's stack-trace member, recorded individually. Its frames are joined by lone line
+        feeds. Frame text is masked; frame count and order are compared.
+      format: >-
+        An ordered array of masked frame placeholders rather than one joined string, matching the
+        projection used for field seven so the two are comparable with each other.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_assert.srw:L100"
+
+    - name: "caught-path-unread-type-members"
+      description: >-
+        Which of the failure type's seven public members the caught composition does NOT read - the
+        window-or-menu name, the line number and the frame array. Recorded because the asymmetry
+        between what the caught path surfaces and what the uncaught path renders is itself the
+        behaviour, and because the frame array has no payload field at all while field one has no
+        member at all. Neither direction of that mismatch is an implementation error.
+      format: >-
+        Two lists - members declared but not read by the composition, and payload fields with no
+        corresponding member - each with its declaring locator.
+      locator: "ws_objects/pfw.common.pbl.src/assertionfailed.sru:L18-L24"
+
+    # -- The stack-trace accessor ----------------------------------------------------------------
+    - name: "stack-trace-on-demand-with-fixture-prefix"
+      description: >-
+        The accessor's returned text with the fixture's own indent prefix applied. The prefix is
+        applied to EVERY frame, not only the first, and frames are joined by lone line feeds.
+      format: >-
+        The returned text as an ordered array of frames, each recorded as its applied prefix plus a
+        masked frame placeholder, so that prefix application is compared while frame text is not.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_assert.srw:L79"
+
+    - name: "stack-trace-on-demand-with-alternate-prefix"
+      description: >-
+        The same call repeated with a different, longer prefix, and a boundary sub-case with the
+        empty prefix. Recorded so the argument's effect is PROVEN rather than assumed: a target
+        implementation that ignored the prefix would be indistinguishable from a correct one if only
+        the fixture's single prefix were ever captured. The empty-prefix sub-case pins the guard that
+        applies the prefix only when it is non-empty.
+      format: >-
+        One frame array per prefix sub-case, keyed by the prefix used, in the same projection as the
+        output above.
+      locator: "ws_objects/pfw.common.pbl.src/stacktraceinfo.srf:L32-L36"
+
+    - name: "stack-trace-on-demand-guard-outcome"
+      description: >-
+        Whether either of the accessor's two empty-return guards fired, and whether its catch
+        swallowed a native failure. All three routes return an empty string, and an empty string is
+        what suppresses the report's call-stack section downstream - so which route produced it is
+        the difference between a shallow stack and a failed native call.
+      format: >-
+        Three booleans - below-minimum guard, offset-exceeded guard, and swallowed failure - plus the
+        frame count the accessor started from.
+      locator: "ws_objects/pfw.common.pbl.src/stacktraceinfo.srf:L22-L30"
+
+  preconditions:
+    - >-
+      EACH TERMINATING CASE RUNS AS ITS OWN PROCESS INVOCATION. Cases 1, 2 and 2B end in process
+      termination at ws_objects/pfw.pbl.src/pfw.sra:L143, so no two of them can share a process and
+      none of them can be followed by another case in the same process. The seed phase's
+      emptyReason records the same requirement, because a reader who checks only the seed phase
+      would otherwise miss it.
+    - >-
+      THE CAPTURE HARNESS TREATS PROCESS TERMINATION AS THE EXPECTED OUTCOME of cases 1, 2 and 2B,
+      not as a harness failure. It must not retry a terminated case, must not report it as an error,
+      and must not wrap the case in anything that prevents the termination from happening - the
+      termination IS the behaviour under characterization. A harness that suppresses it produces a
+      recording of a different system.
+    - >-
+      FIXTURE-AUTHORED ASSERTION MESSAGES ONLY. An assertion message is arbitrary caller-supplied
+      text that flows verbatim into the payload, into the assembled report and into every artifact,
+      so the capture drives only messages authored in the fixture or in this definition and never a
+      message sourced from a real deployment, a configuration value, an environment variable or a
+      captured request. No key, certificate, password, token or credential fragment may be passed as
+      an assertion message or appear in any recording. characterization/README.md section 6.2 is the
+      governing rule.
+    - >-
+      CASE 2B IS DRIVEN WITH A MESSAGE CONTAINING ONE OCCURRENCE OF THE PAYLOAD DELIMITER, so that a
+      field count other than seven is actually observed rather than merely described. The message is
+      fixture-authored and carries no sensitive content. The alternative route to a non-seven count -
+      an empty seventh field, which the split's trailing-empty-segment drop turns into a count of six
+      - is recorded in provesDefects below and may be captured as well where the trace can be driven
+      empty, but the delimiter-bearing message is the route that is deterministically drivable on
+      both sides and is therefore the required one.
+    - >-
+      THE NATIVE FRAME SOURCE IS AVAILABLE ON THE LEGACY SIDE. The producer obtains its frames
+      through a native binding into a closed binary, and its failure is silently swallowed, so a
+      capture taken where that binding is unavailable records the two-field payload rather than the
+      seven-field one and would look like a partial-unpack finding when it is really an environment
+      difference. The frame count the producer started from is recorded so the two are
+      distinguishable.
+    - >-
+      BOTH HALVES OF THE PAIR ARE TAKEN UNDER THE SHARED-VOLUME CAPTURE RULE whose canonical text is
+      characterization/README.md section 2.1. This workflow reads and writes no persistent state of
+      its own, but it claims no exemption from that rule - sharedVolume below records that it
+      applies - so the volume state is left undisturbed across both captures exactly as it would be
+      for a workflow that did touch storage.
+    - >-
+      THE DETERMINISM MASK BELOW IS CONFIGURED ONCE AND USED FOR BOTH CAPTURES. Determinism is a
+      property of the pair, not of a run: configuring a seam differently for the second half
+      manufactures a passing comparison out of mismatched data, which is worse than not masking at
+      all.
+
+  recordingArtifacts:
+    - filename: "case1-one-argument-uncaught.json"
+    - filename: "case1-assembled-report.txt"
+    - filename: "case2-two-argument-uncaught.json"
+    - filename: "case2-assembled-report.txt"
+    - filename: "case2b-non-seven-field-count.json"
+    - filename: "case2b-assembled-report.txt"
+    - filename: "case3-two-argument-caught.json"
+    - filename: "case3-composed-record.txt"
+    - filename: "case4-stack-trace-on-demand.json"
+    - filename: "case4-stack-trace-prefixed.txt"
+    - filename: "payload-field-inventory.csv"
+    - filename: "process-outcomes.json"
+    - filename: "one-argument-versus-two-argument-report-delta.txt"
+
+# ---------------------------------------------------------------------------------------------
+# DETERMINISM MASK - inline, both sides, every entry with its reason.
+#
+# The register of what is deliberately NOT masked is in the top-level description above, which is
+# the only member the schema admits it in: mask entries carry no note member, by design.
+# ---------------------------------------------------------------------------------------------
+determinismMask:
+  - seam: >-
+      Stack-trace frame text - the object names, event names and line numbers of the harness's own
+      frames, wherever a trace reaches an output: field seven of the payload, the failure type's
+      stack-trace member and its frame array, and the return value of the on-demand accessor.
+    method: >-
+      Inject the frame source and substitute a deterministic provider, then replace EACH FRAME with
+      its own stable placeholder while PRESERVING THE FRAME COUNT AND THE FRAME ORDER exactly. The
+      frame list is projected as an ordered array of placeholders rather than as one joined string,
+      so that count and order remain comparable after the text is gone. Where a frame's text is
+      itself parsed into another recorded field - the producer derives the window-or-menu name, the
+      object name, the object-event name and the line number by position within one frame's text -
+      the parse is performed on the unmasked frame and only the recorded frame text is masked, so
+      that the parse outcome stays comparable.
+    appliesTo:
+      - "legacy"
+      - "dotnet"
+    reason: >-
+      The frames name the fixture's own routines at their own line numbers. They change whenever the
+      harness changes - adding a line to the fixture renumbers them - and they differ entirely
+      between the legacy and the target implementations, which do not share a call structure, a
+      naming scheme or a frame-text grammar. The grammar itself is unknowable from this repository:
+      the frame source is a native binding into a closed binary, and nothing in the repository
+      documents the format its frames take. BUT THE DEPTH AND ORDER OF A TRACE ARE BEHAVIOUR AND ARE
+      COMPARED - a trace that loses a frame, gains one or reorders them is a real difference, and the
+      producer's own gate on frame count decides whether two fields or seven get packed. Masking the
+      whole trace would therefore discard genuine signal and hide the one field-count difference this
+      workflow most needs to detect. Getting this asymmetry right is the point of the entry: text
+      masked, structure compared.
+
+  - seam: >-
+      The line-number field of the payload - field six, the failure type's line member, and the line
+      number inside the location suffix the producer appends to the information member.
+    method: >-
+      Replace the numeric value with a stable placeholder in the recording, and compare instead the
+      two facts about it that are behavioural: whether the field was POPULATED at all, and whether
+      the text it was populated from PARSED as a number. Both are recorded as their own unmasked
+      output. The source text is placeheld alongside the value so that a parse failure cannot hide as
+      a legitimate zero.
+    appliesTo:
+      - "legacy"
+      - "dotnet"
+    reason: >-
+      It is a line number in a legacy PowerScript source file and has no target counterpart at all -
+      there is no line in the target implementation that corresponds to it, so no substitution could
+      make the two agree and comparing them would fail on every run for a reason unrelated to
+      behaviour. What IS behaviour is whether the handler populated the field and whether the parse
+      succeeded, because the parse turns a non-numeric source text into a silent zero rather than an
+      error, and a field that stopped being populated changes which lines the assembled report emits.
+      Masking the value while comparing the population state keeps exactly the part that carries
+      behaviour.
+
+  - seam: >-
+      Every clock read - any timestamp that reaches a recorded output, a recorded decision or an
+      artifact's content, on either side.
+    method: >-
+      Inject the clock and substitute a fixed, deterministic time source configured once per pair and
+      used for both captures. No elapsed, latency, duration or throughput value is computed or
+      recorded anywhere in this workflow, so there is no timing field to mask - the seam exists to
+      keep one from appearing.
+    appliesTo:
+      - "legacy"
+      - "dotnet"
+    reason: >-
+      A clock read differs on every run by definition rather than by behaviour, so any comparison
+      that includes one fails for reasons unrelated to the system under test and trains readers to
+      ignore red results. This entry is also the point at which the store-wide prohibition on timing
+      becomes concrete for this workflow: characterization compares observable outputs and never
+      execution time, the repository publishes no service-level agreement, latency budget, throughput
+      target or availability commitment against which one could be asserted, and the only
+      quantitative requirement in the brief - the 80% per-service line-coverage gate - is measured in
+      CI from coverage.cobertura.xml and not from this store. Note the vocabulary collision
+      deliberately: "assertion" throughout this workflow means the legacy runtime precondition check,
+      never a test assertion about timing.
+
+  - seam: >-
+      Newline normalization across the whole recording - the assembled report, the composed record,
+      the frame lists and every field that carries a line break as content.
+    method: >-
+      Normalize line endings to a single convention at COMPARISON TIME, applied identically to both
+      sides, and never by editing a stored master. THE ORDER OF OPERATIONS IS THE WHOLE METHOD AND IT
+      IS NOT INTERCHANGEABLE: split the payload into its fields FIRST, structurally, by locating the
+      CRLF separator and recording the field-boundary indices, and only THEN normalize the surrounding
+      record and the content within each field. The separator is identified by field index thereafter
+      and is never re-derived from the normalized text. Field boundaries are carried as indices in the
+      recording rather than as embedded control characters, and a line feed appearing inside a field
+      is recorded as an escape sequence so that content and boundary are visibly distinct at every
+      later step.
+    appliesTo:
+      - "legacy"
+      - "dotnet"
+    reason: >-
+      The master is produced on Windows by PowerBuilder and the candidate runs in a Linux container,
+      so raw line endings differ BY PLATFORM RATHER THAN BY BEHAVIOUR, and a byte-exact comparison of
+      unnormalized text reports a difference on every line of every multi-line recording. Nothing
+      upstream fixes this: the repository's root .gitattributes declares only linguist-language
+      mappings and carries no text or eol rule at all, so Git performs no line-ending translation
+      here, and that file is not in scope to change. THE SPECIAL HAZARD, AND THE SUBTLEST POINT IN
+      THIS DEFINITION: the payload's own field separator IS a CRLF sequence, while field two and field
+      seven both carry LONE LINE FEEDS as ordinary content - field two because the message argument is
+      appended to the default with a line feed, field seven because the trace's frames are joined with
+      one. Normalization applied before the split is therefore destructive in BOTH directions. Turning
+      lone line feeds into CRLF sequences FABRICATES field boundaries, raising the observed count and
+      flipping which unpack branch runs; turning CRLF sequences into line feeds DESTROYS every
+      boundary and collapses the count to one. Either way the corruption looks like a genuine
+      partial-unpack finding, which is exactly the defect this workflow exists to prove and would
+      therefore be indistinguishable from it. Normalize the surrounding record; never touch the
+      separator that defines the payload's field boundaries.
+
+  - seam: >-
+      The process exit code's numeric value, on the cases that terminate.
+    method: >-
+      Record and compare THE FACT of termination and its stable classification - terminated, or
+      caught-and-continued - and mask the platform-specific numeric code out of the comparison. The
+      code is still present in the recording behind a placeholder so a reviewer can see it was handled
+      deliberately rather than dropped.
+    appliesTo:
+      - "legacy"
+      - "dotnet"
+    reason: >-
+      The numeric code a terminating process yields is a property of the runtime and the host - the
+      legacy halt on Windows PowerBuilder and a .NET process termination in a Linux container have no
+      reason to produce the same integer, and neither value is chosen by the behaviour under test. THE
+      TERMINATION ITSELF IS BEHAVIOUR and is compared without exception: it is what proves the
+      fail-fast posture survived, and a case that continued where the master terminated is a parity
+      failure regardless of every other field agreeing. Masking the code while comparing the fact
+      keeps the assertion that matters and drops the one that cannot hold.
+
+# ---------------------------------------------------------------------------------------------
+# PROVES DEFECTS - the behaviours this pair exists to prove SURVIVED.
+#
+# A capture showing corrected behaviour is a parity FAILURE, not an improvement. Each entry names
+# what the legacy does including the part that looks wrong, and each note names what a well-meaning
+# correction would break.
+# ---------------------------------------------------------------------------------------------
+provesDefects:
+  - defect: >-
+      THE PARTIAL-UNPACK PATH SILENTLY DISCARDS FIELDS THREE THROUGH SEVEN. The handler populates the
+      error number and the error text whenever the split count is TWO OR MORE, and then populates the
+      window-or-menu name, the object name, the object-event name, the line number and the stack trace
+      ONLY when the count is EXACTLY SEVEN. For a count of three, four, five or six the first branch
+      runs and the second does not, so fields three onward are read by nothing at all: no error is
+      raised, nothing is logged, and no output records that data was dropped. The loss is directly
+      visible in the assembled report, because the object name then retains the assertion marker - the
+      value the runtime put on the error record - so the report's object line renders the literal
+      marker instead of a real object name, and the function and line-number lines render whatever the
+      runtime happened to leave behind.
+    locator: "ws_objects/pfw.pbl.src/pfw.sra:L110-L144"
+    note: >-
+      TWO CONCRETE COUNTS INSIDE THE THREE-TO-SIX RANGE ARE REACHABLE, AND BOTH ARE PROVEN FROM
+      SOURCE. A COUNT OF THREE: a two-field payload whose message field itself contains one occurrence
+      of the delimiter splits into three, because the delimiter is a CRLF sequence and nothing escapes
+      or quotes a field's content - the message text after the delimiter becomes field three and is
+      discarded. This is the count case 2B drives, because a fixture-authored message is
+      deterministically controllable on both sides. A COUNT OF SIX: the split function drops a TRAILING
+      EMPTY SEGMENT at ws_objects/pfw.pbl.src/pfw.sra:L64-L66, so a genuine seven-field payload whose
+      seventh field - the trace text - is empty ends with the delimiter and splits into six. The
+      producer packed all seven at ws_objects/pfw.common.pbl.src/assert.srf:L66-L70, and the consumer
+      then discards fields three through six, which the producer had correctly populated. An empty
+      trace field is reachable because two separate sites swallow a native failure and yield an empty
+      string. For completeness in the other direction, a delimiter inside field seven on the
+      seven-field path yields a count ABOVE seven and loses fields three through eight, so the exact
+      equality test fails open in both directions.
+
+
+      WHAT A CORRECTION WOULD BREAK: making the second branch unpack whatever fields are present -
+      partially, defensively, or by treating seven as a minimum rather than an exact count - is
+      precisely the silent correction this store forbids. It would produce a report that looks more
+      correct than the oracle's, and here a better-looking result is a bug report. The defect is
+      reproduced and annotated at its point of reproduction, never repaired.
+
+
+      THE ASSERTION MARKER STRING IS A FIXED LITERAL AND ITS EXACT SPELLING IS CONTRACT. The handler's
+      entire unpacking behaviour is gated on one equality test at
+      ws_objects/pfw.pbl.src/pfw.sra:L114 between the error record's object field and that literal:
+      match and the payload is unpacked, miss and the payload is never touched while the report is
+      still assembled and the process still terminates. The spelling is not arbitrary and not free to
+      normalise - it is the NAME OF THE GLOBAL FUNCTION OBJECT THAT THROWS, declared at
+      ws_objects/pfw.common.pbl.src/assert.srf:L3, which is what the runtime places on the error
+      record. Renaming, case-folding, trimming or namespacing it on either side of the port silently
+      disables every unpacking branch at once, and the resulting report is still emitted, so nothing
+      fails loudly. The marker is recorded as a compared output and is never masked.
+
+  - defect: >-
+      THE WINDOW LINE IS SUPPRESSED WHEN THE WINDOW-OR-MENU NAME EQUALS THE OBJECT NAME. The assembled
+      report emits its window line only when the two names differ, so a failure whose two names are
+      identical produces a report with one fewer line than an otherwise identical failure whose names
+      differ - and nothing in the report says a line was omitted.
+    locator: "ws_objects/pfw.pbl.src/pfw.sra:L131-L133"
+    note: >-
+      THE SUPPRESSION IS STRUCTURAL RATHER THAN INCIDENTAL, which is why it fires often enough to
+      matter. The producer derives both names by parsing one native frame's text positionally at
+      ws_objects/pfw.common.pbl.src/assert.srf:L38-L59, and the two branches of that parse differ: when
+      the frame carries two separating dots the window-or-menu name is taken from before the first and
+      the object name from between them, so they differ; but when the frame carries only ONE separating
+      dot, ws_objects/pfw.common.pbl.src/assert.srf:L47-L52 ASSIGNS THE OBJECT NAME FROM THE
+      WINDOW-OR-MENU NAME, making them identical by construction and guaranteeing the line is
+      suppressed. The frame-text grammar that decides which branch runs lives only inside a closed
+      native binary, so which branch fires is not predictable from this repository - which is exactly
+      why the frame text is masked while the WINDOW-LINE PRESENCE FLAG is recorded and compared as its
+      own boolean.
+
+
+      WHAT A CORRECTION WOULD BREAK: a mechanical port that renders the window line unconditionally -
+      the natural outcome of translating the report assembly line by line and losing one conditional -
+      emits a line the legacy suppresses. Diffing the report text alone would show a difference without
+      showing why, so the presence flag is compared separately to make the cause unambiguous.
+
+  - defect: >-
+      THE CALL-STACK SECTION APPEARS ONLY WHEN THE STACK TRACE IS NON-EMPTY. The report appends its
+      call-stack label and the trace text only on a non-empty trace, so a failure with an empty trace
+      produces a report with no call-stack section at all - and again nothing records that a section
+      was omitted rather than empty.
+    locator: "ws_objects/pfw.pbl.src/pfw.sra:L137-L139"
+    note: >-
+      BOTH OUTCOMES ARE CAPTURED, because an empty trace is genuinely reachable rather than
+      theoretical. Three routes produce one, and all three are silent. The producer wraps its native
+      frame call in a try-catch WITH AN EMPTY CATCH BODY at
+      ws_objects/pfw.common.pbl.src/assert.srf:L29-L32, so a native failure leaves the frame count at
+      zero and no trace is packed at all. The on-demand accessor returns an empty string from either
+      of two guards at ws_objects/pfw.common.pbl.src/stacktraceinfo.srf:L27-L30 when the frame count is
+      below its minimum or the offset exceeds the available frames. And its own catch at
+      ws_objects/pfw.common.pbl.src/stacktraceinfo.srf:L38-L39 assigns an empty string on any
+      throwable. An empty trace therefore carries no information about WHY it is empty, which is why
+      the guard-outcome output records the three routes separately.
+
+
+      WHAT A CORRECTION WOULD BREAK: emitting the call-stack label with an empty body, or substituting
+      a placeholder such as a no-frames-available message, adds a line the legacy does not emit. The
+      section's presence is compared as its own boolean for the same reason the window line's is.
+
+  - defect: >-
+      THE UNCAUGHT PATH TERMINATES THE PROCESS; IT DOES NOT DEGRADE. After assembling and displaying
+      the report the handler halts, unconditionally and with no recovery path, no retry, no
+      continuation and no downgrade to a warning. The report assembly, the display and the halt all
+      sit OUTSIDE the marker-gated block, so they run for EVERY system error that reaches this
+      handler - the marker gate governs only whether the payload is unpacked, never whether the
+      process dies.
+    locator: "ws_objects/pfw.pbl.src/pfw.sra:L143"
+    note: >-
+      THE FAIL-FAST POSTURE MUST SURVIVE AS FAIL-FAST. The target equivalent is fail-fast startup
+      validation and process termination on a structural fault - never graceful degradation. Softening
+      the halt into a logged warning, a caught-and-continued path, a health-check failure that leaves
+      the process running, or a retry is a BEHAVIOURAL CHANGE DRESSED AS ROBUSTNESS, and it is the
+      single most likely way this workflow's parity is lost, because every reviewer instinct favours
+      the softer option. The process-outcome output is compared without exception: a case recorded as
+      continuing where the master terminated is a parity failure even when every other field matches.
+
+
+      CROSS-REFERENCES, because the same posture is owned from two other directions and the three must
+      not drift apart. gateway-lifecycle-composition-root characterizes this same handler from the
+      composition-root side, where the initialize and finalize pairing is likewise fail-fast on a
+      structural fault. persistence-thread-task-lifecycle characterizes a worker session whose creation
+      failure is likewise FATAL rather than degraded. A change that softens any one of the three should
+      be recognisable as a change to all three.
+
+
+      A SECOND, RELATED SCOPE FACT TO PRESERVE: because the halt is outside the marker gate, a system
+      error that is NOT an assertion failure still produces the labelled report - assembled from
+      whatever the runtime left on the error record - and still terminates. A port that moves the
+      termination inside the gate would degrade for every non-assertion system error while looking
+      correct for assertion failures, which is why the report-and-termination-scope output records the
+      marker match and the termination independently.
+
+  - defect: >-
+      THE CAUGHT AND UNCAUGHT PATHS EXPOSE DIFFERENT SUBSETS OF THE SAME PAYLOAD. The fixture's caught
+      composition reads FOUR values from the typed failure - the information text, the object name, the
+      object-event name and the stack-trace text - joined by three fixed literal separators, and reads
+      nothing else. The remaining payload content is reachable only through the packed string the
+      system-error handler unpacks. So the same failure, observed through a catch, surfaces a different
+      set of facts than the same failure observed through the system-error handler, and neither view is
+      a superset of the other.
+    locator: "ws_objects/pfw.tests.pbl.src/w_test_assert.srw:L100"
+    note: >-
+      THE ASYMMETRY IS BIDIRECTIONAL AND ALL FOUR DIRECTIONS ARE BEHAVIOUR. First, the failure type
+      declares SEVEN public members at ws_objects/pfw.common.pbl.src/assertionfailed.sru:L18-L24 and
+      the composition reads four of them - the window-or-menu name, the line number and the frame array
+      are declared, populated and never read by the fixture's caught path. Second, PAYLOAD FIELD ONE
+      HAS NO CORRESPONDING MEMBER AT ALL: the fixed number literal exists only in the packed string, so
+      the caught path cannot see it under any circumstances. Third, THE FRAME ARRAY HAS NO
+      CORRESPONDING PAYLOAD FIELD: it is a member only, so the uncaught path cannot see it. Fourth, and
+      most easily missed, THE ONE FIELD BOTH PATHS DO SHARE CARRIES DIFFERENT VALUES: the producer
+      appends a location suffix naming the object, the object-event and the line to the INFORMATION
+      MEMBER at ws_objects/pfw.common.pbl.src/assert.srf:L71 and NOT to field two, so the caught path's
+      information text is strictly longer than the uncaught path's error text for the identical
+      failure. Compounding all of it, the uncaught path populates the error number and then never
+      renders it in any line of the report, so field one is invisible in the human-readable output of
+      both paths.
+
+
+      WHAT A CORRECTION WOULD BREAK: harmonising the two views - exposing all seven fields on the
+      typed failure, or applying the location suffix to field two as well so the two agree - is a
+      silent correction. Every member value and the composed record are recorded individually and
+      compared so the divergence is pinned rather than tidied.
+
+  - defect: >-
+      THE ONE-ARGUMENT AND TWO-ARGUMENT ASSERTION FORMS PRODUCE DIFFERENT PAYLOADS, AND THE
+      ONE-ARGUMENT FORM'S MESSAGE FIELD IS NOT EMPTY. The one-argument form supplies no message and the
+      two-argument form supplies one, but the difference is not the presence or absence of text: the
+      producer seeds the message field with a FIXED DEFAULT before it considers the argument at all,
+      and appends the argument to that default only when the argument is non-empty. The one-argument
+      form therefore yields a payload whose message field holds the default alone, and the two-argument
+      form yields the default followed by a LINE FEED and then the argument.
+    locator: "ws_objects/pfw.tests.pbl.src/w_test_assert.srw:L39,L42"
+    note: >-
+      THE DEFAULT IS CAPTURED, NOT ASSUMED. The whole reason both cases are driven and both assembled
+      reports are recorded in full is that the message field's default is part of the contract and an
+      implementation that treated the one-argument form as producing an EMPTY message field would
+      differ from the oracle on every one-argument failure while passing every two-argument test. The
+      producing site is ws_objects/pfw.common.pbl.src/assert.srf:L24-L27, and the default value it
+      seeds is recorded verbatim as its own output rather than described.
+
+
+      TWO FURTHER PROPERTIES OF THIS SITE ARE CONTRACT. First, THE JOINING CHARACTER IS A LONE LINE
+      FEED, NOT THE FIELD DELIMITER, so the message field legitimately contains a line break as content
+      while remaining ONE field - which is the direct source of the newline hazard recorded in the
+      fourth determinism-mask entry, and the reason the assembled report's information line renders as
+      two display lines for a two-argument failure. Second, the append is guarded on the argument being
+      non-empty, so passing an EXPLICITLY EMPTY message is observationally identical to the
+      one-argument form rather than producing a trailing line feed - a third variant worth capturing
+      alongside the two.
+
+
+      WHAT A CORRECTION WOULD BREAK: normalising the two forms onto one payload shape, replacing the
+      default with an empty string, or joining the default and the argument with the field delimiter
+      instead of a line feed. The last of these would also change the observed field count and would
+      therefore masquerade as the partial-unpack defect above.
+
+# ---------------------------------------------------------------------------------------------
+# CAPTURE RULE, HONEST STATUS, AND CROSS-REFERENCES
+# ---------------------------------------------------------------------------------------------
+
+# The rule applies. Its canonical text is characterization/README.md section 2.1 and is cited from
+# the top-level description and the capture-phase preconditions rather than reproduced here - the
+# same text is owned word for word by docs/PARITY.md section 4.2 and orchestration/README.md
+# section 7.2, and a fourth copy would be a fourth thing to drift. No exemption is claimed: this
+# workflow reads and writes no persistent state, but the exemption is narrow and claiming it would
+# add nothing, so the volume state is left undisturbed across both halves of the pair exactly as it
+# would be for a workflow that did touch storage.
+sharedVolume:
+  applies: true
+
+# No paired capture has been taken, on either side. The legacy half needs a PowerBuilder toolchain
+# that is not present, and nothing in this definition implies a verified run or a parity result.
+executionStatus: "specified-not-executed"
+
+relatedWorkflows:
+  # Owns the same system-error handler from the composition-root side: the initialize and finalize
+  # pairing, and the same fail-fast posture on a structural fault.
+  - "gateway-lifecycle-composition-root"
+  # The same fail-fast posture in the persistence layer, where worker-session creation failure is
+  # likewise fatal rather than degraded.
+  - "persistence-thread-task-lifecycle"
+  # The event broker's ordering and veto semantics. Related because the broker is the other shared
+  # library whose behaviour is carried by an opaque packed string whose encodings must be decomposed
+  # rather than transmitted whole.
+  - "shared-eventful-broker-ordering"

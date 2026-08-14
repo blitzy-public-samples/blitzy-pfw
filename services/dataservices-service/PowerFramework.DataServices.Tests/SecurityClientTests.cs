@@ -1,0 +1,979 @@
+// ==================================================================================================
+//  SecurityClientTests.cs
+//  Conformance tests for Clients/SecurityClient.cs - contracts C-01 (TokenService) and C-02
+//  (CryptoService).
+//  ------------------------------------------------------------------------------------------------
+//  WHAT THESE TESTS ASSERT, AND WHY THAT IS THE RIGHT BAR
+//    The C-01 half has a caller inside this service: the Persistence client attaches the credential
+//    this provider yields. Its bar is therefore behavioural - reuse, refresh, typed failure,
+//    cancellation.
+//
+//    The C-02 half has NO caller inside this service, and that is a discovery rather than a gap. A
+//    repository-wide search establishes that the legacy n_crypto is not used anywhere in the three
+//    libraries this service and its downstream are ported from. Its correctness bar is therefore
+//    CONFORMANCE TO THE PUBLISHED SCHEMA - path, member spelling, member presence and absence, enum
+//    encoding, status handling - and NOT call-site parity, because there is no legacy call site in
+//    this service to be in parity with. Fabricating one would be a new feature.
+//
+//  NO NETWORK IS REACHED BY ANY TEST HERE. Every one runs against a recording message handler, so the
+//  suite is hermetic and no Security instance is required. The clock is substituted too, so expiry and
+//  reuse are exercised without waiting for real time to pass.
+//
+//  NO SECRET, CREDENTIAL, KEY, CERTIFICATE OR REFERENCE VALUE IN THIS FILE IS REAL. The token and
+//  reference values below are obviously-fake fixed markers chosen so that they cannot match any
+//  provider's credential pattern; none is copied from anywhere in the repository, and in particular
+//  nothing is taken from the read-only legacy browser asset tests/blink/test_jws.htm, which is the
+//  hardcoded-private-key anti-pattern the client under test replaces.
+// ==================================================================================================
+
+using System.Globalization;
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using PowerFramework.DataServices.Clients;
+using PowerFramework.DataServices.Configuration;
+using PowerFramework.Shared.Kernel;
+using Xunit;
+
+namespace PowerFramework.DataServices.Tests;
+
+/// <summary>
+/// A recording message handler. It reaches no network, captures every request it is given together
+/// with the body text and the cancellation token it observed, and answers from a queue of canned
+/// responses.
+/// </summary>
+internal sealed class RecordingHandler : HttpMessageHandler
+{
+    /// <summary>The path contract C-01's token issuance operation is published at.</summary>
+    public const string TokenPath = "/v1/tokens";
+
+    /// <summary>
+    /// The credential the auto-answered token response carries. An obviously-fake fixed marker: it is
+    /// not a credential, does not resemble one, and is copied from nowhere in the repository.
+    /// </summary>
+    public const string AutoAnsweredCredential = "auto.not-a-real-token.value";
+
+    /// <summary>The scope the auto-answered credential is granted.</summary>
+    public const string AutoAnsweredScope = "security.crypto";
+
+    private const string AutoAnsweredTokenJson =
+        "{\"access_token\":\"" + AutoAnsweredCredential + "\",\"token_type\":\"Bearer\","
+        + "\"expires_in\":300,\"scope\":\"" + AutoAnsweredScope + "\"}";
+
+    private readonly Queue<HttpResponseMessage> _responses = new();
+
+    /// <summary>The requests this handler was given, in order, EXCLUDING auto-answered token requests.</summary>
+    /// <remarks>
+    /// Auto-answered token requests are kept out of this list on purpose. Every contract C-02 operation
+    /// now acquires a credential before it sends, so recording that acquisition here would shift the
+    /// index of the request each C-02 test is actually about - a purely mechanical renumbering that
+    /// would obscure what those tests assert. They are recorded in <see cref="TokenRequests"/> instead,
+    /// so nothing is hidden and a test that cares can inspect them.
+    /// </remarks>
+    public List<HttpRequestMessage> Requests { get; } = [];
+
+    /// <summary>The request body text this handler observed, in order, on the same basis.</summary>
+    public List<string> Bodies { get; } = [];
+
+    /// <summary>The auto-answered token requests, in order.</summary>
+    public List<HttpRequestMessage> TokenRequests { get; } = [];
+
+    /// <summary>The body text of each auto-answered token request, in order.</summary>
+    public List<string> TokenBodies { get; } = [];
+
+    /// <summary>
+    /// When set, a request to <see cref="TokenPath"/> is answered from a canned credential WITHOUT
+    /// consuming a queued response.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This exists because the two edges of the Security contract are authenticated differently. Token
+    /// issuance is authenticated by the transport and carries no bearer credential; all eighteen C-02
+    /// crypto operations DO carry one, which they must acquire first. A suite testing a C-02 operation is
+    /// therefore answering two different endpoints, and a strict first-in-first-out queue would hand the
+    /// operation's own canned response to the credential acquisition instead.
+    /// </para>
+    /// <para>
+    /// Left OFF by default, deliberately: the C-01 suite tests issuance itself and must see its own
+    /// queued responses used. Only a suite whose subject is a C-02 operation turns it on.
+    /// </para>
+    /// </remarks>
+    public bool AutoAnswerTokenRequests { get; set; }
+
+    /// <summary>Whether the last observed cancellation token could be cancelled.</summary>
+    public bool ObservedCancellableToken { get; private set; }
+
+    /// <summary>Queues a JSON response.</summary>
+    /// <param name="statusCode">The status to answer with.</param>
+    /// <param name="json">The body, or <see langword="null"/> for no content.</param>
+    /// <param name="mediaType">The media type to report.</param>
+    /// <returns>This handler, so queueing can be chained.</returns>
+    public RecordingHandler Enqueue(
+        HttpStatusCode statusCode,
+        string? json,
+        string mediaType = "application/json")
+    {
+        HttpResponseMessage response = new(statusCode);
+        if (json is not null)
+        {
+            response.Content = new StringContent(json, Encoding.UTF8, mediaType);
+        }
+
+        _responses.Enqueue(response);
+        return this;
+    }
+
+    /// <summary>Queues a response whose content the caller builds itself.</summary>
+    /// <param name="statusCode">The status to answer with.</param>
+    /// <param name="content">The content to answer with.</param>
+    /// <returns>This handler, so queueing can be chained.</returns>
+    public RecordingHandler EnqueueRaw(HttpStatusCode statusCode, HttpContent content)
+    {
+        _responses.Enqueue(new HttpResponseMessage(statusCode) { Content = content });
+        return this;
+    }
+
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ObservedCancellableToken = cancellationToken.CanBeCanceled;
+
+        if (AutoAnswerTokenRequests
+            && string.Equals(request.RequestUri?.AbsolutePath, TokenPath, StringComparison.Ordinal))
+        {
+            TokenRequests.Add(request);
+            TokenBodies.Add(request.Content is null
+                ? string.Empty
+                : request.Content.ReadAsStringAsync(CancellationToken.None).GetAwaiter().GetResult());
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(AutoAnsweredTokenJson, Encoding.UTF8, "application/json"),
+            });
+        }
+
+        Requests.Add(request);
+        Bodies.Add(request.Content is null
+            ? string.Empty
+            : request.Content.ReadAsStringAsync(CancellationToken.None).GetAwaiter().GetResult());
+
+        return Task.FromResult(_responses.Count > 0
+            ? _responses.Dequeue()
+            : new HttpResponseMessage(HttpStatusCode.InternalServerError));
+    }
+}
+
+/// <summary>
+/// A clock a test can move. The production client reads no other clock, which is what makes expiry and
+/// reuse reproducible rather than schedule-dependent.
+/// </summary>
+internal sealed class MutableClock : TimeProvider
+{
+    /// <summary>The instant this clock reports.</summary>
+    public DateTimeOffset UtcNow { get; set; } = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+    public override DateTimeOffset GetUtcNow() => UtcNow;
+}
+
+public sealed class SecurityClientTests
+{
+    // Obviously-fake fixed markers. None is a credential, none resembles one, and none is copied from
+    // anywhere in the repository.
+    private const string FakeToken = "fake.not-a-real-token.value";
+    private const string TestBaseAddress = "https://security.invalid/";
+
+    private static (SecurityClient Client, RecordingHandler Handler, MutableClock Clock) CreateClient(
+        RecordingHandler handler,
+        string? baseAddress = TestBaseAddress,
+        string configuredAddress = TestBaseAddress)
+    {
+        HttpClient httpClient = new(handler, disposeHandler: false);
+        if (baseAddress is not null)
+        {
+            httpClient.BaseAddress = new Uri(baseAddress, UriKind.Absolute);
+        }
+
+        DataServicesOptions options = new();
+        options.Security.BaseAddress = configuredAddress;
+
+        // A CLIENT THAT ACQUIRES A CREDENTIAL MUST BE ABLE TO PRESENT ONE. Contract C-01 authenticates
+        // the issuance endpoint with a caller credential and no bearer token, accepting EITHER a shared
+        // secret as an HTTP Basic credential or a client certificate, so the client refuses to ask for a
+        // token when a deployment configures NEITHER - a credential-less request could only be refused,
+        // and the refusal would read like a Security fault rather than a missing setting here. THE
+        // CERTIFICATE SCHEME IS CHOSEN HERE because its settings are PATHS: nothing below is opened or
+        // loaded, since the client checks only WHETHER a credential is configured and the composition root
+        // is what reads the material. The secret path is exercised by SecurityCredentialCompositionTests.
+        options.Security.MutualTls.CertificatePath = "/run/secrets/powerframework/dataservices.crt";
+        options.Security.MutualTls.CertificateKeyPath = "/run/secrets/powerframework/dataservices.key";
+
+        MutableClock clock = new();
+        SecurityClient client = new(
+            httpClient,
+            Options.Create(options),
+            NullLogger<SecurityClient>.Instance,
+            clock);
+
+        return (client, handler, clock);
+    }
+
+    private static string TokenResponseJson(
+        long expiresIn = 300,
+        string scope = "persistence.read persistence.write",
+        long? issuedAt = null,
+        string accessToken = FakeToken,
+        string tokenType = "Bearer")
+    {
+        string issued = issuedAt is long value
+            ? string.Create(CultureInfo.InvariantCulture, $",\"issued_at\":{value}")
+            : string.Empty;
+
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"{{\"access_token\":\"{accessToken}\",\"token_type\":\"{tokenType}\","
+            + $"\"expires_in\":{expiresIn},\"scope\":\"{scope}\"{issued}}}");
+    }
+
+    private static string ProblemJson(long? retCode, string title = "Access denied") => retCode is long code
+        ? string.Create(
+            CultureInfo.InvariantCulture,
+            $"{{\"type\":\"about:blank\",\"title\":\"{title}\",\"status\":403,"
+            + $"\"detail\":\"The caller is not permitted this reference.\",\"retCode\":{code}}}")
+        : string.Create(
+            CultureInfo.InvariantCulture,
+            $"{{\"type\":\"about:blank\",\"title\":\"{title}\",\"status\":403}}");
+
+    private static ServiceTokenRequest SampleRequest() =>
+        new("powerframework-dataservices", "powerframework-persistence", ["persistence.read"]);
+
+    private static JsonElement Body(RecordingHandler handler, int index = 0) =>
+        JsonDocument.Parse(handler.Bodies[index]).RootElement;
+
+    // ==============================================================================================
+    //  C-01 - token issuance, reuse, refresh and failure
+    // ==============================================================================================
+
+    [Fact]
+    public async Task GetTokenAsync_SendsTheThreePublishedMembersAndNoCredential()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson());
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        ServiceToken token = await client.GetTokenAsync(
+            new ServiceTokenRequest("subject-a", "audience-b", ["scope.one", "scope.two"]),
+            TestContext.Current.CancellationToken);
+
+        HttpRequestMessage request = Assert.Single(handler.Requests);
+        Assert.Equal(HttpMethod.Post, request.Method);
+        Assert.Equal("https://security.invalid/v1/tokens", request.RequestUri?.ToString());
+
+        // Authenticated by the transport, so no Authorization header is attached: a caller cannot
+        // present a bearer token in order to obtain its first bearer token.
+        Assert.Null(request.Headers.Authorization);
+
+        JsonElement body = Body(handler);
+        Assert.Equal(3, body.EnumerateObject().Count());
+        Assert.Equal("subject-a", body.GetProperty("subject").GetString());
+        Assert.Equal("audience-b", body.GetProperty("audience").GetString());
+        Assert.Equal(
+            ["scope.one", "scope.two"],
+            body.GetProperty("scopes").EnumerateArray().Select(element => element.GetString()));
+
+        Assert.Equal(FakeToken, token.AccessToken);
+        Assert.Equal("Bearer", token.TokenType);
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_ReadsTheGrantedScopeSetRatherThanTheRequestedOne()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(scope: "persistence.read"));
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        ServiceToken token = await client.GetTokenAsync(
+            new ServiceTokenRequest("s", "a", ["persistence.read", "persistence.write"]),
+            TestContext.Current.CancellationToken);
+
+        // A narrowing is a normal successful outcome under this contract, not a failure.
+        Assert.Equal(["persistence.read"], token.GrantedScopes);
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_TreatsAnEmptyGrantedScopeSetAsSuccess()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(scope: string.Empty));
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        ServiceToken token = await client.GetTokenAsync(
+            SampleRequest(),
+            TestContext.Current.CancellationToken);
+
+        Assert.Empty(token.GrantedScopes);
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_AnchorsExpiryToTheReportedIssuanceInstantWhenSupplied()
+    {
+        long issuedAt = new DateTimeOffset(2026, 6, 1, 12, 0, 0, TimeSpan.Zero).ToUnixTimeSeconds();
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(expiresIn: 60, issuedAt: issuedAt));
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        ServiceToken token = await client.GetTokenAsync(
+            SampleRequest(),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(
+            DateTimeOffset.FromUnixTimeSeconds(issuedAt).AddSeconds(60),
+            token.ExpiresAt);
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_AnchorsExpiryToTheInjectedClockWhenNoInstantIsSupplied()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(expiresIn: 120));
+        (SecurityClient client, _, MutableClock clock) = CreateClient(handler);
+        DateTimeOffset start = clock.UtcNow;
+
+        ServiceToken token = await client.GetTokenAsync(
+            SampleRequest(),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(start.AddSeconds(120), token.ExpiresAt);
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_ReusesTheHeldCredentialWhileItRemainsComfortablyValid()
+    {
+        // THE POSITIVE ARM, AND IT MATTERS THAT IT IS STILL HERE. A renewal margin that was too wide would
+        // make the cache serve nothing and send every single call to the issuance edge - a worse failure
+        // than the one the margin prevents - so reuse well inside the window has to keep working.
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(expiresIn: 300));
+        (SecurityClient client, _, MutableClock clock) = CreateClient(handler);
+
+        ServiceToken first = await client.GetTokenAsync(
+            SampleRequest(),
+            TestContext.Current.CancellationToken);
+
+        // 200s into a 300s token, with a 30s margin, so the renewal boundary at 270s is not yet reached.
+        clock.UtcNow = clock.UtcNow.AddSeconds(200);
+
+        ServiceToken second = await client.GetTokenAsync(
+            SampleRequest(),
+            TestContext.Current.CancellationToken);
+
+        Assert.Same(first, second);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_RenewsBeforeExpiryRatherThanAtIt()
+    {
+        // 🔴 THE ROW THAT PINS THE FIX, AND THE OLD BEHAVIOUR IT REPLACES WAS A REAL FAILURE MODE. The
+        // cache used to serve any token still valid by a microsecond - a sibling row asserted reuse at
+        // 299s of a 300s lifetime - so a credential could be attached to a call and lapse IN TRANSIT,
+        // reaching the verifier expired. The caller then meets a 401 indistinguishable from a genuine
+        // authorization failure, on a call that was correctly authorized when it was made, and the only
+        // remedy is the retry a cache exists to avoid.
+        //
+        // THE MARGIN IS DERIVED, NOT PICKED: it is this client's own configured outbound request timeout
+        // (Resilience:Security:RequestTimeout, 30s by the options type's declared default), which is the
+        // longest a call carrying the credential can still be in flight.
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(expiresIn: 300))
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(expiresIn: 300, accessToken: "fake.renewed"));
+        (SecurityClient client, _, MutableClock clock) = CreateClient(handler);
+
+        ServiceToken first = await client.GetTokenAsync(
+            SampleRequest(),
+            TestContext.Current.CancellationToken);
+
+        // One second INSIDE the margin - still valid for 29 more seconds, and no longer offered for reuse.
+        clock.UtcNow = first.ExpiresAt.AddSeconds(-29);
+
+        ServiceToken renewed = await client.GetTokenAsync(
+            SampleRequest(),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotSame(first, renewed);
+        Assert.Equal("fake.renewed", renewed.AccessToken);
+        Assert.Equal(2, handler.Requests.Count);
+
+        // AND THE TOKEN IT REPLACED WAS GENUINELY STILL VALID, which is the whole point: this is renewal
+        // ahead of expiry, not recovery after it.
+        Assert.True(first.ExpiresAt > clock.UtcNow);
+    }
+
+    [Fact]
+    public void RenewAt_CapsTheMarginAtHalfTheLifetimeSoAShortTokenIsStillCacheable()
+    {
+        // WITHOUT THE CAP A SHORT-LIVED TOKEN WOULD NEVER BE REUSED ONCE. An issuer minting 20-second
+        // tokens against a 30-second margin would put the renewal boundary BEFORE issuance, so every call
+        // would mint and the issuance edge would take the entire load - the failure the margin was added
+        // to prevent, arrived at from the other direction.
+        DateTimeOffset issued = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        ServiceToken shortLived = new(
+            "fake.token",
+            "Bearer",
+            issued.AddSeconds(20),
+            [],
+            issued);
+
+        // Half of 20s is 10s, so the boundary is 10s in - not 30s before expiry, which would be earlier
+        // than the token existed.
+        Assert.Equal(issued.AddSeconds(10), shortLived.RenewAt(TimeSpan.FromSeconds(30)));
+
+        // A token whose lifetime comfortably exceeds the margin takes the margin unchanged.
+        ServiceToken longLived = new(
+            "fake.token",
+            "Bearer",
+            issued.AddSeconds(300),
+            [],
+            issued);
+
+        Assert.Equal(issued.AddSeconds(270), longLived.RenewAt(TimeSpan.FromSeconds(30)));
+
+        // AND AN UNKNOWN ISSUANCE INSTANT TAKES THE MARGIN UNBOUNDED, because there is no lifetime to
+        // take a fraction of. Null means "unknown", never "zero".
+        ServiceToken withoutIssuedAt = new("fake.token", "Bearer", issued.AddSeconds(300), []);
+
+        Assert.Equal(issued.AddSeconds(270), withoutIssuedAt.RenewAt(TimeSpan.FromSeconds(30)));
+
+        // A non-positive margin disables renewal-ahead entirely and falls back to exact expiry.
+        Assert.Equal(longLived.ExpiresAt, longLived.RenewAt(TimeSpan.Zero));
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_RequestsAgainOnceTheHeldCredentialHasLapsed()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(expiresIn: 300))
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(expiresIn: 300, accessToken: "fake.second"));
+        (SecurityClient client, _, MutableClock clock) = CreateClient(handler);
+
+        ServiceToken first = await client.GetTokenAsync(
+            SampleRequest(),
+            TestContext.Current.CancellationToken);
+
+        // Exactly at expiry, which is past the renewal boundary either way - this row is about the
+        // lapsed case, and GetTokenAsync_RenewsBeforeExpiryRatherThanAtIt covers the margin itself.
+        clock.UtcNow = first.ExpiresAt;
+
+        ServiceToken second = await client.GetTokenAsync(
+            SampleRequest(),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotSame(first, second);
+        Assert.Equal("fake.second", second.AccessToken);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_HoldsACredentialPerSubjectAudienceAndScopeSet()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson())
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson());
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        await client.GetTokenAsync(
+            new ServiceTokenRequest("s", "audience-one", ["scope"]),
+            TestContext.Current.CancellationToken);
+        await client.GetTokenAsync(
+            new ServiceTokenRequest("s", "audience-two", ["scope"]),
+            TestContext.Current.CancellationToken);
+
+        // Keying on the audience matters: reusing one audience's token for another would hand a caller a
+        // credential minted for somewhere else.
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    // ----------------------------------------------------------------------------------------------
+    //  THE CACHE KEY IS INJECTIVE FOR ARBITRARY COMPONENT CONTENT.
+    //  ----------------------------------------------------------------------------------------------
+    //  The pairs below are the minimal ones that collided when the components were joined with U+001F on
+    //  the stated ground that no subject, audience or scope could contain it - true of this service's own
+    //  fixed call sites, but never CHECKED anywhere, so a convention rather than a control. A collision
+    //  is not a cache inefficiency: it hands one caller a credential minted for a different audience or
+    //  a different scope set, which is precisely what the contract's one-audience rule exists to prevent.
+    // ----------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task GetTokenAsync_DoesNotShareACredentialBetweenRequestsThatCollidedUnderTheDelimiter()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(accessToken: "first.not-a-real-token.value"))
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(accessToken: "second.not-a-real-token.value"));
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        ServiceToken first = await client.GetTokenAsync(
+            new ServiceTokenRequest("a\u001Fb", "c", ["scope"]),
+            TestContext.Current.CancellationToken);
+
+        ServiceToken second = await client.GetTokenAsync(
+            new ServiceTokenRequest("a", "b\u001Fc", ["scope"]),
+            TestContext.Current.CancellationToken);
+
+        // Two issuances, and each caller holds ITS OWN credential. Under the delimiter encoding both
+        // requests resolved to one key, so the second returned the first's credential and issued nothing.
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Equal("first.not-a-real-token.value", first.AccessToken);
+        Assert.Equal("second.not-a-real-token.value", second.AccessToken);
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_DoesNotShareACredentialBetweenScopeSetsThatCollidedWhenPreJoined()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(accessToken: "first.not-a-real-token.value"))
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(accessToken: "second.not-a-real-token.value"));
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        ServiceToken first = await client.GetTokenAsync(
+            new ServiceTokenRequest("s", "a", ["read\u001Fwrite"]),
+            TestContext.Current.CancellationToken);
+
+        ServiceToken second = await client.GetTokenAsync(
+            new ServiceTokenRequest("s", "a", ["read", "write"]),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Equal("first.not-a-real-token.value", first.AccessToken);
+        Assert.Equal("second.not-a-real-token.value", second.AccessToken);
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_ReusesACredentialWhenTheSameScopeSetArrivesInAnotherOrder()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson());
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        await client.GetTokenAsync(
+            new ServiceTokenRequest("s", "a", ["one", "two"]),
+            TestContext.Current.CancellationToken);
+        await client.GetTokenAsync(
+            new ServiceTokenRequest("s", "a", ["two", "one"]),
+            TestContext.Current.CancellationToken);
+
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_SendsTheRequestedScopeOrderVerbatim()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson());
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        await client.GetTokenAsync(
+            new ServiceTokenRequest("s", "a", ["zeta", "alpha"]),
+            TestContext.Current.CancellationToken);
+
+        // Ordering happens only inside the cache key; what is sent is what the caller asked for.
+        Assert.Equal(
+            ["zeta", "alpha"],
+            Body(handler).GetProperty("scopes").EnumerateArray().Select(e => e.GetString()));
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_SurfacesARefusalAsATypedFailureAndNeverAnEmptyToken()
+    {
+        RecordingHandler handler = new RecordingHandler().Enqueue(
+            HttpStatusCode.Forbidden,
+            ProblemJson(RetCode.E_ACCESS_DENIED),
+            "application/problem+json");
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        SecurityClientException failure = await Assert.ThrowsAsync<SecurityClientException>(
+            () => client.GetTokenAsync(SampleRequest(), TestContext.Current.CancellationToken).AsTask());
+
+        Assert.Equal("issueToken", failure.OperationId);
+        Assert.Equal((int)HttpStatusCode.Forbidden, failure.StatusCode);
+        Assert.Equal("about:blank", failure.ProblemType);
+        Assert.Equal("Access denied", failure.Title);
+        Assert.Equal("The caller is not permitted this reference.", failure.Detail);
+        Assert.Equal(RetCode.E_ACCESS_DENIED, failure.RetCode);
+        Assert.DoesNotContain(FakeToken, failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_DoesNotCacheAFailedIssuance()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.InternalServerError, ProblemJson(RetCode.E_INTERNAL_ERROR))
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson());
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        await Assert.ThrowsAsync<SecurityClientException>(
+            () => client.GetTokenAsync(SampleRequest(), TestContext.Current.CancellationToken).AsTask());
+
+        ServiceToken token = await client.GetTokenAsync(
+            SampleRequest(),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(FakeToken, token.AccessToken);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Theory]
+    [InlineData("{\"access_token\":\"\",\"token_type\":\"Bearer\",\"expires_in\":60,\"scope\":\"\"}")]
+    [InlineData("{\"access_token\":\"t\",\"token_type\":\"Basic\",\"expires_in\":60,\"scope\":\"\"}")]
+    [InlineData("{\"access_token\":\"t\",\"token_type\":\"Bearer\",\"expires_in\":0,\"scope\":\"\"}")]
+    [InlineData("{\"token_type\":\"Bearer\",\"expires_in\":60,\"scope\":\"\"}")]
+    [InlineData("{\"access_token\":\"t\",\"token_type\":\"Bearer\",\"expires_in\":60}")]
+    public async Task GetTokenAsync_RefusesAnOffContractIssuanceResponse(string json)
+    {
+        RecordingHandler handler = new RecordingHandler().Enqueue(HttpStatusCode.OK, json);
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        await Assert.ThrowsAsync<SecurityClientException>(
+            () => client.GetTokenAsync(SampleRequest(), TestContext.Current.CancellationToken).AsTask());
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_RefusesAnEmptySuccessBody()
+    {
+        RecordingHandler handler = new RecordingHandler().Enqueue(HttpStatusCode.OK, json: null);
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        SecurityClientException failure = await Assert.ThrowsAsync<SecurityClientException>(
+            () => client.GetTokenAsync(SampleRequest(), TestContext.Current.CancellationToken).AsTask());
+
+        Assert.Equal("issueToken", failure.OperationId);
+    }
+
+    // ==============================================================================================
+    //  The problem+json to return-code projection, INCLUDING the preserved tri-state hole
+    // ==============================================================================================
+
+    [Fact]
+    public async Task RetCodeProjection_TreatsPreventAsSucceeded()
+    {
+        SecurityClientException failure = await RefuseWithAsync(RetCode.PREVENT);
+
+        // Preserved legacy behaviour: the success predicate is >= 0, so a prevention reads as a success.
+        Assert.True(failure.RetCodeIsSucceeded);
+        Assert.False(failure.RetCodeIsFailed);
+        Assert.False(failure.RetCodeIsCancelled);
+    }
+
+    [Fact]
+    public async Task RetCodeProjection_TreatsCancelledAsNeitherSucceededNorFailed()
+    {
+        SecurityClientException failure = await RefuseWithAsync(RetCode.CANCELLED);
+
+        Assert.False(failure.RetCodeIsSucceeded);
+        Assert.False(failure.RetCodeIsFailed);
+        Assert.True(failure.RetCodeIsCancelled);
+    }
+
+    [Fact]
+    public async Task RetCodeProjection_TreatsAMissingCodeAsNeither()
+    {
+        SecurityClientException failure = await RefuseWithAsync(retCode: null);
+
+        // Null is never coerced to zero. Coercing it would turn "the response did not tell us" into
+        // "succeeded".
+        Assert.Null(failure.RetCode);
+        Assert.False(failure.RetCodeIsSucceeded);
+        Assert.False(failure.RetCodeIsFailed);
+        Assert.False(failure.RetCodeIsCancelled);
+    }
+
+    [Theory]
+    [InlineData(RetCode.E_INVALID_ARGUMENT)]
+    [InlineData(RetCode.E_ACCESS_DENIED)]
+    [InlineData(RetCode.E_OBJECT_NOT_FOUND)]
+    [InlineData(RetCode.E_INTERNAL_ERROR)]
+    [InlineData(RetCode.UNKNOWN)]
+    public async Task RetCodeProjection_CarriesTheDeclaredFailureCodesThrough(long retCode)
+    {
+        SecurityClientException failure = await RefuseWithAsync(retCode);
+
+        Assert.Equal(retCode, failure.RetCode);
+        Assert.True(failure.RetCodeIsFailed);
+    }
+
+    [Fact]
+    public async Task RetCodeProjection_IgnoresANonIntegerExtensionMember()
+    {
+        RecordingHandler handler = new RecordingHandler().Enqueue(
+            HttpStatusCode.BadRequest,
+            "{\"title\":\"Bad request\",\"retCode\":\"not-a-number\"}",
+            "application/problem+json");
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        SecurityClientException failure = await Assert.ThrowsAsync<SecurityClientException>(
+            () => client.GetTokenAsync(SampleRequest(), TestContext.Current.CancellationToken).AsTask());
+
+        Assert.Null(failure.RetCode);
+    }
+
+    [Fact]
+    public async Task RetCodeProjection_SurvivesAResponseCarryingNoProblemBodyAtAll()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.ServiceUnavailable, "plain text", "text/plain");
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        SecurityClientException failure = await Assert.ThrowsAsync<SecurityClientException>(
+            () => client.GetTokenAsync(SampleRequest(), TestContext.Current.CancellationToken).AsTask());
+
+        // The status is the substantive answer and is never lost behind a deserialization failure.
+        Assert.Equal((int)HttpStatusCode.ServiceUnavailable, failure.StatusCode);
+        Assert.Null(failure.Title);
+        Assert.Null(failure.RetCode);
+    }
+
+    private static async Task<SecurityClientException> RefuseWithAsync(long? retCode)
+    {
+        RecordingHandler handler = new RecordingHandler().Enqueue(
+            HttpStatusCode.Forbidden,
+            ProblemJson(retCode),
+            "application/problem+json");
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        return await Assert.ThrowsAsync<SecurityClientException>(
+            () => client.GetTokenAsync(SampleRequest(), TestContext.Current.CancellationToken).AsTask());
+    }
+
+    // ==============================================================================================
+    //  Cancellation and fail-fast configuration
+    // ==============================================================================================
+
+    [Fact]
+    public async Task GetTokenAsync_ObservesAnAlreadyCancelledToken()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson());
+        (SecurityClient client, _, _) = CreateClient(handler);
+        using CancellationTokenSource source = new();
+        await source.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.GetTokenAsync(SampleRequest(), source.Token).AsTask());
+
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task HashAsync_PropagatesCancellationIntoTheTransport()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, "{\"digest\":\"d\"}");
+        (SecurityClient client, _, _) = CreateClient(handler);
+        using CancellationTokenSource source = new();
+        await source.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.HashAsync(
+                CryptoPayload.FromString("payload"),
+                Enums.CRYPTO_HASH_SHA256,
+                source.Token));
+    }
+
+    [Fact]
+    public async Task EveryOperation_ForwardsACancellableTokenToTheTransport()
+    {
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, "{\"digest\":\"d\"}");
+
+        // The example operation here is a C-02 one, and every C-02 operation now acquires a credential
+        // before it sends, so the credential acquisition is auto-answered rather than being handed this
+        // test's queued digest response.
+        handler.AutoAnswerTokenRequests = true;
+
+        (SecurityClient client, _, _) = CreateClient(handler);
+        using CancellationTokenSource source = new();
+
+        await client.HashAsync(
+            CryptoPayload.FromString("payload"),
+            Enums.CRYPTO_HASH_SHA256,
+            source.Token);
+
+        Assert.True(handler.ObservedCancellableToken);
+    }
+
+    [Fact]
+    public async Task AnyOperation_FailsFastAndNamesTheSettingWhenNoAddressIsConfigured()
+    {
+        RecordingHandler handler = new();
+        (SecurityClient client, _, _) = CreateClient(
+            handler,
+            baseAddress: null,
+            configuredAddress: string.Empty);
+
+        InvalidOperationException failure = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.GenerateGuidAsync(flags: null, TestContext.Current.CancellationToken));
+
+        Assert.Contains("DataServices:Security:BaseAddress", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("the setting itself is missing", failure.Message, StringComparison.Ordinal);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task AnyOperation_DistinguishesAnUnappliedSettingFromAMissingOne()
+    {
+        RecordingHandler handler = new();
+        (SecurityClient client, _, _) = CreateClient(handler, baseAddress: null);
+
+        InvalidOperationException failure = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.GenerateGuidAsync(flags: null, TestContext.Current.CancellationToken));
+
+        Assert.Contains(
+            "registered without applying it",
+            failure.Message,
+            StringComparison.Ordinal);
+    }
+
+    // ==============================================================================================
+    //  The three-argument constructor, and the boundary conditions of the expiry conversion
+    // ==============================================================================================
+
+    [Fact]
+    public async Task TheThreeArgumentConstructorResolvesAgainstTheSystemClock()
+    {
+        // This overload exists so the type resolves whether or not a clock has been registered in the
+        // container. It performs no network input or output, exactly as the seamed overload does not.
+        RecordingHandler handler = new RecordingHandler()
+            .Enqueue(HttpStatusCode.OK, TokenResponseJson(expiresIn: 600));
+        using HttpClient httpClient = new(handler, disposeHandler: false)
+        {
+            BaseAddress = new Uri(TestBaseAddress, UriKind.Absolute),
+        };
+
+        // A credential is configured for the same reason CreateClient configures one: the client refuses
+        // to ask for a token when a deployment can present NEITHER accepted scheme. The certificate scheme
+        // is chosen because its settings are paths rather than a credential value; nothing is opened.
+        DataServicesOptions options = new();
+        options.Security.BaseAddress = TestBaseAddress;
+        options.Security.MutualTls.CertificatePath = "/run/secrets/powerframework/dataservices.crt";
+        options.Security.MutualTls.CertificateKeyPath = "/run/secrets/powerframework/dataservices.key";
+
+        SecurityClient client = new(
+            httpClient,
+            Options.Create(options),
+            NullLogger<SecurityClient>.Instance);
+
+        ServiceToken token = await client.GetTokenAsync(
+            SampleRequest(),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(FakeToken, token.AccessToken);
+        Assert.True(token.ExpiresAt > DateTimeOffset.UnixEpoch);
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_RefusesAnIssuanceInstantOutsideTheRepresentableRange()
+    {
+        long beyondMaximum = DateTimeOffset.MaxValue.ToUnixTimeSeconds() + 1;
+        RecordingHandler handler = new RecordingHandler().Enqueue(
+            HttpStatusCode.OK,
+            TokenResponseJson(expiresIn: 60, issuedAt: beyondMaximum));
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        SecurityClientException failure = await Assert.ThrowsAsync<SecurityClientException>(
+            () => client.GetTokenAsync(SampleRequest(), TestContext.Current.CancellationToken).AsTask());
+
+        Assert.Contains("issuance timestamp", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_RefusesALifetimeThatOverflowsTheRepresentableRange()
+    {
+        // At the very end of the representable range, so the lifetime cannot be added to it.
+        RecordingHandler handler = new RecordingHandler().Enqueue(
+            HttpStatusCode.OK,
+            TokenResponseJson(
+                expiresIn: 60,
+                issuedAt: DateTimeOffset.MaxValue.ToUnixTimeSeconds()));
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        SecurityClientException failure = await Assert.ThrowsAsync<SecurityClientException>(
+            () => client.GetTokenAsync(SampleRequest(), TestContext.Current.CancellationToken).AsTask());
+
+        Assert.Contains("outside the representable range", failure.Message, StringComparison.Ordinal);
+        Assert.IsType<ArgumentOutOfRangeException>(failure.InnerException);
+    }
+
+    [Fact]
+    public async Task GetTokenAsync_RefusesAJsonNullSuccessBody()
+    {
+        RecordingHandler handler = new RecordingHandler().Enqueue(HttpStatusCode.OK, "null");
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        SecurityClientException failure = await Assert.ThrowsAsync<SecurityClientException>(
+            () => client.GetTokenAsync(SampleRequest(), TestContext.Current.CancellationToken).AsTask());
+
+        Assert.Contains("empty body", failure.Message, StringComparison.Ordinal);
+        Assert.Equal("issueToken", failure.OperationId);
+    }
+
+    [Fact]
+    public async Task ARefusalWhoseBodyCannotBeReadAtAllStillReportsItsStatus()
+    {
+        // A JSON media type this runtime cannot decode. The problem body degrades to nothing while the
+        // status - the substantive answer - survives.
+        StringContent content = new("{}", Encoding.UTF8);
+        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(
+            "application/problem+json")
+        {
+            CharSet = "unsupported-charset-name",
+        };
+
+        RecordingHandler handler = new RecordingHandler()
+            .EnqueueRaw(HttpStatusCode.BadGateway, content);
+        (SecurityClient client, _, _) = CreateClient(handler);
+
+        SecurityClientException failure = await Assert.ThrowsAsync<SecurityClientException>(
+            () => client.GetTokenAsync(SampleRequest(), TestContext.Current.CancellationToken).AsTask());
+
+        Assert.Equal((int)HttpStatusCode.BadGateway, failure.StatusCode);
+        Assert.Null(failure.Title);
+        Assert.Null(failure.RetCode);
+    }
+
+    // ==============================================================================================
+    //  The return-code extension member, read directly
+    //
+    //  The two integral arms are unreachable through the transport, because deserialization always parks
+    //  an unmatched member as a JsonElement. They exist for a body constructed in process, and the
+    //  sibling-assembly visibility the project grants is how that is exercised.
+    // ==============================================================================================
+
+    [Fact]
+    public void ReadRetCode_AcceptsEitherRepresentationAndRefusesToInventAValue()
+    {
+        Microsoft.AspNetCore.Mvc.ProblemDetails fromLong = new();
+        fromLong.Extensions["retCode"] = RetCode.E_DB_ERROR;
+        Assert.Equal(RetCode.E_DB_ERROR, SecurityClient.ReadRetCode(fromLong));
+
+        Microsoft.AspNetCore.Mvc.ProblemDetails fromInt = new();
+        fromInt.Extensions["retCode"] = -3;
+        Assert.Equal(RetCode.E_INVALID_ARGUMENT, SecurityClient.ReadRetCode(fromInt));
+
+        Microsoft.AspNetCore.Mvc.ProblemDetails fromElement = new();
+        fromElement.Extensions["retCode"] = JsonDocument.Parse("1").RootElement;
+        Assert.Equal(RetCode.PREVENT, SecurityClient.ReadRetCode(fromElement));
+
+        Microsoft.AspNetCore.Mvc.ProblemDetails fromText = new();
+        fromText.Extensions["retCode"] = "not a number";
+        Assert.Null(SecurityClient.ReadRetCode(fromText));
+
+        Microsoft.AspNetCore.Mvc.ProblemDetails fromNull = new();
+        fromNull.Extensions["retCode"] = null;
+        Assert.Null(SecurityClient.ReadRetCode(fromNull));
+
+        Assert.Null(SecurityClient.ReadRetCode(new Microsoft.AspNetCore.Mvc.ProblemDetails()));
+        Assert.Null(SecurityClient.ReadRetCode(null));
+    }
+}

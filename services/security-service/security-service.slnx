@@ -1,0 +1,206 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ==================================================================================================
+  security-service.slnx
+  The per service solution for the Security service of the PowerFramework .NET 10 decomposition.
+  ==================================================================================================
+
+  WHY THIS FILE EXISTS AT ALL
+
+    The mandated per service workflow is run from THIS directory, and every verb is invoked with no
+    solution argument, no project argument and no path argument whatsoever:
+
+        cd services/security-service
+        dotnet restore
+        dotnet build -c Release
+        dotnet test (collecting XPlat Code Coverage)
+
+    A bare invocation resolves its target by finding exactly one solution file in the current
+    directory. This file is that solution file. Enumerating Security's two projects here is the
+    entire mechanism by which Security restores, builds and tests standalone from a clean checkout,
+    with no sibling service present, no shared solution and no orchestration running. That property
+    is what makes this service independently deployable rather than a folder inside a monolith, and
+    it is the whole reason a solution file exists per service.
+
+  WHAT THIS SERVICE IS, SO THE TWO MEMBERS BELOW READ IN CONTEXT
+
+      Port        5104.
+      Transport   REST plus OpenAPI. Token issuance and key publication have to be plain HTTP so
+                  that each consumer's stock JwtBearer handler fetches the JWKS document and the
+                  OpenID discovery metadata with no bespoke code at all. Choosing gRPC here would
+                  push hand written key retrieval into the other three services, a net increase in
+                  hand written security code rather than a decrease.
+      Role        SOLE JWT ISSUER for the whole system. Exactly one signing secret exists anywhere
+                  in this decomposition and this service holds it. Gateway, DataServices and
+                  Persistence hold verification material only and never mint a token.
+      Replaces    the legacy framework's cryptographic library, whose single native class declares
+                  65 public overloads: encoding conversion, random and GUID generation, RSA key
+                  generation, unkeyed hashing and keyed HMAC, symmetric encryption and decryption,
+                  and RSA signing plus verification. Every one is reimplemented on the Base Class
+                  Library, so the signing primitives a token issuer needs are already present.
+
+    NONE of that is configured here. A port is a runtime concern, a transport is an application
+    concern, and a secret is an orchestration concern reaching the service through the options
+    pattern. A solution declares membership and nothing else, so those facts appear above purely so
+    a reader knows what the two projects below contain. They are specified in docs/ARCHITECTURE.md.
+
+  THE FORMAT IS .slnx, NEVER .sln, AND NEVER ALONGSIDE A .slnf
+
+    .NET 10 tooling emits the XML solution format. Measured on the pinned SDK 10.0.302 before this
+    file was written rather than taken from documentation: `dotnet new sln` produces a bare Solution
+    root element, and adding a project produces a Project child carrying a Path attribute whose
+    value uses forward slash separators and is relative to the solution file's own directory. The
+    body below follows that shape exactly. No .sln text format file exists anywhere in this
+    repository, and the required name for this file carries the .slnx extension.
+
+    Do not author a .slnf solution filter here or anywhere else. The planning record described a
+    legacy filter failing against a .slnx format solution with MSB4014 in all three verbs; that was
+    MEASURED FALSE on the pinned SDK, where a well formed filter over an existing .slnx restores,
+    builds and tests cleanly, and docs/BUILD.md section 2 records the measurement and the code's
+    real trigger. The prohibition is unaffected, because it rests on maintenance rather than on a
+    tooling defect: a filter's project list must be kept in exact agreement with the solution BY
+    HAND. And a filter would be pointless here regardless: this solution has two members
+    and neither is one you would ever want filtered out. The per service .slnx design IS the
+    resolution that a filter would have been reached for.
+
+    A second solution file in this directory is worse than pointless, it is actively breaking. With
+    more than one, the bare commands above stop resolving anything and fail with MSB1011, "specify
+    which project or solution file to use because this folder contains more than one project or
+    solution file". That was reproduced deliberately on SDK 10.0.302 to confirm the constraint is
+    real rather than folklore, then reverted. Exactly one solution file belongs here, and it is this
+    one.
+
+    One more measured toolchain behaviour, recorded because the temptation is to correct it from
+    here: a bare `dotnet test` builds Debug even immediately after `dotnet build -c Release`. The
+    release configuration form passes the configuration to the test verb as well. That is documented
+    in docs/BUILD.md and must not be worked around from inside a solution file, which has no
+    configuration to express.
+
+  RELATIONSHIP TO THE REPOSITORY ROOT SOLUTION
+
+    The repository root PowerFramework.slnx enumerates all twenty projects in the refactor,
+    including this service's two. The two solutions coexist by design and neither supersedes the
+    other: the root one is the whole estate convenience view for a single pass build of everything,
+    while this one is the independently buildable unit that CI and the container build exercise per
+    service. Solution discovery inspects the current directory only and never walks up, so the root
+    solution can neither be found by nor interfere with a bare command issued in this directory.
+
+    Both files must always name the same two Security project paths. Renaming or relocating either
+    project is therefore a change to both files and to the sibling Dockerfile, which copies and
+    publishes these same paths from a repository root build context.
+
+  EXACTLY TWO MEMBERS, AND EXACTLY THESE TWO
+
+    PowerFramework.Security
+      The application. Its own ProjectReference entries reach the published contracts project and
+      the shared kernel, so the whole shared closure arrives transitively and is deliberately NOT
+      listed here. Solution membership is not how a project expresses a dependency: MSBuild derives
+      the build graph from project references, so those two shared projects restore and build from
+      this solution without appearing in it, which was verified by executing the workflow above.
+      Listing them would mean paths climbing out of this directory and a second inventory to keep in
+      step with the root solution's, for no gain.
+
+      One consequence of that choice was measured, and it is FIXED at the repository root rather than
+      by changing this file. When a solution build reaches a project that is not itself a member,
+      MSBuild's default is to unset the parent configuration so the referenced project builds in its
+      own default. Observed on SDK 10.0.302 before the fix: `dotnet build -c Release` in this
+      directory built both members below into bin/Release as intended, while the two shared libraries
+      landed in bin/Debug, and the identical behaviour was confirmed against the other three per
+      service solutions. That is a real defect and not a quirk to live with, because it makes a
+      Release artifact consume assemblies compiled with Debug settings while the command still reports
+      a clean Release build.
+
+      The repository root Directory.Build.props now sets ShouldUnsetParentConfigurationAndPlatform to
+      false, so this solution's configuration is passed through to the projects it references but does
+      not list, and it carries an assertion target that fails the build (PFW0001) if any referenced
+      output ever arrives from a different configuration again. Re-measured after the change: both
+      shared projects land in bin/Release, with zero warnings. The repository root solution, which
+      does list every project, is unaffected because the solution configuration still maps its members
+      explicitly.
+
+      Adding the shared projects to this file remains the wrong fix and must not be done: it would buy
+      nothing that is not already guaranteed, at the price of the brittle out of directory paths
+      described above, and it would leave this one service shaped differently from its three siblings.
+      Overriding ShouldUnsetParentConfigurationAndPlatform back to true is equally wrong, and the
+      assertion target exists precisely so that doing so fails loudly instead of silently.
+
+    PowerFramework.Security.Tests
+      The tests, load bearing rather than a courtesy. This project is the only producer of
+      Security's coverage.cobertura.xml, and that report is the exact artifact the 80 percent line
+      coverage per service gate is measured from. Leave it out of this solution and a bare test run
+      in this directory discovers nothing, emits no report, and the gate cannot be evaluated at all,
+      which is a failure that reads exactly like a pass.
+
+    Both paths are relative to this file's own directory and neither rises above it, which is what
+    keeps them valid when the image is built from a repository root context.
+
+    No sibling service project appears here. Security serves Gateway, DataServices and Persistence
+    over the network through the published contracts, never through a project reference, because one
+    solution spanning several services is precisely the collapsed outcome this decomposition exists
+    to avoid. It is a failure mode rather than a cautious default.
+
+    No deferred capability project appears here either, in any form: no project, no solution folder,
+    no placeholder and no commented out line reserving a slot. The four deferred capability areas
+    are outside this phase entirely and are inventoried once, in docs/DEFERRED.md. Their only
+    representation anywhere is four reserved routes in the Gateway application's routing metadata,
+    and nothing compiles behind those.
+
+  NOTHING IS CONFIGURED HERE, AND NOTHING IS SECRET HERE
+
+    No MSBuild property, no package version, no target framework, no custom configuration and no
+    custom platform appears in this file, and there are no project GUIDs or configuration mapping
+    blocks: the XML format needs none of that legacy ceremony. Only the standard Debug and Release
+    configurations are in play and nothing in this refactor requires another.
+
+    Everything else arrives from the repository root by MSBuild directory walk up. global.json pins
+    the SDK version with roll forward confined to the latest feature band - the number is deliberately
+    not repeated here, for the reason the rest of this paragraph gives - Directory.Build.props sets
+    net10.0, nullable reference types, implicit usings, warnings as errors and the analyzers and
+    turns central package management on, and Directory.Packages.props holds every package version
+    including the two mandatory security pins that clear the NuGet audit advisories. Restating any
+    of it here would create a second source of truth able to drift this one service off a mandatory
+    pin, the exact failure central package management exists to prevent. For the same reason this
+    directory carries no per service Directory.Build.props, Directory.Packages.props, global.json,
+    .editorconfig or .dockerignore.
+
+    No credential, key, token or connection string appears here, and none ever may. This service is
+    the sole holder of the system's one signing secret and that secret reaches it at run time from
+    the orchestration secret layer through the options pattern only. Nothing of the sort belongs in
+    a solution file, a project file, an application settings file or a container definition.
+
+  LEGACY PROVENANCE: ONE IDEA BORROWED, ONE MECHANISM DELIBERATELY NOT TRANSLATED
+
+    The conceptual ancestor of this file is the PowerBuilder workspace pfw.pbw, which does no more
+    than enumerate its child targets by relative path and name a default among them. The borrowed
+    idea is exactly that: one container enumerating buildable units and carrying no configuration.
+
+    What is NOT translated is the library list. The primary target pfw.pbt declares a single ordered
+    list of 32 libraries and its ORDER is load bearing there, because PowerBuilder has no namespaces
+    and no import statements, every global object lives in one flat namespace, and symbol resolution
+    is decided by that ordering. The cryptographic library this service replaces sits at position 19
+    in it. There is no .slnx analogue and none is needed: this tree uses explicit namespaces and
+    explicit project references instead. No ordering semantics are encoded below, no build order
+    directive appears, and none may be added. The pairing of application before tests is for a human
+    reader only; regenerating this file with the SDK would sort the two entries alphabetically and
+    place the test project first, which is equally correct.
+
+    The two PowerBuilder project objects were read for build intent only and are deliberately not
+    translated, because neither is usable: they disagree with each other on library count and on
+    vendor, one embeds developer workstation absolute paths together with a retired library name, and
+    both name an image codec library that exists nowhere in the repository. This solution is a clean
+    creation rather than a translation. No path below points at that read only tree, at any compiled
+    PowerBuilder library, target or workspace, or at any native binary.
+
+  RULES POSITION
+
+    No user rules were provided for this project: the rules document contains exactly one line
+    saying so. Nothing is invented or back filled from convention in their place. The binding
+    constraints are the enterprise standard baseline together with the refactor's own named
+    constraints, and every decision above cites the concern that drives it.
+-->
+<Solution>
+
+  <Project Path="PowerFramework.Security/PowerFramework.Security.csproj" />
+  <Project Path="PowerFramework.Security.Tests/PowerFramework.Security.Tests.csproj" />
+
+</Solution>

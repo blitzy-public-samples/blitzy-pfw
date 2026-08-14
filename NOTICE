@@ -1,0 +1,490 @@
+===============================================================================
+PowerFramework -- NOTICE
+===============================================================================
+
+This file collects the licence terms and the third-party attributions that apply
+to everything in this repository: the original Appeon PowerBuilder framework
+sources and the binaries shipped with them, and the .NET 10 services that have
+been added alongside those sources.
+
+It is a notice, not a licence. It grants nothing, waives nothing and changes
+nothing. The operative terms are the BSD 2-Clause licence in section 1 together
+with the additional conditions in section 2. Where anything said in this file
+could be read differently from those two texts, those two texts govern.
+
+The most recent framework version recorded in logfile.md is 3.0.7.2062
+(2022-04-14). The repository carries no Git tags, so no release version can be
+inferred beyond that record, and this notice is deliberately unversioned.
+
+Contents
+
+  1. Licence
+  2. Additional conditions (Chinese restatement)
+  3. Third-party components vendored in this repository
+  4. Third-party packages used by the .NET services
+  5. A note on the legacy PowerBuilder tree
+  6. Vendored trust material inside third-party binaries
+
+
+===============================================================================
+1. LICENCE
+===============================================================================
+
+Reproduced in full and unaltered from the LICENSE file at the root of this
+repository.
+
+BSD 2-Clause License
+
+Copyright (c) 2013 - 2022, 金千枝(深圳)软件技术有限公司
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+===============================================================================
+2. ADDITIONAL CONDITIONS (CHINESE RESTATEMENT)
+===============================================================================
+
+The copyright holder also publishes a Chinese restatement of the licence, in the
+"license" section of the README at the root of this repository. It is reproduced
+verbatim below, and it is reproduced here for two reasons: that README section is
+the only place in the repository where it appears, and it states FOUR conditions
+where the English text in section 1 states two.
+
+Conditions 1 and 2 correspond to the two English bullets above. Conditions 3 and
+4 impose obligations that the English BSD 2-Clause text does not, and a
+redistributor who reads only the LICENSE file will miss both of them:
+
+* Condition 3 -- attribution. Every product that uses this software's
+  functionality, and all promotional material for such a product, must carry the
+  attribution sentence stated in that condition, which reads in full:
+
+      “本产品内含有由金千枝(深圳)软件技术有限公司及其软件贡献者所开发的软件。”
+
+  The English text requires attribution only in redistributed source and in the
+  documentation or other materials accompanying a binary redistribution.
+  Condition 3 extends that obligation to the product itself and to material used
+  to promote it.
+
+* Condition 4 -- no endorsement. Without specific prior written permission, the
+  original author's organisation name and the names of contributors may not be
+  used to endorse or promote products derived from this software. The English
+  two-clause text contains no such clause; an equivalent clause is what
+  distinguishes the BSD 3-Clause licence from the 2-Clause one.
+
+The block that follows is a character-for-character copy. Its wording, line
+breaks, indentation and punctuation are the copyright holder's own and have not
+been translated, paraphrased, reflowed or corrected in any respect.
+
+Copyright (c) 2013 - 2022
+著作权由金千枝(深圳)软件技术有限公司所有。著作权人保留一切权利。
+
+这份授权条款，在满足下列条件的前提下，允许使用者再发布经过或未经过
+修改的、源代码或二进制形式的本软件：
+
+1. 源代码的再发布，必须保留原来代码中的版权声明、这几条许可条件细目
+   和下面的免责声明。
+2. 二进制形式的再发布，必须在随同提供的文档和其它媒介中，复制原来的
+   版权声明、这几条许可条件细目和下面的免责声明。
+3. 所有使用到本软件功能的产品及宣传材料，都必须包还含下列之交待文字：
+       “本产品内含有由金千枝(深圳)软件技术有限公司及其软件贡献者所开发的软件。”
+4. 如果没有特殊的事前书面许可，原作者的组织名称，和贡献者名字，都不能
+   用于支持或宣传从既有软件派生的产品。
+
+免责声明：此软件由金千枝(深圳)软件技术有限公司和贡献者以“即此”方式提供，无论明示或
+暗示的，包括但不限于间接的关于基于某种目的的适销性、实用性，在此皆明示
+不予保证。在任何情况下，由于使用此软件造成的，直接、间接、连带、特别、
+惩戒或因此而造成的损害（包括但不限于获得替代品及服务，无法使用，丢失数
+据，损失盈利或业务中断），无论此类损害是如何造成的，基于何种责任推断，
+是否属于合同范畴，严格赔偿责任或民事侵权行为（包括疏忽和其他原因），即
+使预先被告知此类损害可能发生，金千枝(深圳)软件技术有限公司和贡献者均不承担任何责任。
+
+
+===============================================================================
+3. THIRD-PARTY COMPONENTS VENDORED IN THIS REPOSITORY
+===============================================================================
+
+The eleven components listed below are incorporated into the closed-source native
+binaries shipped at the root of this repository -- pfw.dll, pfwx.dll, blink.dll,
+blinkfast.dll, sciter.dll, sqlite3.dll and sqlite3.cipher.dll -- and are credited
+in the framework's own "about" window, at
+ws_objects/pfw.demos.pbl.src/w_about.srw.
+
+No C++ source for those binaries is present in this repository, so the list below
+is the credit the framework itself gives, carried forward here unchanged: the
+same eleven names and the same eleven URLs, in the same order, with the upstream
+projects' own capitalisation.
+
+Anyone redistributing those binaries is also redistributing these components, and
+should obtain each component's current licence text from that component's own
+distribution. Where terms are stated below, they are stated because they could be
+established with confidence. Where no terms are stated, none could be established
+for the version actually linked into these binaries -- this repository records no
+component versions -- and in that case a name and a URL is given rather than a
+guess.
+
+  Sciter          http://sciter.com
+                  Terms not established here; see the vendor.
+
+  MiniBlink       http://miniblink.net
+                  Terms not established here; see the project.
+
+  libpng          http://libmng.com/pub/png/libpng
+                  PNG Reference Library License (the "libpng licence").
+
+  apng-patch      http://sourceforge.net/projects/libpng-apng
+                  An APNG patch against libpng. Terms not established here;
+                  see the project.
+
+  pugixml         http://pugixml.org
+                  MIT License.
+
+  cJSON           http://sourceforge.net/projects/cjson
+                  MIT License.
+
+  websocketpp     http://www.zaphoyd.com/websocketpp
+                  BSD 3-Clause License.
+
+  openssl         https://www.openssl.org
+                  Version dependent. OpenSSL 3.0 and later are under the Apache
+                  License 2.0; earlier releases are under the dual OpenSSL and
+                  SSLeay licences. Which of the two applies depends on the
+                  version linked into the binaries named above, and this
+                  repository does not record it.
+
+  zlib            http://www.zlib.net
+                  zlib License.
+
+  sqlite          https://www.sqlite.org
+                  Public domain.
+
+  zint            http://zint.org.uk
+                  Terms not established here; see the project.
+
+That is eleven components. The list is exactly the framework's own credit list,
+neither extended nor abridged.
+
+
+===============================================================================
+4. THIRD-PARTY PACKAGES USED BY THE .NET SERVICES
+===============================================================================
+
+The .NET 10 tree added alongside the legacy sources takes the dependencies listed
+below. The direct list is derived from Directory.Packages.props at the root of
+this repository, which is the single authoritative version manifest for the whole
+.NET tree: every project there declares versionless package references and
+inherits its version from that one file. The correspondence is exact and checkable
+in both directions -- every PackageVersion entry in that manifest appears in the
+direct list below at the same version, and every entry in the direct list below is
+pinned there. The transitive list that follows it is taken from the resolved
+dependency graph instead, because by definition those packages have no entry in
+the manifest.
+
+Where a package is referenced by only one project, that is noted against it, so
+that the inventory doubles as a record of which parts of the tree carry which
+terms rather than implying every project takes every dependency.
+
+The licence identifier beside each package is the expression declared in that
+package's own metadata for the exact pinned version, read from the resolved
+package rather than assumed. These packages are not redistributed in this
+repository; they are fetched from their registry at restore time, and each one
+carries its own licence text within the package.
+
+Registry: nuget.org
+
+  Grpc.AspNetCore                                2.83.0    Apache-2.0
+  Microsoft.AspNetCore.OpenApi                   10.0.11   MIT
+  Microsoft.OpenApi                              2.12.0    MIT
+  Microsoft.OpenApi.YamlReader                   2.12.0    MIT   (1)
+  Microsoft.AspNetCore.Authentication.JwtBearer  10.0.11   MIT
+  Microsoft.IdentityModel.JsonWebTokens          8.22.0    MIT
+  Microsoft.EntityFrameworkCore.Sqlite           10.0.11   MIT
+  Microsoft.EntityFrameworkCore.Design           10.0.11   MIT
+  Microsoft.Data.Sqlite                          10.0.11   MIT
+  SQLitePCLRaw.bundle_e_sqlite3                  3.0.5     Apache-2.0
+  Microsoft.Extensions.Http.Resilience           10.8.0    MIT
+  Microsoft.AspNetCore.Mvc.Testing               10.0.11   MIT
+  xunit.v3                                       3.2.2     Apache-2.0
+  xunit.runner.visualstudio                      3.1.5     Apache-2.0
+  Microsoft.NET.Test.Sdk                         18.8.1    MIT
+  coverlet.collector                             10.0.1    MIT
+
+  (1) Referenced by shared/PowerFramework.Contracts.Tests only. Microsoft.OpenApi
+      2.12.0 ships a JSON reader but no YAML reader, and both contract definitions
+      under shared/PowerFramework.Contracts/OpenApi are YAML, so that one test
+      project takes this reader in order to load and assert on them. The version is
+      2.12.0 rather than 2.11.0 because 2.11.0 is deprecated upstream for
+      CriticalBugs; 2.12.0 is the first 2.x that is not, and the pair above moves
+      together because this reader names the other as its dependency minimum.
+
+The following arrive transitively rather than as direct references. They are
+recorded so that a reader of a lock file does not mistake any of them for an
+undeclared direct dependency, and so that their terms are on the record too.
+
+THIS LIST IS THE ENUMERATED RESOLVED GRAPH, NOT A HAND-PICKED SELECTION. It was
+produced from
+
+  dotnet list PowerFramework.slnx package --include-transitive --format json
+
+by taking every entry reported under transitivePackages across all twenty
+projects, removing those that also appear as a direct reference above, and
+reading the licence expression for each from the .nuspec of the exact resolved
+version in the local package folder. An earlier revision of this file listed
+seven packages here while claiming the list came from the resolved graph; that
+claim was false, and the remedy taken is to enumerate the graph rather than to
+weaken the claim.
+
+  108 distinct transitive package identities, at 124 identity-and-version pairs.
+  Sixteen identities resolve at two versions each because different projects
+  constrain them differently; both versions are listed against those, and both
+  declare the same terms in every case. Counts by licence, over the 124 pairs:
+  MIT 101, Apache-2.0 18, BSD-3-Clause 4, public domain 1.
+
+  Google.Protobuf                                       3.31.1            BSD-3-Clause
+  Grpc.AspNetCore.Server                                2.83.0            Apache-2.0
+  Grpc.AspNetCore.Server.ClientFactory                  2.83.0            Apache-2.0
+  Grpc.Core.Api                                         2.83.0            Apache-2.0
+  Grpc.Net.Client                                       2.83.0            Apache-2.0
+  Grpc.Net.ClientFactory                                2.83.0            Apache-2.0
+  Grpc.Net.Common                                       2.83.0            Apache-2.0
+  Grpc.Tools                                            2.83.0            Apache-2.0
+  Humanizer.Core                                        2.14.1            MIT
+  Microsoft.ApplicationInsights                         2.23.0            MIT
+  Microsoft.AspNetCore.TestHost                         10.0.11           MIT
+  Microsoft.Bcl.AsyncInterfaces                         6.0.0             MIT
+  Microsoft.Bcl.Cryptography                            10.0.2            MIT
+  Microsoft.Build.Framework                             18.0.2            MIT
+  Microsoft.CodeAnalysis.Analyzers                      3.11.0            MIT
+  Microsoft.CodeAnalysis.Common                         5.0.0             MIT
+  Microsoft.CodeAnalysis.CSharp                         5.0.0             MIT
+  Microsoft.CodeAnalysis.CSharp.Workspaces              5.0.0             MIT
+  Microsoft.CodeAnalysis.Workspaces.Common              5.0.0             MIT
+  Microsoft.CodeAnalysis.Workspaces.MSBuild             5.0.0             MIT
+  Microsoft.CodeCoverage                                18.8.1            MIT
+  Microsoft.Data.Sqlite.Core                            10.0.11           MIT
+  Microsoft.EntityFrameworkCore                         10.0.11           MIT
+  Microsoft.EntityFrameworkCore.Abstractions            10.0.11           MIT
+  Microsoft.EntityFrameworkCore.Analyzers               10.0.11           MIT
+  Microsoft.EntityFrameworkCore.Relational              10.0.11           MIT
+  Microsoft.EntityFrameworkCore.Sqlite.Core             10.0.11           MIT
+  Microsoft.Extensions.AmbientMetadata.Application      10.8.0            MIT
+  Microsoft.Extensions.Caching.Abstractions             10.0.11           MIT
+  Microsoft.Extensions.Caching.Memory                   10.0.11           MIT
+  Microsoft.Extensions.Compliance.Abstractions          10.8.0            MIT
+  Microsoft.Extensions.Configuration                    10.0.11, 8.0.0    MIT
+  Microsoft.Extensions.Configuration.Abstractions       10.0.11, 8.0.0    MIT
+  Microsoft.Extensions.Configuration.Binder             10.0.11, 8.0.0    MIT
+  Microsoft.Extensions.Configuration.CommandLine        10.0.11           MIT
+  Microsoft.Extensions.Configuration.EnvironmentVariables10.0.11           MIT
+  Microsoft.Extensions.Configuration.FileExtensions     10.0.11           MIT
+  Microsoft.Extensions.Configuration.Json               10.0.11           MIT
+  Microsoft.Extensions.Configuration.UserSecrets        10.0.11           MIT
+  Microsoft.Extensions.DependencyInjection              10.0.11, 8.0.0    MIT
+  Microsoft.Extensions.DependencyInjection.Abstractions 10.0.11, 8.0.0    MIT
+  Microsoft.Extensions.DependencyInjection.AutoActivation10.8.0            MIT
+  Microsoft.Extensions.DependencyModel                  10.0.11           MIT
+  Microsoft.Extensions.Diagnostics                      10.0.11, 8.0.0    MIT
+  Microsoft.Extensions.Diagnostics.Abstractions         10.0.11, 8.0.0    MIT
+  Microsoft.Extensions.Diagnostics.ExceptionSummarization10.8.0            MIT
+  Microsoft.Extensions.FileProviders.Abstractions       10.0.11           MIT
+  Microsoft.Extensions.FileProviders.Physical           10.0.11           MIT
+  Microsoft.Extensions.FileSystemGlobbing               10.0.11           MIT
+  Microsoft.Extensions.Hosting                          10.0.11           MIT
+  Microsoft.Extensions.Hosting.Abstractions             10.0.11           MIT
+  Microsoft.Extensions.Http                             10.0.11, 8.0.0    MIT
+  Microsoft.Extensions.Http.Diagnostics                 10.8.0            MIT
+  Microsoft.Extensions.Logging                          10.0.11, 8.0.0    MIT
+  Microsoft.Extensions.Logging.Abstractions             10.0.11, 8.0.0    MIT
+  Microsoft.Extensions.Logging.Configuration            10.0.11           MIT
+  Microsoft.Extensions.Logging.Console                  10.0.11           MIT
+  Microsoft.Extensions.Logging.Debug                    10.0.11           MIT
+  Microsoft.Extensions.Logging.EventLog                 10.0.11           MIT
+  Microsoft.Extensions.Logging.EventSource              10.0.11           MIT
+  Microsoft.Extensions.ObjectPool                       10.0.11           MIT
+  Microsoft.Extensions.Options                          10.0.11, 8.0.0    MIT
+  Microsoft.Extensions.Options.ConfigurationExtensions  10.0.11, 8.0.0    MIT
+  Microsoft.Extensions.Primitives                       10.0.11, 8.0.0    MIT
+  Microsoft.Extensions.Resilience                       10.8.0            MIT
+  Microsoft.Extensions.Telemetry                        10.8.0            MIT
+  Microsoft.Extensions.Telemetry.Abstractions           10.8.0            MIT
+  Microsoft.IdentityModel.Abstractions                  8.19.2, 8.22.0    MIT
+  Microsoft.IdentityModel.Logging                       8.19.2, 8.22.0    MIT
+  Microsoft.IdentityModel.Protocols                     8.19.2            MIT
+  Microsoft.IdentityModel.Protocols.OpenIdConnect       8.19.2            MIT
+  Microsoft.IdentityModel.Tokens                        8.19.2, 8.22.0    MIT
+  Microsoft.Testing.Extensions.Telemetry                1.9.1             MIT
+  Microsoft.Testing.Extensions.TrxReport.Abstractions   1.9.1             MIT
+  Microsoft.Testing.Platform                            1.9.1             MIT
+  Microsoft.Testing.Platform.MSBuild                    1.9.1             MIT
+  Microsoft.TestPlatform.ObjectModel                    18.8.1            MIT
+  Microsoft.TestPlatform.TestHost                       18.8.1            MIT
+  Microsoft.VisualStudio.SolutionPersistence            1.0.52            MIT
+  Microsoft.Win32.Registry                              5.0.0             MIT
+  Mono.TextTemplating                                   3.0.0             MIT
+  Newtonsoft.Json                                       13.0.4            MIT
+  Polly.Core                                            8.4.2             BSD-3-Clause
+  Polly.Extensions                                      8.4.2             BSD-3-Clause
+  Polly.RateLimiting                                    8.4.2             BSD-3-Clause
+  SharpYaml                                             2.1.4             MIT
+  SQLite                                                3.53.4            public domain (2)
+  SQLitePCLRaw.config.e_sqlite3                         3.0.5             Apache-2.0
+  SQLitePCLRaw.core                                     3.0.5             Apache-2.0
+  SQLitePCLRaw.provider.e_sqlite3                       3.0.5             Apache-2.0
+  System.CodeDom                                        6.0.0             MIT
+  System.Composition                                    9.0.0             MIT
+  System.Composition.AttributedModel                    9.0.0             MIT
+  System.Composition.Convention                         9.0.0             MIT
+  System.Composition.Hosting                            9.0.0             MIT
+  System.Composition.Runtime                            9.0.0             MIT
+  System.Composition.TypedParts                         9.0.0             MIT
+  System.Diagnostics.EventLog                           10.0.11           MIT
+  System.IdentityModel.Tokens.Jwt                       8.19.2            MIT
+  System.Threading.RateLimiting                         8.0.0             MIT
+  xunit.analyzers                                       1.27.0            Apache-2.0
+  xunit.v3.assert                                       3.2.2             Apache-2.0
+  xunit.v3.common                                       3.2.2             Apache-2.0
+  xunit.v3.core.mtp-v1                                  3.2.2             Apache-2.0
+  xunit.v3.extensibility.core                           3.2.2             Apache-2.0
+  xunit.v3.mtp-v1                                       3.2.2             Apache-2.0
+  xunit.v3.runner.common                                3.2.2             Apache-2.0
+  xunit.v3.runner.inproc.console                        3.2.2             Apache-2.0
+
+  (2) SQLite declares its licence as a FILE rather than as an SPDX expression.
+      The file's entire content is the sentence that SQLite is public domain,
+      followed by the URL https://sqlite.org/copyright.html. It is recorded as
+      public domain here for that reason, and it is the same upstream SQLite
+      already credited among the eleven attributions above -- reached here as a
+      native asset of the SQLitePCLRaw bundle rather than as legacy C source.
+
+Four notes on what the enumeration does and does not cover, so the completeness
+claim is exact rather than broad:
+
+  * IT IS THE .NET GRAPH OF THIS SOLUTION AT THE PINNED VERSIONS. Changing a
+    pin, adding a package, or restoring on a different SDK feature band can
+    change the graph, so this block is accurate for the pins in
+    Directory.Packages.props and must be regenerated with the command above
+    whenever one of them moves. That is the same discipline the direct list
+    above already carries.
+  * PACKAGES THAT RESOLVE TO THE SHARED FRAMEWORK ARE NOT PACKAGES HERE. On
+    net10.0 several declared dependencies are satisfied by Microsoft.NETCore.App
+    or Microsoft.AspNetCore.App rather than by a package. They appear in no lock
+    file, contribute no third-party terms, and therefore appear in no line above.
+    The two shared frameworks themselves are Microsoft components of the .NET
+    platform, licensed MIT. Microsoft.OpenApi.YamlReader is the clearest worked
+    example: it declares exactly three dependencies -- Microsoft.OpenApi 2.12.0,
+    which is already a direct reference above; SharpYaml 2.1.4, which is the one
+    package it genuinely adds and is enumerated above; and System.Text.Json
+    8.0.5, which resolves to the shared framework and so appears nowhere.
+  * IT IS NOT A CONTAINER IMAGE INVENTORY. The base images named in each
+    service's Dockerfile carry their own operating-system package sets, and
+    nothing in this file enumerates those. An image-level inventory is a separate
+    artifact and none is produced in this phase.
+  * IT IS NOT AN npm GRAPH. The three npm devDependencies below are direct
+    references of tests/e2e only; their own transitive closure is recorded in
+    tests/e2e/package-lock.json and is not restated here, because nothing in that
+    closure is shipped in any service image.
+
+Registry: npmjs.org -- used only by the cross-service end-to-end suite under
+tests/e2e. All three are devDependencies of tests/e2e/package.json, so the same
+two-directional reconciliation applies: every devDependency in that manifest
+appears below at the same version, and every entry below is pinned there. None of
+them is referenced by any service project and none is shipped in any service
+image; they are development and verification tooling for that one suite.
+
+  @playwright/test                               1.62.1    Apache-2.0
+  @types/node                                    22.20.1   MIT
+  typescript                                     5.9.3     Apache-2.0
+
+typescript and @types/node are taken by that suite because its specs and
+fixtures are TypeScript compiled under the strict settings in
+tests/e2e/tsconfig.json, and its Node built-in usage is typed rather than
+untyped. Neither is a Playwright dependency, so neither would arrive on its own.
+
+The following arrive transitively from the three above. They are recorded for the
+same reason as the transitive .NET packages: so that a reader of
+tests/e2e/package-lock.json does not mistake any of them for an undeclared
+direct dependency, and so that their terms are on the record too.
+
+  playwright                                     1.62.1    Apache-2.0
+  playwright-core                                1.62.1    Apache-2.0
+  undici-types                                   6.21.0    MIT
+
+playwright and playwright-core arrive through @playwright/test, and undici-types
+through @types/node. One further entry appears in that lock file and is
+deliberately not listed above: fsevents 2.3.2 (MIT), an optional dependency of
+playwright declared for darwin only. It is not installed on the Linux hosts this
+repository builds and tests on, so it contributes no terms to any artifact
+produced here; it is named here only so that every entry in the lock file is
+accounted for.
+
+A note on SQLite, which appears in both section 3 and section 4. That is a
+genuine continuity rather than a duplicated entry. The legacy framework links a
+native SQLite library into the binaries listed in section 3; the .NET persistence
+service reaches the same engine through the managed Microsoft.Data.Sqlite and
+Microsoft.EntityFrameworkCore.Sqlite providers, whose native component arrives in
+SQLitePCLRaw.bundle_e_sqlite3. It is one upstream engine reached two ways, and
+SQLite itself is in the public domain on both paths.
+
+
+===============================================================================
+5. A NOTE ON THE LEGACY POWERBUILDER TREE
+===============================================================================
+
+The PowerBuilder sources under ws_objects/, together with the compiled libraries
+and target and workspace files (*.pbl, *.pbt, *.pbw, *.pbg, *.pbr, *.pbd), the
+frozen PowerBuilder 12.5 tree under oldversion/125/, the consolidated
+redistribution libraries under pack/, the native binaries at the repository root,
+the resources under res/, the Sciter samples and widgets under samples/sciter/ and
+sciter_control/, and the legacy browser assets under tests/blink/, tests/sciter/
+and tests/webview/, all remain in this repository deliberately. They are the
+behavioural specification for the .NET services and the oracle against which
+those services are characterized for parity, so they are treated as read-only and
+are not edited, relocated or removed.
+
+The licence terms in sections 1 and 2 apply to them exactly as they always have.
+The .NET tree is purely additive: it does not replace, relicense or supersede any
+part of the legacy tree, and it depends on neither the PowerBuilder toolchain, nor
+the PowerBuilder runtime, nor any of the shipped native binaries.
+
+The same attribution conditions are additionally embedded in the headers of
+individual PowerBuilder objects throughout the legacy tree -- for example
+ws_objects/pfw.shared.pbl.src/retcode.sru -- which is how the copyright holder
+arranged for the conditions to travel with the code itself rather than live only
+in a root file. Sections 1 and 2 above are transcribed from the root LICENSE and
+README files, which are the canonical statement of those terms.
+
+
+===============================================================================
+6. VENDORED TRUST MATERIAL INSIDE THIRD-PARTY BINARIES
+===============================================================================
+
+Some of the third-party binaries credited in section 3 carry trust material of
+their own: certificate and key data embedded by their upstream vendors when those
+binaries were built. That material belongs to the vendored components, it is not
+remediable from the sources in this repository, and none of it is reproduced
+anywhere in the .NET tree.
+
+This notice records only that the material exists, because it travels with the
+attributed components and a redistributor of those binaries should know that it
+does. The locators, the assessment and the required action are recorded in
+docs/SECRETS.md. No values appear in this file, and none may be added to it: this
+is an attribution notice, not a credential inventory.

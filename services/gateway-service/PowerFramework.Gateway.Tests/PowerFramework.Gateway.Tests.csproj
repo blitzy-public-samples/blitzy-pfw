@@ -1,0 +1,129 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    PowerFramework.Gateway.Tests
+    Unit and service-level tests for the Gateway service, the sole ingress and composition root of
+    the PowerFramework .NET 10 decomposition. This project is the compilation unit for the test
+    classes in this folder and the only producer of Gateway's coverage report.
+
+    HAND-AUTHORED ON PURPOSE. This file was not scaffolded from a template and must not be
+    regenerated from one. `dotnet new xunit3` does not exist in SDK 10.0.302, and `dotnet new xunit`
+    scaffolds the xunit v2 line together with an older test SDK and an older coverage collector.
+    Templating is precisely how the wrong package versions get in, so the XML below is written by
+    hand and kept deliberately small.
+
+    WHAT THIS FILE DELIBERATELY DOES NOT DECLARE. Everything listed below arrives by MSBuild
+    directory walk-up from the repository root and applies to test projects exactly as it does to
+    application projects. Restating any of it here would be duplication that silently drifts:
+      * Directory.Build.props     TargetFramework net10.0, LangVersion, Nullable, ImplicitUsings,
+                                  TreatWarningsAsErrors, .NET analyzers, central package
+                                  management, deterministic build, shared assembly metadata.
+      * Directory.Packages.props  every package version.
+      * global.json               the SDK pin and rollForward latestFeature. The version is read
+                                  there rather than copied here, so this comment cannot go stale
+                                  the way it once did.
+
+    Consequence worth internalising rather than rediscovering: TreatWarningsAsErrors is inherited
+    here too, so a warning in any test file in this folder is a build failure. Fix the warning in
+    the test file. Do not add a NoWarn list, do not disable nullable, do not set
+    GenerateDocumentationFile, and do not widen the root .editorconfig suppressions from here.
+
+    Solution membership: this project is enumerated by services/gateway-service/gateway-service.slnx
+    and by the repository-root PowerFramework.slnx. Because that per-service .slnx is the only
+    solution file in services/gateway-service, a bare `dotnet restore`, `dotnet build` or
+    `dotnet test` run from that directory resolves it automatically, which is what lets the
+    documented per-service command run verbatim. Keep this file's name and directory exactly as
+    those solutions declare them, and never add a .slnf filter - because a filter's project list has
+    to be kept in exact agreement with the solution BY HAND and every drift fails hard. This note
+    used to say such a filter fails with MSB4014 over a .slnx in all three verbs; that was measured
+    false on the pinned SDK, and docs/BUILD.md section 2 carries the measurement.
+  -->
+
+  <PropertyGroup>
+    <!--
+      MANDATORY, NOT STYLISTIC, and verified against the packages themselves rather than assumed.
+      xunit.v3 ships its own in-process runner and generates the test assembly's entry point, so a
+      v3 test project has to build as an executable. It enforces that with a build-time Error in
+      xunit.v3.core.mtp-v1's targets, which fails the build outright when OutputType is anything
+      other than Exe (and, separately, when UseAppHost is not true).
+
+      Declared here explicitly on purpose. Microsoft.NET.Test.Sdk's own targets currently also force
+      OutputType to Exe, so the guard above would be satisfied even by a project that stayed silent.
+      Relying on that is fragile: it makes a build-breaking requirement invisible, and it would stop
+      holding the moment the test host reference changes or the project moves to running under
+      Microsoft Testing Platform directly. State the requirement where it applies. Do not tidy it
+      away on the grounds that the build still passes without it.
+    -->
+    <OutputType>Exe</OutputType>
+
+    <!-- A test project is never packed or shipped. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!--
+    Versions are intentionally absent. ManagePackageVersionsCentrally is enabled at the repository
+    root, so Directory.Packages.props is the single source of truth and every reference here stays
+    versionless. Adding a Version attribute fights central package management and fails the build
+    (NU1008).
+
+    Exactly five packages, and no others. Anything absent from Directory.Packages.props has no
+    resolvable version and fails restore (NU1010). That is the mechanism by which the deliberately
+    excluded assertion, mocking, fixture, container, logging, telemetry and standalone health-check
+    packages stay out: health-check registration already ships in the Microsoft.AspNetCore.App
+    shared framework, and the Gateway service uses only those shared-framework abstractions.
+  -->
+  <ItemGroup>
+    <!-- Test host. -->
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+
+    <!-- The test framework itself. -->
+    <PackageReference Include="xunit.v3" />
+
+    <!--
+      The VSTest adapter, and load-bearing rather than redundant with xunit.v3: without it
+      `dotnet test` discovers nothing at all, which reads as a green run with no tests instead of
+      an error.
+    -->
+    <PackageReference Include="xunit.runner.visualstudio">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+
+    <!--
+      Load-bearing for the coverage gate. This project is the only source of
+      coverage.cobertura.xml for the Gateway service, and that report is what the 80 percent
+      line-coverage-per-service gate is measured from. coverlet.collector is what emits it under
+      `dotnet test` with XPlat Code Coverage collection. Drop the package and no report is produced
+      at all, so the gate cannot be evaluated, which is a worse outcome than a low number because
+      it looks like success.
+    -->
+    <PackageReference Include="coverlet.collector">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+
+    <!--
+      In-process host for the service-level tests that sit alongside the unit tests. Supplies
+      WebApplicationFactory over the Gateway entry point, and brings the Microsoft.AspNetCore.App
+      framework reference this test project needs in order to consume it.
+    -->
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+  </ItemGroup>
+
+  <!--
+    Exactly one project reference: the system under test.
+
+    No reference to any other service (DataServices, Persistence or Security). Every service must
+    restore, build and test independently from a clean checkout with no sibling service present,
+    and a cross-service reference would break that outright. No reference to any deferred-service
+    project either: none exists, and none may be created in this phase.
+
+    No direct reference to the shared libraries or to the contracts project. They arrive
+    transitively through the Gateway reference, which is where that coupling belongs, and naming
+    them here would only duplicate the graph.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="../PowerFramework.Gateway/PowerFramework.Gateway.csproj" />
+  </ItemGroup>
+
+</Project>

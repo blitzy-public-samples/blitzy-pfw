@@ -1,0 +1,90 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Unit tests for PowerFramework.Shared.Kernel.
+
+    This is the test project that discharges constraint C-H (a test project per shippable project)
+    for the shared kernel: the return code algebra ported from ws_objects/pfw.shared.pbl.src/
+    retcode.sru, the tri state predicates from issucceeded.srf and its siblings, the return code
+    formatter from formatretcode.srf, the composite formatting substitute for sprintf.srf, and the
+    bit, ancestry and text primitives that replace the pfw.dll native surface (bitand.srf et al).
+
+    INHERITED, THEREFORE DELIBERATELY NOT RESTATED HERE
+    ===================================================
+    Directory.Build.props at the repository root already supplies TargetFramework (net10.0),
+    LangVersion, Nullable (enable), ImplicitUsings (enable), TreatWarningsAsErrors (true),
+    EnableNETAnalyzers, AnalysisLevel, ManagePackageVersionsCentrally (true), Deterministic and the
+    shared assembly metadata. Restating any of those here would create the exact seam through which
+    a future edit silently diverges this project from the other fifteen, so none is repeated and
+    none is relaxed. In particular there is no Nullable override, no TreatWarningsAsErrors override
+    and no NoWarn blanket: warnings are errors in the tests exactly as they are in the library.
+
+    Directory.Packages.props at the repository root is the single source of truth for every package
+    version (xunit.v3 3.2.2, xunit.runner.visualstudio 3.1.5, Microsoft.NET.Test.Sdk 18.8.1,
+    coverlet.collector 10.0.1). Central package management is switched on, so every PackageReference
+    below is intentionally VERSIONLESS. Adding a Version attribute here is an NU1008 build error and,
+    worse, would defeat the mechanism that keeps the whole repository on one verified version set.
+  -->
+
+  <PropertyGroup>
+    <!--
+      REQUIRED BY xunit.v3, WHICH RUNS TESTS AS AN EXECUTABLE RATHER THAN A LIBRARY.
+      xunit.v3 generates the assembly entry point, so the test host launches this project as a
+      process. Omitting the property is not a subtle misconfiguration; it is a hard build failure.
+      Verified on this repository by overriding the property to Library, which produced:
+
+          xunit.v3.core.mtp-v1.targets(15,5): error : xUnit.net v3 test projects must be
+          executable (set project property '<OutputType>Exe</OutputType>').
+
+      Do not change this to Library. The project is hand authored for a related reason:
+      `dotnet new xunit3` does not exist in the pinned SDK, and `dotnet new xunit` scaffolds the
+      xunit v2 line with an older test SDK and an older coverage collector.
+    -->
+    <OutputType>Exe</OutputType>
+
+    <RootNamespace>PowerFramework.Shared.Kernel.Tests</RootNamespace>
+    <AssemblyName>PowerFramework.Shared.Kernel.Tests</AssemblyName>
+
+    <!-- A test project is never shipped as a NuGet package. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup Label="Test stack (versions come from Directory.Packages.props)">
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <!--
+      coverlet.collector emits coverage.cobertura.xml, which is the exact artifact the 80 percent
+      line coverage gate is measured from, produced by running `dotnet test` for this project with
+      the "XPlat Code Coverage" data collector in the Release configuration. Note that a bare
+      `dotnet test` builds Debug even immediately after a Release build, so the Release
+      configuration has to be requested explicitly when Release coverage is wanted.
+      Removing or mis-scoping this reference makes the gate unmeasurable, so C-H depends on it.
+    -->
+    <PackageReference Include="coverlet.collector">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <!--
+      Microsoft.AspNetCore.Mvc.Testing is DELIBERATELY NOT REFERENCED, even though it is pinned in
+      Directory.Packages.props. It is an in process web host for service level tests and is scoped
+      to the four service test projects only. PowerFramework.Shared.Kernel is a pure BCL library
+      with no HTTP surface, no hosting model and no I/O, so every suite here is an in process unit
+      test over static classes. Adding a web host here would be unrequested scope, not completeness.
+    -->
+  </ItemGroup>
+
+  <!--
+    Exactly one ProjectReference, satisfying C-I (this project restores, builds and tests from a
+    clean checkout with no container, no daemon, no database and no network) and C-A (no coupling to
+    PowerFramework.Contracts, to any other shared library, or to anything under services/). This
+    test project tests one library and only that library.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\PowerFramework.Shared.Kernel\PowerFramework.Shared.Kernel.csproj" />
+  </ItemGroup>
+
+</Project>

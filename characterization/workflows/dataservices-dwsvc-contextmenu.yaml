@@ -1,0 +1,1575 @@
+# yaml-language-server: $schema=./workflow.schema.json
+# ==================================================================================================
+#  dataservices-dwsvc-contextmenu - THE HEADLESS MENU ITEM MODEL, AND THE COLUMN-VALUE ORDERED MAP
+#  ------------------------------------------------------------------------------------------------
+#  THIS DEFINITION HAS TWO JOBS, AND THE SECOND ONE IS HERE BY CORRECTION RATHER THAN BY DESIGN.
+#    1. It characterizes the HEADLESS HALF of the DataWindow context-menu service - the menu ITEM
+#       MODEL. This is the most presentational of the five attached services, so the split between
+#       what ships and what does not is the defining feature of the capture rather than a footnote.
+#    2. It carries the ORDERED-MAP COVERAGE that was displaced here after the container's nominated
+#       oracle turned out not to be one. `../README.md` section 4.6 nominates
+#       `ws_objects/pfw.tests.pbl.src/w_test_static_map.srw` for the ordered map on the strength of
+#       its name. THE NAME IS A FALSE FRIEND: read in full - it is 82 lines - that window creates an
+#       `n_httpclient` at `:L55` and `:L58`, issues an HTTP `GET` against a public third-party
+#       static-map endpoint across `:L55-L66`, and calls `SetPicture` into a control declared
+#       `from picture` at `:L7` and `:L74`, sizing the request through the unit conversions on
+#       `:L66`. Its dependencies are OUTBOUND HTTP and A PICTURE CONTROL - two deferred capability
+#       areas - and it reaches a LIVE THIRD-PARTY ENDPOINT, which destroys the repeatability the
+#       golden-master technique names as its one hard prerequisite. It therefore carries no workflow
+#       at all: C-D rules it out on the first ground and the second would rule it out even if the
+#       capability areas shipped. "Static map" names a static map IMAGE, not the ordered map.
+#
+#       AND THERE IS NO ORDERED-MAP ORACLE WINDOW ANYWHERE. Searching for the ordered-map and vector
+#       container types across EVERY file in `ws_objects/pfw.tests.pbl.src/` and
+#       `ws_objects/pfw.demos.pbl.src/` returns nothing - neither container is exercised anywhere in
+#       the fixture corpus. The container's only in-scope exercise is the column-value map inside
+#       this service's own paste path, so this is where it is characterized, and it is the
+#       container's ONLY paired coverage in the store. Its pure contract - independent of any
+#       DataWindow - is unit-test matter in `PowerFramework.Shared.Containers.Tests`, on the same
+#       ground the return-code algebra is: a behaviour with no oracle recording cannot be paired,
+#       and a unit test that pins a pure function is not weakened by the absence of one.
+#       `./README.md` holds the full correction register and is the authority for both findings.
+#
+#  THIS FILE SPECIFIES A CAPTURE. IT CONTAINS NO CODE AND NO CAPTURED VALUE.
+#  It conforms to `./workflow.schema.json`, which is authoritative for shape. Store-wide conventions
+#  - the capture rule's canonical text, the recording-file conventions, the seam register and the
+#  defect roster - belong to `../README.md` and `../../docs/PARITY.md` and are CITED here, never
+#  restated. A fourth copy of a rule three files already own word for word is a fourth thing to
+#  drift. The deferred roster belongs to `../../docs/DEFERRED.md` and is likewise cited, not copied.
+#
+#  ---- THE HEADLESS / RENDERING SPLIT, AND THE EVIDENCE THAT DRAWS IT WHERE IT IS ----------------
+#  `../../docs/DEFERRED.md` section 6.2 fixes the split for this service: the COMPLETE MENU ITEM
+#  MODEL ships in DataServices - labels, ids, enabled and split flags, and computed logical text
+#  widths - while DPI-to-pixel conversion, font measurement, window geometry and actual rendering
+#  are DEFERRED and named as a reserved Gateway extension point. Section 6.1 of the same document
+#  carries the measured type-position evidence, and this capture adds one finding that makes the
+#  line sharper than a locator list can: ALL FOUR font creations and ALL FOUR unit conversions in
+#  the service live inside its TWO automatic-column-width functions, which begin at
+#  `n_cst_dwsvc_contextmenu.sru:L1085` and `:L1260`. Nothing else in the object measures or converts
+#  anything. THAT IS WHY THE FIXTURE'S OWN HEADER COMMENT ENUMERATES FOUR BUILT-IN FEATURES AND
+#  OMITS AUTOMATIC COLUMN WIDTH: the four it names are precisely the headless ones. A documented gap
+#  is deliberately preferred to a partial implementation (C-D, and the migration plan's own reading
+#  that a half-built deferred service is worse than a documented gap).
+#
+#  ---- THREE READINGS CORRECTED AGAINST THE SOURCE ----------------------------------------------
+#  Each was read line by line rather than copied forward, and each correction is load-bearing
+#  because a capture written against a withdrawn reading asserts a behaviour the oracle does not
+#  exhibit - the one failure a characterization suite cannot survive.
+#    * THE EMPTY STRING ARGUMENT IS AN IMAGE, NOT AN ACCELERATOR. The four `of_AddMenu` overloads at
+#      `n_cst_dwsvc_contextmenu.sru:L70-L74` are (text, image, tiptext, enabled, id), (text, image,
+#      id), (text, image, enabled, id) and (text, image, tiptext, id). The fixture's four-argument
+#      call binds the third of those, so its `""` lands in the item model's IMAGE field at `:L15`.
+#      No accelerator parameter exists anywhere in the object.
+#    * THE ITEM-TEXT ACCESSOR'S FLAG IS `byposition`, NOT A CHOICE OF LABEL RENDERING. The prototype
+#      at `:L91` reads `of_gettext(readonly unsignedlong id, readonly boolean byposition)` and the
+#      body at `:L554-L560` branches `if byPosition then nIndex = id else nIndex = of_GetIndex(id)`.
+#      False means resolve the argument as an IDENTIFIER; true means treat it as a ONE-BASED
+#      POSITION. That is a far more consequential distinction than a rendering choice, and it is why
+#      both flag values are captured - see defect D-05 and defect D-06.
+#    * THE FIXTURE HAS TWO DROP-DOWN-DATAWINDOW COLUMNS AND ONE DROP-DOWN LIST BOX, NOT THREE OF THE
+#      FORMER. `dw_svc_sample_contextmenu.srd:L25` and `:L26` carry `dddw.name=dw_svc_sample_dddw`;
+#      `:L27` is a `ddlb` column whose three display-and-data pairs come from its OWN inline value
+#      list at `:L11`. Both paths reach the same value-map accessor, so the capture covers both and
+#      names which is which rather than treating them as one.
+#
+#  ---- ORDER AND VALUES, NEVER SPEED (C-K, and `../README.md` section 6.4) -----------------------
+#  No elapsed value is recorded and no timing is asserted anywhere in this workflow. The repository
+#  publishes no service-level agreement, no latency budget, no throughput target and no availability
+#  commitment, so there is nothing a timing assertion could be measured against. The only
+#  quantitative gate in the brief is 80% per-service line coverage, read from
+#  `coverage.cobertura.xml` in CI - not from this store. `../../docs/BUILD.md` is the authority for
+#  the command and the report path.
+#
+#  ---- WHAT THIS DEFINITION DELIBERATELY OMITS, AND WHY -----------------------------------------
+#    * `blockedBehaviours` - OMITTED because this workflow blocks nothing. The store's two blocked
+#      cases belong to siblings: pinyin first-letter matching to `dataservices-dwsvc-dropdownsearch`
+#      and cross-session foreign expression variables to `dataservices-dwsvc-columnexp`. Neither is
+#      reachable from the menu item model or the value map, and claiming either would misattribute a
+#      known gap. Said here so the member's absence is not read as an oversight.
+#    * `redaction` - OMITTED because nothing this capture records is sensitive. Every value that
+#      reaches a recording originates in the read-only fixtures' own inline rows - two decimal
+#      columns, one numeric column rendered as a checkbox over one and zero, and three status
+#      columns of three-letter codes - and the clipboard payload the paste case consumes is
+#      FIXTURE-SOURCED for exactly this reason. NO KEY, NO PASSWORD, NO CERTIFICATE, NO TOKEN AND NO
+#      CONNECTION STRING IS READ, EMITTED OR RECORDED HERE (C-F). This service issues no SQL, so the
+#      redacted-statement rule has no field to act on.
+#
+#  ---- GOVERNING CONSTRAINTS --------------------------------------------------------------------
+#  NO USER-SPECIFIED RULES EXIST. The project's rules document returns exactly one line reporting
+#  that none were provided - a single line, with nothing further to page through. No rule is
+#  invented, inferred or back-filled, and nothing in this file exists because of one;
+#  enterprise-standard best practice applies in their place. The binding constraints are the
+#  migration plan's own: C-B (defects reproduced, never corrected - a CORRECTED capture is a parity
+#  FAILURE), C-C (the legacy tree is read-only and is the oracle; every claim carries a locator),
+#  C-D (nothing for a deferred capability area, not even a stub), C-F (no secret value), C-K (every
+#  decision carries its reason) and C-L (the shared-volume capture rule).
+# ==================================================================================================
+
+schemaVersion: "1"
+
+workflowId: dataservices-dwsvc-contextmenu
+
+title: >-
+  Context-menu service: the headless menu item model, its two vetoable hooks, and the column-value
+  ordered map
+
+capabilityArea: >-
+  The headless half of the DataWindow context-menu service `n_cst_dwsvc_contextmenu` - the menu ITEM
+  MODEL it builds (labels, images, tip texts, identifiers, enabled and split flags, submenu
+  presence, separator entries and their suppression rules, and computed logical text widths), the
+  two entry points that produce structurally different models, the boundary between custom and
+  built-in menu identifiers, the two adjacent vetoable hooks and their two different veto meanings,
+  the headless built-in features and their effects on cell and column values, and the column-value
+  ORDERED MAP the paste feature resolves display values through - its insertion order and its
+  positional get by integer index.
+
+targetService: DataServices
+
+description: >-
+  ONE MENU, BUILT AND DISPATCHED TWICE. The pair proves that the item model this service builds, the
+  identifier a selection carries, the effect each headless built-in feature has on the fixture's
+  values, and the two veto outcomes are identical on the legacy master and on the .NET candidate
+  after identical masking.
+
+
+  JOB ONE - THE HEADLESS ITEM MODEL. The item model is a structure of eight fields declared at
+  `ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L12-L21`, and seven of
+  them are headless: enabled, text, image, tip text, identifier, split and menu-owner. The eighth is
+  typed on the popup-menu class at `:L18` and is the single point at which the structure reaches
+  into the deferred half; the candidate substitutes headless submenu metadata for it rather than
+  holding the popup-menu type. Everything the capture records about a menu comes out of that
+  structure and out of the build loop at `:L156-L185` that projects it.
+
+
+  JOB TWO - THE DISPLACED ORDERED-MAP COVERAGE, AND WHY AN ORDERED-MAP CONCERN LIVES IN A
+  CONTEXT-MENU WORKFLOW. `../README.md` section 4.6 nominates the static-map window as the ordered
+  map's oracle; that window is a third-party static-map IMAGE fetch over outbound HTTP into a
+  picture control, so it depends on two deferred capability areas and on a live network endpoint and
+  carries no workflow. Searching both fixture libraries for the ordered-map and vector container
+  types returns nothing, so THERE IS NO ORDERED-MAP ORACLE WINDOW AT ALL. The container's only
+  in-scope exercise is the column-value map that `n_cst_dwsvc.sru` builds at `:L583-L585` and that
+  this service consumes at `n_cst_dwsvc_contextmenu.sru:L948`, so that is where its insertion order
+  and its positional get by integer index are characterized - and this is the container's only
+  paired coverage in the store. `./README.md` holds the full correction register.
+
+
+  THE SPLIT IS THE DEFINING FEATURE, AND ITS REASON IS MEASURED RATHER THAN ASSERTED (C-K). This is
+  the most presentational of the five attached services: it queries a window rectangle, converts
+  logical units to device pixels in four places, creates a font object in four places to measure
+  text, and publishes a submenu surface typed on the popup-menu class. The contrast that makes the
+  split evidence-driven rather than arbitrary is in the same folder - `n_cst_dwsvc.sru` is 864 lines
+  with ZERO presentation references and `n_cst_dwsvc_rowselect.sru` has exactly ONE, so the
+  row-select service ships whole while this one is split. One finding sharpens the line further:
+  every one of the four font creations and every one of the four unit conversions sits inside the
+  two automatic-column-width functions and nowhere else, which is why the fixture's own header
+  comment names four built-in features and silently leaves automatic column width out of them.
+
+
+  WHAT THAT MEANS FOR THIS CAPTURE. The item model, the identifier dispatch, the veto outcomes, the
+  resulting values and the value map are all recorded. Window geometry, unit conversion, font
+  measurement, the theme background style's effect and any rendering are NOT - they are declared in
+  `deferredCapabilities` as a documented gap behind a reserved route, and no mask entry, no
+  precondition and no recorded output targets them. The one width the capture does record is the
+  LOGICAL one the item model computes, expressed as a character-count measure and two logical
+  constants; any device-resolved width is masked out, and the mask entry says which side of that
+  line each recorded width sits on.
+
+
+  NO DATA VALUE RECORDED HERE IS SENSITIVE. Every captured value - including the clipboard payload
+  the paste case consumes, which is seeded from fixture data rather than read from ambient system
+  state - originates in the read-only fixtures' own inline rows. Nothing is read from a credential,
+  a key store or a connection string (C-F).
+
+# ==================================================================================================
+#  THE ORACLE
+#  ------------------------------------------------------------------------------------------------
+#  Read, never edited, moved, renamed, reformatted, re-encoded or copied into this tree (C-C, and
+#  `../README.md` sections 4.7 and 6.3). The host window is only 101 lines while the service object
+#  it exercises is 1,459 - the largest in its folder after the expression engine - so BOTH are cited:
+#  capturing the window alone would characterize the switch that turns the service on, not the
+#  behaviour behind it. `./README.md` records that pairing rule for every roster row that has it.
+# ==================================================================================================
+oracleFixtures:
+  # THE HOST WINDOW - 101 lines, verified. Every locator below was read in the file rather than
+  # copied from a summary, and the three corrections in the header block came out of doing that.
+  - path: ws_objects/pfw.tests.pbl.src/w_test_dwsvc_contextmenu.srw
+    role: oracle-window
+    locators:
+      - "L44-L52"             # THE FOUR-FEATURE HEADER COMMENT - it omits automatic width, the presentational one
+      - "L54"                 # the service is switched on: the only statement in the open event
+      - "L70"                 # the on-screen hint naming THE TWO ENTRY POINTS: column header, and cell
+      - "L80"                 # the bound definition - the release-12.5 sample, not the release-19 family
+      - "L84-L92"             # THE INITIALIZER HOOK, captured step by step in declaration order
+      - "L85"                 # the source comment recording that returning 1 PREVENTS THE MENU ENTIRELY
+      - "L86"                 # the theme background style - PRESENT IN THE ORACLE, DEFERRED HALF, NOT CAPTURED
+      - "L87"                 # a separator is added, and it is added FIRST
+      - "L88"                 # custom item 1: label, EMPTY IMAGE argument `""`, enabled true, id 100
+      - "L89"                 # custom item 2: enabled true, identifier 101
+      - "L90"                 # custom item 3: ENABLED FALSE, identifier 102
+      - "L91"                 # the initializer returns 0 - the non-vetoing outcome
+      - "L94-L100"            # THE SELECTION HOOK
+      - "L95"                 # the source comment recording that returning 1 prevents the DEFAULT BEHAVIOUR
+      - "L96"                 # THE BOUNDARY TEST: identifiers below 10000 are custom, at or above are built-in
+      - "L97"                 # the item-text accessor called with the false flag, and the formatted record
+      - "L99"                 # the selection hook returns 0 - the non-vetoing outcome
+
+  # THE SERVICE OBJECT UNDER CHARACTERIZATION - 1,459 lines. These are the locators this
+  # definition's observed outputs, mask entries and defects actually cite.
+  - path: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru
+    role: service-object
+    locators:
+      - "L12-L21"             # THE ITEM MODEL: eight fields, seven headless
+      - "L15"                 # the image field - where the fixture's empty-string argument lands
+      - "L18"                 # the popup-menu-typed submenu field - THE ONE DEFERRED-TYPED MEMBER
+      - "L19"                 # the split flag
+      - "L20"                 # the menu-owner flag
+      - "L24-L27"             # the platform right-button events and the two internal hooks
+      - "L37-L45"             # THE EIGHT BUILT-IN IDENTIFIERS, 10000 through 10007
+      - "L37"                 # the reserved-start sentinel, value 10000
+      - "L38"                 # automatic column width - THE SAME VALUE, 10000. See defect D-01
+      - "L39"                 # automatic column width, all columns: 10001
+      - "L40"                 # check whole column: 10002
+      - "L41"                 # clear check whole column: 10003
+      - "L42"                 # invert check whole column: 10004 - in neither the comment nor the filter. See D-01
+      - "L43"                 # copy whole column: 10005
+      - "L44"                 # paste clipboard over whole column: 10006
+      - "L45"                 # copy single cell: 10007
+      - "L49-L53"             # the five feature-gating flags, every one defaulting to enabled
+      - "L57"                 # the item array - ONE-BASED, like every array in the legacy
+      - "L58"                 # the row stamped on right-button-down
+      - "L63"                 # the arrow-button width constant - a LOGICAL constant, see the width mask
+      - "L70-L74"             # THE FOUR of_AddMenu OVERLOADS - (text, image, ...) in every one of them
+      - "L72"                 # the overload the fixture's four-argument call actually binds
+      - "L73"                 # the separator adder the fixture calls
+      - "L75-L77"             # the index and identifier conversions the by-position flag depends on
+      - "L83"                 # the item count
+      - "L91"                 # THE ITEM-TEXT ACCESSOR PROTOTYPE - its flag is `byposition`
+      - "L94"                 # the enabled-state accessor, same flag
+      - "L96-L106"            # THE POPUP-MENU-TYPED SUBMENU OVERLOAD BLOCK - deferred surface
+      - "L124-L134"           # the right-button pair: the click fires ONLY if up-row equals down-row
+      - "L136-L202"           # the build, popup and dispatch pipeline
+      - "L143"                # guard: the popup is suppressed outright for an editable focused cell
+      - "L146"                # VETO 1 of 3 - the service's own preparation hook
+      - "L147"                # VETO 2 of 3 - the host's initializer hook, the one the fixture implements
+      - "L149-L150"           # the empty-model outcome, read off the ONE-BASED upper bound
+      - "L156-L185"           # THE MODEL BUILD LOOP - the headless core of the whole service
+      - "L157-L168"           # feature filtering: note what is NOT filtered here. See defect D-01
+      - "L169"                # A SEPARATOR IS ENCODED AS AN ITEM WHOSE TEXT IS A SINGLE HYPHEN
+      - "L173-L178"           # separator suppression: no leading, no consecutive, no trailing
+      - "L179-L183"           # the submenu path carries SPLIT; the plain path does not. See defect D-02
+      - "L187"                # the window-rectangle query - DEFERRED HALF, evidence only
+      - "L189"                # the popup placement and its device conversions - DEFERRED HALF, evidence only
+      - "L193"                # no selection: the pipeline returns before either the host hook or the default
+      - "L194"                # VETO 3 of 3 - the host's selection hook. RETURNING 1 SKIPS THE DEFAULT
+      - "L196"                # the default behaviour, reached only when the selection hook did not veto
+      - "L197-L200"           # the model is DISCARDED after every right-click, and the clipboard cache with it
+      - "L204-L222"           # THE BUILT-IN DISPATCH: eight arms, and NO else arm
+      - "L205-L208"           # the two automatic-width arms - DEFERRED HALF, evidence only
+      - "L209-L214"           # the three check arms
+      - "L215-L216"           # the paste arm - it consumes the clipboard text captured at build time
+      - "L217-L218"           # the copy-column arm
+      - "L219-L220"           # the copy-cell arm, which takes the column object's own name
+      - "L224-L308"           # the preparation hook, where every built-in item is added
+      - "L233-L239"           # band resolution, with the header fallback that reads a pointer position
+      - "L241-L251"           # THE CELL ENTRY POINT'S EARLY RETURN - one item, then stop
+      - "L253-L266"           # the header entry point derives the column by stripping a two-character suffix
+      - "L268-L279"           # the automatic-width items, added only for a grid - DEFERRED HALF, evidence only
+      - "L281-L296"           # the check and copy items, and the two separators that bracket them
+      - "L284-L290"           # THE CHECK ITEMS APPEAR ONLY FOR A CHECKBOX-STYLE COLUMN
+      - "L297-L302"           # THE CLIPBOARD IS READ AT MENU-BUILD TIME, not at selection time
+      - "L310-L330"           # the popup-suppression guard in full
+      - "L514-L552"           # copy whole column
+      - "L519"                # pending edit text is accepted first, and a failure to accept fails the feature
+      - "L521-L525"           # a checkbox column's on and off values are read from the definition
+      - "L529"                # ONE-BASED iteration over the row count
+      - "L530-L531"           # an invisible item yields an EMPTY value - and still emits its line
+      - "L533-L539"           # THE CHECKBOX COLUMN'S ONE AND ZERO BECOME Y AND N
+      - "L541"                # a computed column copies its evaluated value
+      - "L543"                # EVERY OTHER COLUMN COPIES ITS DISPLAY VALUE, not its data value
+      - "L546"                # lines are joined with a carriage-return-and-newline pair
+      - "L549"                # the clipboard is written
+      - "L554-L560"           # THE ITEM-TEXT ACCESSOR BODY - the flag selects identifier or ONE-BASED position
+      - "L597"                # the one-based bounds check, written against the last valid index
+      - "L602-L632"           # copy single cell - the same three-way value logic for one row
+      - "L605"                # a non-positive row is an invalid argument
+      - "L767"                # check whole column
+      - "L795"                # a rejected modification, reported through a localized dialog
+      - "L821"                # invert check whole column
+      - "L863"                # a rejected modification, second site
+      - "L889"                # clear check whole column
+      - "L916"                # a rejected modification, third site
+      - "L942-L1076"          # PASTE OVER WHOLE COLUMN - the path that consumes the ordered map
+      - "L948"                # THE ORDERED MAP IS DECLARED HERE
+      - "L950"                # an empty column name or empty payload is an invalid argument
+      - "L952"                # the payload is split on a carriage-return-and-newline pair
+      - "L986-L988"           # the map is fetched ONLY for a translating or enumerated column
+      - "L987"                # the value-map accessor call
+      - "L993"                # ONE-BASED iteration over the payload lines
+      - "L994-L1001"          # A PAYLOAD LONGER THAN THE ROW COUNT INSERTS ROWS
+      - "L1002-L1003"         # invisible and protected items are skipped
+      - "L1004"               # BUT THE PAYLOAD IS STILL INDEXED BY ROW - positional, not sequential
+      - "L1006-L1007"         # THE MAP RESOLVES A DISPLAY VALUE TO ITS DATA VALUE
+      - "L1009"               # an unresolvable value on an enumerated column, reported and refused
+      - "L1018"               # a type mismatch, first of six sites
+      - "L1027"               # a type mismatch, second site
+      - "L1033"               # a type mismatch, third site
+      - "L1039"               # a type mismatch, fourth site
+      - "L1045"               # a type mismatch, fifth site
+      - "L1052"               # a rejected modification, fourth site
+      - "L1076"               # the map is destroyed on the way out
+      - "L1085"               # AUTOMATIC WIDTH, ALL COLUMNS - DEFERRED HALF, evidence only
+      - "L1092"               # a font object is declared - DEFERRED HALF, evidence only
+      - "L1098"               # a font object is created - DEFERRED HALF, evidence only
+      - "L1241"               # a device conversion - DEFERRED HALF, evidence only
+      - "L1243"               # a device conversion - DEFERRED HALF, evidence only
+      - "L1260"               # AUTOMATIC WIDTH, ONE COLUMN - DEFERRED HALF, evidence only
+      - "L1266"               # a font object is declared - DEFERRED HALF, evidence only
+      - "L1277"               # a font object is created - DEFERRED HALF, evidence only
+      - "L1409"               # a device conversion - DEFERRED HALF, evidence only
+      - "L1411"               # a device conversion - DEFERRED HALF, evidence only
+
+  # THE BASE SERVICE CLASS - 864 lines with ZERO presentation references, which is the contrast that
+  # makes the split above evidence-driven. It also OWNS THE COLUMN-VALUE MAP, which is why this row
+  # is cited alongside the context-menu object rather than left to the sibling that shares the base.
+  - path: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc.sru
+    role: service-object
+    locators:
+      - "L19"                 # the grid style constant the automatic-width items are gated on
+      - "L43"                 # the enable prototype the fixture calls
+      - "L74"                 # THE VALUE-MAP ACCESSOR, BY COLUMN NAME
+      - "L75"                 # THE VALUE-MAP ACCESSOR, BY COLUMN NUMBER - a second overload, not a rename
+      - "L89"                 # the enable body, with its no-change early return
+      - "L127"                # the style accessor
+      - "L145"                # the arm that reports a grid
+      - "L561"                # THE BY-NAME BODY
+      - "L583"                # THE ORDERED MAP IS DECLARED
+      - "L585"                # THE ORDERED MAP IS CREATED
+      - "L587"                # an unusable column name returns an EMPTY MAP - not null, and not an error
+      - "L589-L600"           # the drop-down-DataWindow branch: display column, data column, child resolution
+      - "L663"                # the map is returned to the caller, which owns it
+      - "L666"                # THE BY-NUMBER OVERLOAD DELEGATES, resolving a ONE-BASED column number to a name
+
+  # THE SERVICE EXTENSION THAT HOSTS THE SUB-SERVICE AND DECLARES THE TWO SEMANTIC EVENTS THE FIXTURE
+  # IMPLEMENTS. The 22-event chain itself belongs to `dataservices-dw-event-chain`, and this
+  # definition cites only the points at which the chain and this sub-service meet.
+  - path: ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru
+    role: service-object
+    locators:
+      - "L11"                 # the initializer event's signature
+      - "L12"                 # the selection event's signature, carrying the identifier as a signed long
+      - "L80"                 # the sub-service member the fixture reaches through
+      - "L115-L118"           # the raw right-button-down event: semantic handler, then broker, both inspected
+      - "L120-L122"           # the raw right-button-up event: BROKER ONLY, no semantic handler in the path
+
+  # THE PRIMARY FIXTURE - release 12.5. Nine rows, inline, in the read-only definition itself.
+  - path: ws_objects/pfw.tests.pbl.src/dw_svc_sample_contextmenu.srd
+    role: primary-fixture
+    locators:
+      - "L2"                  # RELEASE 12.5 - see the release-difference note in the seed phase
+      - "L3"                  # the definition is a GRID, which is what admits the automatic-width items
+      - "L8-L14"              # six columns, every one carrying an update-where-clause marking
+      - "L8"                  # a two-place decimal column - and its nine values contain DUPLICATES
+      - "L9"                  # a second two-place decimal column
+      - "L10"                 # THE NUMERIC COLUMN'S VALUE LIST: one and zero
+      - "L11"                 # THE FIRST STATUS COLUMN'S OWN INLINE VALUE LIST: three display-and-data pairs
+      - "L14"                 # the declared sort specification
+      - "L15"                 # THE NINE INLINE ROWS - the seed, carried by the definition itself
+      - "L16-L21"             # the six header text objects, each named with a two-character suffix
+      - "L22-L27"             # the column controls, DECLARED OUT OF IDENTIFIER ORDER - 6, then 5, then 4
+      - "L24"                 # THE CHECKBOX-RENDERED COLUMN: its on value is one and its off value is zero
+      - "L25"                 # a drop-down-DataWindow column, edit disallowed
+      - "L26"                 # a second drop-down-DataWindow column, edit disallowed
+      - "L27"                 # THE DROP-DOWN LIST BOX column - backed by its own value list, not by the child
+
+  # THE CHILD DEFINITION THE TWO DROP-DOWN-DATAWINDOW COLUMNS RESOLVE THROUGH. Also release 12.5.
+  - path: ws_objects/pfw.tests.pbl.src/dw_svc_sample_dddw.srd
+    role: supporting-fixture
+    locators:
+      - "L2"                  # release 12.5, matching its parent
+      - "L8-L9"               # the display column and the data column, both hundred-character strings
+      - "L11"                 # THE THREE DISPLAY-AND-DATA PAIRS - three labels, three three-letter codes
+
+  # CITED FOR CONTRAST AND NOT BOUND BY THIS WORKFLOW. It is the release-19 member of the other
+  # fixture family, and the release difference is the reason this row exists at all.
+  - path: ws_objects/pfw.tests.pbl.src/dw_test_dwsvc_contextmenu.srd
+    role: supporting-fixture
+    locators:
+      - "L2"                  # RELEASE 19 - a DIFFERENT release from the definition the window binds
+      - "L15"                 # nine rows that differ from the bound fixture's in whitespace AND in one value
+
+  # THE CONTAINER CONTRACT, READ AS SPECIFICATION. Thirty-one lines, and every one of them is a
+  # declaration: the type is bound to a closed native binary, so it is SUBSTITUTED rather than
+  # ported, and this file is the whole statement of what the substitute must preserve.
+  - path: ws_objects/pfw.utility.container.pbl.src/n_map.sru
+    role: specification
+    locators:
+      - "L8"                  # BOUND TO A CLOSED NATIVE BINARY - hence substituted, hence this pair matters
+      - "L9"                  # add, by key
+      - "L10"                 # get, BY KEY
+      - "L11"                 # GET, BY INTEGER INDEX - the positional accessor this pair proves survived
+      - "L12"                 # the key at an integer index - the other half of the positional contract
+      - "L13"                 # every key, in order - how insertion order is observed at all
+      - "L15"                 # existence, by key
+      - "L17"                 # the count
+      - "L20"                 # a global auto-instance SHADOWING ITS OWN TYPE NAME. See defect D-04
+
+# ==================================================================================================
+#  THE SEED PHASE - RUNS ONCE, BEFORE THE PAIR BEGINS
+#  ------------------------------------------------------------------------------------------------
+#  THERE IS NO DATABASE IN THIS SEED, AND SAYING SO IS THE POINT. The persistence workflows seed one:
+#  their oracle deletes a file, recreates a schema and inserts rows, which is precisely the
+#  destructive reseed the capture rule forbids between the two halves of a pair. THIS SEED HAS NO
+#  FILE DELETE, NO SCHEMA CREATION, NO INSERT STATEMENT AND NO CONNECTION. The nine rows the capture
+#  starts from are declared INLINE IN THE READ-ONLY DEFINITION ITSELF, at
+#  `dw_svc_sample_contextmenu.srd:L15`, so BINDING THE DEFINITION IS THE SEED. Both assertions below
+#  are nonetheless true and both are still required: the binding happens once per pair, and nothing
+#  here runs between the two captures.
+#
+#  THE RELEASE DIFFERENCE, BECAUSE THE TWO FIXTURE FAMILIES ARE NOT INTERCHANGEABLE. The definition
+#  the window binds at `w_test_dwsvc_contextmenu.srw:L80` is `dw_svc_sample_contextmenu.srd`, which
+#  declares RELEASE 12.5 at its `:L2`. The similarly-named `dw_test_dwsvc_contextmenu.srd` declares
+#  RELEASE 19 at its `:L2`, and its nine-row data line differs from the bound fixture's in whitespace
+#  AND in one value's rendering. Substituting one family for the other changes the fixture and voids
+#  the comparison, so THIS WORKFLOW DRIVES THE RELEASE-12.5 DEFINITION and the release-19 one is
+#  cited for contrast only. `./README.md` carries the same hazard for the whole roster, including the
+#  trap that one member of the release-12.5 naming family is itself release 19.
+# ==================================================================================================
+seedPhase:
+  steps:
+    - action: >-
+        Bind the DataWindow definition the host window names in its data-object property. On the
+        legacy side that is the definition the window declares; on the target side it is the
+        transcribed definition registered under the same column model. Binding loads the definition's
+        own inline rows - THIS STEP PERFORMS NO FILE DELETE, NO SCHEMA CREATION AND NO ROW INSERT,
+        because the rows are part of the read-only fixture. Confirm the bound definition declares
+        release 12.5 and not release 19 before going further.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_contextmenu.srw:L80"
+    - action: >-
+        Confirm the nine inline rows are present in declaration order with their six columns in their
+        declared types - two two-place decimals, one plain numeric, and three hundred-character
+        strings - and the declared sort specification applied. Confirm the first decimal column's nine
+        values CONTAIN DUPLICATES and the three status columns' values do too: the duplication is
+        already in the fixture, so the insertion-order-under-duplication case needs nothing invented
+        for it.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_svc_sample_contextmenu.srd:L15"
+    - action: >-
+        Confirm the definition is a grid. The two automatic-column-width items are added only for a
+        grid, so whether they appear in the item model at all depends on this property - and their
+        presence in the model is a headless output even though their effect is deferred.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_svc_sample_contextmenu.srd:L3"
+    - action: >-
+        Confirm the numeric column is rendered as a checkbox and that its on value is one and its off
+        value is zero. The three check features and the copy features both read those two values, so a
+        column rendered any other way exercises neither.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_svc_sample_contextmenu.srd:L24"
+    - action: >-
+        Confirm the two drop-down-DataWindow columns resolve their child definition and that its three
+        display-and-data pairs are readable. The paste feature resolves a display value to its data
+        value through those pairs, so the value map is empty without them.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_svc_sample_dddw.srd:L11"
+    - action: >-
+        Confirm the first status column's own inline value list is readable. That column is a drop-down
+        LIST BOX rather than a drop-down DataWindow, so its three pairs come from the column
+        definition itself and not from the child - and it reaches the same value-map accessor by a
+        different branch, which is why both are seeded rather than only the child.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_svc_sample_contextmenu.srd:L11"
+    - action: >-
+        Enable exactly the one sub-service the host window enables in its open event, and leave the
+        other four disabled. This is a seed step rather than a precondition check because the item
+        model is a function of it: with the service disabled no model is built at all, and the base
+        class's enable path returns immediately when the requested state already holds.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_contextmenu.srw:L54"
+    - action: >-
+        Leave all five feature-gating flags at their declared default of enabled, so that the baseline
+        item model is the full one and every filtering case below is a departure from a known starting
+        state rather than from an unknown one.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L49-L53"
+    - action: >-
+        Seed the clipboard from FIXTURE DATA before the paste case, and never from ambient system
+        state. The service reads the clipboard while it is BUILDING the menu rather than when the
+        selection is dispatched, so an ambient read would change both whether the paste item appears
+        and what a selection of it does. The seeded payload is a carriage-return-and-newline-separated
+        list of display values taken from the fixture's own rows, and it carries nothing sensitive
+        (C-F).
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L297-L302"
+    - action: >-
+        Configure the determinism seams declared below ONCE, and use that one configuration for both
+        halves of the pair. A seam configured per capture is two configurations, and two
+        configurations make the two recordings answer two different questions.
+    - action: >-
+        On the target side, construct the headless service against the transcribed definition and
+        record nothing else: no schema provisioning and no row seeding runs on this side either,
+        because the candidate materializes the same nine rows from the same read-only definition. This
+        step is idempotent and is safe to repeat without touching any persistent state.
+  runsOncePerPair: true
+  neverBetweenCaptures: true
+
+# ==================================================================================================
+#  THE CAPTURE PHASE - RUNS TWICE, AGAINST THE STATE THE SEED ALREADY ESTABLISHED
+# ==================================================================================================
+capturePhase:
+  behaviourUnderTest: >-
+    THE ITEM MODEL THE CONTEXT-MENU SERVICE BUILDS, THE IDENTIFIER A SELECTION CARRIES, AND WHAT THE
+    HEADLESS BUILT-IN FEATURES DO TO THE FIXTURE'S VALUES. Concretely, the pipeline at
+    `ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L136-L202` end to end:
+    the popup-suppression guard at `:L143`; the service's own preparation hook at `:L146`, which is
+    where every built-in item is added; the host's initializer hook at `:L147`, which is where the
+    fixture adds its separator and its three custom items; the empty-model outcome at `:L149-L150`;
+    THE MODEL BUILD LOOP AT `:L156-L185`, which is the headless core - feature filtering, separator
+    encoding and suppression, and the submenu-versus-plain branch; the no-selection return at
+    `:L193`; the host's selection hook at `:L194`; the built-in dispatch at `:L196` and `:L204-L222`;
+    and the discard at `:L197-L200` that rebuilds the model from scratch on the next right-click.
+
+
+    AND THE COLUMN-VALUE ORDERED MAP, as the second job this definition carries. The map is built by
+    `n_cst_dwsvc.sru:L561` with the container created at `:L585`, and it is consumed by the paste
+    feature at `n_cst_dwsvc_contextmenu.sru:L948`, `:L987` and `:L1006-L1007`. Two properties are the
+    whole observable contract and both are recorded: THE FULL CONTENTS IN INSERTION ORDER, and THE
+    VALUE RETURNED BY A POSITIONAL GET BY INTEGER INDEX. The container is substituted rather than
+    ported - its type is bound to a closed native binary - so this pair is the proof that the
+    substitution preserved both, and it is the container's only paired coverage anywhere in the store.
+
+
+    WHAT THIS CAPTURE IS NOT. It is not a capture of the 22-event chain: `dataservices-dw-event-chain`
+    owns that, and this definition records only the two semantic events of the context-menu pair and
+    the two raw right-button events that reach them. It is not a retrieval or update capture - no
+    statement is generated and no storage is written. AND IT IS NOT A MEASUREMENT: no elapsed value is
+    recorded and no timing is asserted, anywhere, for any case.
+
+
+    WHAT THIS CAPTURE DOES NOT RECORD, STATED SO THE GAP IS EXPLICIT RATHER THAN INFERRED. NO WINDOW
+    RECTANGLE, NO DEVICE-UNIT CONVERSION RESULT, NO MEASURED TEXT EXTENT, NO EFFECT OF THE THEME
+    BACKGROUND STYLE AND NO RENDERING OF ANY KIND IS RECORDED AS AN OUTPUT. Those five belong to the
+    deferred half declared below, which enumerates every one of them with its own locator, and the
+    boundary is drawn where the source draws it: every measurement site and every conversion site in
+    the object sits inside the two automatic-column-width functions beginning at `:L1085` and
+    `:L1260`, and nothing else in the object measures or converts anything. So the two automatic-width
+    ITEMS are recorded as ITEMS - their labels, identifiers and submenu metadata are part of the model
+    a header right-click produces - while their EFFECT is not recorded at all. The one width this
+    capture does record is the LOGICAL one, and the width mask entry below states precisely which side
+    of that line each recorded width sits on.
+
+  preconditions:
+    # ---- ORDERING, CROSS-REFERENCED RATHER THAN RE-DERIVED ---------------------------------------
+    - >-
+      ORDERING DISCIPLINE - THE CONTEXT-MENU PAIR IS STRICTLY SYNCHRONOUS, with no reordering
+      permitted, and both halves of the pair are captured under that same assignment.
+      `dataservices-dw-event-chain` assigns and justifies it; the reason it holds is visible in this
+      service's own pipeline rather than only in the chain's: the identifier the selection hook
+      receives is produced by the popup the initializer hook populated, so initialization must have
+      COMPLETED before the selection identifier means anything. A token that let a consumer re-sort
+      this pair would let it dispatch a selection against a menu that had not been built.
+    - >-
+      THE TWO ENTRY POINTS ARE DISTINCT AND BOTH ARE EXERCISED, because the fixture's own on-screen
+      hint names both: a right-click on a COLUMN HEADER, and a right-click on a CELL. They are not two
+      inputs to one behaviour - they produce STRUCTURALLY DIFFERENT MODELS, because the copy-cell
+      branch returns from the preparation hook immediately after adding its single item.
+    - >-
+      THE MODEL IS REBUILT FROM EMPTY ON EVERY RIGHT-CLICK. The pipeline's cleanup clears the clicked
+      column, clears the cached clipboard text and removes every item, so no case inherits an item
+      from the case before it. Confirm the item count is zero before each case begins; a non-zero
+      count means the previous case's cleanup did not run and the capture is not comparable.
+    - >-
+      A RIGHT-CLICK IS TWO PLATFORM EVENTS, AND THE MENU APPEARS ONLY IF THEY AGREE ON THE ROW. The
+      button-down event stamps its row and the button-up event fires the click only when its own row
+      equals that stamp, then clears it. Every case therefore synthesizes a matched down-and-up pair
+      on one row; the deliberately mismatched pair is its own case below.
+    - >-
+      ALL FIVE FEATURE-GATING FLAGS START ENABLED, per the seed phase, so the baseline model is the
+      full one. The flag-filtering case below is the only one that departs from that, and it departs
+      from it one flag at a time.
+    # ---- THE CAPTURE MATRIX - ONE CASE PER ROW, EACH TAKEN FROM THE SEEDED STATE -----------------
+    - >-
+      CASE 01 - HEADER ENTRY POINT. Right-click the header text object of the two-place decimal
+      column. Starting condition: the column is editable, the row count is nine, and the item list is
+      empty. This is the case that produces the FULL model, and it is the baseline every other model
+      is read against.
+    - >-
+      CASE 02 - CELL ENTRY POINT. Right-click a cell of the same column on a row greater than zero,
+      with that cell not being the focused editable cell. Starting condition: as case 01. This case
+      exercises the preparation hook's EARLY RETURN, so the expected model is a SINGLE item and the
+      absence of every other item - including the separator and the three custom items - is itself the
+      observation.
+    - >-
+      CASE 03 - THE THREE CUSTOM IDENTIFIERS, SELECTED ONE AT A TIME. From the case 01 model, select
+      identifier 100, then repeat the case and select 101, then repeat and select 102. Starting
+      condition: as case 01. THE THIRD IS THE ITEM THE FIXTURE DECLARES DISABLED, and it is selected
+      anyway: the capture records what the model says about it and what a selection of it does, rather
+      than assuming the model omitted it.
+    - >-
+      CASE 04 - THE FOUR BUILT-IN FEATURES THE FIXTURE'S HEADER COMMENT NAMES, each selected from the
+      case 01 model by its own identifier at or above 10000: check whole column at 10002 and clear
+      check whole column at 10003, which the comment names as one feature; copy whole column at 10005;
+      paste over whole column at 10006; and copy single cell at 10007, which is selected from the case
+      02 model because that is the only model it appears in. Starting condition: as case 01, plus the
+      seeded clipboard payload for the paste selection.
+    - >-
+      CASE 05 - THE FIFTH CHECK IDENTIFIER THE COMMENT DOES NOT NAME. Select invert check whole column
+      at 10004 from the case 01 model. Starting condition: as case 01. It is captured because it is
+      headless, because the fixture's four-feature comment folds it away, and because the check
+      feature's own filter does not mention it - all three are recorded under defect D-01.
+    - >-
+      CASE 06 - THE INITIALIZER VETO. Repeat case 01 with the host's initializer hook returning one
+      instead of zero. Starting condition: as case 01. The expected outcome is NO MENU AT ALL, and the
+      observation is that the pipeline returns before the model is built rather than building an empty
+      one.
+    - >-
+      CASE 07 - THE SELECTION VETO OVER A BUILT-IN IDENTIFIER. Repeat case 01, select copy whole
+      column at 10005, and have the host's selection hook return one. Starting condition: as case 01,
+      with the clipboard's prior contents recorded first. The expected outcome is that THE DEFAULT
+      BEHAVIOUR DOES NOT RUN - the clipboard is unchanged - which is a different meaning of the same
+      return value as case 06 and is recorded as such.
+    - >-
+      CASE 08 - THE CHECKBOX-RENDERED COLUMN. Right-click the header of the numeric column whose on
+      value is one and whose off value is zero, then select each of the three check identifiers in
+      turn, and separately select copy whole column. Starting condition: the column's nine values are
+      six zeroes and three ones, in the fixture's declared order. This is the only column for which
+      the check items appear at all, and its copy output is the case in which the one-and-zero
+      representation is not copied literally.
+    - >-
+      CASE 09 - A DROP-DOWN-DATAWINDOW COLUMN. Right-click the header of a status column backed by the
+      child definition and select copy whole column. Starting condition: the child resolves and its
+      three display-and-data pairs are readable. The observation is WHICH OF THE TWO VALUES THE COPY
+      EMITS - the display label or the stored code - because the paste feature in case 11 consumes the
+      other one.
+    - >-
+      CASE 10 - THE DROP-DOWN LIST BOX COLUMN. Repeat case 09 against the status column whose three
+      pairs come from its own inline value list rather than from the child definition. Starting
+      condition: that value list is readable. It is a separate case because it reaches the same
+      value-map accessor through a different branch, and a capture that covered only the child-backed
+      form would leave that branch unproven.
+    - >-
+      CASE 11 - PASTE OVER A WHOLE COLUMN, WITH FIXTURE-SOURCED CLIPBOARD CONTENT. Select paste over
+      whole column at 10006 against each of the two translating column kinds and against the
+      checkbox-rendered column. Starting conditions, each its own sub-case: a payload of nine display
+      values that all resolve; a payload of nine whose fourth line resolves for a translating column
+      but not for an enumerated one; a payload of TEN lines against nine rows; and a payload whose
+      lines correspond to rows of which one is protected. Every payload is assembled from the
+      fixture's own values (C-F).
+    - >-
+      CASE 12 - THE MISMATCHED RIGHT-CLICK. Synthesize a button-down on one row and a button-up on a
+      different row. Starting condition: as case 01. The expected outcome is that NO CLICK IS RAISED
+      and therefore no model is built, and the stamp is left cleared afterwards.
+    - >-
+      CASE 13 - THE ITEM-TEXT ACCESSOR UNDER BOTH FLAG VALUES. From the case 01 model, read each
+      item's text twice: once with the flag false, passing the item's IDENTIFIER, and once with the
+      flag true, passing its ONE-BASED POSITION. Starting condition: as case 01, with the model's
+      length recorded first. Also read one position above the last valid one and one below the first,
+      because the accessor's bounds check is written against the last valid index rather than against
+      a length.
+    - >-
+      CASE 14 - THE ORDERED MAP, DIRECTLY. For each of the three translating columns and for the
+      checkbox-rendered column, capture the map the value-map accessor returns: its count, its keys in
+      order, the key at each integer position, the value at each integer position, and the value for
+      each key. Starting condition: as case 01. Then repeat for a column name that is unusable, whose
+      expected result is an EMPTY map rather than an error or a null.
+    - >-
+      CASE 15 - INSERTION ORDER UNDER DUPLICATION. Capture the map for a column whose nine rows
+      contain repeated values - the fixture's first decimal column repeats each of its three values
+      three times, and each status column repeats each of its three codes three times - so that the
+      capture shows what the container does with a duplicate: whether the order is the order of first
+      insertion, and whether the count reflects distinct values or rows. Starting condition: as case
+      01. Nothing is invented for this case; the duplication is already in the fixture's own data line.
+    - >-
+      CASE 16 - THE FEATURE FLAGS, ONE AT A TIME. Repeat case 01 four times, each with exactly one of
+      the four flags that the build loop's filter mentions turned off, and once more with the flag the
+      filter does NOT mention turned off. Starting condition: as case 01 in every repetition. The
+      observation is which items leave the model, WHICH SEPARATORS COLLAPSE OR DISAPPEAR as a
+      consequence, and which item stays despite its flag being off.
+    # ---- THE GUARD THAT KEEPS THE DEFERRED HALF OUT OF THE RECORDING -----------------------------
+    - >-
+      NO CASE ABOVE DRIVES THE DEFERRED HALF, AND THAT IS A PRECONDITION RATHER THAN A HOPE. Neither
+      automatic-width identifier is selected in any case; the theme background style the fixture sets
+      is left exactly as the fixture sets it and its effect is never read back; and no recorded output
+      names a window rectangle, a converted device unit or a measured text extent. Confirm before each
+      capture that the two automatic-width identifiers appear in the model and are never dispatched -
+      their presence is the observation, and their effect is the documented gap.
+
+  # ================================================================================================
+  #  WHAT THE CAPTURE RECORDS
+  #  ----------------------------------------------------------------------------------------------
+  #  Every name below is the identifier the recording keys on, and each is chosen to match the
+  #  candidate's own member name so that a legacy record and a target record key identically - a
+  #  renamed field is a field that stops matching its counterpart on the other side. `format` is used
+  #  wherever the projection is not obvious from the description. EVERY ONE OF THESE IS COMPARED:
+  #  nothing here carries the non-behavioural marker, because this service emits no field of its own
+  #  that carries no behaviour - it emits no timing value, so there is nothing to record-and-exclude.
+  # ================================================================================================
+  observedOutputs:
+    # ---- THE MODEL ITSELF -----------------------------------------------------------------------
+    - name: contextMenu.outcome
+      description: >-
+        WHICH OF THE FIVE PIPELINE OUTCOMES THE RIGHT-CLICK REACHED, as its own enumerated value
+        rather than as a boolean: a model was built and is awaiting a selection; the popup was
+        suppressed by the guard; the service's preparation hook vetoed; the host's initializer hook
+        vetoed; or the model came out empty. A difference here means the pipeline took a different
+        branch, which is a more serious finding than a difference in the model's contents, so the
+        outcome is recorded before the contents and compared first. Collapsing the five into
+        "menu or no menu" would make three distinct causes indistinguishable.
+      format: >-
+        The enumerated member name, not its ordinal, so that a reordering of the enumeration cannot
+        silently re-label a recording.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L143"
+    - name: contextMenu.itemModel
+      description: >-
+        THE COMPLETE ORDERED ITEM MODEL, and the central output of this whole workflow. For every
+        entry, in the order the build loop emits it: its label; its image argument; its tip text; its
+        identifier; its enabled flag; its split flag; its menu-owner flag; whether it carries a
+        submenu and, if so, that submenu's own entries in their own order; and whether the entry is a
+        SEPARATOR. A difference in the order is as much a finding as a difference in an entry, because
+        the order is what the user sees and it is produced by a loop whose filtering and suppression
+        rules are the behaviour under test.
+      format: >-
+        One record per entry, in emitted order, with the entry's position recorded as a ONE-BASED
+        index to match the legacy's own array. TWO LITERALS ARE PART OF THE ENCODING GRAMMAR RATHER
+        THAN OF THE DATA, so they are named here and both are quoted because YAML would otherwise fold
+        the second one away: a separator is an entry whose text is exactly `"-"`, and the fixture's
+        image argument for each of its three custom entries is exactly `""` - an empty image path, not
+        an absent argument and not a single space. A separator is therefore recorded as an entry whose
+        separator flag is set AND whose text is `"-"`, both, because a substitute that carried the flag
+        without the text would differ from the oracle in a way a flag-only comparison could not see.
+
+
+        THE FIXTURE'S OWN LABEL AND VALUE STRINGS ARE DELIBERATELY NOT REPRODUCED HERE, AND THAT IS A
+        DECISION WITH A REASON RATHER THAN AN OMISSION. The three custom entries' labels and the three
+        display-and-data pairs the status columns resolve through are cited by locator -
+        `ws_objects/pfw.tests.pbl.src/w_test_dwsvc_contextmenu.srw:L88-L90`,
+        `ws_objects/pfw.tests.pbl.src/dw_svc_sample_dddw.srd:L11` and
+        `ws_objects/pfw.tests.pbl.src/dw_svc_sample_contextmenu.srd:L11` - and are read from there. The
+        schema carries no member able to hold fixture content precisely because A VENDORED COPY IS A
+        SECOND MASTER, and a second master can drift from the oracle without anybody noticing. The
+        labels are non-Latin script in this fixture, so they are neither translated nor transliterated
+        anywhere in this definition; the RECORDING carries them verbatim, which is where a comparison
+        needs them.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L156-L185"
+    - name: contextMenu.itemModel.headerEntryPoint
+      description: >-
+        THE MODEL A COLUMN-HEADER RIGHT-CLICK PRODUCES - the full one. Recorded as its own output
+        rather than folded into the model above, because the two entry points produce structurally
+        different models and a single output would average them into something neither side actually
+        produces. Includes the column name the service derived from the header text object, which it
+        obtains by STRIPPING THE TRAILING TWO CHARACTERS of that object's name and then requiring the
+        result to describe as a column or a computed field.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L253-L266"
+    - name: contextMenu.itemModel.cellEntryPoint
+      description: >-
+        THE MODEL A CELL RIGHT-CLICK PRODUCES - a SINGLE ITEM, because the preparation hook adds the
+        copy-cell item and RETURNS IMMEDIATELY. The absence of everything else is the observation: no
+        automatic-width item, no check items, no copy-column item, no paste item, and NOT EVEN THE
+        HOST'S OWN SEPARATOR AND THREE CUSTOM ITEMS - the host's initializer hook still runs and still
+        adds them, so what this output proves is which of the two hooks' contributions survive the
+        early return and in what order they sit relative to each other.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L241-L251"
+    - name: contextMenu.separatorHandling
+      description: >-
+        THE SEPARATOR SUPPRESSION RULES, recorded as a decision per separator rather than only as a
+        presence in the model: whether a separator was suppressed because nothing preceded it, whether
+        two adjacent separators collapsed into one, and whether a trailing separator was dropped. This
+        matters here specifically because THE FIXTURE ADDS ITS SEPARATOR BEFORE ITS FIRST CUSTOM ITEM,
+        so whether it survives depends on whether any built-in item was emitted ahead of it - which
+        makes it a function of the feature flags and of the entry point, not a constant.
+      format: >-
+        One record per separator the item list contained, each carrying its one-based position in the
+        item list, the decision taken, and the reason the loop's own state gave for it.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L173-L178"
+    - name: contextMenu.splitFlagPropagation
+      description: >-
+        WHETHER EACH ENTRY'S SPLIT FLAG REACHED THE BUILT MENU. The item model declares a split flag
+        for every entry, but the build loop passes it ONLY on the submenu branch: the plain branch's
+        call has no split parameter at all, so a plain entry's split flag is carried in the model and
+        then dropped on the way out. Recorded per entry as the flag the model holds AND the flag the
+        built menu received, because the two differ and the difference is legacy behaviour.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L179-L183"
+    - name: contextMenu.featureFlagFiltering
+      description: >-
+        WHICH ENTRIES EACH FEATURE FLAG REMOVED, per flag, and which entries survived a flag that was
+        off. The filter names four identifiers across four flags and does not name the fifth check
+        identifier or either automatic-width identifier, so turning a flag off does not always remove
+        everything that flag's feature owns. Recorded as the identifier set removed and the identifier
+        set retained, per flag, so that a substitute which filtered "correctly" is visible as a
+        divergence rather than passing as an improvement.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L157-L168"
+    - name: contextMenu.identifierClassification
+      description: >-
+        FOR EVERY IDENTIFIER IN THE MODEL, WHETHER THE HOST'S SELECTION HOOK CLASSIFIED IT AS CUSTOM
+        OR AS BUILT-IN, together with the identifier's own value. The fixture's classification is a
+        single strict comparison against 10000: the three custom identifiers 100, 101 and 102 fall
+        below it and every built-in identifier is at or above it. Both the boundary value and the
+        strictness are behaviour - an identifier exactly equal to 10000 exists in the model and is
+        classified as built-in - so the capture records the comparison's outcome per identifier rather
+        than assuming the two ranges never meet.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_contextmenu.srw:L96"
+    - name: contextMenu.disabledItemPresence
+      description: >-
+        THAT THE THIRD CUSTOM ITEM IS PRESENT IN THE MODEL WITH ITS LABEL AND ITS IDENTIFIER 102 AND
+        ITS ENABLED FLAG CLEAR - not absent. The output is the entry itself plus its one-based position
+        in the model, so the capture proves presence-with-disabled rather than absence. A substitute
+        that omitted a disabled entry would produce a shorter model in which every following entry's
+        position had shifted, and every position-based read after it would be wrong.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_contextmenu.srw:L90"
+    - name: contextMenu.itemTextByIdentifier
+      description: >-
+        EVERY ENTRY'S TEXT AS READ BACK THROUGH THE ITEM-TEXT ACCESSOR WITH ITS FLAG FALSE, which is
+        the form the fixture uses: the argument is an IDENTIFIER and is resolved through the
+        identifier-to-index lookup before the text is returned. Recorded per identifier, including the
+        disabled entry's, and including an identifier that is not in the model at all.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L554-L560"
+    - name: contextMenu.itemTextByPosition
+      description: >-
+        THE SAME ACCESSOR WITH ITS FLAG TRUE, where the argument is instead used DIRECTLY AS A
+        ONE-BASED POSITION. The two flag values are captured together because the flag changes what
+        the argument MEANS, not how the result is rendered, and because the two agree only where an
+        entry's identifier happens to equal its position - which in this fixture it never does.
+        Recorded for every valid position and for the two invalid ones either side of the range.
+      format: >-
+        One record per position, each carrying the position asked for, the text returned, and whether
+        the accessor's bounds check rejected it. The bounds check is written against the LAST VALID
+        INDEX rather than against a length, so the position one past the end and the position zero are
+        both recorded explicitly - they are the two values a zero-based port gets wrong.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L597"
+    # ---- SELECTION, AND THE TWO VETOES ----------------------------------------------------------
+    - name: contextMenu.selectedIdentifier
+      description: >-
+        THE IDENTIFIER THE POPUP RETURNED, as its raw number, before any classification. Zero means no
+        selection was made, and the pipeline returns on it before either the host's selection hook or
+        the default behaviour runs - so zero is a distinct outcome and is recorded as one rather than
+        as a missing value.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L193"
+    - name: contextMenu.selectionRecord
+      description: >-
+        THE FORMATTED RECORD THE HOST BUILDS FOR A CUSTOM SELECTION, field by field: the entry's text
+        as returned by the accessor with its flag false, the identifier, the ROW, and the COLUMN
+        OBJECT'S NAME. Recorded as the four fields separately AND as the assembled string, because the
+        assembly uses the legacy's own substitution helper and its line separator, and a difference in
+        the assembly is a different finding from a difference in a field.
+      format: >-
+        The four fields as named values, plus the assembled text with its line separators preserved as
+        the legacy writes them. The row and the column are recorded as the legacy reports them, which
+        means the row is a ONE-BASED index.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_contextmenu.srw:L97"
+    - name: contextMenu.initializerVeto
+      description: >-
+        THE OUTCOME WHEN THE HOST'S INITIALIZER HOOK RETURNS ONE: the whole menu is prevented. What is
+        recorded is that the pipeline returned at the initializer's own call site - BEFORE the item
+        count was read, before any menu object was created and before any selection could exist - so
+        the observable result is no model, not an empty one. The distinction is visible in the outcome
+        output above, which is why both are recorded.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L147"
+    - name: contextMenu.selectionVeto
+      description: >-
+        THE OUTCOME WHEN THE HOST'S SELECTION HOOK RETURNS ONE: the DEFAULT BEHAVIOUR of the selected
+        built-in entry is prevented, and nothing else is. The menu was built, a selection was made and
+        its identifier is known - only the dispatch is skipped. Recorded as the identifier selected,
+        the hook's return value, whether the default dispatch ran, and the unchanged state of whatever
+        that dispatch would have altered. TWO ADJACENT HOOKS, ONE RETURN VALUE, TWO DIFFERENT
+        MEANINGS: this output and the one above it are what keep them apart.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L194"
+    - name: contextMenu.rightButtonRowStamp
+      description: >-
+        THE ROW THE BUTTON-DOWN EVENT STAMPED, WHETHER THE BUTTON-UP EVENT RAISED A CLICK, AND THE
+        STAMP'S VALUE AFTERWARDS. The click is raised only when the two events agree on the row, and
+        the stamp is cleared unconditionally afterwards. Recorded because a mismatched pair produces NO
+        MENU AT ALL, which is a legitimate outcome that a capture driving only matched pairs would
+        never exercise.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L124-L134"
+    - name: contextMenu.modelDiscard
+      description: >-
+        THE STATE LEFT BEHIND AFTER EVERY RIGHT-CLICK: the item count, the remembered clicked column
+        and the cached clipboard text, all read immediately after the pipeline returns. The cleanup
+        runs on every path including the vetoed ones, so THE MODEL IS REBUILT FROM EMPTY EVERY TIME.
+        Recorded because a substitute that retained items between clicks would produce a model that
+        grew, and the second capture of the same case would then disagree with the first for reasons
+        that have nothing to do with the port.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L197-L200"
+    - name: eventChain.contextMenuPair
+      description: >-
+        THE TWO SEMANTIC EVENTS OF THE CONTEXT-MENU PAIR AND THE TWO RAW RIGHT-BUTTON EVENTS THAT
+        REACH THEM, in arrival order, each with its arguments and its numeric return. Recorded here
+        only at the points where the chain and this sub-service meet - the chain itself belongs to the
+        sibling definition named below, and this output exists so the two pairs can be cross-checked
+        against each other without either duplicating the other. Note the asymmetry the chain
+        declares: the raw button-DOWN event calls a semantic handler and then the broker and inspects
+        both returns, while the raw button-UP event reaches the broker ONLY.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L115-L122"
+    # ---- WHAT THE HEADLESS BUILT-IN FEATURES ACTUALLY DO ----------------------------------------
+    - name: builtIn.checkColumn.columnValues
+      description: >-
+        THE CHECKBOX-RENDERED COLUMN'S NINE VALUES AFTER EACH OF THE THREE CHECK IDENTIFIERS IS
+        DISPATCHED - set the whole column, clear the whole column, and invert the whole column - each
+        taken from the same seeded starting values of six zeroes and three ones. Recorded as the nine
+        stored values in row order plus each row's item status, because the features write through the
+        buffer and a value that changed without its status changing is a divergence.
+      format: >-
+        Nine records per dispatch, each with its ONE-BASED row number, the stored value before, the
+        stored value after, and the item status after.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L767"
+    - name: builtIn.copyColumn.clipboardText
+      description: >-
+        THE EXACT TEXT COPY-WHOLE-COLUMN WRITES TO THE CLIPBOARD, per column kind, byte for byte
+        including its trailing separator. THREE DISTINCT RULES ARE IN PLAY AND THE OUTPUT PROVES WHICH
+        ONE EACH COLUMN TOOK: a checkbox-rendered column's stored one and zero are NOT copied
+        literally - they are compared against the column's declared on and off values and copied as two
+        single letters instead; a computed column copies its evaluated value; and EVERY OTHER COLUMN
+        COPIES ITS DISPLAY VALUE RATHER THAN ITS STORED DATA VALUE, which for the three status columns
+        means the label rather than the three-letter code. An invisible item contributes an EMPTY value
+        and still contributes its line, so the line count matches the row count either way.
+      format: >-
+        The whole clipboard text verbatim, and separately the per-row values as a list in row order so
+        that a difference is attributable to a row rather than only to the blob. Lines are joined with
+        the carriage-return-and-newline pair the legacy uses, recorded as written and normalised only
+        at comparison time under the newline seam below.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L543"
+    - name: builtIn.copyItem.clipboardText
+      description: >-
+        THE TEXT COPY-SINGLE-CELL WRITES, for one cell of each column kind, under the same three rules
+        as the column copy. Recorded separately because it is the ONLY built-in feature reachable from
+        the cell entry point, and because its guard differs: a non-positive row is refused as an
+        invalid argument rather than producing an empty result.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L602-L632"
+    - name: builtIn.pasteColumn.columnValues
+      description: >-
+        THE COLUMN'S VALUES AFTER PASTE-OVER-WHOLE-COLUMN, per payload sub-case, and the three
+        behaviours that make this the most intricate of the four headless features. FIRST, the payload
+        is split on the carriage-return-and-newline pair and its line count drives the loop - so A
+        PAYLOAD LONGER THAN THE ROW COUNT INSERTS ROWS, and the inserted rows are recorded with their
+        statuses. SECOND, an invisible or protected item is SKIPPED, but the payload is still indexed
+        BY ROW NUMBER rather than consumed sequentially, so a skipped row CONSUMES ITS LINE and the
+        lines after it do not shift up. THIRD, a translating column's value is resolved through the
+        ordered map before it is stored. All three are recorded per row so that a substitute which
+        consumed the payload sequentially - the natural way to write it - shows up as a misalignment
+        rather than as a plausible-looking result.
+      format: >-
+        One record per payload line, each with its ONE-BASED position, the raw line, whether the row
+        was skipped and why, the value after any map resolution, the value stored, and the row's item
+        status afterwards. Plus the row count before and after, so an insertion is visible.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L942-L1076"
+    - name: builtIn.dispatchArm
+      description: >-
+        WHICH ARM OF THE BUILT-IN DISPATCH A SELECTED IDENTIFIER REACHED, recorded as the arm's own
+        identifier constant. The dispatch has EIGHT ARMS AND NO ELSE ARM, so an identifier at or above
+        the boundary that matches none of them falls through silently and does nothing at all - which
+        is a legitimate outcome and is recorded as one rather than as an error. The two automatic-width
+        arms are named in this output as ARMS THAT EXIST AND ARE NEVER DISPATCHED by any case here.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L204-L222"
+    # ---- THE ORDERED MAP: THE CONTAINER'S ONLY PAIRED COVERAGE IN THE STORE ----------------------
+    - name: valueMap.insertionOrder
+      description: >-
+        THE VALUE MAP'S FULL CONTENTS IN INSERTION ORDER, per column kind - the first of the two
+        properties that together ARE the container's observable contract. Recorded as the count, then
+        every key in the order the map enumerates them, then the value under each key. The order is
+        not incidental: it is the order the builder inserted pairs in while walking the child
+        definition's rows or the column's own value list, so a substitute backed by a hash-ordered
+        dictionary would produce the same pairs in a different order and every positional read after it
+        would return a different value.
+      format: >-
+        The count first, then an ordered list of key-and-value records, each carrying its ONE-BASED
+        position. Recorded for both drop-down-DataWindow columns, for the drop-down list box column and
+        for the checkbox-rendered column, so all three branches of the builder are covered.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc.sru:L561"
+    - name: valueMap.positionalGet
+      description: >-
+        THE VALUE RETURNED BY A POSITIONAL GET BY INTEGER INDEX, for every position in each captured
+        map - the second of the two properties. The container declares this as a SEPARATE OVERLOAD of
+        the same accessor name as the by-key form, distinguished only by its argument type and
+        returning the same untyped result, so a substitution that collapsed the two into one
+        stringly-typed lookup would still compile and would return the wrong thing for a map whose keys
+        happen to look like numbers. Recorded alongside the key at each position, because the two
+        together are what prove the positional contract rather than either alone.
+      format: >-
+        One record per position, each with the ONE-BASED index asked for, the key at that index, the
+        value at that index, and the value the by-key form returns for that same key - so the two
+        accessors are shown to agree entry by entry. The index one past the end and the index zero are
+        both included.
+      locator: "ws_objects/pfw.utility.container.pbl.src/n_map.sru:L11"
+    - name: valueMap.duplicateValueStability
+      description: >-
+        WHAT THE MAP DOES WITH A REPEATED VALUE, captured against columns whose nine rows repeat each
+        of their three values three times. Recorded as the count, the ordered keys and the positional
+        reads, so the capture answers three questions the container's declaration alone does not:
+        whether a repeated pair is added again or ignored, whether re-adding an existing key moves it to
+        the end or leaves it where it was, and whether the count reflects distinct keys or rows walked.
+        INSERTION-ORDER STABILITY UNDER DUPLICATION is the property at issue, and it is exactly where a
+        substituted container is most likely to differ while looking correct.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_svc_sample_contextmenu.srd:L15"
+    - name: valueMap.displayToDataResolution
+      description: >-
+        THE DIRECTION THE MAP RESOLVES IN, per lookup, and the ASYMMETRY BETWEEN THE TWO FEATURES THAT
+        USE IT. Copy-whole-column emits a column's DISPLAY value; paste-over-whole-column consumes a
+        display value and resolves it to the STORED DATA VALUE through this map. The round trip is
+        therefore the map's real contract in situ, and it is recorded as such: the value copied out,
+        the value pasted back in, the key the map matched, and the value it returned. Recorded per
+        column kind, because the checkbox-rendered column resolves through the same map with a
+        different pair set.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L1006-L1007"
+    - name: valueMap.emptyForUnusableColumn
+      description: >-
+        THAT AN UNUSABLE COLUMN NAME YIELDS AN EMPTY MAP - not a null, and not an error. The builder
+        creates the container BEFORE it validates its argument and returns that empty container on the
+        guard path, so a caller always receives a usable object. Recorded as the returned object's
+        validity, its count and the result of a positional read against it, because a substitute that
+        returned a null reference here would fail at the caller's own existence check rather than at
+        the lookup, and the two produce different observable outcomes.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc.sru:L587"
+    - name: valueMap.accessorOverloadAgreement
+      description: >-
+        THAT THE BY-NUMBER OVERLOAD OF THE VALUE-MAP ACCESSOR AGREES WITH THE BY-NAME ONE, entry for
+        entry. The by-number form does not build a map of its own: it resolves the ONE-BASED column
+        number to a column name through a describe call and then delegates. Recorded for every column
+        number in the fixture, paired with the name it resolved to - which matters here because THE
+        FIXTURE'S COLUMN CONTROLS ARE DECLARED OUT OF IDENTIFIER ORDER, so a port that confused
+        declaration position with column number would resolve the wrong name and still return a
+        perfectly valid map.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc.sru:L666"
+    # ---- STRUCTURED ERRORS: THE DIALOGS, WITH ONLY THE DELIVERY CHANNEL CHANGED ------------------
+    - name: structuredError.payload
+      description: >-
+        EVERY ERROR THE HEADLESS FEATURES RAISE, AS A STRUCTURED RESULT RATHER THAN AS A DIALOG, with
+        the exact message text, the localization category, the substitution arguments, the severity and
+        the returned numeric code all preserved. Only the delivery channel changes. The service has TEN
+        live dialog sites and ALL TEN route through localization under the same category - which is the
+        contrast that makes the expression engine's non-localized messages a defect rather than a style
+        difference, and `../../docs/DEFERRED.md` section 6.3 is the authority for both counts. Three
+        message keys are reachable from the cases here: a rejected modification, an unresolvable value
+        on an enumerated column, and a data-type mismatch. Every one of them is prefixed by a
+        row-number substitution whose argument is a ONE-BASED row.
+      format: >-
+        One record per raised error: the message key before substitution, the substituted arguments in
+        order, the assembled text, the localization category, the severity, and the numeric code the
+        feature returned to its caller. The assembled text is recorded verbatim; it is fixture data
+        throughout and carries nothing sensitive.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L1009"
+    - name: structuredError.acceptTextGuard
+      description: >-
+        WHETHER PENDING EDIT TEXT WAS ACCEPTED BEFORE A COPY RAN, AND WHAT HAPPENED WHEN IT COULD NOT
+        BE. Both copy features accept pending text first and return a plain failure when that accept
+        is refused - before reading a single value. Recorded as the accept's own result and the
+        feature's returned code, because the ordering is behaviour: a port that copied first and
+        accepted afterwards would emit a stale value and still report success.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L519"
+    # ---- THE LOGICAL WIDTH MEASURE, AND THE LINE IT SITS ON --------------------------------------
+    - name: contextMenu.logicalTextWidthMeasure
+      description: >-
+        THE LOGICAL SIDE OF THE WIDTH COMPUTATION, AND ONLY THE LOGICAL SIDE. One correction belongs
+        here and it is stated rather than worked around: THE ITEM MODEL DECLARES NO WIDTH FIELD OF ITS
+        OWN. Its eight fields are enabled, text, image, tip text, identifier, submenu, split and
+        menu-owner, and none of them is a width - the width the service computes is a COLUMN width, in
+        the two automatic-width functions, and the popup class the built menu is handed to does its own
+        sizing in the deferred half. So what is recorded here is the width computation's LOGICAL INPUT:
+        the ordered set of texts the computation enumerates - the column's heading text object and each
+        visible row's display text, in enumeration order - together with the two logical constants the
+        object declares for padding and for the arrow-button allowance. A narrow-and-wide character
+        count is DERIVED from each recorded text at comparison time by the same rule on both sides, so
+        it adds no claim that the oracle emits a number it does not.
+      format: >-
+        The enumerated texts in order, each with its band and its object name and its object type, plus
+        the two declared logical constants as numbers. Character counts are derived at comparison time
+        and are not stored as oracle emissions. NOTHING DEVICE-RESOLVED APPEARS IN THIS OUTPUT - see
+        the width entry in the mask below, which is where the device-resolved width is excluded and why.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L63"
+    # ---- THE INDEXING BASIS, DECLARED RATHER THAN ASSUMED ---------------------------------------
+    - name: indexingBasis
+      description: >-
+        THE INDEXING BASIS EVERY OTHER OUTPUT IN THIS CAPTURE IS RECORDED UNDER, stated as its own
+        field so that no reader has to infer it. EVERY ROW NUMBER, EVERY COLUMN NUMBER, EVERY ITEM
+        POSITION AND EVERY MAP POSITION IN THIS RECORDING IS A ONE-BASED LEGACY INDEX. The legacy's
+        arrays begin at one and its upper-bound function returns the LAST VALID INDEX, whereas the
+        target's arrays begin at zero and its length is one past the end. A recording that did not
+        declare its basis would be silently ambiguous, and a silent off-by-one is indistinguishable
+        from a behavioural regression. This output exists so that the comparison is between two
+        recordings that agree on what a "3" means.
+      format: >-
+        A single declarative record naming the basis, the upper-bound convention, and the four kinds of
+        index it governs. Recorded identically on both sides; the CANDIDATE converts at its boundary and
+        records the legacy basis, rather than recording its own and leaving the comparison to translate.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L57"
+
+  # Text-based and diffable, one workflow's output in one workflow's own directory. THE EXTENSIONS ARE
+  # NOT A STYLE CHOICE: the root `.gitignore` carries SIX extensions UNANCHORED at `:L7-L12` - one dump,
+  # one log, one backup, one batch and two archive patterns - so they match at every depth including
+  # inside this store, and the file's only negations at `:L14-L15` are anchored elsewhere in the tree
+  # and rescue nothing here. A capture named that way is silently untracked: present on the machine
+  # that produced it, absent from `git status`, from review and from CI, so the comparison looks taken
+  # and cannot be found. The root `.gitignore` is NOT to be modified; naming the file correctly is the
+  # fix, and the schema's own filename pattern makes all six unspellable here in any case.
+  # `../README.md` sections 3.4 and 3.5 are the authority.
+  recordingArtifacts:
+    - filename: item-model.jsonl
+    - filename: menu-outcomes.jsonl
+    - filename: selection-dispatch.json
+    - filename: builtin-feature-effects.json
+    - filename: column-values.csv
+    - filename: clipboard-text.txt
+    - filename: value-map-contents.jsonl
+    - filename: structured-errors.json
+    - filename: indexing-basis.json
+
+# ==================================================================================================
+#  THE DEFERRED HALF - A DOCUMENTED GAP, AND NOTHING ELSE
+#  ------------------------------------------------------------------------------------------------
+#  READ THIS ENTRY AS A NOTE ABOUT THE EVENTUAL SYSTEM, BECAUSE THAT IS ALL IT IS. It documents a gap
+#  and implements nothing. There is NO project, NO container, NO test, NO partial implementation and
+#  NO placeholder that throws behind the route named below, and there is no workflow anywhere in this
+#  store for the capability area that will eventually own it - the schema's target enum is CLOSED and
+#  the four deferred names are absent from it, so a definition that tried to target one could not be
+#  written down at all. Naming the area here says where the gap will be filled; it cannot claim that
+#  it has been. `../../docs/DEFERRED.md` carries the deferred roster, the objects assigned to each
+#  area and the reserved-route metadata, and IT IS NOT RESTATED HERE (C-D).
+# ==================================================================================================
+deferredCapabilities:
+  - capability: >-
+      MENU RENDERING, AND EVERYTHING THE SERVICE DOES IN ORDER TO PERFORM IT: the window-rectangle
+      query that anchors the popup and the placement conversions applied to the click coordinates
+      [`ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L187`, `:L189`]; the
+      four device-unit conversions [`:L1241`, `:L1243`, `:L1409`, `:L1411`]; the four font objects
+      created to measure text [`:L1092`, `:L1098`, `:L1266`, `:L1277`], all eight of which sit inside
+      the two automatic-column-width functions that begin at [`:L1085`] and [`:L1260`] and nowhere
+      else in the object; the popup-menu-typed submenu surface - the item model's own member at
+      [`:L18`] and the overload block at [`:L96-L106`]; and the theme background style the fixture
+      sets at [`ws_objects/pfw.tests.pbl.src/w_test_dwsvc_contextmenu.srw:L86`], which is present in
+      the oracle and is deliberately left out of the capture. TO COVER THIS WOULD REQUIRE a window
+      system to query, a device context to convert against and a font engine to measure with - none of
+      which exists in a headless service, and none of which is created in this phase.
+
+
+      WHAT SHIPS INSTEAD, SO THE GAP IS BOUNDED RATHER THAN OPEN-ENDED: the complete menu ITEM MODEL,
+      characterized above - labels, images, tip texts, identifiers, enabled and split flags,
+      menu-owner flags, separator entries with their suppression decisions, submenu presence as
+      headless metadata in place of the popup-menu-typed member, and the LOGICAL side of the width
+      computation. The two automatic-width entries THEMSELVES ship in the model and are recorded
+      there; only their effect is absent. Each deferred piece is surfaced as DATA over the contract
+      rather than dropped, which is what makes the gap enumerable: a reader can list precisely what
+      does not ship by reading this entry.
+    deferredTo: DesignSystem
+    reservedRoute: "/v1/design/**"
+
+# ==================================================================================================
+#  THE DETERMINISM MASK - INLINE, SYMMETRIC, AND EVERY ENTRY WITH ITS REASON
+#  ------------------------------------------------------------------------------------------------
+#  The mask is a MEMBER of this definition rather than a pointer to one, because a mask that drifts
+#  away from its workflow silently invalidates every pair captured under it. EVERY ENTRY APPLIES TO
+#  BOTH SIDES: masking only the candidate leaves the master holding a value that can never be matched,
+#  and masking only the master inverts the same problem. One configuration, used for both captures.
+#  `../../docs/PARITY.md` section 5.1 is the authoritative seam register and carries each seam's
+#  injection point and its own status; the first two entries below are this workflow's application of
+#  two of its four rows, and the last four are seams specific to this oracle that no register row
+#  anticipates - which the schema explicitly admits, since the seam member is deliberately not a
+#  closed list. PREFER A SEAM TO A MASK: a seam makes a field reproducible and leaves the comparison
+#  able to detect something in it, whereas a mask removes the field from the comparison entirely.
+#  Four of the six below are seams; two are genuine exclusions and say so.
+# ==================================================================================================
+determinismMask:
+  - seam: >-
+      Every clock read reachable from this service - any timestamp that reaches a recorded field or a
+      recorded decision, on either side.
+    method: >-
+      Inject the clock and substitute a deterministic double that advances only when the test advances
+      it. Nothing in this service branches on a clock value, so the substitution changes no path; it
+      only makes a recorded timestamp reproducible. This is a SEAM rather than a mask, deliberately: a
+      masked field is a field a regression can hide in.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      A timestamp differs on every run BY DEFINITION RATHER THAN BY BEHAVIOUR, so an unmasked one
+      reports a difference on every comparison and trains a reviewer to ignore red results. NOTE WHAT
+      THIS IS NOT: seaming the clock does not introduce a timing assertion. No elapsed value is
+      recorded or compared anywhere in this workflow, and this service emits no timing field of its own
+      for one to be derived from.
+  - seam: >-
+      Modify-call ordering - the sequence of describe and modify calls the service issues while
+      building the item model and while writing values back. The build path is describe-heavy: the band
+      at the pointer, the header height, the clicked column's type, its edit style, its editability, its
+      protection, the checkbox on and off values, and the drop-down display and data column names are
+      all read through describe calls before a single item is added.
+    method: >-
+      Fix the order in which the service issues its describe and modify calls, route them through one
+      injected surface whose calls a test records in order, and record them in that fixed order on both
+      sides.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      Two orderings that reach the same state can emit different intermediate output, so an unpinned
+      order surfaces as a difference where no behaviour changed. FIXING THE ORDER IS NOT THE SAME AS
+      FIXING THE OUTCOME: every property's value remains fully compared, and a genuine change in what a
+      describe returns is still detected. Whether a modify was issued AT ALL is carried separately, for
+      the same reason - a port that emits a write the legacy would not have made is a divergence even
+      when the resulting value agrees.
+  - seam: >-
+      The right-click coordinates carried in the two platform mouse-event payloads, and the pointer
+      position the band fallback reads when the band at the pointer resolves to a background or
+      foreground band.
+    method: >-
+      Substitute ONE FIXED LOGICAL COORDINATE PER CASE, chosen so that it resolves to the row and
+      column object that case intends, and record the substituted coordinate rather than a synthesized
+      device one. THEN COMPARE THE RESOLUTION, NOT THE COORDINATE: the band the service resolved, the
+      row it resolved, the column object it resolved and the column name it derived from that object
+      are all recorded and all fully compared.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      A raw device coordinate is an ARTIFACT OF HOW THE CLICK WAS SYNTHESIZED - it depends on the
+      window's position, its scroll offset and the display it was synthesized against, none of which is
+      behaviour. WHAT THE COORDINATE RESOLVES TO IS ENTIRELY BEHAVIOUR, and it is the thing this
+      workflow actually turns on: the two entry points are distinguished by nothing else. So the
+      coordinate is masked and the resolution is compared, which is the only split that keeps the entry
+      points comparable while leaving them detectable.
+  - seam: >-
+      Line endings in every multi-line recorded field - most consequentially the clipboard text the
+      copy features write, the payload the paste feature splits, and the assembled selection record the
+      host formats.
+    method: >-
+      Declare one newline convention for this workflow and apply it identically to both halves AT
+      COMPARISON TIME. This is a comparison-time normalization only: IT DOES NOT LICENSE EDITING A
+      STORED MASTER, which the technique forbids outright. The legacy's own separators - the
+      carriage-return-and-newline pair the copy features join with and the paste feature splits on, and
+      the single newline the selection record uses - are recorded as written, because WHICH separator
+      the legacy chose is behaviour and only the platform's rendering of it is not.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      The master is produced on Windows by the legacy framework while the candidate runs in a Linux
+      container, so raw line endings differ BY PLATFORM RATHER THAN BY BEHAVIOUR - and the repository's
+      root `.gitattributes` declares only language mappings, with NO text rule and NO end-of-line rule
+      at all, so nothing normalises them on the way into version control. Without this entry a
+      byte-exact comparison reports a difference on every line of every multi-line field. Changing
+      `.gitattributes` is NOT in scope and would be the wrong place to solve it: the normalization
+      belongs to the comparison, not to the repository's checkout behaviour.
+  - seam: >-
+      Absolute text widths derived from font metrics - the device-resolved extent the automatic-width
+      computation produces once a text has been measured and converted.
+    method: >-
+      RECORD THE LOGICAL SIDE AND MASK THE DEVICE-RESOLVED SIDE, and be precise about which side each
+      recorded value sits on. ON THE LOGICAL SIDE, RECORDED AND FULLY COMPARED: the ordered set of texts
+      the computation enumerates, each with its band, its object name and its object type; the two
+      logical constants the object declares for padding and for the arrow-button allowance; and the
+      narrow-and-wide character count derived from each recorded text at comparison time by the same
+      rule on both sides. ON THE DEVICE SIDE, MASKED OUT OF THE COMPARISON ENTIRELY: any extent
+      returned by a font measurement, any value that has passed through a unit conversion, and any
+      column width applied as a result. The item model itself declares no width field, so no entry in
+      it carries a width on either side of the line.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      The logical side is the headless output and IS behaviour - it is a function of the read-only
+      definition and its rows, it is reproducible, and a difference in it means the port enumerated
+      different text. The device side BELONGS TO THE DEFERRED RENDERING HALF and must not be compared
+      at all: it varies with the display, the device context and the installed font, none of which the
+      candidate has, so comparing it would report a difference on every run for a capability that does
+      not ship. This is the one entry in the mask that is a genuine exclusion rather than a seam, and it
+      is an exclusion because the value cannot be made reproducible without implementing the very half
+      that is deferred (C-D).
+  - seam: >-
+      Clipboard content provenance - the ambient system clipboard the service reads WHILE IT IS
+      BUILDING THE MENU, not when the selection is dispatched.
+    method: >-
+      SEED THE CLIPBOARD FROM FIXTURE DATA before the paste case rather than reading ambient system
+      state, and pass the seeded text in as an explicit input on both sides so that the read is an
+      injected value rather than an environmental one. Record the seeded payload verbatim alongside the
+      values it produced.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      Ambient clipboard content is ENVIRONMENTAL, NOT BEHAVIOURAL: it depends on whatever was last
+      copied on the machine, so it can differ between the two halves of one pair and makes the paste
+      case unrepeatable - which fails the golden-master technique's one hard prerequisite. The read's
+      TIMING makes it worse than it first looks: because the clipboard is read at menu-build time, an
+      ambient read changes not only WHAT a paste selection does but WHETHER THE PASTE ITEM APPEARS IN
+      THE MODEL AT ALL, so an unseeded clipboard would perturb the item model itself and not merely one
+      feature's result. Seeding it is therefore a seam on the item model as much as on the paste. The
+      seeded payload is assembled from the fixture's own values and carries nothing sensitive (C-F).
+
+# ---- WHAT IS DELIBERATELY NOT MASKED, STATED EXPLICITLY --------------------------------------------
+#  These are the behaviour under test. Masking any one of them would produce a comparison that passes
+#  while proving nothing, which is worse than a comparison that fails:
+#    * EVERY ITEM LABEL, IMAGE ARGUMENT AND TIP TEXT, byte for byte, including the empty image string
+#      the fixture passes and including every label that is not written in Latin script;
+#    * EVERY ITEM IDENTIFIER, as its raw number - the three custom ones and all eight built-in ones;
+#    * EVERY ENABLED FLAG, including the third custom item's cleared one;
+#    * EVERY SPLIT FLAG, both as the model holds it and as the built menu received it - they differ;
+#    * EVERY SEPARATOR ENTRY, its single-hyphen text, and every suppression or collapse decision;
+#    * THE ITEM ORDER, and every one-based position derived from it;
+#    * THE LOGICAL TEXT WIDTH MEASURE - the enumerated texts, their order and the two logical constants;
+#    * THE SELECTED IDENTIFIER and the pipeline outcome it was reached through;
+#    * THE FORMATTED SELECTION RECORD, field by field and as assembled;
+#    * BOTH VETO OUTCOMES, as raw return values, and the different effect each one has;
+#    * EVERY RESULTING CELL AND COLUMN VALUE after every headless built-in feature, with its item status;
+#    * EVERY CLIPBOARD TEXT the copy features write, verbatim;
+#    * THE MAP'S INSERTION ORDER, its count, its keys and its positional-get results;
+#    * EVERY STRUCTURED ERROR'S message key, arguments, assembled text, category, severity and code.
+#  And nothing is masked on one side only, anywhere, ever.
+
+# ==================================================================================================
+#  THE DEFECTS AND QUIRKS THIS PAIR EXISTS TO PROVE SURVIVED
+#  ------------------------------------------------------------------------------------------------
+#  THE INVERSION IS LOAD-BEARING: a capture that shows CORRECTED behaviour is a parity FAILURE, not an
+#  improvement. Where the target produces output that looks more correct than the oracle, the finding
+#  is a divergence IN THE TARGET and is filed as a defect (C-B). A legacy defect is reproduced and
+#  annotated at its point of reproduction, never repaired. `../../docs/PARITY.md` section 7 is the
+#  authoritative catalogue of behaviour groups; the entries below record which of them THIS pair pins.
+# ==================================================================================================
+provesDefects:
+  - defect: >-
+      D-01. THE BOUNDARY BETWEEN CUSTOM AND BUILT-IN IDENTIFIERS IS A SINGLE STRICT COMPARISON AGAINST
+      10000, AND THE BOUNDARY VALUE IS ITSELF A REAL DISPATCHABLE IDENTIFIER. The host classifies a
+      selection by testing whether the identifier is strictly less than 10000: the fixture's three
+      custom identifiers are 100, 101 and 102, and every built-in identifier is at or above the
+      boundary. Both the value and the strictness are behaviour, and the reason the strictness matters
+      is that the object declares TWO CONSTANTS WITH THE SAME VALUE - the reserved-start sentinel and
+      automatic-column-width are both 10000 - so the boundary is not a gap between two ranges but a
+      real, selectable entry. An implementation that treated the sentinel as reserved-and-unused, or
+      that used a non-strict comparison, would misclassify that one entry.
+
+
+      TWO FURTHER MISCOUNTS FALL OUT OF THE SAME LINES, and both are preserved rather than tidied. The
+      fixture's header comment enumerates FOUR built-in features while the object declares EIGHT
+      identifiers governed by FIVE flags: the comment folds set-and-clear into one feature, omits
+      invert-check entirely, and omits both automatic-width identifiers. And the build loop's own
+      feature filter names only TWO of the three check identifiers - set and clear - so a host that
+      turns the check flag off from inside its initializer hook, after the items have been added but
+      before the loop runs, removes two of the three and LEAVES THE THIRD IN THE MODEL.
+    locator: >-
+      ws_objects/pfw.tests.pbl.src/w_test_dwsvc_contextmenu.srw:L96, with the eight identifiers at
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L37-L45, the two sharing 10000 at :L37
+      and :L38, the five flags at :L49-L53, the fixture's four-feature comment at
+      ws_objects/pfw.tests.pbl.src/w_test_dwsvc_contextmenu.srw:L44-L52, and the filter at
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L157-L168
+    note: >-
+      WHAT A WELL-MEANING CORRECTION WOULD BREAK. Renaming or de-duplicating the two constants that
+      share 10000 would look like hygiene and would change the classification of a real entry. Adding
+      the missing invert-check identifier to the filter would look like a bug fix and would remove an
+      entry the oracle keeps. And "correcting" the fixture's four-feature comment to six or eight would
+      change nothing observable but would remove the evidence that the four it names are precisely the
+      headless ones - which is the observation that draws the split in the first place. Constant
+      identifiers additionally keep their legacy screaming-snake spelling in the port because they
+      appear in serialized payloads, log records and these recordings, so a rename would silently
+      invalidate every stored comparison; `../../docs/PARITY.md` section 1.7 is the authority.
+  - defect: >-
+      D-02. THE THIRD CUSTOM ITEM IS DELIBERATELY DISABLED, AND IT STILL APPEARS IN THE MODEL. The
+      fixture adds it with its enabled argument false and its identifier 102, and the build loop emits
+      it exactly as it emits the other two: the loop's filtering is by feature flag and by separator
+      text, and it never consults the enabled flag. So the disabled entry is PRESENT, in position, with
+      its label and its identifier, and merely not selectable. The capture therefore proves
+      presence-with-disabled rather than absence.
+
+
+      THE SAME LINES CARRY A SECOND QUIRK IN THE OPPOSITE DIRECTION. Every entry in the model declares a
+      SPLIT flag, but the loop passes it only on the submenu branch - the plain branch's call has no
+      split parameter at all. A plain entry's split flag is therefore held in the model and DROPPED on
+      the way to the built menu, so the flag is observable in one place and not the other.
+    locator: >-
+      ws_objects/pfw.tests.pbl.src/w_test_dwsvc_contextmenu.srw:L90, with the loop that emits it at
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L156-L185 and the split-carrying branch
+      at :L179-L183
+    note: >-
+      WHAT A WELL-MEANING CORRECTION WOULD BREAK. Omitting a disabled entry is the obvious "improvement"
+      and it is the one that does the most damage here: it shortens the model, shifts every following
+      ONE-BASED POSITION down by one, and therefore changes the answer to every position-based read in
+      this capture - including the item-text accessor's by-position form and the two positions either
+      side of the range. The model would still look plausible and every identifier-based read would still
+      agree, which is exactly the kind of divergence a characterization pair catches and a unit test does
+      not. Equally, propagating the split flag on the plain branch "for consistency" would hand the built
+      menu a flag the oracle never gave it.
+  - defect: >-
+      D-03. TWO ADJACENT HOOKS ARE BOTH VETOABLE WITH THE SAME RETURN VALUE AND THE VETOES MEAN
+      DIFFERENT THINGS. Returning one from the initializer hook PREVENTS THE MENU ENTIRELY - the
+      pipeline returns before the item count is even read, so there is no model, not an empty one.
+      Returning one from the selection hook prevents only the DEFAULT BEHAVIOUR of the selected entry,
+      and only when that entry is a built-in one: the menu was built, a selection was made, its
+      identifier is known, and nothing but the dispatch is skipped. The fixture's own two comments state
+      both meanings, one line above each hook.
+
+
+      THERE IS A THIRD VETOABLE HOOK, INTERNAL TO THE SERVICE, and it is recorded because it makes the
+      outcome enumeration five-valued rather than three-valued: the service's own preparation hook is
+      tested for the same return value immediately before the host's initializer hook, and a veto there
+      is indistinguishable from a veto here unless the two are recorded separately.
+    locator: >-
+      ws_objects/pfw.tests.pbl.src/w_test_dwsvc_contextmenu.srw:L91, with its comment at :L85, the selection hook's
+      return at :L99 and its comment at :L95, and the three call sites at
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L146, :L147 and :L194
+    note: >-
+      WHAT A WELL-MEANING CORRECTION WOULD BREAK. Flattening the two vetoes into one boolean
+      "prevented" outcome is the natural simplification and it destroys the distinction: a menu that was
+      never built and a built-in feature that was merely not dispatched would record identically, and a
+      port that prevented the wrong one would pass. The broker's own veto in the surrounding event chain
+      is TRI-VALUED for the same family of reasons - prevent-once, prevent-deep and continue - and
+      `dataservices-dw-event-chain` pins that separately; this entry is about the two hooks the fixture
+      itself implements, not about the broker's.
+  - defect: >-
+      D-04. THE ORDERED MAP PRESERVES INSERTION ORDER AND SUPPORTS A POSITIONAL GET BY INTEGER INDEX,
+      and both properties are load-bearing rather than incidental. The container declares a by-key get
+      and a SEPARATE by-integer-index get as two overloads of one name, plus a key-at-index accessor
+      and an ordered key enumeration - so the order is observable, positions are addressable, and the
+      two accessors must agree entry by entry. The service builds such a map per column by walking
+      either a child definition's rows or a column's own inline value list, and consumes it to resolve a
+      display value to a stored one. An unusable column name yields an EMPTY map rather than a null or
+      an error, because the container is created before the argument is validated.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc.sru:L74, with the second overload at :L75, the body at
+      :L561, the container declared at :L583 and created at :L585, the empty-map guard at :L587, the by-number
+      delegation at :L666, the consuming site at
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L948 and the resolution at :L1006-L1007
+    note: >-
+      THIS IS THE CONTAINER'S ONLY PAIRED COVERAGE ANYWHERE IN THE STORE, BECAUSE NO ORDERED-MAP ORACLE
+      WINDOW EXISTS. Searching for the ordered-map and vector container types across every file in both
+      fixture libraries returns nothing, so there is no window to capture either container from, and the
+      map's only in-scope exercise is the column-value map inside this service's paste path. THE
+      CONTAINER IS ALSO SUBSTITUTED RATHER THAN PORTED - its type is bound to a closed native binary, so
+      no source for its implementation exists anywhere in the repository - which is precisely why this
+      pair matters: the capture is the ONLY evidence that the substitution preserved insertion order and
+      positional addressing rather than merely preserving the pairs. WHAT A WELL-MEANING CORRECTION
+      WOULD BREAK: backing the substitute with an unordered dictionary would return the same pairs from
+      the by-key form and different values from every positional read, and returning a null for an
+      unusable column instead of an empty map would move the failure from the lookup to the caller's own
+      validity check. The container's pure contract, independent of any DataWindow, is unit-test matter
+      in the shared containers test project - a behaviour with no oracle recording cannot be paired, and
+      a unit test that pins a pure function is not weakened by the absence of one.
+  - defect: >-
+      D-05. THE ITEM-TEXT ACCESSOR'S SECOND ARGUMENT CHANGES WHAT ITS FIRST ARGUMENT MEANS, AND THE
+      FIXTURE PASSES THE FALSE FORM. With the flag false the first argument is an IDENTIFIER and is
+      resolved through the identifier-to-index lookup; with the flag true it is used DIRECTLY AS A
+      ONE-BASED POSITION. The same flag appears on the tip-text, image and enabled-state accessors and
+      on the remove, enable and setter operations, so it is a convention across the whole surface rather
+      than a quirk of one function. Both flag values are captured, because the two agree only where an
+      entry's identifier happens to equal its position - which in this fixture it never does, since the
+      identifiers are 100, 101, 102 and 10000 upward while the positions run from one.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L91, with the body at :L554-L560, the
+      bounds check at :L597, the conversions it depends on at :L75-L77, and the fixture's false-form call at
+      ws_objects/pfw.tests.pbl.src/w_test_dwsvc_contextmenu.srw:L97
+    note: >-
+      A READING IS WITHDRAWN HERE, AND IT IS NAMED SO THAT A READER ARRIVING FROM IT FINDS THE
+      CORRECTION RATHER THAN REDISCOVERING IT. The flag has been described as selecting a RENDERING of
+      the label. IT DOES NOT: the prototype names it as a by-position flag and the body branches on it
+      to choose how the first argument is interpreted, not how the result is formatted. The distinction
+      is observable and consequential - under the withdrawn reading a capture would compare two
+      renderings of the same entry's text and would never exercise positional addressing at all, so it
+      would miss both the bounds behaviour and its interaction with D-06. WHAT A WELL-MEANING CORRECTION
+      WOULD BREAK: replacing the flag with two separately named functions is the natural tidy-up and it
+      would be a widening of the contract, because a single call site that passes a variable flag can do
+      either at run time and two functions cannot.
+  - defect: >-
+      D-06. EVERY ROW NUMBER, COLUMN NUMBER, ITEM POSITION AND MAP POSITION IS A ONE-BASED LEGACY INDEX,
+      AND THE UPPER-BOUND CONVENTION IS THE LAST VALID INDEX RATHER THAN A LENGTH. The item array is
+      one-based; the emptiness test reads the upper bound and compares it to zero; the accessor's bounds
+      check rejects anything below one or above the upper bound; the copy loop and the paste loop both
+      run from one to a count; the map's positional accessors take an integer index in the same
+      convention; and the by-number value-map accessor resolves a one-based column number to a name
+      through a describe call. The target's arrays begin at zero and its length is one past the end, so
+      EVERY ONE OF THOSE IS A TRANSLATION SITE.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L57, with the emptiness test at
+      :L149-L150, the bounds check at :L597, the copy loop at :L529, the paste loop at :L993, the payload's
+      positional indexing at :L1004, the map's positional accessors at
+      ws_objects/pfw.utility.container.pbl.src/n_map.sru:L11 and :L12, and the column-number resolution at
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc.sru:L666
+    note: >-
+      THIS IS THE SHARPEST MECHANICAL HAZARD IN THE WHOLE REFACTOR AND IT BITES TWICE HERE.
+      `../../docs/PARITY.md` section 7.12 is the authority: a silent off-by-one is INDISTINGUISHABLE
+      FROM A BEHAVIOURAL REGRESSION, so the capture declares its basis as its own recorded field rather
+      than leaving a reader to infer it from the values. It bites twice in this workflow specifically
+      because the positional map get is index-based AND the item accessor's by-position form is
+      index-based, so one wrong basis moves BOTH the entry read and the value returned, and the two
+      errors can compensate for each other into a result that looks right. THREE SITES ARE MORE
+      DANGEROUS THAN THE REST: the paste loop indexes its payload BY ROW NUMBER even though it skips
+      invisible and protected rows, so a port that consumed the payload sequentially - the natural way
+      to write it - produces a plausible misalignment; the bounds check is written against the last valid
+      index, so a port that compares against a length admits one position too many; and the fixture's
+      column controls are DECLARED OUT OF IDENTIFIER ORDER, so a port that confused declaration position
+      with column number resolves the wrong column and still returns a perfectly valid map.
+  - defect: >-
+      D-07. THE ITEM MODEL IS WIDER THAN THE BEHAVIOUR THE HEADLESS HALF CAN PERFORM, AND THE ENTRIES IT
+      CANNOT ACT ON ARE STILL EMITTED. For a grid definition the preparation hook adds the two
+      automatic-column-width entries - one of them carrying a SUBMENU with a child entry of its own -
+      and the build loop emits them like any other, because its filter has no arm for them. They are
+      therefore part of every model a header right-click produces, with their labels, their identifiers
+      10000 and 10001, and their submenu metadata, while their EFFECT belongs to the deferred rendering
+      half and is not implemented. That asymmetry is a real property of the shipped surface, not an
+      oversight, and the capture records the entries so the gap is visible in the model rather than only
+      in a document.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_contextmenu.sru:L268-L279, with the submenu
+      construction at :L272-L274, the dispatch arms that are never reached at :L205-L208, and the grid gate at
+      ws_objects/pfw.tests.pbl.src/dw_svc_sample_contextmenu.srd:L3
+    note: >-
+      THE SPLIT FINDING, WITH THE CONTRAST THAT MAKES IT EVIDENCE RATHER THAN ASSERTION. THIS IS THE MOST
+      PRESENTATIONAL OF THE FIVE ATTACHED DATAWINDOW SERVICES: it queries a window rectangle, applies
+      FOUR PAIRS of device-unit conversions, creates FOUR FONT OBJECTS to measure text, and publishes a
+      submenu surface typed on the popup-menu class. That is why only its ITEM MODEL ships and the
+      rendering is a named gap. The contrast is in the same folder and it is what keeps the split from
+      being arbitrary: the base service class is 864 lines with ZERO presentation references, and the
+      ROW-SELECT SERVICE HAS EXACTLY ONE - a single dialog - so it needs no split at all and SHIPS
+      WHOLE. One measurement sharpens the line further: all four font creations and all four unit
+      conversions sit inside the two automatic-width functions and nowhere else in the object, which is
+      why the fixture's own header comment enumerates four built-in features and leaves automatic width
+      out of them - the four it names are exactly the headless ones. `../../docs/DEFERRED.md` sections
+      6.1 and 6.2 are the authority for the split; A DOCUMENTED GAP IS DELIBERATELY PREFERRED TO A
+      PARTIAL IMPLEMENTATION, and nothing exists behind the reserved route (C-D).
+  - defect: >-
+      D-08. THE CONTAINER'S TYPE IS SHADOWED BY A GLOBAL AUTO-INSTANCE OF THE SAME NAME. The container
+      declaration ends with a global variable whose identifier is identical to the type's own, so in the
+      legacy's single flat namespace the name resolves to an instance in one position and to a type in
+      another. The refactor's namespace scheme has no equivalent: the type keeps a descriptive name and
+      the instance becomes an injected dependency rather than a global. The capture records the map the
+      accessor RETURNS and never a global, which is what keeps the substitution honest - a port that
+      quietly reused one shared instance would pass every single-column case and fail the first case that
+      captured two columns' maps in one right-click.
+    locator: >-
+      ws_objects/pfw.utility.container.pbl.src/n_map.sru:L20, with the native binding that makes the type unportable
+      at :L8 and the per-call creation the service relies on at
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc.sru:L585
+    note: >-
+      THE DISPLACED ORDERED-MAP COVERAGE, WITH ITS EVIDENCE. The container's coverage lives in a
+      CONTEXT-MENU workflow because its nominated oracle turned out not to be one.
+      [`../README.md`](../README.md) section 4.6 nominates `ws_objects/pfw.tests.pbl.src/w_test_static_map.srw`
+      for the ordered map on the strength of its name; read in full - 82 lines - that window creates an
+      HTTP client at `:L55` and `:L58`, issues a `GET` against a public third-party static-map endpoint
+      across `:L55-L66`, and calls a set-picture operation into a control declared `from picture` at
+      `:L7` and `:L74`, sizing the request through the unit conversions on `:L66`. ITS DEPENDENCIES ARE
+      OUTBOUND HTTP AND A PICTURE CONTROL - two deferred capability areas - AND IT REACHES A LIVE
+      THIRD-PARTY ENDPOINT, which destroys the repeatability the technique names as its one hard
+      prerequisite. So it carries NO WORKFLOW: C-D rules it out on the first ground and the second would
+      rule it out even if those areas shipped. "Static map" names a static map IMAGE, not the ordered
+      map. With no oracle window for either container anywhere in the corpus, the map's only in-scope
+      exercise - the column-value map in this service's own paste path - is where it is characterized.
+      `./README.md` holds the full correction register and is the authority for this displacement; it is
+      cross-referenced rather than restated.
+
+# ---- THE SHARED-VOLUME CAPTURE RULE ---------------------------------------------------------------
+#  `applies: true`. THE RULE'S CANONICAL TEXT IS OWNED BY `../README.md` SECTION 2.1 AND IS CITED HERE
+#  RATHER THAN REPRODUCED - the same text is carried word for word by that file, by
+#  `../../docs/PARITY.md` section 4.2 and by `../../orchestration/README.md`, and a fourth copy would be
+#  a fourth thing to drift, which is the failure this store exists to prevent rather than to commit.
+#
+#  WHY IT APPLIES EVEN THOUGH THIS WORKFLOW'S ROWS ARE INLINE IN A READ-ONLY FIXTURE AND ITS SEED
+#  TOUCHES NO DATABASE. The exemption in `../README.md` section 2.7 is narrow and is NOT a loophole: it
+#  holds only while a workflow reads and writes NOTHING, and the store's only exempt row is the paging
+#  behaviour, which is a pure string transform. THIS WORKFLOW DOES NOT QUALIFY. The target half is
+#  captured against the running service rather than an in-process host; the check and paste features
+#  WRITE into a live buffer, and the paste feature INSERTS ROWS when its payload is longer than the row
+#  count; and both copy features accept pending edit text before they read. A volume state that moved
+#  between the two halves would change the input the second half ran against, and nothing would report
+#  it. The rule is therefore honoured in full, including its teardown corollary in section 2.6: between
+#  the two halves, tear the stack down with a plain down and NEVER with the flag that removes named
+#  volumes.
+sharedVolume:
+  applies: true
+
+# ---- HONEST STATE --------------------------------------------------------------------------------
+#  NOTHING HERE HAS BEEN RUN, AND THE ONLY LEGAL VALUE SAYS SO. No paired capture exists on either
+#  side. `characterization/recordings/` IS present - both halves exist and carry their own readmes - but
+#  neither holds a recording for this identifier, and the blocker is one-sided: the legacy half needs a
+#  PowerBuilder toolchain that is not present. Nothing in this
+#  definition may be read as reporting a parity result, and the schema's single-member enumeration is
+#  what makes that structural rather than a matter of trust.
+executionStatus: specified-not-executed
+
+# ---- SIBLINGS ------------------------------------------------------------------------------------
+#  A cross-reference only: each pair stays independently comparable under its own identifier, and no
+#  definition here merges with another. The event chain is cited because THIS SERVICE RUNS INSIDE IT -
+#  its two semantic events are two of the chain's nine, and the ordering discipline this capture is
+#  taken under is assigned there rather than re-derived here. The other three are the siblings that
+#  share the split: column sort and drop-down search are the other two presentational services whose
+#  headless halves ship, and row-select is the one that needed no split at all, which is the contrast
+#  D-07 rests on. The two behaviours this store reports BLOCKED belong to siblings rather than to this
+#  workflow - pinyin first-letter matching to the drop-down search definition, and cross-session
+#  foreign expression variables to the column-expression definition - which is why this definition
+#  declares no blocked behaviour of its own.
+relatedWorkflows:
+  - dataservices-dw-event-chain
+  - dataservices-dwsvc-columnsort
+  - dataservices-dwsvc-dropdownsearch
+  - dataservices-dwsvc-rowselect

@@ -1,0 +1,54 @@
+# ---------------------------------------------------------------------------------------------------
+# Generated artifacts of the end-to-end suite. NONE of these belongs in version control.
+#
+# WHY THIS FILE EXISTS HERE AND NOT AT THE REPOSITORY ROOT
+# The refactor plan records that no change to the root `.gitignore` is required, and that file is
+# therefore left exactly as the legacy repository has it. `tests/e2e/` is a directory this refactor
+# creates, so the ignore rules for what it generates belong inside it. A nested `.gitignore` applies
+# to its own directory and everything beneath it, which is precisely the scope wanted: these rules
+# must not accidentally suppress a same-named path elsewhere in the tree.
+#
+# The root file also already carries a pre-existing inconsistency - it excludes /pack/* while pack/
+# is tracked - which sits inside the read-only region and is not this suite's to resolve. Adding
+# Node-specific rules there would edit a file the migration treats as out of bounds, to solve a
+# problem that exists only in this directory.
+#
+# WHY IT IS NOT MERELY TIDINESS
+# `npm ci` materializes several hundred megabytes under `node_modules/`, and a Playwright run writes
+# report and trace directories. Without these rules a routine `git add -A` commits all of it. Traces
+# and reports are the more serious of the two: a trace records request and response bodies, so a run
+# against a configured environment can capture a bearer token or other credential material verbatim.
+# Keeping them untracked is a secrets control, not housekeeping.
+#
+# WHAT IS DELIBERATELY *NOT* IGNORED
+# `package.json`, `package-lock.json`, `playwright.config.ts`, `tsconfig.json`, `fixtures/` and
+# `specs/` are all committed. The lock file in particular must be tracked: `npm ci` requires it and
+# fails without it, and it is what makes an install reproducible.
+# ---------------------------------------------------------------------------------------------------
+
+# Installed dependencies
+node_modules/
+
+# Playwright run output: results, HTML report, and the sharded/merged report formats
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# TypeScript incremental build state, emitted next to tsconfig.json by --incremental/--build
+*.tsbuildinfo
+
+# Local environment overrides. Never commit a populated environment file: the base URLs are harmless
+# but the client-certificate and token settings this suite reads are not.
+.env
+.env.*
+!.env.example
+
+# The ephemeral mutual-TLS client identity written by `npm run provision:identity`: a throwaway
+# certificate authority and a client leaf whose common name is the identity the suite claims. This
+# directory holds PRIVATE KEYS, so the rule is a secrets control rather than housekeeping - and it is the
+# reason the script may write here at all. Fresh material is generated on every run and is never shared
+# between environments, so there is nothing here worth keeping and everything here worth not committing.
+# The repository's own secrets inventory exists because committed key material is the defect this
+# refactor is remediating; do not add an exception to this rule.
+.mtls/

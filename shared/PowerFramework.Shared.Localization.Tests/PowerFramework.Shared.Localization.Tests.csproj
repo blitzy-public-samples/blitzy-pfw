@@ -1,0 +1,267 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ==============================================================================================
+    PowerFramework.Shared.Localization.Tests
+    ==============================================================================================
+    Unit test project for PowerFramework.Shared.Localization, the .NET port of the legacy
+    PowerBuilder localization surface. The behavioural specification is the read-only legacy tree:
+
+      ws_objects/pfw.ui.pbl.src/n_cst_i18n.sru                    provider contract, a single event
+                                                                  member ontranslate(source,
+                                                                  category, ref text) at L9
+      ws_objects/pfw.ui.pbl.src/i18n.srf                          the three overload facade, with
+                                                                  the silent passthrough fallback
+                                                                  when no provider is installed
+      ws_objects/pfw.ui.controls.ext.pbl.src/ne_cst_i18n.sru       CAT_MSGBOX and CAT_DWSVC as
+                                                                  offsets from I18N_CAT_CUSTOM
+      ws_objects/pfw.ui.controls.ext.pbl.src/n_cst_i18n_en.sru     English provider, including the
+                                                                  two preserved mistranslations
+      ws_objects/pfw.ui.controls.ext.pbl.src/n_cst_i18n_chs.sru    Simplified Chinese, the base
+                                                                  locale, a genuine no operation
+      ws_objects/pfw.ui.controls.ext.pbl.src/n_cst_i18n_cht.sru    Traditional Chinese table lookup
+      pfw.i18n.xml                                                the translation resource table
+
+    HAND AUTHORED, DELIBERATELY. No template can produce this project: `dotnet new xunit3` does not
+    exist in the pinned SDK, and `dotnet new xunit` scaffolds the xunit v2 line with older test SDK
+    and coverage packages. Do not regenerate this file from a template and patch it.
+
+    INHERITED, NEVER RESTATED. TargetFramework (net10.0), LangVersion, Nullable, ImplicitUsings,
+    TreatWarningsAsErrors and ManagePackageVersionsCentrally all arrive by MSBuild directory walkup
+    from the repository root Directory.Build.props, which declares no Import element and therefore
+    terminates the walkup. Restating any of them here would be duplication; weakening any of them
+    would break a repository wide quality gate. That is why this file contains no NoWarn property
+    and no TargetFramework, and why every package reference below is versionless.
+
+    No credential material of any kind appears in this file, and none may ever be added to it. The
+    project declares no configuration values at all, which is what keeps that guarantee trivial.
+    ==============================================================================================
+  -->
+
+  <PropertyGroup>
+
+    <!--
+      MANDATORY for xunit.v3, and the single property that distinguishes a v3 test project from a
+      v2 one. The v3 runner supplies its own application entry point, so the test assembly must be
+      an executable. Built as a library it never starts, and `dotnet test` discovers zero tests.
+    -->
+    <OutputType>Exe</OutputType>
+
+    <!-- A test assembly is never published to a package feed. -->
+    <IsPackable>false</IsPackable>
+
+    <!-- Declares the project to `dotnet test` and the VSTest platform as a test project. -->
+    <IsTestProject>true</IsTestProject>
+
+    <!--
+      AssemblyName and RootNamespace are deliberately left unset: the SDK already derives both as
+      PowerFramework.Shared.Localization.Tests from this file's name, which is exactly the intended
+      value, and every test source file in this folder declares that namespace.
+
+      The fourteen files, and the surface each one owns. Enumerated rather than counted, because a bare
+      count is unverifiable by inspection and drifts the moment a file is added - which is exactly how
+      this comment came to overstate the project's contents once already.
+
+        CategoriesTests.cs              CAT_MSGBOX and CAT_DWSVC as offsets from I18N_CAT_CUSTOM
+        I18nTests.cs                    the facade: silent passthrough, install and replace, dispatch
+        I18nFacadeTests.cs              the facade again from the other direction: the passthrough with no
+                                        provider installed, the installer's replace-not-chain semantics,
+                                        and the discarded provider return value
+        II18nProviderTests.cs           the one-member contract, exercised through every implementation
+        EnglishProviderTests.cs         the source filter, the category map, hit/miss, both preserved
+                                        mistranslations
+        MistranslationParityTests.cs    the two mistranslations as ONE table-driven parity matrix, the
+                                        English-word collision the first of them causes, and the
+                                        dormant correct table asserted absent at BOTH the behavioural
+                                        and the data layer - the data layer being the only assertion in
+                                        the project that catches a coordinated edit of code and data
+        SimplifiedChineseProviderTests.cs  the deliberate no-op, and why 1-and-unchanged is not a decline
+        TraditionalChineseProviderTests.cs  the cht language token, the same category map and both of its
+                                        quirks, identity translations that are hits rather than misses,
+                                        and the proof that the English mistranslations are data-scoped
+        CategoryMappingTests.cs         the category switch driven across BOTH XPath providers in one
+                                        matrix, so an en/cht divergence in a switch that is the same code
+                                        in two files cannot hide from a per-provider suite; the source
+                                        filter proved to run BEFORE the switch using pairs measured to be
+                                        hits; the zero collision between I18N_SRC_PFW and
+                                        I18N_CAT_WINDOW asserted executably rather than warned about; arm
+                                        coverage asserted as a SET; and the data premise behind both
+                                        deliberate holes - the resource has no datawindow element and no
+                                        custom element - which nothing else in the project pinned
+        I18nResourceReaderTests.cs      the XDocument/XPath substitution and its structural guards
+        I18nResourceFidelityTests.cs    pfw.i18n.xml asserted at the byte, against the read-only oracle
+        I18nXPathInjectionTests.cs      the unescaped key: malformed, always-true and union outcomes
+        LookupKeyFormatTests.cs         the key's CONSTRUCTION rather than its outcomes: the two format
+                                        strings carried verbatim from n_cst_i18n_en.sru:L51 and
+                                        n_cst_i18n_cht.sru:L52, the fixed argument order and what a
+                                        transposition costs, the language token as the providers' only
+                                        substantive difference, the source text interpolated with NO
+                                        escaping of any kind, the apostrophe proved hazardous and the
+                                        double quote proved inert against the framework's own XPath
+                                        engine, resource-side braces as data, and a sweep requiring the
+                                        legacy expression and this port to agree on the shipped table
+        FakeI18nProviders.cs            the test doubles the facade suites drive; declares no test
+
+      Thirteen of the fourteen carry tests; FakeI18nProviders.cs is a fixture source and is consumed by
+      I18nTests.cs and II18nProviderTests.cs. SimplifiedChineseProviderTests.cs deliberately consumes
+      no double: its subject has exactly two branches and that suite drives both of them directly, so
+      a stand in that declines BY CONSTRUCTION would carry no information about the provider under
+      test, and the facade behaviour a double would be needed for is owned by I18nTests.cs.
+
+      EnglishProviderTests.cs and MistranslationParityTests.cs overlap on the two mistranslations, and
+      that overlap is deliberate rather than an oversight. The first covers them as two assertions among
+      the provider's whole surface; the second is the dedicated parity matrix AAP §0.8.2 and §0.6.7 ask
+      for, and it alone carries the collision, the negative dormant-wording assertions and the
+      document-level scan. Neither subsumes the other, and duplicated cover on the one behaviour this
+      project exists to freeze is the cheapest insurance in the repository.
+
+      CategoryMappingTests.cs overlaps the two per-provider suites on the category map, and that overlap
+      is deliberate for a third, different reason: those suites each see ONE provider, so neither can
+      observe that the two implementations of one switch have diverged, and neither closes the zero
+      collision (EnglishProviderTests.cs pairs its foreign source with I18N_CAT_WINDOW, which is also 0).
+      The cross-provider matrix, the non-zero-category filter rows and the set-level arm-coverage claim
+      exist only here. Nothing in it restates the mistranslated VALUES, the rendered key's shape or the
+      reader's mechanics - it uses pfw.i18n.xml:L49 as a known HIT and never asserts what that entry says.
+
+      I18nTests.cs and I18nFacadeTests.cs likewise both drive the facade, and that is deliberate for the
+      same reason: the first covers the three overloads as one surface, while the second isolates the
+      three properties that are easiest to lose silently - the SILENT passthrough when no provider is
+      installed, install-replaces rather than install-chains, and the provider's handled/not-handled
+      return value being DISCARDED by every overload. Neither subsumes the other.
+
+      LookupKeyFormatTests.cs and I18nXPathInjectionTests.cs both concern the unescaped lookup key, and
+      the division between them is by SUBJECT rather than by degree. The injection suite is a catalogue
+      of OUTCOMES: what each crafted payload resolves to, recorded against the value the legacy
+      expression produced for it. The format suite is upstream of that, and asserts the key's
+      CONSTRUCTION: which format string each provider uses, which argument occupies which of the two
+      sequential placeholders, and that the source text passes through unescaped. It is the only suite
+      in the project that inspects the composed key STRING, the only one carrying a double-quote control
+      row alongside the apostrophe (the control matters: a double quote cannot escape a single-quoted
+      predicate, so a suite reaching for one as its quote case would report confidence it had not
+      earned), and the only one that evaluates the legacy key against the shipped table with a second
+      framework API and requires the port to agree. Neither subsumes the other, and the overlap on the
+      apostrophe is one behaviour reached from two directions: mechanism here, consequence there.
+
+      One test file per shippable type is the rule this project follows, and it is what the per-project
+      line coverage gate measures: with all three shipped locale providers now present in the library,
+      all three carry a suite. TraditionalChineseProviderTests.cs was added with the provider it covers,
+      because without it the library's measured line coverage falls below that gate. Four files sit
+      deliberately outside that rule because their subject is a BEHAVIOUR that no single type owns:
+      MistranslationParityTests.cs, CategoryMappingTests.cs, I18nXPathInjectionTests.cs and
+      LookupKeyFormatTests.cs each cut across the reader, the providers and the resource table together.
+    -->
+
+  </PropertyGroup>
+
+  <!--
+    Test stack. Every reference is deliberately VERSIONLESS. Central package management is enabled
+    repository wide, so the single source of truth for versions is the repository root
+    Directory.Packages.props, which pins xunit.v3 3.2.2, xunit.runner.visualstudio 3.1.5,
+    Microsoft.NET.Test.Sdk 18.8.1 and coverlet.collector 10.0.1. Adding a Version attribute here
+    would raise an NU1008 class error and defeat the mechanism that forces the repository's
+    mandatory security pins onto every project from one place.
+
+    coverlet.collector is what makes `dotnet test` with the XPlat Code Coverage collector emit
+    coverage.cobertura.xml, the artifact the line coverage gate is measured from. See docs/BUILD.md
+    for the exact command; it cannot be spelled here because an MSBuild comment may not contain two
+    consecutive hyphens.
+
+    The list is exhaustive by design, and matches the sibling shared library test projects:
+      * No Microsoft.AspNetCore.Mvc.Testing. A shared library exposes no HTTP surface, so there is
+        no in process host to spin up.
+      * No XML or XPath package. The resource reader under test uses System.Xml.Linq over
+        System.Xml, and this suite additionally uses System.Xml.XPath to cross check the document's
+        shape through a second framework API; all of them ship inside the
+        Microsoft.NETCore.App shared framework. A
+        package reference here would be the first thread of coupling to a deferred capability that
+        this phase must not implement even partially.
+      * No mocking or fluent assertion library. The test doubles in this folder are hand written
+        classes (FakeI18nProviders.cs) and assertions use xunit's own Assert.
+      * No logging, parser or pinyin package. Nothing in this project needs one.
+  -->
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="coverlet.collector" />
+  </ItemGroup>
+
+  <!--
+    Exactly two project references, and each one states a dependency this project genuinely has.
+
+    PowerFramework.Shared.Localization is the system under test.
+
+    PowerFramework.Shared.Kernel is referenced DIRECTLY because these tests compile against it
+    directly: CategoriesTests.cs opens with `using PowerFramework.Shared.Kernel;` and reads its
+    expectations out of RetCode.OK, RetCode.E_INVALID_OBJECT, Enums.I18N_SRC_PFW,
+    Enums.I18N_SRC_CUSTOM, the Enums.I18N_CAT_* set and Formatting.Sprintf rather than restating
+    literals. An earlier form of this file omitted it on the reasoning that Kernel arrives
+    transitively through the Localization edge and that a direct reference would be redundant. It
+    does arrive, and the project compiled - but the manifest then described a dependency shape the
+    source does not have, and it made this project's ability to compile a side effect of another
+    project's implementation choice. The day Localization stopped needing Kernel, or narrowed that
+    edge with PrivateAssets, these tests would break for a reason nothing in this file explains.
+    A manifest that matches the source's own imports is the whole point of declaring one.
+
+    No sibling shared library and no service project is referenced. One test assembly covers one
+    shared library, so coverage is never merged across libraries and the per project gate cannot be
+    masked; Kernel's own coverage is measured by PowerFramework.Shared.Kernel.Tests.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="../PowerFramework.Shared.Localization/PowerFramework.Shared.Localization.csproj" />
+    <ProjectReference Include="../PowerFramework.Shared.Kernel/PowerFramework.Shared.Kernel.csproj" />
+  </ItemGroup>
+
+  <!--
+    TRANSLATION RESOURCE FIXTURE : DELIBERATELY NOT DECLARED HERE, AND THAT IS LOAD BEARING.
+
+    The reader tests in this project open pfw.i18n.xml by BARE RELATIVE FILENAME, because that is what
+    they are testing: I18nResourceReader reproduces the legacy `_doc.LoadFile("pfw.i18n.xml")` at
+    n_cst_i18n_en.sru:L159 and n_cst_i18n_cht.sru:L63, which resolves against the process working
+    directory and probes nowhere else. The xunit.v3 test host runs with the build output directory as
+    its working directory, so the table has to be sitting in this project's output for those tests to
+    pass at all.
+
+    It gets there through PowerFramework.Shared.Localization, which declares the Content item once and
+    flows it down the ProjectReference edge. An earlier form of this file declared its own copy of the
+    same item. Removing it is not tidying: the library is the only thing in the tree that READS the
+    table, so the library is where its delivery belongs, and with the duplicate gone THESE TESTS
+    BECOME THE REGRESSION GUARD FOR THAT DELIVERY. If someone removes the item from the library - and
+    an earlier form of this refactor did exactly that, on the mistaken reading that copying a
+    read-only file breaches constraint C-C - the reader tests fail here immediately and loudly. With a
+    duplicate present they would keep passing while every consuming service silently shipped without
+    the table, translating nothing.
+
+    Two properties of the copy remain contractual wherever it is declared, and are restated here
+    because this project is what proves them. The repository root pfw.i18n.xml is a read-only DATA
+    INPUT (AAP §0.2.1.2): MSBuild only ever COPIES it, and nothing in this project or in the library
+    writes to, moves, renames, transforms, re-encodes or reformats that path, so the read-only
+    guarantee is structural rather than a matter of reviewer diligence. And the copy must stay BYTE
+    IDENTICAL to the original - 6824 bytes, no byte order mark, no XML declaration (the document opens
+    directly with the pfw element), UTF-8 encoded Chinese, LF only line endings, no trailing newline -
+    because the two documented mistranslations it carries must survive verbatim rather than being
+    silently fixed. Never add an encoding conversion or a newline fixup anywhere on that path.
+  -->
+
+
+  <!--
+    REPOSITORY ROOT, EMBEDDED SO THIS PROJECT'S ON DISK LOCATORS DO NOT DEPEND ON WHERE ITS OUTPUT WENT
+    This project reads real files from the source tree, and it finds them by walking up from
+    AppContext.BaseDirectory for a marker. That walk holds only while the output sits inside the
+    checkout, so a test run whose artifacts path option names a directory outside the tree - a supported
+    and entirely valid way to run the suite - left every one of those locators with no ancestor
+    carrying the marker, and they threw for a reason unrelated to the code under test.
+
+    The value comes from the PowerFrameworkRepositoryRoot property in the repository root
+    Directory.Build.props, which resolves it from that file's own location. It is turned into assembly
+    metadata HERE, in each test project, rather than there: a service assembly ships inside a container
+    image and must carry no build machine path, and the root property sheet keeps its documented rule of
+    introducing no project level item. The locators still verify their marker and still keep the walk as
+    the fallback, so an absent or stale value degrades to the previous behaviour rather than misreading
+    a different tree.
+  -->
+  <ItemGroup>
+    <AssemblyMetadata Include="PowerFrameworkRepositoryRoot" Value="$(PowerFrameworkRepositoryRoot)" />
+  </ItemGroup>
+
+</Project>

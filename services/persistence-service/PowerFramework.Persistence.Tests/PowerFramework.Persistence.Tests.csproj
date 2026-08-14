@@ -1,0 +1,263 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    PowerFramework.Persistence.Tests
+    Unit and service-level tests for the Persistence service of the PowerFramework .NET 10
+    decomposition. Persistence is the only service that generates or executes SQL and the only
+    one holding a storage provider, so this project is where the retrieval / validation / update
+    triple, the two paging rewriters, the SQLite URI grammar and the optimistic-concurrency
+    contract are to be held to legacy parity.
+
+    WHAT IS HERE, AND HOW DEEPLY. Stated because "is where X is held to parity" reads as a claim
+    about existing coverage, so the coverage is described rather than assumed. The authority for every
+    coverage statement below is the Cobertura report this project emits, counting the sequence points
+    that report calls lines; the report, not this comment, is what the gate reads.
+
+      BUILD AND TEST STATUS: this project builds in Release with zero warnings and zero errors, and
+      its whole suite passes with no failure and no skip. The application project it references
+      carries Program.cs and produces an entry point, so CS5001 is not reachable here.
+
+      COVERAGE: PowerFramework.Persistence clears the 80 percent per-service line floor that
+      constraint C-H requires. EVERY production type in the application project is named by at least
+      one test file here, the three EF-generated files under Data/Migrations included. That includes
+      the internal ItemStatusMachine in Buffers/ItemStatus.cs and the internal
+      PagedUniqueIndexColumnValidator in Sql/Paging/IPagingRewriter.cs, neither of which has a file
+      of its own.
+
+      DRIVEN THOROUGHLY: the three DataWindow buffers and the item-status machine; both transfer
+      codecs, changeset and full state, including their receive and transfer paths; the SELECT
+      statement model and its compound-select behaviour; ClauseModifier; the paged unique-index
+      column validator; UpdateWhereBuilder; IdentityColumnResolver; ConflictDetector; SqlRedactor;
+      DbErrorData; CompanyEntity together with its EF mapping, the DDL that mapping emits and the
+      initial migration and model snapshot that carry it; TransactionData and TransactionPool;
+      SqlTaskBase and SqlQueryTask
+      with all three task proxies; the Command, Transaction and Update gRPC services; the health
+      and ping endpoints; and the composition root.
+
+      BOTH PAGING REWRITERS ARE COVERED. SqlServerPagingRewriterTests.cs exercises all FOUR arms of
+      the SQL Server 2x2 matrix - unique-index columns present or absent, crossed with the native
+      OFFSET/FETCH switch - and PagingRewriterByteExactTests.cs pins their exact output text, together
+      with the dispatcher's DBT_MSSQL / DBT_ORACLE selection and its E_NO_IMPLEMENTATION arm for
+      anything else. These are pure string transforms, so they need no database instance of either
+      kind - which is exactly why docs/PARITY.md section 6.2 treats them as byte-exact matrices.
+
+      REACHED LEAST DEEPLY, SO THE NEXT READER KNOWS WHERE TO WORK - ranked rather than given as a
+      rate, because a rate goes stale and the ranking is the actionable part. Read the current numbers
+      off the Cobertura report. Data/SqliteConnectionFactory is lowest: its pure URI and option
+      surface is exercised, while several of the members that actually open, close or probe a
+      connection are not. Then Tasks/TaskProxies/SqlTaskProxyBase; then Grpc/QueryService, whose
+      chunked server-streaming members are entered only in part; then
+      Configuration/PersistenceOptions, whose unreached remainder is its validation failure arms.
+
+      THE WHOLE SCHEMA SEAM IS EXERCISED. Data/CompanyEntity.cs, Data/PowerFrameworkDbContext.cs - the context AND the
+      design-time factory declared beside it - and all three files under Data/Migrations each measure
+      100 percent, driven by CompanyEntityTests.cs. The objection that a unit test over the
+      migrations would only assert the EF generator's output does not hold for what that file
+      actually asserts: it pins the table name, the six UPPERCASE column names, their exact declared
+      types with INT and INTEGER left distinct, their nullability, the single database-generated key,
+      the COLUMN ORDER that dw_sqlite.srd's by-position SELECT * binding depends on, the suppression
+      of EF's default AUTOINCREMENT emission, the agreement between the migration, the model snapshot
+      and OnModelCreating, and the absence of a connection-string literal in the design-time factory.
+      None of those is the generator's choice; every one is this service's, and each was confirmed to
+      fail under a deliberate mutation of the mapping before being relied on. The schema it pins is
+      still the single DDL the legacy tree publishes, read from the DwSqliteFixture transcription
+      rather than retyped. Every provider-backed case there owns a private in-memory SQLite
+      connection and disposes it, so nothing touches the configured data directory and nothing
+      recreates or reseeds the persistence-db volume the paired characterization captures depend on.
+
+    THIS PROJECT IS THE MEASURED UNIT FOR THE COVERAGE GATE, AND THE GATE IS ENFORCED.
+    Constraint C-H requires 80 percent line coverage per in-scope service, evaluated per service
+    so that one service's coverage cannot mask another's. The Cobertura report this project emits is
+    the artifact that gate reads, which is why coverlet.collector below is load bearing and must
+    never be trimmed as an unused reference.
+
+    .github/workflows/ci.yml enforces it, in this project's own matrix leg. The collector runs
+    unconfigured, so the report it emits carries one Cobertura package per instrumented assembly -
+    this project also loads the shared libraries and the generated protobuf stubs in
+    PowerFramework.Contracts - and the gate SELECTS the package named PowerFramework.Persistence and
+    reads that package's line rate. Selecting the package by name IS the measurement scope, expressed
+    inline in the workflow rather than in a settings file, and there is no settings file anywhere in
+    this repository. The report's own top level rate is a much lower, meaningless number for this
+    service because it averages in code no Persistence test was ever meant to exercise; every other
+    package's rate is printed by the gate but never gated on, since the root solution leg owns them.
+
+    Two consequences worth knowing before changing anything here. Removing or renaming
+    coverlet.collector makes the leg fail with a structural error rather than a coverage number, and
+    so does renaming this project's application assembly, because the gate fails outright when
+    PowerFramework.Persistence is absent from the report rather than silently measuring whatever else
+    is present. And the leg does not fail fast against its three siblings, so a shortfall here is
+    reported alongside their verdicts rather than hiding them.
+
+    HAND-AUTHORED ON PURPOSE, NOT TEMPLATED.
+    `dotnet new xunit3` does not exist in the pinned SDK (it exits 103 and suggests searching
+    NuGet.org), and `dotnet new xunit` scaffolds the xunit v2 line with an older test SDK and an
+    older coverage collector. Neither can produce this file, so it is written by hand, and its
+    shape mirrors the Gateway sibling element for element because the four service test manifests
+    must be structurally identical: versionless PackageReference elements throughout, with
+    PrivateAssets and IncludeAssets metadata on exactly the two build-time tooling packages
+    (xunit.runner.visualstudio and coverlet.collector) and on neither of the three library ones.
+    Gateway is the reference; DataServices and Security carry the same pairing. If this file ever
+    disagrees with those three, this file is the one that is wrong.
+
+    NOTHING INHERITED IS RESTATED HERE.
+    TargetFramework (net10.0), LangVersion, Nullable, ImplicitUsings, TreatWarningsAsErrors,
+    EnableNETAnalyzers, AnalysisLevel and ManagePackageVersionsCentrally all arrive from the
+    repository-root Directory.Build.props by MSBuild directory walk-up; package versions arrive
+    from the repository-root Directory.Packages.props. Duplicating an inherited property here is
+    how the four services silently drift apart later, so this file declares only what is genuinely
+    local to it. Warnings are errors in test code too.
+
+    NO GLOBAL USING ITEMS HERE.
+    The sibling GlobalUsings.cs file is the single owner of this assembly's `global using`
+    declarations, and xunit.v3 injects no MSBuild Using items of its own, so nothing is missing.
+    An MSBuild Using element here would compile (Roslyn silently deduplicates an identical global
+    using arriving from two sources, verified: zero warnings, zero errors), but it would split one
+    concern across two mechanisms and leave the four service test projects inconsistent, since the
+    Gateway test folder carries no GlobalUsings.cs at all. One owner, discoverable from the file
+    name, is the point.
+
+    NO InternalsVisibleTo HERE EITHER.
+    That attribute points the other way: the application project grants this assembly access, so
+    sibling test files CAN drive internal members, and all three uses below are current fact.
+    Tests here drive the internal SelectStatementModel and
+    ItemStatusMachine; SqlServerPagingRewriterTests.cs reaches the internal pfwPagedSQL_Tbl sentinel
+    inside SqlServerPagingRewriter; and WebApplicationFactory binds to the implicitly generated
+    internal Program class with no `public partial` shim, which is what CompositionRootTests.cs,
+    HealthEndpointsTests.cs and PingEndpointsTests.cs each depend on.
+    Data/SqliteConnectionFactory's URI and option composition is also driven from here; what is not
+    driven is the subset of its members that open a connection.
+
+    Validated command, from AAP section 0.8.3 and the attached environment's setup instructions,
+    which must keep working with no extra argument (constraints C-I and C-L). The literal command
+    line cannot be quoted here because a double hyphen is illegal inside an XML comment and would
+    make this project file malformed, so the collector option is named rather than spelled:
+
+        cd services/persistence-service
+        dotnet restore
+        dotnet build -c Release
+        dotnet test, requesting the "XPlat Code Coverage" data collector
+
+    Expected and not a defect: bare `dotnet test` builds Debug even immediately after
+    `dotnet build -c Release`. The documented command is retained verbatim; the release-configuration
+    variant, which adds `-c Release` alongside the same collector option, is recorded in
+    docs/BUILD.md.
+  -->
+
+  <PropertyGroup>
+    <!--
+      MANDATORY, not a style choice. A v3 test assembly is self-executing: xunit.v3 generates its
+      entry point with the Xunit.v3.MSBuildTasks.XunitGenerateEntryPoint task and then, in its
+      _XunitValidateBuild target, raises a hard MSBuild error unless OutputType is Exe and an app
+      host is produced. Do not rely on Microsoft.NET.Test.Sdk quietly coercing this: that package
+      does force Exe for .NET Core test projects, but it is a coincidence of the current package
+      set rather than a contract, and the xunit error fires the moment the coercion goes away.
+      Declaring it here keeps the requirement visible and locally true.
+    -->
+    <OutputType>Exe</OutputType>
+    <!--
+      Stated explicitly rather than inferred from the file name, because the application project's
+      InternalsVisibleTo names this assembly by string. A rename that silently changed the
+      assembly identity would revoke internal access and break compilation of the sibling tests.
+    -->
+    <AssemblyName>PowerFramework.Persistence.Tests</AssemblyName>
+    <RootNamespace>PowerFramework.Persistence.Tests</RootNamespace>
+    <!-- A test project is never a shipped package. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!--
+    Exactly five packages, every one versionless.
+    Central Package Management is switched on at the repository root, so a Version attribute here
+    is a build error and the single source of truth stays Directory.Packages.props
+    (xunit.v3 3.2.2, xunit.runner.visualstudio 3.1.5, Microsoft.NET.Test.Sdk 18.8.1,
+    coverlet.collector 10.0.1, Microsoft.AspNetCore.Mvc.Testing 10.0.11). Each is load-bearing:
+
+      xunit.v3                        the test framework itself.
+      xunit.runner.visualstudio       the discovery adapter. Without it the standard test command
+                                      discovers nothing at all and reports a vacuous pass.
+      Microsoft.NET.Test.Sdk          the test host that `dotnet test` drives.
+      coverlet.collector              emits coverage.cobertura.xml, the exact artifact the
+                                      80 percent per-service line-coverage gate is measured from.
+      Microsoft.AspNetCore.Mvc.Testing  supplies WebApplicationFactory for the service-level
+                                      endpoint and gRPC tests that sit alongside the unit tests.
+                                      Its nuspec declares a framework reference to
+                                      Microsoft.AspNetCore.App, which is why this project can stay
+                                      on Microsoft.NET.Sdk instead of Microsoft.NET.Sdk.Web.
+
+    Nothing else may be added. In particular: no Microsoft.IdentityModel.JsonWebTokens, because
+    Security is the sole token issuer and Persistence never mints (C-G); no
+    Microsoft.Extensions.TimeProvider.Testing, because the transaction-pool clock double is
+    hand-authored against the BCL TimeProvider and that package is deliberately absent from
+    Directory.Packages.props; no assertion, mocking or container library; and no SQL Server or
+    Oracle client, because both DBMS behaviours are preserved as pure string paging rewriters that
+    need no database instance. A package that is not pinned centrally cannot restore.
+  -->
+  <ItemGroup Label="Test stack">
+    <PackageReference Include="xunit.v3" />
+
+    <!--
+      THE TWO TOOLING PACKAGES CARRY ASSET METADATA; THE THREE LIBRARY PACKAGES DO NOT.
+      The split is not cosmetic and it matches the Gateway, DataServices and Security siblings
+      element for element, which is the point - four structurally identical service test manifests
+      mean a reader who has understood one has understood all four.
+
+      PrivateAssets=all stops these two flowing onward to anything that references this assembly.
+      They are build-time tooling, not part of any API surface, so propagating them would put test
+      infrastructure into an unrelated project's dependency closure.
+
+      IncludeAssets deliberately RETAINS `build`, and dropping it would be the damaging mistake
+      here: both packages deliver their registration through MSBuild targets in their `build`
+      assets, so a narrower list silently disables discovery and collection. The failure mode is
+      the worst kind - the test command still exits successfully while finding nothing, and the
+      coverage gate then reads a Cobertura report with no data, which looks like success.
+    -->
+    <PackageReference Include="xunit.runner.visualstudio">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+
+    <PackageReference Include="coverlet.collector">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+  </ItemGroup>
+
+  <!--
+    Exactly one project reference: this service's own application project, and nothing else.
+    That is constraint C-A (decompose, do not collapse) in mechanical form. No reference reaches
+    PowerFramework.Gateway, PowerFramework.DataServices or PowerFramework.Security, and no
+    shared/ project is referenced directly: the shared kernel, diagnostics, containers and the
+    contracts assembly all arrive transitively through the application project, as do
+    Microsoft.Data.Sqlite and the EF Core SQLite provider. Persistence therefore restores, builds
+    and tests from a clean checkout with no knowledge of any sibling service (C-I).
+  -->
+  <ItemGroup Label="Subject under test">
+    <ProjectReference Include="..\PowerFramework.Persistence\PowerFramework.Persistence.csproj" />
+  </ItemGroup>
+
+
+  <!--
+    REPOSITORY ROOT, EMBEDDED SO THIS PROJECT'S ON DISK LOCATORS DO NOT DEPEND ON WHERE ITS OUTPUT WENT
+    This project reads real files from the source tree, and it finds them by walking up from
+    AppContext.BaseDirectory for a marker. That walk holds only while the output sits inside the
+    checkout, so a test run whose artifacts path option names a directory outside the tree - a supported
+    and entirely valid way to run the suite - left every one of those locators with no ancestor
+    carrying the marker, and they threw for a reason unrelated to the code under test.
+
+    The value comes from the PowerFrameworkRepositoryRoot property in the repository root
+    Directory.Build.props, which resolves it from that file's own location. It is turned into assembly
+    metadata HERE, in each test project, rather than there: a service assembly ships inside a container
+    image and must carry no build machine path, and the root property sheet keeps its documented rule of
+    introducing no project level item. The locators still verify their marker and still keep the walk as
+    the fallback, so an absent or stale value degrades to the previous behaviour rather than misreading
+    a different tree.
+  -->
+  <ItemGroup>
+    <AssemblyMetadata Include="PowerFrameworkRepositoryRoot" Value="$(PowerFrameworkRepositoryRoot)" />
+  </ItemGroup>
+
+</Project>

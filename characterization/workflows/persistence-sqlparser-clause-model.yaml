@@ -1,0 +1,652 @@
+# yaml-language-server: $schema=./workflow.schema.json
+#
+# PowerFramework characterization workflow definition
+# ---------------------------------------------------
+# Capability: the SELECT-statement clause model - parse, the six clause accessors, the six
+# clause modifiers, and re-rendering the whole statement.
+#
+# This file DECLARES one paired golden-master capture. It contains no code, no expectation
+# value and no recording: it states what is captured, from which read-only legacy oracle,
+# under which mask, and which legacy behaviours the pair exists to prove survived.
+#
+# It conforms to ./workflow.schema.json - draft 2020-12, additionalProperties false, closed
+# enums - and that schema is the authority on shape. characterization/README.md is the
+# authority on the store-wide conventions this file obeys and deliberately does not
+# restate: the capture rule's canonical text (section 2.1), the recording-file conventions
+# (section 3.4), the newline-normalization convention (section 3.7), the determinism-seam
+# register (section 5.1), and what must never enter a recording (section 6).
+#
+# Two optional schema members are deliberately absent. blockedBehaviours is absent because
+# nothing in this capability is blocked: the single gap this workflow carries is an
+# ORACLE-COVERAGE gap that candidate-side unit tests already cover, which is a different
+# thing and is recorded as such under provesDefects. deferredCapabilities is absent because
+# no half of this capability is deferred - the clause model is entirely headless string
+# transformation and has no presentation half to leave behind.
+
+schemaVersion: "1"
+
+workflowId: persistence-sqlparser-clause-model
+
+title: >-
+  SELECT-statement clause model - parse, six clause accessors, six clause modifiers and
+  full statement re-render, compared byte-exactly
+
+capabilityArea: >-
+  The six-clause SELECT statement model owned by Persistence: parse of a statement into
+  select blocks, the column, table, where, group-by, having and order-by clause accessors,
+  the six matching clause modifiers driven by a modification style, and re-render of the
+  whole statement. The acceptance criterion for the capability is byte-exact clause-level
+  string output - every clause string and every re-rendered statement must agree character
+  for character, whitespace included.
+
+targetService: Persistence
+
+description: >-
+  Why this pair exists. The clause model is reimplemented in-repo rather than delegated to
+  a package, and the reason is recorded so the choice is auditable: no BCL SQL parser
+  exists, and the one obvious managed candidate is dialect-specific and therefore cannot
+  serve the second paging dialect at all. A reimplementation whose acceptance criterion is
+  byte-exact clause-level output needs evidence that it matches, and this definition is
+  that evidence. It is also the specific gap docs/PARITY.md section 6.2 names: the paging
+  matrix already in the tree transcribes its expectations from a run of the target
+  rewriters rather than deriving them from the legacy generator, because the legacy
+  statement model is a closed native binary with no source in this repository - so that
+  suite detects drift in the target and cannot certify agreement with the oracle. Closing
+  that gap needs a legacy-side capture, which is what this workflow specifies.
+
+  The storage position, stated carefully because the distinction matters. The shared-volume
+  capture rule APPLIES to this workflow - sharedVolume.applies is true - because the oracle
+  is a window inside the same PowerBuilder oracle application whose state both halves of
+  the pair share. It is recorded here, as a clarification and not as an exemption, that the
+  parse and clause-manipulation behaviour ITSELF touches no database and needs no schema of
+  any dialect: the oracle window opens no connection, declares no transaction object,
+  creates no datastore, retrieves nothing and commits nothing, and its only inputs are
+  statement text and replacement clause text typed into two editor controls. The one
+  exemption characterization/README.md section 2.7 records belongs to the sibling paging
+  workflow, which has no oracle window at all. This workflow claims no exemption and is
+  captured under the rule in full.
+
+  The timing position. This is the one workflow in the store where the ORACLE ITSELF emits
+  a timing value: the parse handlers render an elapsed-millisecond figure beside the select
+  count. It is recorded with maskedAsNonBehavioural set to true and masked out of the
+  comparison on both sides, so that it is visibly present-but-not-asserted rather than
+  quietly dropped, while the select count standing beside it in the same line IS compared.
+  No timing value is an assertion anywhere in this definition. The repository publishes no
+  service-level agreement, no latency budget, no throughput target and no availability
+  commitment, so there is nothing to assert one against; the only quantitative gate in the
+  brief is the 80 per cent per-service line-coverage floor, and it is measured in CI from
+  coverage.cobertura.xml, never from this store.
+
+  The redaction position. The statements this capture records are the fixture's own literal
+  test inputs - a bare select against a dummy table and a bracketed placeholder clause -
+  so they are neither credentials nor interpolated user data and are recorded as they
+  stand. The contingency is nevertheless declared under capturePhase.redaction rather than
+  left to judgement: if a captured statement ever carries an interpolated literal that
+  could be sensitive, the treatment for this workflow's own recorded statement fields is
+  redacted - the same single redacted field the published payload takes, so this recording
+  and the contract agree rather than diverging. That treatment read
+  split-statement-and-parameters until the final security review: splitting withholds
+  nothing, because it writes the values into a tracked file, and a parameter collection is
+  itself the sensitive data (docs/SECRETS.md section 6.3 is the record of that being
+  considered and rejected). A placeholder keeps the statement SHAPE byte-comparable, which
+  is the only property this workflow compares. The scoping note still holds: this decision
+  governs this recording's own fields and does not reach the published database-error
+  payload's statement field, which characterization/README.md section 6.2 rules is carried
+  as one redacted field with nothing beside it. No key, password, certificate, token or
+  fragment of one appears
+  anywhere in this definition or in any recording taken under it.
+
+oracleFixtures:
+  - path: ws_objects/pfw.tests.pbl.src/w_test_sqlparser.srw
+    role: oracle-window
+    locators:
+      - "L107"
+      - "L201"
+      - "L204"
+      - "L222-L231"
+      - "L248-L254"
+      - "L272"
+      - "L290"
+      - "L308"
+      - "L326"
+      - "L344"
+      - "L362"
+      - "L380-L381"
+      - "L399-L400"
+      - "L418-L419"
+      - "L437-L438"
+      - "L456-L457"
+      - "L475-L476"
+      - "L511-L512"
+      - "L530-L531"
+      - "L549-L550"
+      - "L568-L569"
+      - "L587-L588"
+      - "L642"
+      - "L699-L700"
+      - "L716"
+      - "L724-L733"
+      - "L749"
+  - path: ws_objects/pfw.utility.parser.pbl.src/n_sql.sru
+    role: specification
+    locators:
+      - "L8"
+      - "L11"
+      - "L12"
+      - "L13"
+      - "L14-L37"
+      - "L38-L49"
+      - "L51"
+  - path: ws_objects/pfw.utility.parser.pbl.src/parsesql.srf
+    role: specification
+    locators:
+      - "L7"
+      - "L10-L13"
+  - path: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru
+    role: specification
+    locators:
+      - "L269-L284"
+      - "L286-L288"
+      - "L367"
+      - "L685"
+      - "L691"
+      - "L698"
+  - path: ws_objects/pfw.shared.pbl.src/enums.sru
+    role: specification
+    locators:
+      - "L718-L720"
+  - path: ws_objects/pfw.shared.pbl.src/isfailed.srf
+    role: specification
+    locators:
+      - "L15-L17"
+
+seedPhase:
+  steps: []
+  emptyReason: >-
+    Nothing is seeded, and the accounting is explicit rather than omitted. The clause model
+    is a pure string transformation: its whole input is the statement text, the replacement
+    clause text and the select index that the oracle window's own editor controls carry,
+    and its whole output is clause strings and re-rendered statement text. There is no file
+    to delete, no schema to create and no row to insert - unlike the storage fixture, whose
+    setup is destructive and is exactly why the seed phase is declared apart from the
+    capture phase in the first place. The oracle window opens no connection, declares no
+    transaction object and creates no datastore, so there is no starting state for a seed
+    step to establish. The three inputs are supplied as preconditions of the capture, not
+    as seed steps, because they are arguments to the behaviour rather than state behind it.
+  runsOncePerPair: true
+  neverBetweenCaptures: true
+
+capturePhase:
+  behaviourUnderTest: >-
+    One statement is parsed; the parse outcome, the select count and the labelled clause
+    dump are read back; each of the six clause accessors is called for more than one select
+    index; each of the six clause modifiers is then called under a modification style and
+    the whole statement is re-rendered immediately after it; and the invalid-statement path
+    and the two clause-modification rejection arms are driven deliberately. The parser
+    instance is created explicitly at the start of the capture and destroyed explicitly at
+    the end, mirroring the oracle window's own open-and-close pairing, because the
+    companion factory function leaks and the caller therefore owns disposal. Comparison
+    criterion for the whole capture, stated once and applying to every output below unless
+    that output is marked masked - BYTE-EXACT STRING EQUALITY, whitespace included: every
+    clause string, every re-rendered statement, the select count, the invalid-statement
+    marker and the labelled dump's layout must agree character for character between the
+    two halves of the pair after the mask has been applied identically to both.
+  preconditions:
+    - >-
+      Captured under the shared-volume capture rule whose canonical text
+      characterization/README.md section 2.1 owns. That text is cited, not restated here,
+      and not paraphrased: three upstream files already carry it word for word and a fourth
+      copy would be a fourth thing to drift.
+    - >-
+      Both halves of the pair use the identical statement text. The oracle window's editor
+      control supplies its own default, a bare select against a dummy table, and any
+      substituted statement is recorded as a capture input so the second half can reuse it
+      exactly.
+    - >-
+      Both halves use the identical replacement clause text. The oracle window's second
+      editor control supplies a bracketed placeholder as its default.
+    - >-
+      Both halves drive the identical select-index sequence, and that sequence includes at
+      least one index greater than one, so the select-index dimension of the accessors and
+      the modifiers is exercised rather than only the default index the window ships with.
+    - >-
+      The parser instance is created before the first parse and destroyed after the last
+      read, once per capture, so that no clause state leaks from one recorded operation
+      into the next.
+    - >-
+      Each modifier call is followed immediately by a full statement re-render, before the
+      next modifier runs, because the modifiers mutate shared statement state and a
+      re-render taken after two mutations cannot attribute a difference to either of them.
+  observedOutputs:
+    - name: captureInputs
+      description: >-
+        The three inputs the whole capture is a function of - the statement text, the
+        replacement clause text and the ordered list of select indices used. Recorded first
+        and recorded verbatim so the second half of the pair is demonstrably driven with
+        the same arguments as the first; a difference here means the two recordings answer
+        two different questions and the comparison is void rather than failing.
+      format: >-
+        Canonical JSON with three named fields in a stable order - statementText as a
+        string, replacementClauseText as a string, and selectIndices as an array of
+        integers - the statement text carried as a single string with its line endings
+        already normalized by the mask.
+      locator: ws_objects/pfw.tests.pbl.src/w_test_sqlparser.srw:L716, :L642, :L749
+    - name: parserLifetime
+      description: >-
+        That the parser instance was explicitly created at the start of the capture and
+        explicitly destroyed at the end, and that exactly one instance existed across the
+        capture. The pairing is itself the observable: the companion factory function
+        creates, parses, returns and never destroys, so the caller carries disposal, and
+        the oracle window's own create-at-open and destroy-at-close is the evidence that it
+        does. A capture that records two instances, or none destroyed, is not comparable
+        with one that records the pairing.
+      format: >-
+        Two ordered event records, created and destroyed, each with the instance ordinal
+        and no timestamp of any kind.
+      locator: ws_objects/pfw.tests.pbl.src/w_test_sqlparser.srw:L201-L204
+    - name: parseOutcome
+      description: >-
+        Whether the parse of the supplied statement succeeded, as the value the parse
+        function itself returned. The legacy declares that function as returning a BOOLEAN,
+        not a numeric return code, so this output is the boolean and there is no numeric
+        code on this path to record in its place. The oracle discriminates on it through
+        the boolean overload of the failure predicate, which is a plain negation with a
+        null arm that reads as success - so a null return would select the success branch.
+        Record the returned boolean and the branch it selected together; do not project the
+        boolean onto the return-code algebra, and do not invent a numeric code for it.
+      format: >-
+        The returned boolean verbatim, plus the branch identifier the oracle took, as two
+        fields.
+      locator: ws_objects/pfw.tests.pbl.src/w_test_sqlparser.srw:L226, :L728
+    - name: selectCount
+      description: >-
+        The number of select blocks the parse produced, as the oracle renders it into the
+        detail pane on the success branch. This is the output that makes the multi-select
+        dimension checkable at all: a compound statement whose count comes back as one has
+        been parsed wrong in a way no single-clause comparison would reveal. It stands in
+        the same rendered line as the masked elapsed figure and, unlike that figure, it IS
+        compared.
+      format: >-
+        The decimal integer exactly as the oracle renders it, retaining the bracketed
+        select label and its punctuation - note that the parse line writes that label with
+        no space after the colon while the labelled dump writes it with one, and both
+        spellings are preserved as they stand.
+      locator: ws_objects/pfw.tests.pbl.src/w_test_sqlparser.srw:L229, :L731
+    - name: parseElapsedMilliseconds
+      description: >-
+        The oracle's own elapsed-millisecond figure, rendered immediately after the select
+        count on the success branch of both parse entry points. It is derived from a
+        processor-clock delta taken around the parse call, so it differs between every run
+        on either side and carries no behaviour whatever. It is recorded rather than
+        dropped so that a reviewer can see the field exists in the oracle's output and see
+        that it was excluded deliberately, and it is excluded from the comparison on both
+        sides by the elapsed-figure entry of the determinism mask. It is not an assertion,
+        it is not a budget, and nothing in this store may be read as a performance claim
+        about it.
+      format: >-
+        The figure as the oracle renders it, with its unit suffix, retained in the
+        recording and never compared.
+      maskedAsNonBehavioural: true
+      locator: ws_objects/pfw.tests.pbl.src/w_test_sqlparser.srw:L229, :L731
+    - name: invalidStatementMarker
+      description: >-
+        What the oracle reports when the parse fails - the bare fixed marker text, spelled
+        "Invalid SQL", and nothing else. There is no code, no character position, no
+        offending token and no reason, from either parse entry point. That error ergonomic
+        is the legacy behaviour and it is compared byte-exactly like any other output; a
+        recording that shows a structured error here has recorded an improvement, which in
+        this store is a failure and is filed against the target.
+      format: >-
+        The marker string verbatim, its two words separated by one space and its
+        capitalization preserved, plus an explicit assertion that no sibling field
+        accompanied it.
+      locator: ws_objects/pfw.tests.pbl.src/w_test_sqlparser.srw:L227, :L729
+    - name: labelledClauseDump
+      description: >-
+        The oracle's fixed-layout dump of all six clauses for one select index, whose exact
+        shape is part of the contract rather than incidental formatting. The layout is a
+        select-index line followed by six labelled lines in this order and no other -
+        columns, tables, where, group by, having, order by - with each line introduced by a
+        carriage-return-and-line-feed escape and each label separated from its clause text
+        by a single TAB character. Capture the layout literally: the label spellings, their
+        order, the punctuation after each label, and the tab positions. A reordered or
+        re-spelled dump is a behavioural difference, not a cosmetic one.
+      format: >-
+        The rendered text captured literally, with TAB characters preserved as tabs and
+        only line endings normalized by the mask. The tab positions are described here
+        rather than embedded in this definition so that this file itself stays free of
+        structural tabs.
+      locator: ws_objects/pfw.tests.pbl.src/w_test_sqlparser.srw:L248-L254
+    - name: clauseAccessorResults
+      description: >-
+        The six clause strings returned by the six accessors - where, column, table, order,
+        group and having - for each select index the capture drives. Recorded per accessor
+        per index, so the select-index dimension is exercised rather than assumed, and an
+        accessor that silently returns the first block's clause for every index is caught.
+        Two honest scope notes. The oracle drives only the select-index-taking form of each
+        accessor; the parameterless overloads declared beside them are reached by no oracle
+        window at all. And of the six clause-presence predicates declared in the same
+        block, only the order-by one is reached anywhere in the legacy, from the framework's
+        own paging path rather than from a test window, so this capture does not pin the
+        other five.
+      format: >-
+        Canonical JSON keyed by select index then by clause name, each value the returned
+        clause string verbatim including its internal whitespace, with a stable key order
+        so that an unpinned ordering cannot surface as a difference where no behaviour
+        changed.
+      locator: >-
+        ws_objects/pfw.tests.pbl.src/w_test_sqlparser.srw:L272, :L290, :L308, :L326, :L344,
+        :L362
+    - name: reRenderedStatement
+      description: >-
+        The whole statement as the model re-renders it after each clause modification, one
+        recorded value per modifier call, in call order. This is the primary output of the
+        capture and the one the byte-exact criterion exists for: the modifiers mutate
+        shared statement state, so a re-render taken immediately after each call is what
+        attributes a difference to the call that caused it. One honest limitation of the
+        oracle, recorded rather than glossed - the modifier functions are declared as
+        returning a boolean and the oracle window DISCARDS every one of those returns, so
+        the oracle witnesses a modification only through the re-rendered text and this
+        capture cannot pin the boolean the legacy modifier returned. The candidate side
+        surfaces that return; agreement on it is a target-side unit-test obligation, not
+        something this pair can establish.
+      format: >-
+        An ordered array of records, each carrying the modifier name, the clause kind, the
+        modification style by name and by numeric value, the replacement text supplied, and
+        the re-rendered statement text verbatim with only line endings normalized.
+      locator: >-
+        ws_objects/pfw.tests.pbl.src/w_test_sqlparser.srw:L380-L381, :L399-L400,
+        :L418-L419, :L437-L438, :L456-L457, :L475-L476, :L511-L512, :L530-L531, :L549-L550,
+        :L568-L569, :L587-L588, :L699-L700
+    - name: modificationStylesObserved
+      description: >-
+        The modification styles the capture actually reached, recorded by name and by
+        numeric value - replace is one, append is two, prepend is three - together with
+        which of the twelve modifier calls used which. Recorded explicitly because the
+        style set is observable and because the record is what makes the coverage gap
+        checkable rather than asserted: the oracle reaches replace and append only, six
+        calls each, and reaches prepend not once. The style semantics are compared, never
+        masked.
+      format: >-
+        Canonical JSON mapping each style name to its numeric value and to the ordered list
+        of modifier calls that used it, with an explicit empty list for the style the
+        oracle never reaches.
+      locator: ws_objects/pfw.shared.pbl.src/enums.sru:L718-L720
+    - name: clauseModificationRejections
+      description: >-
+        The numeric return code from the clause-modification setters for the two rejection
+        cases the legacy validates before it touches the statement at all - a select index
+        at or below zero, and an empty clause string. Both yield the invalid-argument code,
+        and both arms are driven deliberately rather than left to chance. Unlike the parse
+        path, this path DOES return a numeric code, so the numeric code is what is
+        recorded: a boolean projection of it would erase the distinction between this code
+        and every other failure code in the algebra.
+      format: >-
+        The numeric return code per rejection case, recorded as the integer and by its
+        constant identifier in its original screaming-snake spelling, never as a boolean.
+      locator: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L271, :L288
+  redaction:
+    - field: >-
+        This workflow's own recorded statement fields - captureInputs.statementText and
+        every reRenderedStatement value - and only in the contingency that a captured
+        statement carries an interpolated literal that could be sensitive. The fixture's
+        own inputs carry none, so under the fixture's defaults both fields are recorded as
+        they stand. This entry is scoped to this recording and is NOT the published
+        database-error payload's statement field, which characterization/README.md section
+        6.2 rules is carried as a single redacted field with nothing beside it. The
+        contingency treatment is that same single redacted field: this entry read
+        split-statement-and-parameters, which contradicted the ruling it cites one sentence
+        earlier, and which docs/SECRETS.md section 6.3 records as considered and rejected
+        because a parameter collection is itself the sensitive data.
+      treatment: redacted
+  recordingArtifacts:
+    - filename: capture-inputs.json
+    - filename: parse-outcome.json
+    - filename: clause-accessors.json
+    - filename: statement-renders.json
+    - filename: modification-styles.json
+    - filename: rejection-codes.json
+    - filename: labelled-clause-dump.txt
+    - filename: mask-applied.json
+
+# The mask is inline, in full, and every entry applies to BOTH sides. There is no pointer,
+# no external mask file and no see-also anywhere below: a mask that drifts away from its
+# workflow silently invalidates every pair captured under it, and a mask applied to one
+# side only is worse than no mask at all because it manufactures a passing comparison out
+# of mismatched data.
+determinismMask:
+  - seam: >-
+      The oracle's own elapsed-millisecond figure in the parse output, rendered immediately
+      after the select count by both parse entry points.
+    method: >-
+      Strip the elapsed figure and its unit suffix from the recorded line before comparison,
+      retaining the select count that stands beside it in the same line, and retain the
+      stripped figure in the recording as the parseElapsedMilliseconds output so that the
+      exclusion is visible rather than invisible. Masking is the right instrument here and
+      seaming is not: a clock could be injected on the candidate side, but the master's
+      figure is already frozen inside a PowerBuilder recording taken from a processor-clock
+      delta that no injection can reach retrospectively, so the field cannot be made
+      reproducible on both sides without editing a stored master - which the technique
+      forbids outright.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      Two independent reasons, and either alone would be sufficient. First, the value is a
+      processor-clock delta taken around the parse call, so it differs between every run on
+      either side and between the two sides by construction; left unmasked it reports a
+      difference on every single capture and trains a reviewer to ignore a red result, which
+      is how a suite loses the ability to detect anything. Second, and more fundamentally,
+      it is a DURATION, and no timing value may be treated as a result in this store:
+      characterization compares observable outputs and never compares execution time, and
+      the repository publishes no service-level agreement, no latency budget, no throughput
+      target and no availability commitment anywhere against which a duration could be
+      asserted. Recording it and asserting it are therefore different acts - the field is
+      recorded, because deleting a field the oracle genuinely emits would misrepresent the
+      oracle's output, and it is asserted on neither side. The only quantitative gate in the
+      whole brief is the 80 per cent per-service line-coverage floor, and it is measured in
+      CI from coverage.cobertura.xml rather than from this store, so nothing here needs a
+      timing assertion in order to be complete.
+  - seam: >-
+      Every clock read, generalized beyond the one field above - any timestamp, tick count
+      or processor-clock value that reaches a recorded output or a recorded decision in this
+      workflow.
+    method: >-
+      Inject the clock as a dependency on the candidate side and substitute a deterministic
+      double for it, and mask any clock-derived value that still reaches a recorded output
+      from the comparison on both sides. Prefer the injection: it leaves the field able to
+      detect a difference, whereas the mask only removes the field from the comparison.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      The same reason as the entry above, stated once as a rule so that a clock-derived
+      field this definition did not anticipate is still governed rather than silently
+      compared. A timestamp in a recorded output differs on every run by construction, so it
+      can only ever produce a false difference; and because a clock read can also drive a
+      DECISION rather than merely an output, the seam is stated as an injection first and a
+      mask second - a masked decision is untestable, whereas an injected clock makes the
+      decision reproducible and therefore comparable.
+  - seam: >-
+      Line endings across the whole recording, including the carriage-return-and-line-feed
+      escapes the labelled clause dump emits between its six clause lines.
+    method: >-
+      Normalize line endings to a single declared convention on both sides at comparison
+      time, immediately before the byte-exact string comparison, and apply the identical
+      normalization to the master and to the candidate. Normalization is a comparison-time
+      convention only: it never licenses rewriting a stored master.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      The difference is a platform artifact rather than a behaviour. The master is produced
+      on Windows by PowerBuilder - the framework's own assertion payload is split on a
+      carriage-return-and-line-feed pair - while the candidate runs in a Linux container,
+      and the repository's root .gitattributes declares only linguist-language mappings with
+      no text rule and no eol rule, so version control performs no translation on the way
+      in and nothing normalizes them for us. That file is not in scope to change, and
+      changing it would be solving this in the wrong place in any case. This workflow makes
+      the difference unusually visible because the labelled dump emits those escapes itself,
+      so an unnormalized byte-exact comparison would report a difference on every one of its
+      seven lines while no clause text differed at all.
+  - seam: >-
+      Tab-versus-space rendering and trailing whitespace in the labelled clause dump, whose
+      labels are separated from their clause text by TAB characters.
+    method: >-
+      Preserve TAB characters literally on both sides - never expand a tab to spaces and
+      never collapse a run of whitespace - and normalize only trailing whitespace at the end
+      of a recorded line before comparison, on both sides identically.
+    appliesTo:
+      - legacy
+      - dotnet
+    reason: >-
+      The two kinds of whitespace here are not the same kind of thing and must not be
+      treated alike. The tab characters are part of the fixture's own output layout and are
+      therefore BEHAVIOUR: expanding them to spaces, or normalizing whitespace generally,
+      would erase a layout difference that a reviewer needs to see and would let a
+      re-spelled dump pass. Trailing whitespace at the end of a line is an editor and
+      round-trip artifact of the multi-line edit control the oracle renders into, carries no
+      behaviour, and would otherwise produce a difference on lines whose visible content is
+      identical. Masking the second while preserving the first is the narrowest treatment
+      that leaves the layout comparison able to detect anything.
+
+# What this pair exists to prove SURVIVED. The inversion is load-bearing: a recording that
+# shows corrected behaviour is a parity FAILURE, not an improvement, and is filed as a
+# divergence in the target. Nothing below is repaired.
+provesDefects:
+  - defect: >-
+      The companion factory function leaks the parser instance. It creates a parser, parses
+      the supplied statement, returns the instance and never destroys it - and it discards
+      the parse function's boolean return while doing so, so it hands back an instance
+      whether the parse succeeded or not. Ownership therefore transfers silently to the
+      caller, who must destroy it, and nothing in the function's own signature or body says
+      so.
+    locator: ws_objects/pfw.utility.parser.pbl.src/parsesql.srf:L10-L13
+    note: >-
+      The oracle window is the evidence that callers really do carry that burden: it creates
+      the parser in its open event and destroys it in its close event, an explicit pairing
+      it would not need if the factory disposed of anything. Preserved as a documented
+      ownership quirk rather than repaired. What a well-meaning correction would break: a
+      target factory that disposed the model before returning it, or returned nothing on a
+      failed parse, would change an observable - the legacy hands back a usable instance
+      after a failed parse, and code downstream of the factory is entitled to call accessors
+      on it. The capture records the create-and-destroy pairing as parserLifetime for
+      exactly this reason.
+  - defect: >-
+      A global auto-instance shadows its own type name. The statement-model class declares a
+      global variable whose identifier is character-for-character identical to the
+      identifier of the type it is an instance of, so the same spelling denotes both a type
+      and an object depending only on syntactic position.
+    locator: ws_objects/pfw.utility.parser.pbl.src/n_sql.sru:L51
+    note: >-
+      The legacy tolerates this because it resolves one flat global namespace by library-list
+      order, so there is no import to disambiguate and no compiler complaint. The target
+      resolves it structurally instead: the type keeps a descriptive name and the instance
+      becomes an injected dependency rather than a global. That resolution is a NAMING
+      change and must be an observably empty one - this pair is what proves it changed
+      nothing in the parse result, the clause strings or the re-rendered statement. What a
+      well-meaning correction would break: nothing here may be "tidied" into a singleton or
+      a static, because a shared instance carries clause state between operations and the
+      capture's per-call re-render would then reflect an earlier call's mutation.
+  - defect: >-
+      An invalid statement reports a fixed marker and nothing else. Both parse entry points
+      set the detail pane to the bare text "Invalid SQL" on failure - no numeric code, no
+      character position, no offending token, no reason and no sibling field. The caller
+      cannot tell which statement failed, where it failed, or why.
+    locator: ws_objects/pfw.tests.pbl.src/w_test_sqlparser.srw:L227, :L729
+    note: >-
+      Behaviour preservation extends to error ERGONOMICS, not merely to happy paths, so this
+      is preserved rather than upgraded. What a well-meaning correction would break: a
+      target that returned a structured parse error here - a code, a caret position, an
+      expected-token list - would produce output that looks strictly better and is
+      nonetheless a divergence, and in this store the better-looking output is the bug
+      report. The marker text is compared byte-exactly and is deliberately not masked.
+  - defect: >-
+      A select index at or below zero, or an empty clause string, is rejected with the
+      invalid-argument return code before the statement is touched at all. The guard fires
+      first, ahead of any lookup, so a rejected call leaves the statement state completely
+      unmodified - which also means an empty clause is NOT a removal instruction and there
+      is no way to clear a clause through this path.
+    locator: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L271, :L288
+    note: >-
+      Both rejection arms are driven deliberately by this capture and both are recorded as
+      the numeric code, never as a boolean, because a boolean projection would erase the
+      difference between this code and every other failure code in the algebra. Note that
+      the guard is duplicated verbatim on the order-by setter beside the where setter rather
+      than factored out, and the duplication is preserved. What a well-meaning correction
+      would break: reading an empty clause as "remove this clause" would silently turn a
+      rejected no-op into a destructive edit of the generated statement.
+  - defect: >-
+      The clause-modification style set is observable and has three members - replace,
+      append and prepend - but the legacy exercises only two of them. Prepend is declared
+      and is a legal argument, and no oracle window and no framework object passes it
+      anywhere in the repository: the identifier occurs exactly once in the whole legacy
+      tree, at its own declaration.
+    locator: ws_objects/pfw.shared.pbl.src/enums.sru:L718-L720
+    note: >-
+      ORACLE COVERAGE GAP, stated rather than papered over. The oracle window reaches
+      replace and append only - six modifier calls each across the six clause kinds - and
+      reaches prepend not once, so no paired capture can establish prepend parity for this
+      or any other workflow. The prepend behaviour is therefore covered by unit tests in the
+      Persistence test project rather than by a paired capture, and the distinction is
+      material: those tests pin the target's own output and detect drift in it, and they
+      cannot certify agreement with the oracle, because the oracle never produced an answer
+      to agree with. This is a coverage gap, not a blocked behaviour - there is no missing
+      evidence to go and find, only an input the legacy authors never exercised - which is
+      why it is recorded here rather than under blockedBehaviours. The capture records the
+      styles it reached, with an explicit empty list for prepend, so the gap is checkable in
+      the recording itself.
+  - defect: >-
+      This is the SQL-injection surface. The clause arrives as a raw, unescaped string and
+      is spliced straight into the statement through the modify path, with no parameter
+      binding and no validation beyond the emptiness guard - and where the connection
+      disables bind variables the runtime interpolates values as literals rather than
+      binding them, which is the mechanical root of the exposure.
+    locator: ws_objects/pfw.thread.ext.pbl.src/n_cst_thread_task_sqlquery.sru:L691
+    note: >-
+      The target implementation uses parameterized commands internally while preserving the
+      observable generated statement, and the capture's byte-exact criterion on every
+      re-rendered statement is precisely what proves the observable output did not change
+      while the internals did. The site is documented as a known legacy defect rather than
+      silently repaired: narrowing what the clause string may contain, or escaping it, would
+      change the generated statement and therefore the recorded output, and that is a
+      behavioural change dressed as a security fix. Remediation belongs in the published
+      contract's validation layer, where it is visible, and not in a quiet rewrite of the
+      generator. No recording under this workflow carries a credential or an interpolated
+      literal that could be sensitive - the fixture's own inputs are a bare select against a
+      dummy table and a bracketed placeholder clause - and the contingency treatment if one
+      ever did is declared under capturePhase.redaction.
+
+# The capture rule APPLIES here, in full, and this workflow claims no exemption. Its
+# canonical text is owned by characterization/README.md section 2.1 and is cited rather than
+# restated, because three upstream files already carry it word for word.
+#
+# Clarification, recorded so the boundary is not misread: the parse and clause-manipulation
+# behaviour ITSELF touches no database and needs no schema of any dialect - the oracle
+# window opens no connection, declares no transaction object, creates no datastore,
+# retrieves nothing and commits nothing. That is a statement about the BEHAVIOUR, not a
+# claim about the CAPTURE: the oracle is a window inside the same oracle application whose
+# volume state both halves of the pair share, so the rule governs the capture regardless.
+# The one exemption of characterization/README.md section 2.7 belongs to the sibling paging
+# workflow, which has no oracle window at all. The top-level description states this in
+# full; sharedVolume itself carries no prose member in which to state it.
+sharedVolume:
+  applies: true
+
+# The honest state of this workflow, and the only value the schema admits. Nothing here has
+# been run: no paired capture has been taken on either side. The legacy half needs a
+# PowerBuilder toolchain that is not present. The compose bring-up the capture rule is
+# expressed against HAS been exercised - orchestration/README.md section 10 is the only place
+# in this repository that reports execution status - but a bring-up is not a capture: it
+# produced no recording under this identifier or any other. Nothing in this file may be read
+# as implying a verified run or a passing comparison.
+executionStatus: specified-not-executed
+
+# Cross-references only. Neither sibling is merged with this one and each pair stays
+# independently comparable under its own identifier. The paging workflow is the one whose
+# expectations this capture would let somebody derive from the oracle instead of from a run
+# of the target; the chunked-query workflow is the consumer that reaches this clause model
+# through its own where-clause and order-by-clause setters.
+relatedWorkflows:
+  - persistence-sql-paging-rewrite
+  - persistence-thread-sqlquery-chunked

@@ -1,0 +1,1207 @@
+# yaml-language-server: $schema=./workflow.schema.json
+# ==================================================================================================
+#  dataservices-dwsvc-dropdownsearch - THE DROP-DOWN SEARCH SERVICE, HEADLESS HALF
+#  ------------------------------------------------------------------------------------------------
+#  THIS FILE SPECIFIES A CAPTURE. IT CONTAINS NO CODE AND NO CAPTURED VALUE.
+#  It conforms to `./workflow.schema.json`, which is authoritative for shape. Store-wide conventions
+#  - the capture rule's canonical text, the recording-file conventions, the seam register, the defect
+#  roster and what must never enter a recording - belong to `../README.md` and to `../../docs/PARITY.md`
+#  and are CITED here, never restated. A fourth copy of a rule three files already own word for word
+#  is a fourth thing to drift.
+#
+#  ---- WHAT THIS WORKFLOW CARRIES THAT NO SIBLING DOES ------------------------------------------
+#  THE ONE GENUINE PARITY RISK IN THE WHOLE IN-SCOPE SET. Pinyin first-letter matching cannot be
+#  proven bit-exact from the repository alone, and `blockedBehaviours` below states that WITHOUT
+#  SOFTENING. `../README.md` section 5.5 and `../../docs/PARITY.md` R1 are the authoritative
+#  statements; this definition is their application to one capture.
+#
+#  ---- THE PINYIN FLAGS ARE DOCUMENTED, AND THIS FILE USES THE DOCUMENTED READING ---------------
+#  The migration plan's own wording says the flag value `7` passed at
+#  `n_cst_dwsvc_dropdownsearch.sru:L323` has semantics "recorded nowhere in the repository". THAT
+#  READING IS WRONG, and `../../docs/PARITY.md` R1 says so in terms - the claim "was wrong, and the
+#  correction narrows the risk rather than widening it".
+#  `ws_objects/pfw.shared.pbl.src/enums.sru:L1146-L1149` declares the
+#  flags under the comment `//PinyinFirstLetterLike:[flags]` as ignore-case = 1, ignore-width = 2 and
+#  fuzzy-sound = 4, so `7` is all three enabled and NEEDS NO CHARACTERIZATION AT ALL.
+#  `../../docs/DEFERRED.md` section 8 and `../../docs/ARCHITECTURE.md` section 13 L1 record the same
+#  decoding, and `./workflow.schema.json`'s own `blockedBehaviours` description already describes the
+#  gap as the matching relation and the fuzzy-equivalence set rather than as the flags.
+#  THE BLOCKED VERDICT IS UNCHANGED BY THIS CORRECTION - only its reason becomes precise, and
+#  precision is what keeps a blocked report from reading as an excuse. Four closed inputs remain, and
+#  they are enumerated in `blockedBehaviours` below. Both readings are recorded so that a reader
+#  arriving from the plan's wording is not left to rediscover the correction, and so that nobody
+#  characterizes a flag decoding that `enums.sru` already supplies.
+#
+#  ---- TWO SEVENS, AND THEY ARE NOT THE SAME SEVEN ----------------------------------------------
+#  `FILTER_ALL` is 7 [`n_cst_dwsvc_dropdownsearch.sru:L50-L53`], being the three filter bits summed.
+#  The pinyin flag argument is also 7 [`:L323`], being the three pinyin flags summed. They are
+#  unrelated values from unrelated constant sets that coincide numerically, and the oracle window
+#  sets one of them [`w_test_dwsvc_dropdownsearch.srw:L43`] while the service hardcodes the other.
+#  Recorded because conflating them would make a reader think the filter type reaches the matcher.
+#
+#  ---- LOCATOR CORRECTIONS MADE AGAINST THE SOURCE ----------------------------------------------
+#  Every locator in this file was read line by line in the oracle rather than copied forward. Three
+#  readings needed correcting, and each changes what the capture must record:
+#    * THE PINYIN CLAUSE DOES NOT INTERPOLATE THE RAW INPUT. It interpolates the LOWER-CASED input:
+#      `:L316` assigns the lower-cased form and `:L323` interpolates THAT, while the alphabetic guard
+#      at `:L322` tests the RAW input. Guard and clause therefore read two different strings, and a
+#      capture that used one for both would miss it.
+#    * THERE ARE FOUR LIVE INTERPOLATION SITES IN THE SERVICE, NOT TWO - `:L319`, `:L323`, `:L331`
+#      and `:L334` - and `:L334` is the sharpest of them because it interpolates unquoted into a
+#      numeric comparison. The fixture's own override at
+#      `w_test_dwsvc_dropdownsearch.srw:L62` is a fifth.
+#    * THE `Find` INTERPOLATION AT `:L242` IS DORMANT, inside a commented-out block at `:L238-L246`
+#      dated 2017-09-01. It is NOT a live site and is not counted as one; the capture proves it inert.
+#
+#  ---- WHAT THIS DEFINITION DELIBERATELY OMITS, AND WHY -----------------------------------------
+#    * `redaction` - OMITTED because nothing this capture records is sensitive. Every value that
+#      reaches a recording is a search input or a filter expression built from one, and every search
+#      input is drawn from the read-only fixtures' own inline rows and their three-pair code table.
+#      THE SEARCH INPUTS ARE FIXTURE-SOURCED TEST STRINGS AND ARE NOT CREDENTIALS. NO KEY, NO
+#      PASSWORD, NO CERTIFICATE, NO TOKEN AND NO CONNECTION STRING IS READ, EMITTED OR RECORDED
+#      HERE (C-F). This workflow issues no SQL, so the redacted-statement rule has no field to act
+#      on - the expressions below are DataWindow filter expressions evaluated in-process against a
+#      dropdown's own buffer, not statements sent to a database.
+#    * `connectionUri` - OMITTED. This workflow opens no storage.
+#
+#  ---- ORDER AND EXPRESSIONS, NEVER SPEED (C-B, and `../README.md` section 6.4) ------------------
+#  Filtering invites a throughput claim and this workflow makes none. NO ELAPSED VALUE IS RECORDED,
+#  no rows-per-unit-time figure is derived, and no timing is asserted anywhere. The repository
+#  publishes no service-level agreement, no latency budget, no throughput target and no availability
+#  commitment, so there is nothing a timing assertion could be measured against. The only
+#  quantitative gate in the brief is 80% per-service line coverage, and it is read from
+#  `coverage.cobertura.xml` in CI - never from this store.
+#
+#  ---- GOVERNING CONSTRAINTS -------------------------------------------------------------------
+#  NO USER-SPECIFIED RULES EXIST. The project's rules document returns exactly one line reporting
+#  that none were provided, so no rule is invented, inferred or back-filled, and nothing in this file
+#  exists because of one. Enterprise-standard best practice applies in their place. The binding
+#  constraints are the migration plan's own: C-B (defects reproduced, never corrected - a corrected
+#  capture is a parity FAILURE), C-C (the legacy tree is read-only and is the oracle; every claim
+#  carries a locator), C-D (nothing for a deferred capability area), C-F (no secret value), C-K
+#  (every decision carries its reason) and C-L (the shared-volume capture rule).
+# ==================================================================================================
+
+schemaVersion: "1"
+
+workflowId: dataservices-dwsvc-dropdownsearch
+
+title: >-
+  Drop-down search: filter-expression construction, the search state machine, and the BLOCKED pinyin
+  matcher
+
+capabilityArea: >-
+  The headless half of the drop-down search service `n_cst_dwsvc_dropdownsearch` - the construction of
+  the dropdown filter expression from a user's input across its three composable filter bits, the
+  composition of that expression with the dropdown's own original filter, the search state machine
+  that drives incremental filtering and inline completion, and the row and filtered counts the service
+  reports back through the event chain.
+
+targetService: DataServices
+
+description: >-
+  ONE FILTER EXPRESSION, BUILT TWICE AND COMPARED BYTE FOR BYTE. The pair proves that the expression
+  string this service constructs from a given input, the expression it finally applies after composing
+  with the dropdown's original filter, the state its search machine carries between keystrokes, and
+  the counts it reports are identical on the legacy master and on the .NET candidate after identical
+  masking. THE CONSTRUCTED EXPRESSION IS THE PRIMARY ARTIFACT, because the expression IS the
+  behaviour: it is the whole of what this service produces, and every other recorded output is
+  downstream of it.
+
+
+  THIS WORKFLOW IS SPLIT, AND THE SPLIT IS EVIDENCE-DRIVEN. Only the headless half of the service
+  ships in this phase and only the headless half is captured here. The service's presentational
+  coupling is BROAD rather than incidental - eight references across its 516 lines, enumerated in
+  `deferredCapabilities` below - which is why it is split at all. The contrast that proves the split
+  is not arbitrary: `n_cst_dwsvc_rowselect.sru` is 288 lines with exactly ONE presentation reference
+  and ships whole, and `n_cst_dwsvc.sru` is 864 lines with ZERO
+  [`../../docs/DEFERRED.md`](../../docs/DEFERRED.md) section 6.1. Eight against one against zero is
+  the measurement, and it is the reason this definition has a `deferredCapabilities` member and the
+  row-select definition does not.
+
+
+  THIS WORKFLOW CARRIES THE STORE'S ONE GENUINE PARITY RISK, AND IT CARRIES IT SPLIT IN TWO. The
+  pinyin clause's CONSTRUCTION is deterministic, fully specified by the source, and is compared byte
+  for byte like every other clause. The pinyin clause's MATCH RESULTS depend on a lookup table that
+  exists only inside a closed native binary and are BLOCKED. That separation is the difference between
+  a workflow that is largely usable the moment an oracle runs and one that is entirely blocked, so it
+  is made explicit in `observedOutputs` rather than left to be inferred - two distinct outputs, one
+  compared and one withheld from comparison.
+
+
+  ON THE IDENTIFIER. It follows the roster and the schema's derivation rule: the capability area
+  followed by the oracle window's name with its underscores rendered as hyphens. A test hook pins a
+  differently spelled constant for the same workflow; `./README.md`'s correction register owns that
+  divergence, records that the ROSTER identifier is the canonical one because the schema's
+  `workflowId` pattern rejects underscores, and states when the constant is reconciled. It is cited
+  here rather than re-argued.
+
+
+  NO DATA VALUE RECORDED HERE IS SENSITIVE. Every search input is a fixture-sourced test string drawn
+  from the read-only definitions' own inline rows and their three-pair code table. Nothing is read
+  from a credential, a key store or a connection string (C-F).
+
+oracleFixtures:
+  # THE OBJECT UNDER CHARACTERIZATION. Read, never edited, moved, renamed, reformatted, re-encoded or
+  # copied into this tree (C-C). 516 lines; the locators below are the ones this definition's observed
+  # outputs, defects and blocked entry cite.
+  - path: ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru
+    role: service-object
+    locators:
+      - "L43"         # its OWN window prototype, bound to user32.dll - split evidence, not headless
+      - "L50-L53"     # FILTER_DISP=1, FILTER_DISP_PY=2, FILTER_DATA=4, FILTER_ALL=1+2+4=7
+      - "L57"         # THE DEFAULT filter type is DISP+DISP_PY = 3: the data bit is OFF by default
+      - "L84-L131"    # THE SEARCH STATE MACHINE - the edit-changed handler
+      - "L88"         # the edit-context validity gate
+      - "L90"         # a null input is coerced to empty, not rejected
+      - "L94-L96"     # ONLY a dropdown-DataWindow column filters; a dropdown-list column never does
+      - "L98-L101"    # THE BACKSPACE GUARD: no completion when the input did not grow
+      - "L102"        # the last-input state field, written on every growing keystroke
+      - "L104-L113"   # completion over the dropdown DataWindow: one-based scan, first match wins
+      - "L114-L124"   # completion over the dropdown list, and its tab split at :L123
+      - "L127-L130"   # the completed text and the selected remainder, in one-based character offsets
+      - "L231-L249"   # the context-filter reset path
+      - "L238-L246"   # THE DORMANT commented-out block, and the inert interpolation at :L242
+      - "L247"        # the live reset: the filter is rebuilt from an EMPTY input
+      - "L313-L345"   # THE FILTER-EXPRESSION CONSTRUCTOR - the primary artifact's source
+      - "L315"        # an empty input yields an empty expression, and no clause is attempted
+      - "L316"        # the lower-cased input, which the pinyin clause interpolates
+      - "L317"        # the like-pattern form: trimmed, then every space becomes a wildcard
+      - "L318-L320"   # the display bit; the clause at :L319 ASSIGNS rather than appends
+      - "L319"        # interpolation site 1 of 4
+      - "L321-L325"   # the pinyin bit
+      - "L322"        # THE ALPHABETIC GUARD, tested against the RAW input
+      - "L323"        # interpolation site 2 of 4, and the flag argument 7
+      - "L326-L338"   # the data bit
+      - "L327"        # the clause is emitted ONLY when the data column differs from the display one
+      - "L328"        # the column-type query that precedes the clause
+      - "L329-L336"   # the type dispatch, which has NO else arm
+      - "L331"        # interpolation site 3 of 4, the character arm
+      - "L334"        # interpolation site 4 of 4, unquoted into a numeric comparison
+      - "L340"        # the outer wrap, applied only to a non-empty expression
+      - "L342"        # THE REFERENCE-STRING OUT-PARAMETER, fired AFTER construction completes
+      - "L368-L412"   # the apply path
+      - "L372-L380"   # composition with the dropdown's own original filter
+      - "L376"        # the conjunctive composition form
+      - "L379"        # an empty input restores the original filter rather than clearing it
+      - "L382"        # THE IDEMPOTENCE GUARD: an unchanged expression does nothing at all
+      - "L389-L391"   # the ordered triple: set the filter, filter, sort
+      - "L393-L394"   # the two counts, taken BEFORE the buffer move
+      - "L408"        # the filtered notification
+      - "L419-L456"   # the public original-filter update, and its four entry guards
+      - "L474"        # split evidence
+      - "L475"        # split evidence
+      - "L489"        # split evidence
+  # THE STRUCTURAL HOST. The service is reached through the event chain, and the two events this
+  # workflow rides are declared on that chain rather than on the service.
+  - path: ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru
+    role: service-object
+    locators:
+      - "L13"         # THE REFERENCE-STRING OUT-PARAMETER in its declared form
+      - "L28"         # the filtered notification's four arguments
+      - "L83"         # the service member the chain owns
+      - "L169-L171"   # the hand-off: semantic event, then broker, THEN this service
+      - "L573"        # construction
+      - "L578"        # initialization
+      - "L587"        # teardown
+  # THE ORACLE WINDOW. 65 lines, and the whole of its behaviour is the six statements the capture
+  # depends on: it enables the service, widens the filter type, makes two columns editable, binds the
+  # fixture, and overrides the filter request. The BEHAVIOUR lives in the service object above, which
+  # is why both are cited and why neither alone is sufficient.
+  - path: ws_objects/pfw.tests.pbl.src/w_test_dwsvc_dropdownsearch.srw
+    role: oracle-window
+    locators:
+      - "L34-L38"     # the header comment stating the DEFAULT dropdown-DataWindow rule
+      - "L41"         # the service is enabled
+      - "L43"         # the filter type is widened to all three bits
+      - "L45"         # the dropdown-list column is made editable
+      - "L46"         # the dropdown-DataWindow column is made editable
+      - "L55"         # the bound definition
+      - "L59-L63"     # THE REFERENCE-STRING OVERRIDE, and :L59 calls the ancestor FIRST
+      - "L61"         # the override's two-part condition: row 2 and the second string column
+      - "L62"         # the fifth interpolation site, this one in the fixture itself
+  # THE PRIMARY FIXTURE. Nine inline rows over six columns; one dropdown-list column and two
+  # dropdown-DataWindow columns, which is what makes a list-versus-DataWindow comparison possible from
+  # a single definition.
+  - path: ws_objects/pfw.tests.pbl.src/dw_svc_sample.srd
+    role: primary-fixture
+    locators:
+      - "L8-L14"      # the six columns and their declared types
+      - "L11"         # the dropdown-list column's own three-pair code table, tab and slash delimited
+      - "L14"         # the declared sort specification, which the apply path re-applies
+      - "L15"         # THE NINE INLINE ROWS - the seed, and there is no other
+      - "L25"         # the THIRD string column: a dropdown DataWindow left NOT editable
+      - "L26"         # the SECOND string column: the dropdown DataWindow the override keys on
+      - "L27"         # the FIRST string column: the dropdown list
+      - "L28"         # a row-number computation, present and captured as unaffected by filtering
+  # THE DROPDOWN SOURCE. Two columns and three rows. Its display-to-data mapping is recorded in the
+  # seed phase because the display-versus-data resolution is one of the behaviours under test and a
+  # capture cannot verify it without the mapping.
+  - path: ws_objects/pfw.tests.pbl.src/dw_svc_sample_dddw.srd
+    role: supporting-fixture
+    locators:
+      - "L8-L10"      # the display and data columns, both of character type
+      - "L11"         # THE THREE DISPLAY-TO-DATA PAIRS
+      - "L12"         # only the display column is laid out, which is why the data column needs a query
+  # THE SIBLINGS' DROPDOWN SOURCE, cited for a reason that is easy to get wrong. This definition is
+  # NOT reached by this workflow's oracle window: the bound fixture points its two dropdown columns at
+  # `dw_svc_sample_dddw` above, and this one is bound by `dw_test_dwsvc.srd` and
+  # `dw_test_dwsvc_contextmenu.srd` instead. It is cited because it carries the IDENTICAL two-column
+  # shape and the IDENTICAL three display-to-data pairs under a DIFFERENT release header - so a
+  # reviewer cross-reading this pair against a sibling pair is comparing the same mapping, and the
+  # only difference between the two sources is a header and two band heights. Recorded so that the
+  # sameness is checked rather than assumed, and so that nobody substitutes one for the other.
+  - path: ws_objects/pfw.tests.pbl.src/dw_test_dwsvc_dddw.srd
+    role: supporting-fixture
+    locators:
+      - "L8-L10"      # the same two columns
+      - "L11"         # the same three pairs
+  # THE MATCHER, READ AS SPECIFICATION AND NOT AS SOURCE. Ten lines, and every one of them is a
+  # declaration: two overloads, both bound to a closed binary under one alias. This file is the whole
+  # of what the repository states about the matcher, which is precisely why the behaviour is BLOCKED.
+  - path: ws_objects/pfw.utility.pbl.src/pinyinfirstletterlike.srf
+    role: specification
+    locators:
+      - "L7"          # the two-argument overload, whose DEFAULT flag set is unrecorded
+      - "L8"          # the three-argument overload the call site uses
+  # THE FLAG DECLARATION, which is the evidence that WITHDRAWS the "flags undocumented" reading. Read
+  # as specification: it decodes the call site's flag argument completely, so no part of the flag
+  # decoding needs characterizing.
+  - path: ws_objects/pfw.shared.pbl.src/enums.sru
+    role: specification
+    locators:
+      - "L1146-L1149" # the comment naming the function, and the three flag constants under it
+
+# ==================================================================================================
+#  THE SEED PHASE - IT RUNS ONCE, AND IT TOUCHES NOTHING DESTRUCTIVE
+#  ------------------------------------------------------------------------------------------------
+#  The seed shape here is genuinely different from the persistence workflows and the difference is
+#  worth stating. Those seed a database: the oracle's own setup deletes the file, recreates the schema
+#  and inserts rows, which is exactly the destructive reseed the capture rule forbids between the two
+#  halves of a pair. THIS workflow seeds nothing of the kind. Every row it starts from is declared
+#  INLINE IN THE READ-ONLY DEFINITIONS THEMSELVES - nine rows at `dw_svc_sample.srd:L15`, three
+#  display-and-data pairs at `dw_svc_sample_dddw.srd:L11`, and three more pairs in the dropdown-list
+#  column's own code table at `dw_svc_sample.srd:L11`. THERE IS NO FILE DELETE, NO DDL, NO INSERT AND
+#  NO CONNECTION anywhere in this seed phase. Binding the definition IS the seed. The two assertions
+#  below are still both true and still both required.
+# ==================================================================================================
+seedPhase:
+  steps:
+    - action: >-
+        Bind the DataWindow definition the oracle window names in its own data-object property. On the
+        legacy side that is the definition the window declares; on the target side it is the
+        transcribed definition the catalogue registers under the same column model. Binding loads the
+        definition's own inline rows - this step performs no file delete, no schema creation and no row
+        insert, because the rows are part of the read-only fixture.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_dropdownsearch.srw:L55"
+    - action: >-
+        Confirm the nine inline rows the bound definition declares are present and in declaration
+        order, with the six columns in their declared types - three two-place decimals and three
+        hundred-character strings - and the declared sort specification applied. The three string
+        columns hold DATA codes rather than display labels in every row, which is what makes the
+        display-versus-data resolution observable at all: a capture against rows holding display text
+        could not tell the two resolutions apart.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_svc_sample.srd:L15"
+    - action: >-
+        RECORD THE DROPDOWN SOURCE'S DISPLAY-TO-DATA MAPPING EXPLICITLY, because the
+        display-versus-data resolution is one of the behaviours under test and a capture cannot verify
+        it without the mapping. The source declares two character columns - a display column and a data
+        column - and exactly three rows pairing them, in this declaration order: 新建 maps to NEW, 确认
+        maps to CFD, and 审核 maps to ADT. Confirm all three pairs resolve in both directions before
+        either capture begins. THE MAPPING IS FIXTURE DATA, NOT CONFIGURATION AND NOT A CREDENTIAL.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_svc_sample_dddw.srd:L11"
+    - action: >-
+        Record the dropdown-LIST column's own code table, which is a separate mapping carried inline on
+        the column rather than in a child definition, and which pairs the same three labels with the
+        same three codes using a tab between a pair and a slash between pairs. It is recorded
+        separately from the step above because the two are read by two different code paths - the
+        DataWindow path queries the child definition's buffer while the list path reads this table
+        through a positional accessor and splits each entry at its tab - so a capture that assumed one
+        mapping served both would not detect a divergence in either.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_svc_sample.srd:L11"
+    - action: >-
+        Enable the drop-down search service, and leave the other four sub-services disabled. This is a
+        seed step rather than a precondition check because the chain reaches this service only when it
+        is enabled: the raw editing event calls it after its semantic event and after the broker, and
+        with the service disabled the capture records an empty chain rather than a filtered one.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_dropdownsearch.srw:L41"
+    - action: >-
+        Widen the filter type to all three bits and record that the widening is DELIBERATE AND
+        NECESSARY, because the service's own default is only two of the three - the display bit and the
+        pinyin bit, with the data bit OFF. Both halves of the pair are seeded with all three bits set,
+        or the two recordings answer two different questions. The per-bit cases in the capture phase are
+        departures from this known starting state rather than from an unknown one.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_dropdownsearch.srw:L43"
+    - action: >-
+        Make the first string column - the dropdown-list column - editable, so that typing into it
+        reaches the service at all. Record that the bound definition declares this column NOT editable
+        and that this step overrides that declaration.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_dropdownsearch.srw:L45"
+    - action: >-
+        Make the second string column - the first dropdown-DataWindow column - editable, and record the
+        same override. RECORD ALSO WHAT IS NOT DONE HERE: the THIRD string column is a dropdown
+        DataWindow over the same source and is left NOT editable, because the oracle window contains no
+        statement making it editable. That asymmetry is fixture behaviour and is preserved; it is the
+        control case that proves an editable column is required for the service to engage.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_dropdownsearch.srw:L46"
+    - action: >-
+        Install the reference-string override on the filter-request event exactly as the oracle window
+        declares it, including its call to the ancestor script FIRST - the ancestor runs and produces
+        the constructed expression, and only then does the override inspect its two-part condition.
+        Reversing that order would capture an override that had nothing to override.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_dropdownsearch.srw:L59"
+    - action: >-
+        Record the dropdown's ORIGINAL filter as it stands before any input, because every applied
+        expression is composed against it and a capture taken against an unrecorded original filter
+        cannot be reproduced. Where the original filter is absent the service resolves it by querying
+        the dropdown's own filter property and treats the unresolved marker as empty.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L443-L446"
+    - action: >-
+        Configure the determinism seams declared below once, and use that one configuration for both
+        halves of the pair. A seam configured per capture is two configurations, and two configurations
+        make the two recordings answer two different questions.
+    - action: >-
+        On the target side, materialize the same nine rows and the same two mappings from the same
+        read-only definitions, transcribed rather than read at run time, and open one search session
+        per host. No schema provisioning and no row seeding runs on this side either, so this step is
+        idempotent and is safe to repeat without touching any persistent state.
+  runsOncePerPair: true
+  neverBetweenCaptures: true
+
+# ==================================================================================================
+#  THE CAPTURE PHASE - RUNS TWICE, AGAINST THE STATE THE SEED ALREADY ESTABLISHED
+#  ------------------------------------------------------------------------------------------------
+#  The primary artifact is a STRING: the filter expression the service constructs. It is compared BYTE
+#  FOR BYTE, because the expression is not a description of the behaviour - it IS the behaviour, and a
+#  single character's difference in it is a different filter. Every expected expression written below
+#  was derived by reading `_of_getfilter` at `n_cst_dwsvc_dropdownsearch.sru:L313-L345` statement by
+#  statement, not by running anything: nothing here has been executed, and `executionStatus` says so.
+# ==================================================================================================
+capturePhase:
+  behaviourUnderTest: |-
+    THE CONSTRUCTION OF THE DROPDOWN FILTER EXPRESSION AT
+    `ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L313-L345`, THE
+    COMPOSITION AND APPLICATION OF THAT EXPRESSION AT `:L368-L412`, AND THE SEARCH STATE MACHINE AT
+    `:L84-L131` - and nothing else. For each input: the expression string as constructed, the
+    expression string as finally applied after the reference-string event and after composition with
+    the dropdown's original filter, which of the three filter bits contributed a clause, the two counts
+    the filtered notification carries, the display and data values that resolve, and the state the
+    search machine carries into the next keystroke.
+
+    THE THREE CLAUSES, AND THE ASYMMETRY BETWEEN THEM THAT THE MATRIX EXISTS TO EXPOSE. The display
+    clause ASSIGNS the expression [`:L319`]. The pinyin clause and both data clauses APPEND to it with
+    a leading disjunction [`:L323`, `:L331`, `:L334`]. The whole is then wrapped in one further pair of
+    parentheses, but only when it is non-empty [`:L340`]. Three consequences follow mechanically and
+    all three are captured: a single display clause is wrapped twice; a pinyin or data clause reached
+    with the display bit OFF leaves a LEADING dangling disjunction; and an empty input produces an
+    expression that is empty rather than trivially true.
+
+    THE TWO INPUT DERIVATIONS, WHICH ARE NOT THE SAME STRING. The display and data clauses interpolate
+    the LIKE-PATTERN form - the input lower-cased [`:L316`], trimmed, then with every internal space
+    replaced by a wildcard [`:L317`]. The pinyin clause interpolates the LOWER-CASED form only
+    [`:L316`, `:L323`], untrimmed and unwildcarded. The alphabetic guard [`:L322`] tests the RAW input,
+    a third string again. A capture that used one derivation for all three would miss two behaviours.
+
+    ---- THE INPUT MATRIX. EACH CASE IS CAPTURED SEPARATELY AND RECORDED UNDER ITS OWN CASE NAME. ----
+    Expected expressions are written for the second string column, whose display column is `dsp`, whose
+    data column is `dat`, and whose data column is of character type - so the character arm at `:L331`
+    is the one the data bit takes. All three filter bits are set unless the case says otherwise.
+
+    CASE-01 empty input. The constructor returns early [`:L315`], so NO clause is attempted and the
+      expression is EMPTY - not a trivially-true expression and not a wrapped empty one, because the
+      wrap at `:L340` is itself guarded. The apply path then restores the dropdown's ORIGINAL filter
+      rather than clearing the filter [`:L379`]. This case has a real trigger rather than being
+      synthetic: the context-reset path rebuilds from an empty input at `:L247`.
+    CASE-02 a single alphabetic character, `n`. The guard matches, so all three clauses appear:
+      `((Lower(dsp) LIKE '%n%') OR PinyinFirstLetterLike(dsp,'n',7) OR (Lower(dat) LIKE '%n%'))`
+    CASE-03 a multi-character alphabetic input, `ne`. The same shape with the longer needle:
+      `((Lower(dsp) LIKE '%ne%') OR PinyinFirstLetterLike(dsp,'ne',7) OR (Lower(dat) LIKE '%ne%'))`
+    CASE-04 a mixed-case alphabetic input, `Ne`. PROVES THE LOWER-CASING IS APPLIED AND IS BEHAVIOUR:
+      the expression is byte-identical to CASE-03. The lower-casing is NOT masked anywhere in this
+      workflow, precisely so that a candidate which skipped it fails here.
+    CASE-05 a non-alphabetic input, the digit `1`. The alphabetic guard fails, so THE PINYIN CLAUSE IS
+      ABSENT ENTIRELY - absent, not present-and-empty, which is the distinction the recording proves:
+      `((Lower(dsp) LIKE '%1%') OR (Lower(dat) LIKE '%1%'))`
+    CASE-06 a Chinese-character input, `新`. The guard fails for the same reason, and the value is
+      reproduced because it IS the data under test - it is one of the three display labels the dropdown
+      source declares:
+      `((Lower(dsp) LIKE '%新%') OR (Lower(dat) LIKE '%新%'))`
+    CASE-07 a mixed-script input, `n新`. The guard matches on the ASCII letter, so the pinyin clause
+      appears and carries the Han character through to the matcher:
+      `((Lower(dsp) LIKE '%n新%') OR PinyinFirstLetterLike(dsp,'n新',7) OR (Lower(dat) LIKE '%n新%'))`
+    CASE-08 an input containing an INTERNAL SPACE, `a b`. Proves the two derivations diverge: the
+      display and data clauses receive the wildcard substitution while the pinyin clause receives the
+      space unchanged:
+      `((Lower(dsp) LIKE '%a%b%') OR PinyinFirstLetterLike(dsp,'a b',7) OR (Lower(dat) LIKE '%a%b%'))`
+    CASE-09 an input with LEADING AND TRAILING spaces, ` a `. Proves the trim applies to the
+      like-pattern form only, and that the pinyin clause keeps the untrimmed string.
+    CASE-10 an input containing a QUOTE character, `N'W`. EXERCISES THE UNESCAPED INTERPOLATION. The
+      quote is carried through verbatim into two single-quoted literals, and the resulting expression is
+      MALFORMED - the literal terminates early. The recording captures the malformed string exactly as
+      produced, and A CAPTURE SHOWING AN ESCAPED OR REJECTED QUOTE IS A PARITY FAILURE, not a fix:
+      `((Lower(dsp) LIKE '%n'w%') OR PinyinFirstLetterLike(dsp,'n'w',7) OR (Lower(dat) LIKE '%n'w%'))`
+    CASE-11 an input that is the wildcard character itself, `%`. The guard fails, and the needle becomes
+      a bare wildcard, so THIS IS ALSO THE CASE THAT MATCHES EVERY ROW - all three rows survive the
+      filter and the filtered count is zero:
+      `((Lower(dsp) LIKE '%%%') OR (Lower(dat) LIKE '%%%'))`
+    CASE-12 an input containing the single-character wildcard, `_`. Same construction shape, and
+      recorded separately because the two wildcards have different match semantics.
+    CASE-13 an input that matches NOTHING, `zzz`. Construction is unremarkable; the point of the case is
+      the counts - zero rows surviving and all three filtered - and that the notification still fires.
+    CASE-14 the display bit ALONE. The single clause is wrapped a second time by `:L340`, producing
+      DOUBLE PARENTHESES, which is an observable artifact of the wrap being unconditional over an
+      already-parenthesized clause:
+      `((Lower(dsp) LIKE '%n%'))`
+    CASE-15 the pinyin bit ALONE. The append reaches an empty expression, so the result carries a
+      LEADING DANGLING DISJUNCTION. Captured verbatim; it is legacy behaviour, not a transcription slip:
+      `( OR PinyinFirstLetterLike(dsp,'n',7))`
+    CASE-16 the data bit ALONE. The same leading dangling disjunction, from the other append site:
+      `( OR (Lower(dat) LIKE '%n%'))`
+    CASE-17 the display and pinyin bits together - the service's OWN DEFAULT [`:L57`], captured
+      explicitly because it is the state a caller that never widens the type would run in:
+      `((Lower(dsp) LIKE '%n%') OR PinyinFirstLetterLike(dsp,'n',7))`
+    CASE-18 the pinyin and data bits together, with the display bit off. Two appends onto an empty
+      expression: the leading disjunction appears once, before the first clause only.
+    CASE-19 all three bits together. This is CASE-02, recorded again under the all-bits case name so the
+      bit sweep is complete in the recording rather than requiring a reader to cross-reference.
+    CASE-20 THE DROPDOWN-LIST COLUMN, the first string column. The constructor is NEVER REACHED, because
+      the filter call is guarded on the dropdown-DataWindow style [`:L94-L96`]. The recording carries NO
+      expression for this case - a distinct state from an empty expression, and the recording
+      distinguishes the two rather than collapsing them. The completion machine still runs, and its
+      code-table path splits each entry at its tab [`:L123`].
+    CASE-21 THE DROPDOWN-DATAWINDOW COLUMN, the second string column, for direct comparison with
+      CASE-20 under the same input.
+    CASE-22 ROW 2 WITH THE SECOND STRING COLUMN - the override fires. The ancestor constructs the full
+      expression first [`:L59`], the event delivers it through the reference parameter [`:L342`], and the
+      override REPLACES it wholesale with an exact-match comparison against the DATA column [`:L62`].
+      Both strings are recorded: the constructed expression and the replacement. With the input `NEW`
+      the replacement is `dat = 'NEW'`. Note the override interpolates the RAW input, so with the
+      input `new` it produces `dat = 'new'` - which matches no row, because the data codes are
+      upper-case. That case-sensitivity is the override's behaviour and is captured, not corrected.
+    CASE-23 ROW 1 WITH THE SECOND STRING COLUMN - the override does NOT fire because the row part of its
+      condition fails, and the constructed expression survives to be applied.
+    CASE-24 ROW 2 WITH THE THIRD STRING COLUMN - the override does NOT fire because the column part of
+      its condition fails. Recorded separately from CASE-23 so that BOTH halves of the two-part
+      condition are proven independently rather than jointly.
+    CASE-25 THE DATA COLUMN EQUAL TO THE DISPLAY COLUMN. The data clause is OMITTED ENTIRELY by the
+      guard at `:L327`, and the column-type query at `:L328` is never issued - so the recording proves
+      the absence of both the clause AND the query. The equality is established by modifying the BOUND
+      INSTANCE's dropdown data-column property at capture time, using the same property-modification
+      mechanism the oracle window itself uses [`w_test_dwsvc_dropdownsearch.srw:L45-L46`]. IT IS NOT
+      ESTABLISHED BY EDITING ANY FIXTURE: the read-only definitions on disk are untouched (C-C). Record
+      the coupled consequence too - with the two columns equal, the filtered-row reveal decides against
+      revealing [`:L261`].
+    CASE-26 A REPEATED IDENTICAL INPUT. The second application hits the idempotence guard [`:L382`], so
+      the filter is not re-set, the filter and sort are not re-run, and THE FILTERED NOTIFICATION DOES
+      NOT FIRE. The recording carries the absence of the second notification, which is the behaviour.
+    CASE-27 A SHRINKING INPUT - type `ne`, then delete back to `n`. Proves the ORDER of two guards: the
+      filter is rebuilt and reapplied, because the filter call precedes the growth guard [`:L94-L96`
+      before `:L98-L101`], while the inline completion is SUPPRESSED. A capture showing completion here
+      would mean the two guards had been reordered.
+    CASE-28 A GROWING INPUT that resolves to a display label by prefix. Proves the completion path: the
+      one-based scan over the dropdown's rows [`:L104-L113`], first match wins, the completed text, and
+      the selected remainder expressed as one-based character offsets [`:L127-L130`].
+    CASE-29 FULL-WIDTH AND HALF-WIDTH FORMS of the same alphabetic input. Required by
+      [`../../docs/PARITY.md`](../../docs/PARITY.md) R1 because the flag set enables ignore-width. THE
+      CLAUSE CONSTRUCTION IS COMPARED; the match outcome is part of the BLOCKED set below.
+    CASE-30 EACH DOCUMENTED FUZZY-SOUND PAIR, IN BOTH DIRECTIONS - the declaration names three pairs
+      [`ws_objects/pfw.shared.pbl.src/enums.sru:L1149`]. Same division: construction compared, match
+      outcome BLOCKED. Also required by R1, and the reason the input set is deliberately broad is that
+      the fuzzy set is illustrative rather than provably exhaustive.
+    CASE-31 THE DORMANT PATH, PROVEN DORMANT. The context-reset path contains a commented-out block
+      [`:L238-L246`] which would have seeded the filter from the column's current display value and
+      would have issued a lookup carrying a third interpolation [`:L242`]. Drive a column that HAS a
+      modified display value into the reset path and record that NO lookup was issued and NO
+      value-seeded expression was produced - the explicit negative that proves the block stayed inert on
+      both sides. Reviving it would be a silent behaviour change.
+
+    ---- WHAT THIS CAPTURE IS NOT ----------------------------------------------------------------
+    IT RECORDS NOTHING ABOUT WHERE OR HOW LARGE THE DROPDOWN IS DRAWN. The dropdown window's placement
+    and its dimensions are NOT captured, NOT compared and NOT recorded in any form, and neither is any
+    text composition state produced by an input method. Those belong to the rendering half declared in
+    `deferredCapabilities` below, which ships nothing in this phase; the only place they are named in
+    this definition is as evidence locators there. Nor is this a retrieval or update capture: no
+    statement is generated, no storage is opened and nothing is written - the expressions above are
+    DataWindow filter expressions evaluated against a dropdown's own in-memory buffer.
+    AND IT IS NOT A MEASUREMENT. No elapsed value is recorded, no rate is derived and no timing is
+    asserted, per [`../README.md`](../README.md) section 6.4.
+
+  preconditions:
+    - >-
+      The drop-down search service is enabled and the other four sub-services are disabled, so the
+      recorded chain is this service's and not a neighbour's
+      [`ws_objects/pfw.tests.pbl.src/w_test_dwsvc_dropdownsearch.srw:L41`].
+    - >-
+      The filter type is set to all three bits before the baseline cases, and every per-bit case states
+      its own bit set explicitly. Both halves of the pair are taken under the SAME bit set for a given
+      case name [`:L43`].
+    - >-
+      Every event-gate bit on the host chain is enabled, so that no gate suppresses the editing event
+      this service rides in on. The gate is a separate mechanism owned by
+      `dataservices-dw-event-chain`; it is asserted here only as a starting condition.
+    - >-
+      The reference-string override is installed and calls its ancestor first, so that a constructed
+      expression exists for the override to replace
+      [`ws_objects/pfw.tests.pbl.src/w_test_dwsvc_dropdownsearch.srw:L59`].
+    - >-
+      The dropdown's original filter is recorded and is IDENTICAL on both sides before the first
+      keystroke, because every applied expression is composed against it [`:L376`, `:L379`].
+    - >-
+      The search machine's last-input state is empty at the start of each case, since the growth guard
+      compares against it and a stale value silently changes whether completion runs [`:L98-L102`].
+    - >-
+      The determinism mask below is configured once and identically for both halves.
+    - >-
+      NO PRECONDITION IS PLACED ON THE VISIBILITY OR SIZE OF THE DROPDOWN, deliberately: the headless
+      half must be capturable without one, and a capture that depended on it would be capturing the
+      deferred half.
+
+  observedOutputs:
+    - name: constructedFilterExpression
+      description: >-
+        THE PRIMARY ARTIFACT. The expression string exactly as the constructor returns it, before the
+        reference-string event is fired and before any composition. Compared BYTE FOR BYTE: the
+        expression is the whole of what this service produces, so one differing character is one
+        differing filter. A difference here means the candidate builds a different query than the
+        oracle did - the single most consequential divergence this pair can report.
+      format: >-
+        The literal string, with no normalization beyond the newline and encoding conventions declared
+        in the mask, and with NO escaping, requoting or reformatting applied. Recorded as absent rather
+        than as an empty string for the case in which the constructor is never reached, because
+        never-built and built-empty are different states.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L313-L345"
+    - name: pinyinClauseConstruction
+      description: >-
+        THE PINYIN CLAUSE AS TEXT, SEPARATED FROM ITS RESULTS ON PURPOSE. This output is the clause's
+        CONSTRUCTION - whether the alphabetic guard admitted it, the display column name it names, the
+        lower-cased needle it interpolates, and the flag argument it passes. ALL OF THAT IS
+        DETERMINISTIC, FULLY SPECIFIED BY THE SOURCE, AND IS COMPARED NORMALLY: it is not masked and it
+        is not blocked. Keeping it separate from the match results is what makes this workflow largely
+        usable the moment an oracle runs, instead of blocked in its entirety.
+      format: >-
+        The clause substring verbatim, plus the guard outcome as a boolean, plus the flag argument as
+        the integer literal 7 and its decoding into the three named constants. The decoding is recorded
+        because it is knowable from `enums.sru` and recording it prevents the flag being characterized
+        needlessly.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L321-L325"
+    - name: pinyinMatchResults
+      description: >-
+        THE ROWS THE PINYIN CLAUSE ITSELF SELECTS - AND THIS OUTPUT IS BLOCKED, NOT NON-BEHAVIOURAL.
+        The distinction matters and conflating the two would hide the risk: a non-behavioural field
+        carries no meaning and is excluded forever, whereas this field carries the behaviour that
+        matters most and is excluded ONLY UNTIL the oracle characterization exists. It is recorded on
+        both sides and withheld from comparison until then. See `blockedBehaviours` below for the four
+        closed inputs it waits on. `maskedAsNonBehavioural` is deliberately FALSE here even though the
+        field is excluded from comparison, because declaring it true would misfile a known gap as an
+        irrelevance.
+      format: >-
+        The set of dropdown rows the pinyin term alone admits, by one-based row number and by display
+        value, recorded per input. Recorded so that the day an oracle runs, the comparison needs a new
+        comparison pass and not a new capture.
+      maskedAsNonBehavioural: false
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L323"
+    - name: filterBitsInForce
+      description: >-
+        The three filter bits as they stood for the case, and which of them actually contributed a
+        clause - which are not the same thing, because the pinyin bit can be set and still contribute
+        nothing when the alphabetic guard fails, and the data bit can be set and still contribute
+        nothing when the two columns match or the column type falls outside the dispatch. Recorded as
+        the numeric bitmask AND as the per-clause contribution, so a divergence points at the bit or at
+        the guard rather than leaving a reader to work out which.
+      format: >-
+        The bitmask as its numeric value, the three constant names it decodes to, and one boolean per
+        clause for contributed-or-not. Never a single boolean for the whole expression.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L50-L53"
+    - name: alphabeticGuardOutcome
+      description: >-
+        Whether the alphabetic test admitted the pinyin clause, recorded as its own field and against
+        the RAW input it was tested on. It is separated from the clause text because the guard is the
+        one place the raw input is read, and because proving the clause ABSENT on a failing guard is a
+        different assertion from proving it correct on a passing one.
+      format: >-
+        The boolean outcome, the raw input it was evaluated against, and - on a false outcome - an
+        explicit assertion that the clause is absent from the expression rather than present and empty.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L322"
+    - name: dataColumnClauseDecision
+      description: >-
+        The data bit's three-way decision and its evidence: whether the data column differed from the
+        display column, the column type the query returned, and which arm of the type dispatch was
+        taken. THE DISPATCH HAS NO ELSE ARM, so a type outside its two cases emits no clause at all -
+        an omission that must be recorded as such rather than inferred from a missing substring.
+      format: >-
+        The two column names, the queried type string, the arm taken as one of character, numeric or
+        none, and whether the query was issued at all. On the equal-columns case the query must be
+        recorded as NOT ISSUED, which is the stronger assertion.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L326-L338"
+    - name: overriddenFilterExpression
+      description: >-
+        The expression the reference-string parameter carries back after the event, recorded for every
+        case and not only for the cases where the override fires. On a firing case it is the
+        replacement; on a non-firing case it is byte-identical to the constructed expression, which is
+        the assertion that the two-part condition really did fail. This is the reference-string
+        out-parameter's whole observable effect, and it is why the ordering for this pair is strictly
+        synchronous: the event produces its result by MUTATING A PARAMETER rather than by returning a
+        value, and the caller cannot proceed until it returns, so the answer has no fire-and-forget form.
+      format: >-
+        The string verbatim, plus a boolean for whether it differs from the constructed expression, plus
+        the row number and column name the condition was evaluated against. Row and column numbers are
+        ONE-BASED legacy indices throughout.
+      locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_dropdownsearch.srw:L59-L63"
+    - name: appliedFilterExpression
+      description: >-
+        THE EXPRESSION ACTUALLY APPLIED, which is a THIRD string and is none of the two above. A
+        non-empty expression is composed conjunctively with the dropdown's own original filter
+        [`:L376`]; an empty one restores the original filter instead of clearing it [`:L379`]. A capture
+        that recorded only the constructed expression would miss the composition entirely, and the
+        composition is what the dropdown actually filters on.
+      format: >-
+        The composed string verbatim, plus the original filter it was composed against, plus which of
+        the two composition branches was taken.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L372-L380"
+    - name: idempotenceGuardOutcome
+      description: >-
+        Whether the applied expression differed from the one already in force, and therefore whether any
+        of the work downstream of it happened at all [`:L382`]. On a guard hit, NOTHING runs: the filter
+        is not set, the buffer is not filtered, the sort is not re-applied and the notification does not
+        fire. The absence of that whole sequence is the behaviour, so it is recorded as an outcome
+        rather than left as four missing records a reader has to notice.
+      format: >-
+        The boolean outcome, the previous applied expression, the new one, and an explicit list of the
+        four downstream actions marked as run or not run.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L382"
+    - name: filterApplicationSequence
+      description: >-
+        The ordered triple the apply path issues past the guard - set the filter, filter the buffer,
+        re-apply the sort [`:L389-L391`]. The ORDER is the contract: sorting before filtering, or
+        omitting the sort, would leave the dropdown's rows in a different order under an identical
+        filter, and the declared sort specification is part of the fixture.
+      format: >-
+        The three call names in the order issued, with the filter string the first one received.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L389-L391"
+    - name: rowAndFilteredCounts
+      description: >-
+        The two counts the filtered notification carries - rows surviving and rows filtered out - AND
+        the fact that both are read BEFORE any buffer movement, which the source's own comment marks
+        twice [`:L392`, `:L407`]. Reading them after the move would report the post-move buffer's
+        shape, so the two counts are only meaningful together with the point at which they were taken.
+        These are COUNTS AND NOT RATES: no duration accompanies them and none may be derived from them.
+      format: >-
+        Two integers, plus the one-based row numbers surviving the filter, plus an explicit marker that
+        both were read pre-move.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L393-L394"
+    - name: resolvedDisplayAndDataValues
+      description: >-
+        For each surviving dropdown row, the display value and the data value it resolves to, checked
+        against the three pairs the seed phase recorded. This is the display-versus-data resolution
+        under test: the display clause and the data clause read two different columns, and the override
+        matches on the data column while the default rule matches on the display column, so a capture
+        that recorded only one of the two values could not tell a resolution error from a filter error.
+      format: >-
+        One display-and-data pair per surviving row, by one-based row number, with the mapping the seed
+        recorded restated per row so the comparison is self-contained.
+      locator: "ws_objects/pfw.tests.pbl.src/dw_svc_sample_dddw.srd:L11"
+    - name: searchMachineState
+      description: >-
+        The state the search machine carries between keystrokes: the last-input value it stores, whether
+        the input grew, and therefore whether the completion path ran at all [`:L98-L102`]. THE ORDER OF
+        THE TWO GUARDS IS THE POINT - the filter is rebuilt before the growth test, so a shrinking input
+        filters but does not complete. Recording only the completion outcome would hide that.
+      format: >-
+        The previous and current input, the growth boolean, and whether the filter path and the
+        completion path each ran.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L98-L101"
+    - name: inlineCompletionOutcome
+      description: >-
+        The completion the machine performs when the input grew: the matched candidate, the text set into
+        the field, and the selected remainder. Both branches are recorded and they read their candidates
+        from two different places - the DataWindow branch scans the dropdown's rows one-based and takes
+        the first match [`:L104-L113`], while the list branch walks the column's own code table by
+        position and splits each entry at its tab to recover the display half [`:L114-L124`]. THE
+        SELECTION IS RECORDED AS ONE-BASED CHARACTER OFFSETS INTO THE TEXT, which is text state and
+        carries no geometry of any kind.
+      format: >-
+        The branch taken, the matched candidate with its one-based index, the completed text, and the
+        selection as a one-based start offset and a length in characters.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L127-L130"
+    - name: chainEventsAndReturns
+      description: >-
+        The events this service causes to be emitted into the host chain, in order, with the arguments
+        each received and the value each returned - the editing event that delivers the input to the
+        service after the semantic event and the broker have both run
+        [`ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L169-L171`], the filter-request event
+        with its reference parameter [`:L13`], and the filtered notification with its four arguments
+        [`:L28`]. The ORDERING CONTRACT ITSELF belongs to `dataservices-dw-event-chain` and is
+        cross-referenced rather than re-derived; what this pair adds is which of those events this
+        service emits, with what values, for each input.
+      format: >-
+        An ordered list of event records - name, arguments, return value - with the returns as their
+        numeric values and never as boolean projections.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/se_cst_dw.sru:L169-L171"
+    - name: dormantPathEvidence
+      description: >-
+        The explicit negative for the commented-out block in the context-reset path [`:L238-L246`]: no
+        lookup was issued, no value-seeded expression was produced, and the reset rebuilt from an empty
+        input instead [`:L247`]. Recorded because a dormant path is only provably dormant if something
+        asserts its absence; a recording in which it fires is a parity failure on whichever side fired
+        it, not an improvement in behaviour.
+      format: >-
+        Booleans for lookup-issued and value-seeded-expression-produced, both expected false, plus the
+        expression the live reset path actually produced.
+      locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L238-L246"
+
+  recordingArtifacts:
+    # Text-based and diffable, one workflow's output in one workflow's own directory
+    # ([`../README.md`](../README.md) sections 3.4 and 3.6). THE EXTENSIONS ARE NOT A STYLE CHOICE: the
+    # root `.gitignore` carries six extensions UNANCHORED - one log extension and five archive and dump
+    # extensions, enumerated in section 3.5 - so they match at every depth including inside this store,
+    # and its only negations are anchored elsewhere and rescue nothing here. A capture named that way is
+    # silently untracked: present on the machine that produced it, absent from `git status`, from review
+    # and from CI, so the comparison looks taken and cannot be found. The root `.gitignore` is not to be
+    # modified; naming the file correctly is the fix, and the schema's own filename pattern makes those
+    # six unspellable here in any case.
+    - filename: filter-expressions.jsonl
+    - filename: filter-bit-matrix.csv
+    - filename: pinyin-clause-construction.jsonl
+    - filename: pinyin-match-results.jsonl
+    - filename: search-machine-state.jsonl
+    - filename: filtered-counts.csv
+    - filename: chain-events.jsonl
+    - filename: dormant-path-evidence.json
+
+# ==================================================================================================
+#  BLOCKED - THE ONE GENUINE PARITY RISK IN THE WHOLE IN-SCOPE SET
+#  ------------------------------------------------------------------------------------------------
+#  Stated without softening, because an approximation here is worse than a documented gap. One entry,
+#  and it is the reason this workflow exists in the form it does. `../README.md` section 5.5 and
+#  `../../docs/PARITY.md` R1 are the authoritative statements; this is their application to a capture.
+# ==================================================================================================
+blockedBehaviours:
+  - behaviour: >-
+      PINYIN FIRST-LETTER MATCHING - specifically the ROWS the pinyin term selects for a given input.
+      The clause's CONSTRUCTION is not blocked and is compared byte for byte like every other clause;
+      what is BLOCKED is what the matcher DOES with that clause. The matcher is reached from the filter
+      expression this service builds at
+      `ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L323`, which passes the
+      dropdown's display column, the lower-cased search input and the flag argument 7, and it is
+      declared as two overloads bound to a closed native binary at
+      `ws_objects/pfw.utility.pbl.src/pinyinfirstletterlike.srf:L7-L8`.
+    reason: >-
+      PINYIN FIRST-LETTER MATCHING CANNOT BE PROVEN BIT-EXACT FROM THE REPOSITORY ALONE, AND SO IT IS
+      REPORTED **BLOCKED** RATHER THAN APPROXIMATED. Functional managed substitutes exist and NONE IS
+      ADOPTED. THE BOUNDARY OF THE GAP IS NARROWER THAN IT FIRST APPEARS, AND STATING IT PRECISELY IS
+      WHAT KEEPS A BLOCKED REPORT FROM READING AS AN EXCUSE. What is NOT missing: the flag argument.
+      `ws_objects/pfw.shared.pbl.src/enums.sru:L1146-L1149` declares the flags under the comment naming
+      this very function - ignore-case is 1, ignore-width is 2 and fuzzy-sound is 4 - so the literal 7
+      decodes as all three enabled and NEEDS NO CHARACTERIZATION WHATSOEVER. The migration plan's
+      wording says the flag semantics are recorded nowhere in the repository; that reading is WRONG and
+      `../../docs/PARITY.md` R1 says so in terms, while `../../docs/DEFERRED.md` section 8,
+      `../../docs/ARCHITECTURE.md` section 13 L1 and `../README.md` section 5.5 all carry the same
+      decoding. Anyone characterizing the flags is characterizing something the source already states.
+      WHAT IS GENUINELY MISSING IS STILL ENOUGH TO KEEP THIS BLOCKED, AND IT IS EXACTLY FOUR THINGS.
+      FIRST, THE LOOKUP TABLE: there is no table, no data file and no source mapping any character to
+      its pinyin initial anywhere in the tree, and no C++ source for the native library at all - the
+      table exists only inside the closed binary. SECOND, THE MATCHING RELATION: whether the comparison
+      is a prefix, a substring or a subsequence over the derived initials, how a non-Han character is
+      treated, and what a multi-reading character resolves to are all unrecorded. THIRD, THE
+      FUZZY-SOUND EQUIVALENCE SET: the declaration names three pairs, and nothing states that they are
+      the whole set, that they are symmetric, or that the set does not extend to the other pairs a
+      Chinese input method would normally fold together - they are illustrative, not provably
+      exhaustive. FOURTH, THE TWO-ARGUMENT OVERLOAD'S DEFAULT FLAGS: the overload at
+      `pinyinfirstletterlike.srf:L7` takes no flag argument and nothing records what it defaults to.
+      Bit-exact parity therefore requires characterizing all four FROM THE BEHAVIOURAL ORACLE, over a
+      deliberately broad input set - Han characters across readings, mixed-script input, full-width and
+      half-width forms, and each documented fuzzy pair in both directions - which is why the capture
+      matrix above carries those cases. AND THE ORACLE HAS NOT BEEN EXERCISED: no PowerBuilder toolchain
+      is present, `executionStatus` below is the only legal value, and `characterization/recordings/`
+      does not exist. SO THE CHARACTERIZATION THAT WOULD LIFT THIS BLOCK HAS NOT BEEN OBTAINED, AND
+      UNTIL IT IS, THE PINYIN FILTER IS REPORTED BLOCKED. WHY APPROXIMATING IS NOT AN OPTION, stated
+      concretely rather than cautiously: a substitute pinyin table gets most characters right and a
+      minority wrong, so an approximated filter returns SUBTLY DIFFERENT RESULT SETS - mostly correct,
+      occasionally missing a row, occasionally including one. That is a regression that LOOKS LIKE
+      CORRECT BEHAVIOUR, it passes review, and it is found by a user rather than by a test. It is
+      precisely the class of defect a characterization suite catches and a unit test does not. This is
+      also why NO THIRD-PARTY PINYIN PACKAGE IS ADOPTED, deliberately: trusting a third-party table
+      would substitute one unverified table for another and would convert a known gap into an unknown
+      one. A BLOCKED report is a known gap; an approximation is an unknown one. THE OPERATIONAL
+      CONSEQUENCE, which is what makes this workflow usable rather than stalled: the capture records the
+      clause's CONSTRUCTION and its MATCH RESULTS as two separate outputs above. The construction is
+      compared normally, now. The match results are recorded on both sides and withheld from comparison
+      until the four closed inputs are characterized - and they are marked BLOCKED rather than
+      non-behavioural, because filing a known gap as an irrelevance would hide the very risk this entry
+      exists to report. The reportable form of this state is the skipped matrix `../README.md` section
+      3.6 describes, one case per closed input, which un-skips itself the moment a legacy recording
+      appears for this workflow identifier.
+    disposition: blocked-report-not-approximate
+
+# ==================================================================================================
+#  THE DEFERRED HALF - A DOCUMENTED GAP, AND NOTHING ELSE
+#  ------------------------------------------------------------------------------------------------
+#  This member documents a gap and implements nothing (C-D). The schema carries no note or evidence
+#  member here and forbids additional properties, so the evidence locators and the no-stub statement
+#  are written into the capability text itself rather than alongside it. The deferred capability area
+#  is named as DOCUMENTATION ONLY: those four names appear in this member and nowhere else in the
+#  schema, and they are deliberately absent from the `targetService` enum, so a definition can say
+#  where a gap will be filled without being able to claim that it has been.
+# ==================================================================================================
+deferredCapabilities:
+  - capability: >-
+      THE RENDERING HALF OF THE DROP-DOWN SEARCH SERVICE: showing, measuring, offsetting and placing the
+      dropdown window, and composing text through an input method. NOTHING OF THIS IS CAPTURED,
+      COMPARED, IMPLEMENTED OR STUBBED ANYWHERE IN THIS PHASE, and the locators below are cited as
+      EVIDENCE FOR THE SPLIT rather than as a specification for anything to be built. Evidence, all in
+      `ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru`: the window-show call
+      at `:L256`, guarded by a visibility test at `:L255` and reached again at `:L385`; the
+      window-rectangle query at `:L474`; the rectangle offset at `:L475`; and the window-placement call
+      at `:L489` with its flag composition at `:L488`. The service additionally declares a window
+      prototype OF ITS OWN, bound to a platform library, at `:L43` - which is why the coupling is
+      described as broad rather than incidental: EIGHT references across 516 lines. WHAT SHIPS AND IS
+      CHARACTERIZED HERE INSTEAD: the filter-expression construction including the pinyin clause's
+      construction, the composition with the dropdown's original filter, the search state machine with
+      its growth guard and inline completion, and the row and filtered counts - all surfaced as DATA
+      over the contract. WHAT WOULD BE NEEDED TO COVER THE DEFERRED HALF: a presentation surface with a
+      real window system and a real input method, neither of which exists in a headless service, plus
+      the DPI conversion family the other two split services also need. THERE IS NO PROJECT, NO
+      CONTAINER, NO TEST, NO PARTIAL IMPLEMENTATION AND NO PLACEHOLDER THAT THROWS behind the reserved
+      route below; the route is a routing declaration answering 501 with a machine-readable body naming
+      the deferred area, which is metadata about the shape of the eventual system and not a stub of it.
+      The deferred roster and the objects assigned to it belong to
+      [`../../docs/DEFERRED.md`](../../docs/DEFERRED.md) - sections 6.1 and 6.2 for this split
+      specifically - and are pointed at rather than restated here.
+    deferredTo: DesignSystem
+    reservedRoute: /v1/design/**
+
+# ==================================================================================================
+#  THE DETERMINISM MASK - INLINE, SYMMETRIC, AND EVERY ENTRY WITH ITS REASON
+#  ------------------------------------------------------------------------------------------------
+#  The mask is a member of this definition rather than a pointer to one, because a mask that drifts
+#  away from its workflow silently invalidates every pair captured under it. It is FULLY INLINE and is
+#  NOT DELEGATED: `../../docs/PARITY.md` section 5.1 is cited below as PROVENANCE for the seams it
+#  owns, which is correct and encouraged, but no entry is replaced by that citation. EVERY ENTRY
+#  APPLIES TO BOTH SIDES: masking only the candidate leaves the master holding a value that can never
+#  be matched, and masking only the master inverts the same problem. One configuration, both captures.
+#
+#  WHAT IS DELIBERATELY **NOT** MASKED, STATED EXPLICITLY SO THAT NOBODY ADDS IT LATER: the
+#  constructed filter expression; the applied expression and the original filter it was composed
+#  against; the overridden expression; the filter bits and each clause's contribution; the
+#  ALPHABETIC-GUARD OUTCOME; the pinyin clause's CONSTRUCTION, including its interpolated needle and
+#  its flag argument; the LOWER-CASING of the input, which is behaviour and not a normalization; the
+#  row and filtered counts; the display-versus-data resolution; the search machine's state and its
+#  completion outcome; and the event sequence with its returns. Every one of those is compared. Masking
+#  any of them would hide the behaviour this pair exists to pin - a masked field is a field a
+#  regression can hide in.
+# ==================================================================================================
+determinismMask:
+  - seam: >-
+      Every clock read reachable from this workflow - any timestamp that reaches a recorded field or a
+      recorded decision, on either side.
+    method: >-
+      Inject the clock and substitute a deterministic double that advances only when the test advances
+      it. Nothing in this service branches on a clock value, so the substitution changes no path; it
+      only makes a recorded timestamp reproducible. Prefer this to masking the field out, because a
+      masked field is a field a regression can hide in.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      A timestamp differs on every run BY DEFINITION RATHER THAN BY BEHAVIOUR, so an unmasked one
+      reports a difference on every comparison and trains a reviewer to ignore red results. NOTE WHAT
+      THIS IS NOT: seaming the clock introduces no timing assertion. No elapsed value and no rate is
+      recorded or compared anywhere in this workflow. Provenance:
+      [`../../docs/PARITY.md`](../../docs/PARITY.md) section 5.1 carries this seam's injection point and
+      status.
+  - seam: >-
+      Modify-call ordering - the order in which this service issues the column-type query and the
+      property modifications it makes while resolving a dropdown's columns and applying a filter,
+      including the capture-time property change the equal-columns case relies on.
+    method: >-
+      Fix the order of the query and modification calls to the source's own order and hold it for both
+      captures: the column-type query precedes the data clause it feeds
+      [`n_cst_dwsvc_dropdownsearch.sru:L328`], and the apply path issues its three calls in the declared
+      order [`:L389-L391`]. Record the intermediate output that order produces, then compare against the
+      same order on the other side rather than masking the output away.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      Two orderings that reach the same target state can emit DIFFERENT INTERMEDIATE OUTPUT, so an
+      unpinned order perturbs the recorded query results without any behaviour having changed. Pinning
+      the order rather than discarding the output keeps the ordered triple itself comparable, which
+      matters here because the sort re-application is part of that triple and the fixture declares a
+      sort. Provenance: [`../../docs/PARITY.md`](../../docs/PARITY.md) section 5.1.
+  - seam: >-
+      Line endings in every recorded artifact, including the multi-line expression and event logs.
+    method: >-
+      Declare one newline convention and normalize both sides to it at comparison time, before any
+      byte-exact expression comparison is attempted.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      THE LEGACY MASTER IS PRODUCED ON WINDOWS BY POWERBUILDER WHILE THE CANDIDATE RUNS IN A LINUX
+      CONTAINER, so raw line endings differ BY PLATFORM RATHER THAN BY BEHAVIOUR, and an unnormalized
+      byte-exact comparison would report a difference on every line of every multi-line recording -
+      which would be fatal here, since byte-exact comparison of expression text is this workflow's
+      primary criterion. Git does not solve this for us: the repository's root `.gitattributes` declares
+      only language mappings and carries NO `text` and NO `eol` rule at all, so no line-ending
+      translation happens, and THAT FILE IS NOT IN SCOPE TO CHANGE. Normalization is a comparison-time
+      convention only and licenses no edit to a stored master. See
+      [`../README.md`](../README.md) section 3.7.
+  - seam: >-
+      Unicode composition of the Chinese fixture values and the Chinese and mixed-script search inputs -
+      the three display labels, and every input case that carries a Han character or a full-width form.
+    method: >-
+      Pin ONE Unicode normalization form and apply it to both sides before comparison. Apply it to the
+      recorded expression text and to the recorded display and data values alike, so that a needle and
+      the value it matched are normalized identically. DO NOT NORMALIZE CASE - see the reason.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      The legacy master and the container candidate may present CANONICALLY EQUIVALENT BUT DIFFERENTLY
+      COMPOSED sequences for the same character, which is an ENCODING ARTIFACT AND NOT A FILTER
+      BEHAVIOUR, and an unmasked difference of that kind is indistinguishable in a diff from a genuinely
+      different needle. THE EXCLUSION IS THE IMPORTANT HALF OF THIS ENTRY: case is NOT normalized,
+      because the display clause's lower-casing [`n_cst_dwsvc_dropdownsearch.sru:L316`] IS BEHAVIOUR -
+      it is the reason a mixed-case input and its lower-case form produce byte-identical expressions,
+      and normalizing case at comparison time would make a candidate that skipped the lower-casing pass.
+      Width is not normalized either: ignore-width is a matcher FLAG, so folding widths in the mask
+      would silently do the matcher's job for it and destroy the very case that tests it.
+  - seam: >-
+      Collation culture for the ordering of the rows that survive a filter, and for the order in which
+      the surviving display and data values are recorded.
+    method: >-
+      Pin an invariant collation on both sides, identically for both captures, and record the resulting
+      order under that fixed collation. The order is then COMPARED NORMALLY - this entry fixes the
+      collation, it does not exclude the ordering from comparison.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      A culture-dependent collation would present as a ROW-ORDER DIVERGENCE while the filter behaviour
+      was identical, which is a false positive that costs a reviewer real time and points at nothing.
+      Pinning rather than excluding is deliberate: the fixture declares its own sort specification and
+      the apply path re-applies it inside the ordered triple [`:L391`], so the resulting order IS
+      behaviour and must stay comparable - what must not vary is the culture the comparison is resolved
+      under.
+  - seam: >-
+      THE PINYIN CLAUSE'S MATCH RESULTS, AND ONLY THOSE - the rows the pinyin term admits. NOT the
+      clause's construction, which is excluded from this entry deliberately.
+    method: >-
+      Record the match results on both sides and EXCLUDE THEM FROM COMPARISON until the oracle
+      characterization of the four closed inputs exists, then compare them normally with no change to
+      the capture. The corresponding output above is marked `maskedAsNonBehavioural: false` WITH AN
+      EXPLICIT NOTE THAT IT IS **BLOCKED, NOT NON-BEHAVIOURAL**. THE CLAUSE'S CONSTRUCTION IS NOT MASKED
+      BY THIS ENTRY OR BY ANY OTHER AND IS COMPARED NORMALLY, including the display column it names, the
+      lower-cased needle it interpolates, the flag argument 7 and the guard outcome that admitted it.
+    appliesTo: [legacy, dotnet]
+    reason: >-
+      The backing table is inside a closed native binary, so no correct expected value can be stated for
+      a match result from the repository alone - see `blockedBehaviours` above for the four closed
+      inputs. THE DISTINCTION THIS ENTRY TURNS ON: a non-behavioural field carries no behaviour and is
+      excluded permanently; this field carries the behaviour that matters MOST in this workflow and is
+      excluded only until an oracle run supplies the expected values. CONFLATING THE TWO WOULD FILE THE
+      STORE'S ONE GENUINE PARITY RISK AS AN IRRELEVANCE AND HIDE IT, which is exactly the outcome the
+      blocked report exists to prevent. Masking the construction along with the results would be the
+      same mistake in smaller form - it would discard the part that IS provable today.
+
+# ==================================================================================================
+#  THE DEFECTS THIS PAIR EXISTS TO PROVE **SURVIVED**
+#  ------------------------------------------------------------------------------------------------
+#  THE INVERSION IS LOAD-BEARING: a capture that shows CORRECTED behaviour is a parity FAILURE, not an
+#  improvement. Where the target produces output that looks safer or better formed than the oracle, the
+#  finding is a divergence in the target and is filed as a defect (C-B). A legacy defect is reproduced
+#  and annotated at its point of reproduction, never repaired. `../../docs/PARITY.md` section 7 is the
+#  authoritative catalogue of behaviour groups; the entries below record which of them THIS pair pins.
+#
+#  ON THE FIVE INTERPOLATION SITES AND THE ONE THAT DOES NOT COUNT. Four are live in the service
+#  [`:L319`, `:L323`, `:L331`, `:L334`] and a fifth is live in the fixture's own override
+#  [`w_test_dwsvc_dropdownsearch.srw:L62`]. A sixth apparent site [`:L242`] is DORMANT inside a
+#  commented-out block and is NOT counted; CASE-31 and the `dormantPathEvidence` output above prove it
+#  inert rather than assuming it, which is the only way an absence becomes evidence.
+#  THE TARGET MAY BE SAFER INTERNALLY ONLY WHERE THE CHANGE IS UNOBSERVABLE. The OBSERVABLE FILTER
+#  EXPRESSION MUST MATCH BYTE FOR BYTE, including when a quote in the input leaves it malformed.
+# ==================================================================================================
+provesDefects:
+  - defect: >-
+      D-01. USER DATA IS INTERPOLATED UNESCAPED INTO THE DISPLAY FILTER CLAUSE. The clause is assembled
+      by concatenating the user's input into a single-quoted pattern literal, with no escaping, no
+      quoting discipline and no rejection of a quote character. A quote in the input therefore ALTERS
+      THE EXPRESSION rather than being matched by it: the literal terminates early and what follows is
+      reinterpreted as expression syntax.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L319,
+      with its needle derived at :L316-L317
+    note: >-
+      A KNOWN LEGACY DEFECT, DOCUMENTED AND PRESERVED AS OBSERVABLE BEHAVIOUR - never silently escaped.
+      The implementation may be safer INTERNALLY only where the change is UNOBSERVABLE; the observable
+      expression must match byte for byte, malformation included. CASE-10 of the matrix drives a
+      quote-bearing input for exactly this reason, and a recording in which the target escaped, rejected
+      or sanitized the quote is a PARITY FAILURE on the target side rather than a security improvement.
+      Two derivation details belong with this entry because a port can reproduce the concatenation and
+      still get the needle wrong: the input is LOWER-CASED [`:L316`] and then TRIMMED WITH EVERY INTERNAL
+      SPACE REPLACED BY A WILDCARD [`:L317`], so a space in the input becomes a wildcard in the pattern -
+      CASE-08 and CASE-09 pin that - and an input that is itself a wildcard passes straight through,
+      which CASE-11 and CASE-12 pin.
+  - defect: >-
+      D-02. USER DATA IS INTERPOLATED UNESCAPED INTO THE PINYIN CLAUSE AS WELL - A SECOND AND DISTINCT
+      SITE, NOT THE SAME ONE. The clause concatenates the input into a single-quoted argument of the
+      matcher call, with the same absence of escaping, so the same quote that malforms the display clause
+      malforms this one too and both malformations appear in one expression.
+    locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L323"
+    note: >-
+      Same reasoning as D-01 and the same prohibition on quietly fixing it. THE PRECISION THAT MATTERS
+      HERE, AND THAT IS EASY TO GET WRONG: this clause interpolates the LOWER-CASED input
+      [`:L316`], NOT the raw input, while the guard that admits the clause tests the RAW input
+      [`:L322`]. Guard and clause read two different strings, and the display clause reads a third - the
+      wildcard-substituted form. A port that derived all three from one string would produce a
+      subtly different expression that still looked right, which is why the recording carries the needle
+      each clause actually received rather than the input it started from.
+  - defect: >-
+      D-03. A THIRD UNESCAPED INTERPOLATION LIVES IN THE FIXTURE'S OWN OVERRIDE. The override builds an
+      exact-match comparison by concatenating the user's input into a quoted comparison against the
+      dropdown's DATA column, so the oracle fixture is itself an instance of the pattern the service
+      exhibits - which is part of why the capture includes a quote-bearing input.
+    locator: "ws_objects/pfw.tests.pbl.src/w_test_dwsvc_dropdownsearch.srw:L62"
+    note: >-
+      TWO FURTHER LIVE SITES EXIST IN THE SERVICE AND BELONG ON THIS RECORD, bringing the live total to
+      FIVE rather than three: the data bit's character arm interpolates the same wildcard-substituted
+      needle into a quoted literal [`:L331`], and its numeric arm interpolates the RAW INPUT UNQUOTED
+      DIRECTLY INTO A COMPARISON [`:L334`] behind nothing but a numeric-looking test - the sharpest of
+      the five, because there is no literal delimiter to malform, only an expression to extend. A SIXTH
+      APPARENT SITE IS NOT COUNTED AND MUST NOT BE: the lookup interpolation at [`:L242`] sits inside a
+      commented-out block at [`:L238-L246`] and is INERT, so the live total is five rather than six -
+      CASE-31 and the `dormantPathEvidence` output prove that absence instead of assuming it, and a
+      recording in which it fires is a parity failure on whichever side fired it. This
+      override site differs from all four live service sites in one respect worth recording: it
+      interpolates the RAW input
+      rather than a lower-cased one, so an input whose case does not match the stored data code produces
+      a well-formed comparison that matches NOTHING. CASE-22 captures both spellings to pin that.
+  - defect: >-
+      D-04. THE PINYIN CLAUSE IS GATED BY AN ALPHABETIC-CHARACTER TEST, so a non-alphabetic input
+      SILENTLY PRODUCES NO PINYIN CLAUSE AT ALL. There is no diagnostic, no fallback and no empty clause
+      - the term is simply not appended, and the expression that results is a valid expression with one
+      fewer disjunct.
+    locator: "ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L322"
+    note: >-
+      CAPTURE THE GATED CASE AND PROVE THE CLAUSE IS **ABSENT, NOT EMPTY** - the two are different
+      states and a recording that could not distinguish them would not pin this defect. CASE-05,
+      CASE-06 and CASE-11 all take the false branch, by digit, by Han character and by wildcard
+      respectively; CASE-07 proves the guard is a CONTAINMENT test rather than a whole-string test, since
+      a mixed-script input containing one ASCII letter passes it. The consequence is worth stating
+      plainly because it is counter-intuitive: FOR A PURELY CHINESE INPUT THE PINYIN FILTER NEVER RUNS,
+      even though matching Chinese text is what the matcher is for - the header comment at
+      [`w_test_dwsvc_dropdownsearch.srw:L34-L38`] describes the rule as input plus the input's pinyin
+      initials, and the guard means the second half applies only when the input is at least partly
+      alphabetic. This also bounds the BLOCKED risk usefully: the blocked matcher is unreachable for
+      inputs that fail this guard.
+  - defect: >-
+      D-05. THE DATA-COLUMN CLAUSE IS EMITTED ONLY WHEN THE DATA COLUMN DIFFERS FROM THE DISPLAY COLUMN,
+      and its construction FIRST QUERIES THAT COLUMN'S TYPE. When the two columns are the same the clause
+      is omitted and the query is never issued; when the queried type falls outside the two arms of the
+      dispatch the clause is omitted as well, because THE DISPATCH HAS NO ELSE ARM.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L327-L328,
+      with the arms at :L329-L336
+    note: >-
+      CASE-25 captures the equal-columns case and proves BOTH absences - the clause and the
+      column-type query at [`:L328`] - which is the stronger assertion, since a port could omit the
+      clause while still issuing the query and would look correct in the expression alone. The
+      equality is produced by modifying the BOUND
+      INSTANCE at capture time, never by editing a read-only fixture (C-C). Two coupled behaviours belong
+      with this entry: with the two columns equal the filtered-row reveal decides AGAINST revealing
+      [`:L261`], so the same condition drives two separate outcomes; and the numeric arm is additionally
+      guarded on the input looking numeric [`:L333`], so a numeric-typed data column with a
+      non-numeric input also yields no clause - a third distinct route to the same omission, and the
+      recording names which route was taken rather than only that the clause was missing.
+  - defect: >-
+      D-06. THE ASSIGNMENT-VERSUS-APPEND ASYMMETRY PRODUCES TWO MALFORMED EXPRESSION SHAPES, AND BOTH ARE
+      LEGACY BEHAVIOUR. The display clause ASSIGNS the expression while the pinyin clause and both data
+      arms APPEND to it with a leading disjunction, and the whole is then wrapped in one further pair of
+      parentheses whenever it is non-empty. So with the display bit OFF and any other bit ON, the
+      expression carries a LEADING DANGLING DISJUNCTION; and with the display bit ON ALONE, the single
+      already-parenthesized clause is WRAPPED A SECOND TIME.
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L319
+      assigns while :L323, :L331 and :L334 append, and :L340 wraps
+    note: >-
+      RECORDED AS A FINDING OF THIS DEFINITION'S OWN LINE-BY-LINE READING rather than carried forward
+      from the migration plan, which does not name it. It is reachable and therefore in scope: the
+      service's OWN DEFAULT filter type omits the data bit [`:L57`] and any caller may set a bit set that
+      omits the display bit, so the dangling form is a state a real caller reaches - CASE-15, CASE-16 and
+      CASE-18 pin it and CASE-14 pins the double wrap. It is captured VERBATIM and must not be tidied:
+      normalizing either shape would make the target's expression differ from the oracle's on exactly the
+      cases that expose the asymmetry, and a reviewer would see a cleaner string and a failed comparison.
+      The oracle window widens the filter type to all three bits
+      [`w_test_dwsvc_dropdownsearch.srw:L43`], which is why the default capture path does not encounter
+      the dangling form and why the per-bit sweep is required to reach it at all.
+  - defect: >-
+      D-07. ONE-BASED ROW AND COLUMN INDEXING THROUGHOUT. Every row number and column number this
+      workflow records is a ONE-BASED LEGACY INDEX: the completion scan runs from one to the row count
+      [`:L104-L113`], the code-table walk starts at one [`:L114-L121`], the selection offset is a
+      one-based character position [`:L129`], and the override keys on ROW 2 SPECIFICALLY
+      [`w_test_dwsvc_dropdownsearch.srw:L61`].
+    locator: >-
+      ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_dropdownsearch.sru:L104-L113,
+      and the override's row condition at
+      ws_objects/pfw.tests.pbl.src/w_test_dwsvc_dropdownsearch.srw:L61
+    note: >-
+      THE INDEXING BASIS MUST BE STATED OR THE OVERRIDE CASE CANNOT BE REPRODUCED CORRECTLY. The legacy
+      is one-based and its upper-bound function returns the LAST VALID INDEX, while the target's arrays
+      are zero-based with a length ONE PAST THE END, so a port that renumbers on the way out turns the
+      override's row 2 into the fixture's second-or-third row depending on which convention it applied -
+      and the recording would still contain a plausible row number. Every recorded index in this
+      workflow is therefore in the LEGACY basis, and any translation happens strictly inside the
+      candidate and never in what it records. AND A SPLIT FINDING THAT BELONGS WITH THIS LIST, because it
+      determines WHICH indices get recorded at all: this service's presentational coupling is BROAD - it
+      calls the window-show, window-rectangle, rectangle-offset and window-placement primitives and
+      declares a window prototype of its own, EIGHT references across 516 lines - which is why only the
+      headless half ships and only headless indices are captured. Compare
+      `ws_objects/pfw.datawindow.services.pbl.src/n_cst_dwsvc_rowselect.sru`, which is 288 lines with
+      EXACTLY ONE presentation reference and ships WHOLE, and `n_cst_dwsvc.sru`, which is 864 lines with
+      ZERO [`../../docs/DEFERRED.md`](../../docs/DEFERRED.md) section 6.1. Eight against one against zero
+      is the measurement that makes the split evidence-driven rather than a judgement call.
+
+# ==================================================================================================
+#  THE SHARED-VOLUME CAPTURE RULE - IT APPLIES, AND ITS TEXT IS OWNED ELSEWHERE
+#  ------------------------------------------------------------------------------------------------
+#  The rule's CANONICAL TEXT is reproduced word for word in [`../README.md`](../README.md) section 2.1,
+#  which takes it verbatim from [`../../docs/PARITY.md`](../../docs/PARITY.md) section 4.2, which is in
+#  turn the attached environment's own instruction with a single volume-name substitution that
+#  `../README.md` section 2.4 justifies. IT IS CITED HERE AND DELIBERATELY NOT RESTATED: three files
+#  already own that text word for word, and a fourth copy would be a fourth thing to drift. The
+#  teardown corollary in section 2.6 applies in full - between the two halves of a pair, tear the stack
+#  down WITHOUT removing named volumes.
+#
+#  WHY IT APPLIES EVEN THOUGH THIS WORKFLOW'S ROWS ARE INLINE IN READ-ONLY FIXTURES AND IT OPENS NO
+#  DATABASE. The exemption in `../README.md` section 2.7 is NARROW and is not a loophole: it holds only
+#  while a workflow reads and writes NOTHING, the paging rewriters being the clear case. THIS WORKFLOW
+#  DOES NOT QUALIFY. The target half is captured against the running service rather than an in-process
+#  host, so the capture crosses the composed stack; the service mutates live buffer state through its
+#  filter, sort and buffer-movement calls; and its state machine carries a value from one keystroke into
+#  the next. A volume state that moved between the two halves would change what the second half ran
+#  against and nothing would report it. The roster row for this workflow in
+#  [`./README.md`](README.md) records the same verdict, and declaring the rule applied is also the
+#  cheaper error: asserting it when it were not needed costs nothing, while omitting it when it were
+#  needed voids the pair silently.
+# ==================================================================================================
+sharedVolume:
+  applies: true
+
+# ---- HONEST STATE ------------------------------------------------------------------------------
+#  NOTHING HERE HAS BEEN RUN, AND THE ONLY LEGAL VALUE SAYS SO. No paired capture exists on either
+#  side: the legacy half needs a PowerBuilder toolchain that is not present, and both halves of
+#  `characterization/recordings/` hold nothing but their own readmes - so no recording directory for this
+#  identifier exists either. Nothing in this definition may be read as reporting a parity result; every expected
+#  expression above was DERIVED BY READING the constructor statement by statement, not observed.
+#
+#  AND THIS COMPOUNDS WITH THE BLOCKED BEHAVIOUR, WHICH IS THE HONEST WAY TO STATE IT. The pinyin
+#  matcher's four closed inputs can only be characterized FROM the oracle, and the oracle HAS NOT BEEN
+#  EXERCISED - so the characterization that would lift that block has not merely not been applied, it
+#  has NOT BEEN OBTAINED. The two facts are one fact seen twice: the pinyin filter is BLOCKED, and the
+#  single run that could unblock it is the same run this status says has not happened. Reporting the
+#  block as pending an available oracle would overstate the position.
+executionStatus: specified-not-executed
+
+# ---- SIBLINGS ----------------------------------------------------------------------------------
+#  Cross-references only: each pair stays independently comparable under its own identifier. The event
+#  chain owns the ordering contract this service's two events ride on and is cited rather than
+#  re-derived. The column-expression definition is the sibling that carries the store's OTHER declared
+#  gap - cross-session foreign variables, narrowed with a defined error rather than blocked - and the
+#  two dwsvc definitions listed after it are the other two split workflows, whose headless-and-rendering
+#  division follows the same evidence and the same reserved route as this one. The row-select definition
+#  is included because it is the CONTRAST that makes this workflow's split measurable: it ships whole.
+relatedWorkflows:
+  - dataservices-dw-event-chain
+  - dataservices-dwsvc-columnexp
+  - dataservices-dwsvc-contextmenu
+  - dataservices-dwsvc-rowselect

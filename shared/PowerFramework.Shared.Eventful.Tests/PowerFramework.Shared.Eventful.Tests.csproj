@@ -1,0 +1,88 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Unit tests for PowerFramework.Shared.Eventful, the publish/subscribe event broker ported
+    from ws_objects/pfw.utility.invoker.pbl.src/n_cst_eventful.sru (1,328 lines of PowerScript
+    carrying zero `native` declarations, so the port is pure logic with no PBNI substitution).
+    The behavioural oracle for these suites is ws_objects/pfw.tests.pbl.src/w_test_eventful.srw.
+
+    Both legacy objects are READ ONLY specification. Nothing in this project reads the legacy
+    tree at build time or at run time: every expectation lives in C# member data. The root
+    .dockerignore excludes ws_objects/ from the build context, so such a read would fail in a
+    container and in CI even if it happened to work locally.
+
+    Deliberately NOT restated here, because the repository-root Directory.Build.props already
+    supplies all of it by MSBuild directory walk-up:
+      TargetFramework net10.0, LangVersion, Nullable enable, ImplicitUsings enable,
+      TreatWarningsAsErrors true, EnableNETAnalyzers, AnalysisLevel, Deterministic,
+      ManagePackageVersionsCentrally true, and the shared assembly metadata.
+    Restating any of those is the seam through which one project silently diverges from the
+    rest of the tree, so this file sets only what is genuinely local to it. Nullable reference
+    types and warnings as errors therefore apply to these tests exactly as they do to shipping
+    code, and no NoWarn blanket or analyzer suppression is introduced to soften that.
+
+    AssemblyName and RootNamespace are intentionally omitted: the SDK derives both from this
+    file name as PowerFramework.Shared.Eventful.Tests, which is precisely the required value.
+
+    Hand authored on purpose. `dotnet new xunit3` does not exist in the pinned SDK and
+    `dotnet new xunit` scaffolds the xunit v2 line with an older test SDK and coverage
+    package, so neither template may be used to regenerate this file.
+  -->
+
+  <PropertyGroup>
+    <!--
+      REQUIRED by xunit.v3: a v3 test project must be an executable that builds an app host.
+      Its own build logic enforces this, failing the build with
+      "xUnit.net v3 test projects must be executable" when OutputType is anything but Exe.
+      This is the detail most easily mistaken for a mistake by a reader who has only seen
+      xunit v2 projects, which were libraries. Do not remove it.
+    -->
+    <OutputType>Exe</OutputType>
+    <!-- A test project is never shipped as a NuGet package. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!--
+    Every reference below is VERSIONLESS by requirement: central package management is enabled
+    repository wide, so the single source of truth for versions is the root
+    Directory.Packages.props. A Version attribute here is a restore error (NU1008), not a
+    style choice, and it would defeat the mechanism that keeps every project on one version set.
+
+    Microsoft.AspNetCore.Mvc.Testing is deliberately absent. The broker is pure in process
+    logic with no host, no HTTP surface and no endpoint, so there is nothing for a test host to
+    start. That package is pinned centrally but scoped to the four service test projects; it is
+    not part of the shared test project shape. Please do not add it to "complete the set".
+  -->
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <!--
+      Emits coverage.cobertura.xml under TestResults/ when the test run collects
+      "XPlat Code Coverage". That report is the exact artifact the 80 percent line coverage
+      gate is measured from, so this reference is load bearing rather than optional.
+    -->
+    <PackageReference Include="coverlet.collector">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!--
+    Exactly ONE project reference, to the single library under test. This project tests one
+    library and only that library: no reference to PowerFramework.Contracts, to any other
+    shared/PowerFramework.Shared.* project, or to anything under services/.
+
+    In particular there is deliberately NO direct reference to PowerFramework.Shared.Kernel.
+    The library under test already references Kernel, so RetCode, Predicates and
+    ThrowException reach these tests transitively. Adding a second reference would smuggle in
+    coupling that the decomposition does not permit.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="../PowerFramework.Shared.Eventful/PowerFramework.Shared.Eventful.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,131 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!--
+    PowerFramework.Security - the Security service of the PowerFramework .NET 10 decomposition.
+
+      Port        5104
+      Transport   REST + OpenAPI (chosen so that consumers' stock JwtBearer handlers can fetch
+                  /.well-known/jwks.json and the OIDC discovery document with zero bespoke code;
+                  gRPC here would push hand-written JWKS retrieval into three other services)
+      Role        SOLE JWT ISSUER for the whole system. Every other service holds verification
+                  material only and never mints a token.
+      Replaces    the legacy framework's cryptographic library, ten exported objects whose class
+                  surface alone declares 65 public overloads, every one of which is reimplemented
+                  on the Base Class Library - see the package section below. The library to
+                  service assignment is recorded in docs/SERVICE_MAPPING.md.
+
+    Deliberately minimal: this file carries ONLY what is specific to this project.
+
+    Inherited from the repository-root Directory.Build.props and restated nowhere here (a second
+    copy of a single decision is a defect - the two copies diverge):
+      target framework, language version, nullable reference types, implicit usings,
+      warnings-as-errors, the .NET analyzers, central package version management, deterministic
+      build and the shared assembly metadata.
+
+    Inherited from the repository-root Directory.Packages.props:
+      every package version. Central Package Management is in force, so every PackageReference
+      below is VERSIONLESS by requirement, not by omission.
+
+    Conventions relied on rather than restated:
+      * AssemblyName and RootNamespace default from this file's name to PowerFramework.Security,
+        which is the assembly the service Dockerfile's ENTRYPOINT invokes. Do not rename either
+        the file or the directory.
+      * OutputType is not set: the Web SDK already produces an executable. (An explicit Exe is
+        needed only by the sibling xunit.v3 test project, which is a different file.)
+      * appsettings.json and appsettings.Development.json are picked up and copied to the output
+        directory by the Web SDK's default globs, so they need no explicit item here.
+
+    Deliberately absent, each for a stated reason:
+      * No UserSecretsId. The signing secret reaches this service at run time from the
+        orchestration secret layer through the options pattern only; a local secret store must
+        not be implied as a delivery mechanism, and no credential of any kind belongs in a
+        project file, an appsettings file or a container definition.
+      * No container-tooling properties. The service Dockerfile and orchestration/docker-compose.yml
+        own containerization, and they build from a repository-root context.
+      * No GenerateDocumentationFile. With warnings-as-errors it would promote CS1591 across
+        every public member, and nothing requires an XML documentation file: the OpenAPI
+        description text is authored explicitly in the endpoint declarations.
+      * No client-side, static-web-asset, SPA-proxy or Razor/Blazor property or item. Phase 1 is
+        API and service level only: there is no presentation surface, no component library and
+        no theming layer in scope, so no such property or item belongs here.
+      * Nothing from the read-only PowerBuilder legacy tree is compiled, embedded or copied. That
+        tree is the behavioural oracle: it is read as specification, never built.
+  -->
+
+  <ItemGroup Label="Project references - shared libraries only, never another service">
+    <!--
+      The published contract boundary. Carries OpenApi/security.v1.yaml, the authoritative wire
+      document for this service's REST surface, as content so it travels with the build and can
+      be asserted against.
+
+      Note there is deliberately no security protocol-buffer definition and therefore no
+      generated C# type for this surface: the Contracts project's .proto items cover the gRPC
+      services only. Request and response types here are hand-authored beside the endpoints and
+      conform to the YAML by review.
+    -->
+    <ProjectReference Include="../../../shared/PowerFramework.Contracts/PowerFramework.Contracts.csproj" />
+    <!--
+      The ported kernel: the return-code algebra whose values the problem+json bodies carry, the
+      30 CRYPTO_* constants (hash types, cipher types, cipher modes with their ECB default, RSA
+      padding with its PKCS number 1 default, random-string and GUID flags, and the legal RSA key
+      sizes), the tri-state IsSucceeded / IsFailed predicates, and the formatting helpers. The
+      kernel itself declares no package and no project reference, so this edge is pure.
+    -->
+    <ProjectReference Include="../../../shared/PowerFramework.Shared.Kernel/PowerFramework.Shared.Kernel.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Label="Package references - versionless: versions live in Directory.Packages.props">
+    <!-- Generates the OpenAPI document that describes this service's REST surface. -->
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <!--
+      Direct on purpose, and mandatory. The transitive floor is decided by
+      Microsoft.AspNetCore.OpenApi rather than here, and it has already sat inside the range NuGet
+      audit advisory NU1903 covers (high severity, every Microsoft.OpenApi at or below 2.7.4).
+      Advancing to the 3.x line instead breaks the build: the 10.0.x OpenAPI source generator is
+      compiled against the 2.x object model and the generated XML-comment support file then fails
+      to compile with CS0200 on a read-only media-type example property. The centrally pinned
+      2.12.0, the highest published 2.x, is the only value that is non-vulnerable, compatible AND
+      free of the upstream deprecation its lock-stepped YAML reader carries at 2.11.0, and this
+      direct reference is the mechanism that makes that pin win over the transitive one.
+    -->
+    <PackageReference Include="Microsoft.OpenApi" />
+    <!-- Inbound JWT validation, on /v1/ping and on the authenticated cryptographic surface. -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+    <!--
+      Token MINTING. This is the only project in the repository permitted to reference it,
+      because this service is the sole issuer; the other three validate only. Keeping the
+      reference here and nowhere else makes the sole-issuer topology visible in the build graph
+      rather than merely documented.
+    -->
+    <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" />
+    <!--
+      No cryptography package is referenced, deliberately. System.Security.Cryptography in the
+      Base Class Library covers the whole legacy surface this service replaces: RSA key
+      generation, encryption, decryption, signing and verification; keyed and unkeyed hashing
+      over the MD5 and SHA family; DES, Triple DES and AES in ECB, CBC and CFB modes with
+      PKCS-family padding; and cryptographically strong random generation. GUID generation comes
+      from System.Guid. A third-party package would add supply-chain surface without adding a
+      single operation.
+
+      Nothing else belongs here either: no gRPC package, because this service is REST by
+      decision; no HTTP resilience package, because this service has no outbound HTTP edge - its
+      callers reach in, it does not reach out; no interactive OpenAPI UI package, because the
+      document is produced already and a UI is not required; no third-party logging or telemetry
+      package, because the built-in abstractions in the shared framework are the mandated stack;
+      no validation framework; and no health-check package, because health-check registration
+      ships in the Microsoft.AspNetCore.App shared framework.
+    -->
+  </ItemGroup>
+
+  <ItemGroup Label="Test support">
+    <!--
+      Grants the sibling test project access to the internal determinism seams: the randomness
+      provider behind GenRandomBlob, GenRandomString and GenGUID, and the clock behind a token's
+      issued-at and expiry claims. Both are the primary sources of non-determinism for
+      characterization, and reaching them directly is what makes the per-service line-coverage
+      gate attainable on the issuance path without resorting to reflection.
+    -->
+    <InternalsVisibleTo Include="PowerFramework.Security.Tests" />
+  </ItemGroup>
+
+</Project>

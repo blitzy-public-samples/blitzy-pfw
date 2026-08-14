@@ -1,0 +1,93 @@
+<Solution>
+
+  <!--
+    persistence-service.slnx
+
+    The per service solution for the Persistence service of the PowerFramework .NET 10
+    decomposition. Persistence is the ONLY service in the system that generates or executes SQL
+    and the ONLY one that holds a storage provider. It binds ONE TLS endpoint carrying both protocol
+    versions: port 5101 with Http1AndHttp2, serving the anonymous /health and the JWT protected
+    /v1/ping alongside contracts C-05 Query, C-06 Update, C-07 Command and C-08 Transaction over gRPC.
+    5101 is the port AAP 0.3.2.2 assigns, and ALPN negotiates the version per connection. It validates
+    tokens only and never mints one, because Security is the sole issuer in the system.
+
+    WHY THIS FILE EXISTS, AND WHY IT IS NOT BOILERPLATE
+    This file is the mechanism that makes each service restore, build and test independently from
+    a clean checkout. With exactly ONE solution file present in this directory, the documented per
+    service command sequence resolves it automatically, with no extra argument:
+
+        cd services/persistence-service
+        dotnet restore
+        dotnet build -c Release
+        dotnet test, requesting the "XPlat Code Coverage" data collector
+
+    That last line is named rather than spelled because the collector option begins with a double
+    hyphen, which is illegal inside an XML comment and would make this file malformed.
+
+    Solution discovery inspects the CURRENT directory only and never walks up. The repository root
+    PowerFramework.slnx, which enumerates every project in the repository as a whole repo
+    developer convenience, therefore neither supersedes nor interferes with this file. Conversely,
+    adding a second solution file of any name beside this one would destroy that automatic
+    resolution, so this directory holds exactly one.
+
+    EXACTLY TWO PROJECTS, AND WHY THAT SET IS COMPLETE
+    Only this service's own application and test projects are enumerated. The four shared
+    libraries the application consumes, PowerFramework.Contracts, PowerFramework.Shared.Kernel,
+    PowerFramework.Shared.Diagnostics and PowerFramework.Shared.Containers, are reached through
+    the application project's own ProjectReference items. Restore and build follow project
+    references regardless of solution membership, so those four are restored and built here
+    without being listed, and listing them would add nothing.
+
+    It would also do harm. Enumerating projects from shared/ pulls their sibling test projects
+    into this directory's test run, which contaminates the Cobertura report that the 80 percent
+    line coverage gate is measured from, and that gate is evaluated per service precisely so that
+    one service's coverage cannot mask another's.
+
+    No peer service project appears here either. That is what keeps the four services decomposed
+    rather than collapsed into a single build: one combined solution is a failure mode for this
+    refactor, not a cautious default. Nothing appears for any deferred capability area either.
+    Those are represented solely as reserved routes on the Gateway, and a routing declaration is
+    not a project, so there is no entry, no placeholder and no commented out line for any of them.
+
+    NOTHING INHERITED IS RESTATED HERE
+    Target framework, language version, nullable context, implicit usings, warnings as errors and
+    central package management all arrive from the repository root Directory.Build.props by
+    MSBuild directory walk up. Every package version arrives from the repository root
+    Directory.Packages.props. The SDK is pinned by the repository root global.json. This file
+    therefore declares project membership and nothing else: no configuration, no property and no
+    version. Duplicating any of it here is how four services silently drift apart later.
+
+    PROVENANCE: NO LEGACY BUILD DEFINITION IS TRANSLATED
+    The nearest legacy analogue is the PowerBuilder workspace pfw.pbw, which likewise does no more
+    than enumerate its child targets by relative path. Nothing here is translated from the two
+    PowerBuilder project objects under ws_objects/pfw.pbl.src/, because neither is usable:
+    project.srj declares 29 libraries under COM:Appeon and includes pfw.utility.sqlite.pbl, while
+    p_pfw.srj declares 28 under COM:Sybase, Inc., omits that library, and embeds developer
+    workstation absolute paths together with the retired library name pfwUtils.pbl. Both declare
+    pfw.utility.imgcodec.pbl, which does not exist anywhere in the repository, so neither would
+    build as written and both are read as REFERENCE for build INTENT only. The legacy tree is the
+    read only behavioural oracle for parity testing and is never a build input.
+
+    RULES POSITION
+    No user rules were provided for this repository: the rules document contains exactly one line
+    saying so. Nothing is invented or back filled from convention in their place. The binding
+    constraints are the enterprise standard baseline together with the named non rule constraints,
+    and each decision recorded above cites the concern that drives it.
+  -->
+
+  <!--
+    The shippable ASP.NET Core gRPC application. This is the project that carries the four
+    ProjectReference edges into shared/, so it is the path by which every shared library enters
+    this build without appearing in this file.
+  -->
+  <Project Path="PowerFramework.Persistence/PowerFramework.Persistence.csproj" />
+
+  <!--
+    The xunit.v3 test project, and the measured unit for this service's coverage gate: it is the
+    project whose run emits the Cobertura report. It references the application project above and
+    nothing else, which is why the two entries here are sufficient to build and test the service
+    in full.
+  -->
+  <Project Path="PowerFramework.Persistence.Tests/PowerFramework.Persistence.Tests.csproj" />
+
+</Solution>

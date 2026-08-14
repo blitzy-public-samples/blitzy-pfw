@@ -1,0 +1,180 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!--
+    PowerFramework.Gateway - the system's sole ingress and composition root.
+
+    ROLE
+      Gateway is the only service external clients reach. It publishes the REST surface of contract
+      C-09 (/health, /v1/ping, /v1/capabilities and the /v1/datawindow/** projections of C-03 and
+      C-04), re-expresses the legacy framework lifecycle as ASP.NET Core host startup and shutdown,
+      and declares the four reserved Phase 2 extension points as routing metadata. REST rather than
+      gRPC at this boundary is a deliberate per service transport decision: an ingress needs browser
+      and third party reach, HTTP standard caching and proxying, and mature OpenAPI tooling, all of
+      which gRPC-Web would forfeit by requiring a translating proxy.
+
+    LEGACY REFERENCE (read only: never edited, never built, never shipped)
+      The framework's PowerBuilder application object is the composition root reference. Its open
+      event pairs the framework initialize call with the finalize call in its close event, hardcodes
+      the locale to "en", and its system error event unpacks a seven field assert payload before
+      terminating the process. Those behaviours are reproduced by the sources under Composition/,
+      Configuration/ and Diagnostics/, and this manifest exists to give those sources their compile
+      time dependencies.
+
+      Nothing in the read only legacy tree is copied, embedded or globbed by this project: it
+      declares no Content, None or EmbeddedResource item at all, and no path in it points anywhere
+      near that tree. In particular no item brings the repository root localization resource table
+      (pfw.i18n.xml) into the output, because the localization library opens that file by relative
+      filename at run time and its absence is exactly what produces the preserved silent passthrough
+      behaviour. Materialising it would be a behavioural change dressed up as completeness.
+
+      The two legacy PowerBuilder project objects were read as reference for build INTENT only and
+      are deliberately not translated. They disagree with each other on library count (29 versus 28
+      entries) and on vendor, one of them embeds developer workstation absolute paths and a retired
+      library name, and both name an image codec library that exists nowhere in the repository, so
+      neither would build as written. No version, library list or vendor string in this .NET build
+      graph derives from either of them; every version is pinned centrally at the repository root.
+
+    WHAT THIS FILE DELIBERATELY DOES NOT SET
+      TargetFramework, LangVersion, Nullable, ImplicitUsings, TreatWarningsAsErrors,
+      EnableNETAnalyzers, AnalysisLevel and ManagePackageVersionsCentrally all arrive from the
+      repository root Directory.Build.props through MSBuild directory walk up. Restating any of them
+      here would create a second source of truth that could silently drift. OutputType is left at
+      the Web SDK default of Exe; only the sibling test project needs to set it explicitly, and that
+      is a different file. InvariantGlobalization is likewise left unset, because the ported
+      localization surface needs ICU to stay live.
+
+      Every PackageReference below is VERSIONLESS. Central Package Management is enabled at the
+      repository root, so versions live solely in Directory.Packages.props; a Version attribute here
+      would be a build error and would let one service drift off a mandatory security pin.
+  -->
+
+  <PropertyGroup>
+    <AssemblyName>PowerFramework.Gateway</AssemblyName>
+    <RootNamespace>PowerFramework.Gateway</RootNamespace>
+  </PropertyGroup>
+
+  <!--
+    Exactly four project references, and exactly these four.
+
+      PowerFramework.Contracts            The published boundary: the generated gRPC client for
+                                          dataservices.v1 plus the OpenAPI definitions. This is the
+                                          ONLY coupling Gateway has towards another service, and it
+                                          is a contract definition rather than a shared behaviour
+                                          back door.
+      PowerFramework.Shared.Kernel        The return code algebra and Enums, including the eight
+                                          INIT_FLAG_ENABLE_* capability bits that
+                                          Composition/CapabilityFlags.cs projects as configuration.
+      PowerFramework.Shared.Diagnostics   The assert payload, stack trace and caller info types that
+                                          Diagnostics/SystemErrorHandler.cs reproduces.
+      PowerFramework.Shared.Localization  The I18N surface and locale providers behind the preserved
+                                          "en" default in Configuration/GatewayOptions.cs.
+
+    Not referenced, on purpose:
+      * PowerFramework.Shared.Eventful and PowerFramework.Shared.Containers. Gateway consumes
+        neither. The event broker belongs to DataServices, and the ordered map and vector belong to
+        DataServices and Persistence.
+      * Any sibling service project. Gateway must restore, build and test standalone from a clean
+        checkout, so a reference to PowerFramework.DataServices, PowerFramework.Persistence or
+        PowerFramework.Security is never permitted: it would collapse the decomposition this
+        refactor exists to produce. Gateway reaches those services over the network, through the
+        contracts project above.
+      * Anything backing a deferred capability. DesignSystem, Documents, Integration and
+        ScriptBridge have no project and no package anywhere in this build graph. The four reserved
+        routes are route table metadata inside Endpoints/DeferredCapabilityEndpoints.cs, and nothing
+        compiles behind them.
+
+    Paths are relative and rise exactly three levels (PowerFramework.Gateway, then gateway-service,
+    then services) to reach the repository root, which is also the Docker build context of the
+    sibling Dockerfile. No path in this file assumes the build context is this directory.
+  -->
+  <ItemGroup Label="Shared libraries and the published contract boundary">
+    <ProjectReference Include="../../../shared/PowerFramework.Contracts/PowerFramework.Contracts.csproj" />
+    <ProjectReference Include="../../../shared/PowerFramework.Shared.Kernel/PowerFramework.Shared.Kernel.csproj" />
+    <ProjectReference Include="../../../shared/PowerFramework.Shared.Diagnostics/PowerFramework.Shared.Diagnostics.csproj" />
+    <ProjectReference Include="../../../shared/PowerFramework.Shared.Localization/PowerFramework.Shared.Localization.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Label="REST ingress and its OpenAPI document (contract C-09)">
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <!--
+      Microsoft.OpenApi is referenced DIRECTLY and deliberately, even though
+      Microsoft.AspNetCore.OpenApi already pulls it in, because a direct reference is what binds the
+      mandatory 2.12.0 pin held in the repository root Directory.Packages.props.
+
+      Left transitive, the version is whatever Microsoft.AspNetCore.OpenApi names - a floor this
+      repository does not own, and one that has already sat inside the range NuGet audit warning
+      NU1903 covers at high severity (every Microsoft.OpenApi at or below 2.7.4). Moving forward to
+      the 3.x line instead BREAKS the build: the 10.0.x OpenAPI source generator is compiled against
+      the 2.x object model and emits two CS0200 "cannot assign, read only" errors from its own
+      generated XML comment support file. 2.12.0 is the highest published 2.x and the only value
+      that is simultaneously non vulnerable, compatible and free of the upstream deprecation its
+      lock-stepped YAML reader carries at 2.11.0. Do not relax this, and do not add a Version
+      attribute to move it: change the central pin or nothing.
+    -->
+    <PackageReference Include="Microsoft.OpenApi" />
+  </ItemGroup>
+
+  <ItemGroup Label="Inbound JWT validation (/health anonymous; /v1/ping is 401 untokened)">
+    <!--
+      Validation only. Security is the sole token issuer in the system, so the token minting package
+      that Security alone references (see the authentication group in the repository root
+      Directory.Packages.props) is deliberately absent from this project. Gateway holds verification
+      material fetched from Security's published JWKS document and no signing authority of its own,
+      so referencing any minting library here would be a structural contradiction even if no code
+      ever used it.
+
+      Health check registration ships inside the Microsoft.AspNetCore.App shared framework, so
+      /health and Gateway's aggregation of its three upstreams need no package reference at all.
+    -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+  </ItemGroup>
+
+  <ItemGroup Label="gRPC client for DataServices (client side only; Gateway hosts no gRPC service)">
+    <!--
+      Grpc.AspNetCore carries Grpc.AspNetCore.Server.ClientFactory, so the typed clients under
+      Clients/ need no further package. The protocol definitions themselves live in
+      PowerFramework.Contracts, which generates both the client and the server stubs, so this
+      project declares no Protobuf items of its own. The gRPC server reflection package is
+      deliberately absent as well: it is a convenience for command line gRPC tooling rather than a
+      requirement, and Gateway hosts no gRPC service for it to reflect over.
+    -->
+    <PackageReference Include="Grpc.AspNetCore" />
+  </ItemGroup>
+
+  <ItemGroup Label="Resilience on the network edges that decomposition itself creates">
+    <!--
+      This package is required BY the transition rather than layered on top of it, and the reasoning
+      is recorded here so it cannot be mistaken for scope creep against the minimal change clause.
+
+      An in process call cannot fail in transit; a network call can. Gateway's calls to DataServices
+      and Security are edges the legacy framework simply did not have, because PowerFramework was an
+      in process library with no process of its own, no listener and no server tier. Without retry
+      and circuit breaking, the first transient network fault would surface as a defect the legacy
+      could not have had, which is a regression introduced by the refactor rather than a preserved
+      behaviour. No latency, throughput or availability claim is made or implied by its presence:
+      the repository publishes no such budget, so none may be asserted.
+    -->
+    <PackageReference Include="Microsoft.Extensions.Http.Resilience" />
+  </ItemGroup>
+
+  <ItemGroup Label="Test visibility for the internal types this project's composition root declares">
+    <!--
+      ONE ASSEMBLY, NAMED EXACTLY, AND FOR A COVERAGE REASON RATHER THAN A CONVENIENCE ONE.
+      The composition root declares internal types that carry real decisions rather than wiring:
+      InternalTlsTrust decides which certificate authority every outbound internal channel accepts,
+      and Configuration/GatewayOptions.cs declares an internal address validator. Both are branch
+      rich, both are security relevant, and neither can be driven from outside without booting a
+      host - which would leave the per service line coverage gate unreachable for exactly the logic
+      that most needs asserting.
+
+      The alternative was to make those types public, which would publish them on this service's
+      surface for no consumer: nothing outside this assembly composes a Gateway host. Granting one
+      named test assembly visibility is the narrower change.
+
+      The sibling projects for DataServices, Persistence and Security already carry the same item for
+      the same reason, so this brings the four into line rather than introducing a new pattern.
+    -->
+    <InternalsVisibleTo Include="PowerFramework.Gateway.Tests" />
+  </ItemGroup>
+
+</Project>

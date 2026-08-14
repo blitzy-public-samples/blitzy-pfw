@@ -1,0 +1,369 @@
+# ==================================================================================================
+# Docker build-context exclusions — PowerFramework .NET 10 decomposition
+# ==================================================================================================
+#
+# WHY THIS FILE SITS AT THE REPOSITORY ROOT, AND WHY THE BUILD CONTEXT IS THE REPOSITORY ROOT.
+# Read this before changing anything below; the single most likely way to break the container build
+# is to "simplify" the context and then wonder why restore fails.
+#
+#   Each service's container definition lives at services/<service-name>/Dockerfile, but every
+#   service project references the shared libraries and the generated contract stubs under shared/.
+#   A Docker build cannot reach outside its own context, so the context CANNOT be the service
+#   directory — it must be the repository root. orchestration/docker-compose.yml therefore declares
+#
+#       build:
+#         context: ..
+#         dockerfile: services/<service-name>/Dockerfile
+#
+#   and it is THIS root-level .dockerignore that Docker consults. A per-service .dockerignore would
+#   never be read for a root context and would be a confusing dead file; there must be exactly one
+#   of these in the repository.
+#
+# WHY THE EXCLUSIONS BELOW ARE NOT OPTIONAL. Alongside the .NET tree this repository carries the
+# read-only Appeon PowerBuilder 2021 estate that is being decomposed: 39 exported library folders
+# holding 544 objects, 40 compiled root libraries, a frozen PowerBuilder 12.5 target, consolidated
+# redistribution libraries, and seven closed-source Windows native binaries. Measured on this
+# checkout that is roughly 125 MB of the ~130 MB working tree. None of it is a build input for a
+# .NET service and none of it can be a runtime input either — the target is Linux containers and
+# those binaries are Windows PE images. Without this file every one of those bytes is uploaded to
+# the daemon and baked into a layer of all four images for zero benefit.
+#
+# THIS FILE IS ALSO A SECRETS CONTROL. The repository-wide sweep recorded in docs/SECRETS.md found
+# eight in-source credential sites plus three sites embedded in vendored native binaries. Six of the
+# eight in-source sites live in the legacy test, demo and browser-harness regions excluded below, and
+# all three binary sites are among the native libraries excluded below. Keeping those paths out of
+# every build context is a structural, mechanical guarantee rather than a matter of reviewer
+# diligence. No credential value is reproduced anywhere in this file, and none may ever be added to
+# it — refer to docs/SECRETS.md, which records locators, severity and required action without
+# reproducing values.
+#
+# EXCLUSION IS NOT DELETION. Every legacy path named below is the read-only behavioural oracle for
+# parity testing. This file only ever tells Docker not to upload a path. Nothing here deletes, moves,
+# renames or rewrites a legacy file, and no such change may ever be made.
+#
+# PATTERN SEMANTICS, VERIFIED AGAINST A REAL BUILD RATHER THAN ASSUMED. These differ from
+# .gitignore and getting them wrong is silent:
+#   * Patterns are matched against paths relative to the CONTEXT ROOT. A bare `*.pbl` therefore
+#     matches ONLY root-level files, NOT nested ones — which is why every recursive rule below is
+#     spelled `**/`.
+#   * `**/` matches zero or more leading directories, so a single `**/*.pbl` covers the root level
+#     and every depth beneath it. No separate root-level duplicate is needed.
+#   * A trailing-slash directory pattern excludes that directory's entire subtree.
+#   * `!` re-includes, and the LAST matching pattern wins — which is why the deliberate re-inclusion
+#     guards are the final section of this file.
+#   * Excluding the container definition and this file is safe: Docker still sends both to the
+#     builder because it needs them to run the build, while COPY instructions do not pick them up.
+#
+# RELATIONSHIP TO .gitignore. The two files have different jobs: .gitignore governs what is
+# committed, this file governs what is uploaded to the Docker daemon. .gitignore is NOT mirrored
+# here, and this refactor makes no change to it. One trap in particular: .gitignore lists /pack/*,
+# yet pack/ is physically present and tracked in this checkout, so pack/ is excluded explicitly
+# below. Do not assume a git ignore rule keeps anything out of a build context — it does not.
+# Conversely bin/ and obj/ are NOT git-ignored in this repository, so excluding them here is what
+# stops stale host build output from poisoning an in-container restore.
+
+# --------------------------------------------------------------------------------------------------
+# 1. The read-only PowerBuilder legacy tree
+# --------------------------------------------------------------------------------------------------
+# The behavioural oracle. Read as specification by humans and by parity tests on the host; never a
+# build input, never shipped.
+ws_objects/
+oldversion/
+pack/
+
+# Named for completeness. Neither exists in this checkout, but both appear in .gitignore, so a
+# working copy may materialise them and they must not reach a build context if it does.
+packuse/
+bak/
+
+# --------------------------------------------------------------------------------------------------
+# 2. Compiled PowerBuilder artifacts and workspace descriptors, at every depth
+# --------------------------------------------------------------------------------------------------
+# Libraries, dynamic libraries, targets, workspaces and resource manifests. The `**/` form is
+# required: the root holds 40 *.pbl plus *.pbt/*.pbw descriptors, and oldversion/125/ holds three
+# more descriptors that a root-anchored pattern would miss.
+**/*.pbl
+**/*.pbd
+**/*.pbt
+**/*.pbw
+**/*.pbr
+
+# Zero *.pbg files exist anywhere in this repository. The pattern is carried deliberately so the
+# exclusion list matches the read-only boundary exactly as that boundary is stated, and so a future
+# PowerBuilder export that emits library-group files is covered without anyone having to notice.
+**/*.pbg
+
+# Named explicitly for legibility even though **/*.pbr already covers it: the resource manifest that
+# binds the fonts and images under res/.
+res.pbr
+
+# PowerBuilder per-user options and developer scratch objects.
+**/*.usr.opt
+**/pfw.dev.*
+
+# --------------------------------------------------------------------------------------------------
+# 3. Closed-source native binaries
+# --------------------------------------------------------------------------------------------------
+# Seven Windows PE libraries, ~46 MB combined, with no source anywhere in the repository. They are
+# unusable in a Linux container by construction, and three of them are the binary credential sites
+# recorded in docs/SECRETS.md. Named individually so the intent is legible at a glance, then caught
+# again by a recursive glob.
+pfw.dll
+pfwx.dll
+blink.dll
+blinkfast.dll
+sciter.dll
+sqlite3.dll
+sqlite3.cipher.dll
+
+# Belt and braces. Verified safe: the only *.dll files in this repository are the seven above. The
+# .NET build produces its own assemblies INSIDE the container from source, so no host-side *.dll is
+# ever a build input, and excluding them all also stops a stale host-built assembly from being
+# mistaken for a fresh one.
+**/*.dll
+
+# --------------------------------------------------------------------------------------------------
+# 4. Legacy assets, samples and browser-harness fixtures
+# --------------------------------------------------------------------------------------------------
+res/
+samples/
+sciter_control/
+
+# tests/ IS NOT A GREENFIELD DIRECTORY, and this distinction must survive every future edit of this
+# file. The three directories named below are pre-existing read-only legacy browser-harness assets
+# and part of the behavioural oracle; tests/blink/ in particular holds one of the in-source
+# credential sites. tests/e2e/ beside them is new and purely additive, and is excluded separately in
+# section 9 for an entirely different reason. They are listed individually, and never as a blanket
+# `tests/`, so that no reader can mistake this directory for empty or safe to clean.
+tests/blink/
+tests/sciter/
+tests/webview/
+
+# --------------------------------------------------------------------------------------------------
+# 5. Version control and continuous integration metadata
+# --------------------------------------------------------------------------------------------------
+# .git/ is by far the largest single win here and is never a build input. Excluding it does mean
+# source-link style git metadata is unavailable in-container, which is intended: reproducible builds
+# are configured through Directory.Build.props, not by shipping history into a layer.
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# Tooling scratch directory. Never tracked and never a build input, but it does appear in a working
+# tree during automated runs and holds captured screenshots and logs, so a broad COPY would bake it
+# into a layer. Excluded so the context stays identical whether or not it happens to be present.
+blitzy/
+
+# --------------------------------------------------------------------------------------------------
+# 6. Documentation and other non-build content
+# --------------------------------------------------------------------------------------------------
+# docs/ carries the five read-only legacy specifications plus the seven authored .NET documents. All
+# are for humans; no container step consumes any of them.
+docs/
+
+# Root-level markdown only — this pattern is root-anchored, exactly as intended. It covers README.md
+# and the ~50 KB legacy changelog. Nested markdown is deliberately left alone here so that a
+# markdown file which ever becomes a genuine build input (a package readme, for instance) is not
+# swept up invisibly by a rule written today.
+*.md
+
+# LICENSE and NOTICE are DELIBERATELY NOT EXCLUDED. See the re-inclusion guards in section 12 for
+# the reasoning; they are named there rather than here so the decision is impossible to miss.
+
+# --------------------------------------------------------------------------------------------------
+# 7. Orchestration, environment files and credential material
+# --------------------------------------------------------------------------------------------------
+# The whole orchestration directory is excluded. Nothing in it is a build input: the compose manifest
+# is read by Docker Compose from the host filesystem, not from the context — verified against a real
+# `docker compose build` with `context: ..`. Excluding the directory outright is what structurally
+# guarantees that the operator-created orchestration/.env, which holds the one real signing secret in
+# the system, can never enter any build context or image layer. The tracked orchestration/.env.example
+# is covered by the same rule and stays excluded too: it is a template, no image needs it, and its
+# absence removes any chance of it being picked up and read as real configuration.
+orchestration/
+
+# Belt and braces for environment files anywhere in the tree, including any a developer creates
+# locally. Note there is deliberately no `!**/.env.example` re-inclusion: example templates are not
+# needed in an image either.
+**/.env
+**/.env.*
+
+# Belt and braces for key, certificate and keystore material by extension. None of these files
+# exists in the repository today and none ever should; the rules make an accidental future addition
+# non-shipping by default rather than dependent on someone noticing it in review.
+**/*.pem
+**/*.key
+**/*.pfx
+**/*.p12
+**/*.jks
+**/*.keystore
+**/*.crt
+**/*.cer
+**/*.der
+**/id_rsa
+**/id_ecdsa
+**/id_ed25519
+**/*.secret
+**/secrets.json
+
+# --------------------------------------------------------------------------------------------------
+# 8. .NET build output and local tooling state
+# --------------------------------------------------------------------------------------------------
+# Critical, not cosmetic. bin/ and obj/ are NOT git-ignored in this repository, so a host build
+# leaves them in the working tree. Uploading a host obj/ lets a stale project.assets.json and stale
+# nuget.g.props reach the container, where they can defeat or corrupt the in-container restore. The
+# container must always restore from scratch against Directory.Packages.props.
+**/bin/
+**/obj/
+**/out/
+**/artifacts/
+**/publish/
+**/TestResults/
+**/coverage.cobertura.xml
+**/coverage*.xml
+**/coverage*.json
+**/*.coverage
+**/.vs/
+**/.vscode/
+**/.idea/
+**/*.user
+**/*.suo
+**/*.userprefs
+**/.dotnet/
+**/.nuget/
+
+# --------------------------------------------------------------------------------------------------
+# 9. The end-to-end suite
+# --------------------------------------------------------------------------------------------------
+# tests/e2e/ is the new, purely additive Playwright root that verifies cross-service workflows from
+# outside the containers. No service image runs Playwright, so the entire directory — its manifests,
+# its specs, its installed packages and its reports — is build-context noise. This is a separate
+# decision from the read-only legacy harness directories in section 4 and must stay separate.
+tests/e2e/
+
+# Any Node package tree anywhere, in case one is ever created outside tests/e2e/.
+**/node_modules/
+**/.npm/
+**/npm-debug.log*
+**/playwright-report/
+**/blob-report/
+**/test-results/
+**/.playwright/
+**/ms-playwright/
+
+# --------------------------------------------------------------------------------------------------
+# 10. Characterization recordings
+# --------------------------------------------------------------------------------------------------
+# Paired legacy-oracle and target-side capture output, plus the workflow definitions and determinism
+# masks that drive it. Large, environment-specific, and consumed by the parity harness on the host —
+# never by a container build step. If a container step is ever genuinely required to read a workflow
+# definition, re-include that one path here explicitly rather than deleting this rule.
+characterization/
+
+# --------------------------------------------------------------------------------------------------
+# 11. Container definitions, archives, logs and operating-system detritus
+# --------------------------------------------------------------------------------------------------
+# Excluding the container definitions and this file is safe and intended. Docker sends both to the
+# builder regardless because it needs them to run the build; excluding them only stops a broad COPY
+# from baking them into the image. Verified against a real compose build whose Dockerfile was matched
+# by the pattern below and which still built successfully.
+**/Dockerfile*
+**/*.dockerfile
+**/docker-compose*.yml
+**/docker-compose*.yaml
+**/compose*.yml
+**/compose*.yaml
+**/.dockerignore
+
+# Archives. res/ and samples/ hold the repository's only archive files and are already excluded
+# wholesale; these rules stop a future one from being uploaded.
+**/*.zip
+**/*.rar
+**/*.7z
+**/*.tar
+**/*.tar.gz
+**/*.tgz
+
+# Windows scripts, crash dumps, logs and editor backups. None is a build input on Linux.
+**/*.bat
+**/*.cmd
+**/*.dmp
+**/*.log
+**/*.bak
+**/*.tmp
+**/*.swp
+**/*~
+
+# Operating-system metadata.
+**/[Tt]humbs.db
+**/.DS_Store
+**/desktop.ini
+
+# --------------------------------------------------------------------------------------------------
+# 12. Deliberate re-inclusions — the build-critical allowlist
+# --------------------------------------------------------------------------------------------------
+# `!` rules come last because the last matching pattern wins. None of the paths below is matched by
+# any rule above today; each is asserted anyway, as a standing guard, so that a future broadening of
+# a rule in this file cannot silently remove a build input. Every one of these is required for a
+# clean in-container restore and build, and losing any of them is the single most likely way to break
+# this file. If a container build ever fails to restore, suspect an over-broad exclusion above and
+# NARROW it — never respond by weakening central package management.
+#
+# Deliberately NOT re-included in bulk: whole directories such as shared/ or services/. Those trees
+# are already fully included by default, and a blanket `!shared/` would be a standing invitation to
+# re-admit the bin/ and obj/ output that section 8 exists to keep out.
+
+# Solution and repository-wide MSBuild plumbing. Directory.Build.props supplies net10.0, nullable,
+# implicit usings and warnings-as-errors to all twenty projects; Directory.Packages.props is the
+# single source of truth for every package version including the two mandatory security pins;
+# global.json pins the SDK. Without any one of these the in-container build either fails outright or,
+# worse, silently builds under different settings than the host and CI.
+!PowerFramework.slnx
+!Directory.Build.props
+!Directory.Packages.props
+!global.json
+!NuGet.config
+!nuget.config
+
+# The localization resource table. THIS IS A BUILD INPUT, NOT LEGACY BALLAST, and excluding it is a
+# hard build break rather than a size optimisation.
+#
+# The legacy providers load this table by bare relative filename from the process working directory,
+# so the .NET port must place a copy beside the built assembly to reproduce that lookup. The
+# localization projects therefore carry a literal, non-glob Content item that copies this exact path
+# to the output directory. Verified on this toolchain: with the file absent that item fails the build
+# with MSB3030, "could not copy ... because it was not found"; with it present the build reports zero
+# warnings and zero errors and the 6,824-byte table lands in the output directory byte for byte.
+#
+# A second, quieter reason to be careful: the localization fallback is a SILENT PASSTHROUGH — with no
+# provider installed the source text is returned unchanged, never throwing and never logging. So if
+# this file were excluded and the copy item were ever loosened to a glob, localization would fail
+# silently in the container instead of failing loudly. Never exclude this path.
+!pfw.i18n.xml
+
+# Editor and analyzer configuration. This is a build input, not a preference file: it is where the
+# analyzer severity overrides for the deliberately preserved SCREAMING_SNAKE constant identifiers are
+# scoped, because Directory.Build.props sets warnings-as-errors with the .NET analyzers enabled and
+# deliberately declines to suppress anything globally. Keeping it in the context is what makes the
+# in-container build diagnostically identical to the host and CI build, and it costs a few kilobytes.
+#
+# Stated precisely rather than overstated, because the distinction matters to anyone auditing this
+# rule: as the analyzer set stands today the tree still builds clean without this file, so it is not
+# yet load-bearing. It is re-included because it CONFIGURES DIAGNOSTICS, and a context that omits it
+# lets the image build under different severities than the host and CI — the "builds on my machine,
+# fails in the image" class of defect, which appears the moment a severity here is raised or code
+# style enforcement is turned on. Keep it in the context; do not wait for the first failure.
+!.editorconfig
+
+# Attribution material, kept available so a container definition can COPY it into the image.
+#
+# The project is BSD 2-Clause. Its binary-redistribution condition requires that the copyright
+# notice, the list of conditions and the disclaimer be reproduced in the materials provided with the
+# distribution, and a container image is a binary distribution. NOTICE additionally carries the
+# four-condition restatement from the project readme and the eleven upstream attributions the
+# framework depends on. Directory.Build.props already advertises both files in the assembly copyright
+# metadata, so an image that omitted them would be pointing at material it does not carry. They total
+# a few kilobytes; the cost of excluding them is a failed COPY or an unsatisfied licence obligation.
+!LICENSE
+!NOTICE

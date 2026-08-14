@@ -1,0 +1,1695 @@
+# ==================================================================================================
+#  .github/workflows/ci.yml
+#  CONTINUOUS INTEGRATION FOR THE POWERFRAMEWORK .NET 10 DECOMPOSITION
+#
+#  This is the ONLY workflow in the repository, and .github/workflows holds no other file. There is no
+#  second workflow, no reusable or called workflow, no composite action and no committed helper script.
+#  Everything the coverage gate needs is an inline `run:` step below, for exactly that reason.
+# --------------------------------------------------------------------------------------------------
+#
+#  1. WHAT THIS WORKFLOW ASSERTS, AND THE ONLY NUMBER IT IS ALLOWED TO ASSERT
+#
+#  Four in-scope services, each restored, built in Release and tested with coverage collection in its
+#  own directory; a per-service 80 percent line-coverage gate read from that service's own Cobertura
+#  report; then one container image per in-scope service per build. Those four steps are the shape the
+#  Agent Action Plan specifies, and each is a job below.
+#
+#  80 percent line coverage is the ONLY quantitative non-functional requirement in the entire brief.
+#  The repository publishes no service-level agreement, no latency budget, no throughput target and no
+#  availability commitment anywhere, so this file asserts none of those: there is no benchmark step, no
+#  timing assertion and no performance threshold. The `timeout-minutes` values are runaway-job guards,
+#  not performance budgets, and nothing here may be read as one.
+#
+#  2. PER SERVICE, NEVER REPOSITORY-WIDE - CONSTRAINT C-H IS THE DESIGN OF THIS FILE
+#
+#  C-H requires the gate be "evaluated per service rather than repository-wide so that one service's
+#  coverage cannot mask another's". That sentence is the whole design of the `service` job: four
+#  independent matrix legs, four independent Cobertura reports, four independent verdicts, and no
+#  aggregation step anywhere. There is deliberately no repository-wide coverage number computed,
+#  published or gated on in this file, because computing one would invite gating on it - and a
+#  repository aggregate would clear 80 percent while hiding a service with no tests at all, which is
+#  the exact outcome the requirement exists to prevent.
+#
+#  `fail-fast: false` on both matrices is part of that requirement rather than a convenience. With the
+#  default, the first service to fall below the floor cancels its siblings before they measure
+#  anything, so a run reports one failure and three unknowns and a second service below the floor
+#  stays invisible until the first is fixed. That is masking by another route.
+#
+#  3. THE FOUR IN-SCOPE SERVICES, AND ONLY THOSE - CONSTRAINT C-D
+#
+#  gateway-service, dataservices-service, persistence-service, security-service. Each name is
+#  simultaneously a matrix entry, the directory under services/ that holds it, the stem of the single
+#  .slnx in that directory, and the directory in the Dockerfile path. They are used verbatim below.
+#
+#  The four DEFERRED services - DesignSystem, Documents, Integration and ScriptBridge - appear nowhere
+#  in this file: no matrix entry, no job, no step, no image, no artifact, no environment variable and
+#  no secret. They have no project to build and no test to run, and a placeholder leg marked "ready for
+#  a later phase" would be precisely the partial implementation C-D forbids. The reserved port that the
+#  orchestration manifest leaves commented for one of them is likewise absent here: a reserved port is
+#  a comment in that manifest, not a CI concern.
+#
+#  4. THE LEGACY BUILD DEFINITIONS ARE REFERENCE FOR INTENT ONLY, AND NEITHER IS USABLE
+#
+#  This workflow's declared sources are the two PowerBuilder project objects,
+#  ws_objects/pfw.pbl.src/project.srj and ws_objects/pfw.pbl.src/p_pfw.srj. They were read for build
+#  intent and then set aside, because measurement shows neither would build as written:
+#
+#    * They disagree on library count. project.srj declares 29 `PBD:` lines and includes
+#      pfw.utility.sqlite.pbl; p_pfw.srj declares 28 and omits it. The 28 shared lines are otherwise
+#      byte-identical and identically ordered, so one is a stale copy of the other rather than a
+#      variant with a purpose.
+#    * They disagree on vendor. project.srj carries `COM:Appeon` with a matching `DES:`; p_pfw.srj
+#      carries `COM:Sybase, Inc.`. A build system cannot adjudicate that, and neither can this file.
+#    * BOTH end by declaring pfw.utility.imgcodec.pbl, which exists nowhere in the repository - a
+#      full-depth search returns zero matches. Each project object therefore names a library that
+#      cannot be found, which is why "neither would build as written" is a finding and not an opinion.
+#    * p_pfw.srj additionally embeds three developer-workstation absolute paths under a Windows drive
+#      letter, one of them naming a retired library that also exists nowhere in the repository.
+#
+#  Four rulings follow, and all four are binding on this file:
+#
+#    a. NO VERSION SCHEME IS DERIVED. The `1.0.0.1` literals in both project objects are meaningless
+#       here, and independently the repository carries ZERO Git tags across its entire history, so no
+#       release is marked anywhere. Image tags below are therefore derived ONLY from CI-provided
+#       values - the commit SHA, the run number and the ref name. No semantic version is invented, no
+#       version is read out of the legacy tree, and there is no `latest` tag: a moving pointer that
+#       names no CI coordinate is not a CI-provided value, and the orchestration manifest builds its
+#       images locally rather than pulling any tag from a registry, so nothing needs one.
+#    b. NO VENDOR OR COMPANY STRING IS DERIVED. The two project objects contradict each other, and
+#       assembly and product metadata belong to Directory.Build.props, which sets it once from the
+#       root LICENSE. This file sets none and must not.
+#    c. NO `LibList` OR `PBD:` ORDERING ANALOGUE EXISTS. PowerBuilder resolved one flat global
+#       namespace by library-list order; the .slnx format has no equivalent, and the .NET tree uses
+#       explicit namespaces with ProjectReference edges instead. So no ordering semantics carry into
+#       the solution or into this file: the order of the matrix legs below is presentational, the legs
+#       are independent, and nothing may be inferred from their sequence.
+#    d. EVERY PATH HERE IS REPOSITORY-ROOT-RELATIVE AND LINUX-APPROPRIATE. The drive-lettered paths in
+#       p_pfw.srj are the warning: they are why that project object stopped being buildable on any
+#       machine but one. No path in this file is absolute, carries a drive letter, or uses a backslash
+#       separator.
+#
+#  5. TOOLCHAIN FACTS THAT BREAK THE BUILD IF A READER MISSES THEM
+#
+#    * .NET 10 emits the XML `.slnx` solution format. There is no `.slnf` solution FILTER in this
+#      repository and none may be added - because a filter's project list must be kept in exact
+#      agreement with the solution BY HAND and every drift fails hard, not because filters are
+#      broken. An earlier form of this note claimed a filter over a `.slnx` fails with MSB4014 in
+#      all three verbs; that was measured false on the pinned SDK, and docs/BUILD.md section 2
+#      carries the measurement and the code's real trigger. Build
+#      scoping is done by the per-service `.slnx` files, and EXACTLY ONE of them sits in each service
+#      directory - which is what lets the bare `dotnet restore`, `dotnet build` and `dotnet test`
+#      verbs below resolve it with no `-p`, `--project` or `-s` argument, and what makes each service
+#      genuinely buildable and testable on its own from a clean checkout (constraint C-I).
+#    * A BARE `dotnet test` BUILDS DEBUG even immediately after `dotnet build -c Release`. That is a
+#      documented nuance of the toolchain rather than a defect, and Directory.Build.props deliberately
+#      declines to paper over it so the documented per-service command behaves identically everywhere.
+#      Coverage measured against a Debug build is not coverage of the artifact the job just produced,
+#      so every test step below states `-c Release` explicitly.
+#    * TWO PACKAGE PINS IN Directory.Packages.props ARE WHAT MAKE `dotnet restore` WARNING-FREE, and
+#      the restore step below depends on both. Microsoft.OpenApi is pinned to 2.12.0 - the highest
+#      published 2.x - because every version at or below 2.7.4 raises the NU1903 vulnerability
+#      advisory while moving to the current major line breaks compilation inside the SDK's own
+#      generated OpenAPI support, and because its lock-stepped partner Microsoft.OpenApi.YamlReader is
+#      DEPRECATED upstream at 2.11.0 and first clean at 2.12.0; and SQLitePCLRaw.bundle_e_sqlite3 is
+#      pinned to 3.0.5 because the native library the EF Core SQLite provider pulls transitively
+#      raises NU1903 as well. Warnings are errors repository-wide, so an unpinned tree fails restore
+#      outright. The deprecation gate below is what keeps the reader half of that pair honest.
+#      THE RULE THAT FOLLOWS FROM THAT: if this workflow ever needs `NoWarn`, an audit suppression or
+#      a restore-skipping trick to go green, the PINS are wrong and the pins get fixed - never this
+#      file. Nothing here suppresses a warning, and `-warnaserror` is deliberately not passed either,
+#      because TreatWarningsAsErrors already lives in Directory.Build.props and restating it here
+#      would be a second declaration of one policy that could later disagree with the first.
+#    * NO PACKAGE FEED IS ADDED OR CONFIGURED. Every .NET package resolves from nuget.org and the one
+#      npm package from npmjs.org, so no feed credential exists in this project or is needed here.
+#
+#  6. THE CONTAINER BUILD CONTEXT IS THE REPOSITORY ROOT, AND THAT IS STRUCTURAL
+#
+#  Every image below is built with `.` as its context and `-f services/<service>/Dockerfile`. This is
+#  mandatory rather than stylistic: each service project reaches the shared libraries by
+#  ProjectReference, and MSBuild finds global.json, Directory.Build.props and Directory.Packages.props
+#  by walking up to the repository root. A service-directory context can reach none of those, and each
+#  Dockerfile copies all three by root-relative path. The orchestration manifest expresses the same
+#  thing as `context: ..` with `dockerfile: services/<service>/Dockerfile` because it sits one level
+#  down; this workflow runs at the root, so the equivalent is `.`.
+#
+#  The repository-root .dockerignore is what keeps that context honest. It excludes the read-only
+#  legacy tree, every compiled PowerBuilder library, the seven root native binaries, the frozen 12.5
+#  target, the redistribution libraries, the resource and sample trees and the legacy browser harness -
+#  tens of megabytes that no .NET build reads. It doubles as a secrets control, because most of the
+#  repository's in-source hardcoded-credential sites live inside regions it excludes.
+#
+#  7. WHAT IS DELIBERATELY ABSENT FROM THIS FILE
+#
+#    * No repository-wide coverage aggregate. See section 2; its absence is the point of the file.
+#    * No branch or method coverage threshold. C-H names a line-coverage floor and nothing else.
+#    * No secret of this project's own, and no secret literal of any kind. The signing key and every
+#      other credential live in the orchestration secret layer and reach a service through the
+#      options pattern; nothing here starts a service, so nothing here needs any of them. The only
+#      credential used at all is the automatically provisioned GITHUB_TOKEN, for the registry. The
+#      repository's known in-source hardcoded-secret sites are catalogued in docs/SECRETS.md, are
+#      read-only legacy oracle content, and no value from any of them appears here in any form.
+#    * No secret-scanning step. It could only be scoped by exempting the legacy sites it would
+#      otherwise flag on every run, and a scanner that has to be taught to ignore the oracle teaches
+#      readers to ignore the scanner. The catalogue in docs/SECRETS.md is the control instead.
+#    * No `docker compose up`, and no health probing. Bringing the stack up is a deployment check;
+#      asserting it here would claim a verification this workflow does not perform. What it does
+#      perform is BUILDING each image, which is what proves each container definition.
+#    * No step that touches the read-only legacy tree. Nothing here restores, compiles, lints, moves,
+#      cleans or rewrites the exported PowerBuilder sources, any compiled library or target file, or
+#      any root native binary, and no PowerBuilder toolchain is invoked - the .NET tree depends on
+#      none of it. The legacy tree is the behavioural oracle, never a build input.
+#    * No step that writes to the repository. Nothing commits, pushes back, edits a tracked file or
+#      alters .gitignore - which, verified, does not ignore bin, obj or TestResults, so build output
+#      must never reach a commit. All writing is confined to the runner's ephemeral workspace.
+#    * No Playwright or end-to-end job. It needs all four services running and a provisioned client
+#      identity, so it belongs against a deployed stack; its documented install-and-run path lives
+#      with the specs themselves.
+#    * No `continue-on-error` and no swallowed exit code anywhere. Every failure is loud.
+#    * NO TOOL INSTALLATION OF ANY KIND. No `pip install`, no `apt-get install`, no `npm install -g`
+#      and no `dotnet tool install`. Nothing here mutates the runner image, and the only software this
+#      workflow provisions is the .NET SDK, provisioned by a pinned action from the version global.json
+#      already declares. The consequence is that every dependency CI has is a dependency
+#      Directory.Packages.props inventories - see section 9.
+#
+#  8. HONEST LIMITATION, STATED RATHER THAN LEFT TO BE DISCOVERED
+#
+#  This workflow has not run on a GitHub-hosted runner. Rather than leave that as a blanket caveat,
+#  here is exactly which of its parts have been executed and which have only been read.
+#
+#  EXERCISED DIRECTLY, on a real host carrying the pinned SDK, by running these steps' own commands:
+#    * The per-service path for all four services - restore, Release build, coverage-collecting test -
+#      each reporting 0 Warning(s) and 0 Error(s), every test passing, and a coverage.cobertura.xml
+#      produced under a collector-chosen subdirectory that the gate then found by search.
+#    * The coverage gate itself, extracted verbatim from this file and run against all four real
+#      reports plus constructed ones. It passes for all four services and fails correctly when the
+#      floor is raised above a measured rate, when handed an unfiltered report, when handed a report
+#      for the wrong assembly, when handed two reports at once, and when handed none.
+#    * The solution job's whole-tree Release build and every shared and contracts test suite.
+#    * The container build this file performs for ALL FOUR services - `docker build` with the
+#      repository root as the context and each service's own Dockerfile - all four producing an image.
+#    * The restore steps, confirmed to emit no NuGet audit warning at all, which is what makes the
+#      no-suppression rule in section 5 a fact about this build rather than an aspiration.
+#
+#    * The ORCHESTRATED bring-up this workflow itself does not perform - `docker compose up --build -d`
+#      against orchestration/docker-compose.yml - brought all four services to Docker health status
+#      `healthy` in the documented order and answered 200 on all four /health endpoints and 401 on
+#      /v1/ping without a token. That is recorded here because it bears on the container legs below
+#      being meaningful, and it is reported in ONE place with its full detail and its limits:
+#      orchestration/README.md section 10, which is this repository's only execution-status statement.
+#
+#  READ AND REVIEWED BUT NOT EXECUTED: the registry authentication and the image push, and the
+#  behaviour of the checkout, SDK-install and buildx steps on a hosted runner. Those remain the least
+#  proven part of this file, which is why their failure is made loud, why the verdict job inspects
+#  each leg's RESULT rather than trusting `needs`, and why no step assumes an image step succeeded.
+#
+#  9. THE SUPPLY CHAIN OF THIS FILE ITSELF - WHY IT USES NO MARKETPLACE ACTION AT ALL
+#
+#  A security review found that EVERY action this workflow referenced shipped a committed `dist/`
+#  bundle carrying advisory-affected npm dependencies - critical and high advisories across form-data,
+#  tar, minimatch, undici, tmp, lodash and uuid - and that two of those actions ran with
+#  `packages: write` while processing a build context that, on a pull request, is untrusted
+#  (CWE-1104, CWE-494, CWE-1357). Three further problems travelled with it: the first-party actions
+#  were referenced by MUTABLE MAJOR TAG, so the code executed was whatever the tag pointed at rather
+#  than what was reviewed; the schema-validation job installed a Python package with a hashless,
+#  floating transitive graph; and the base images were pinned by TAG, which is a name a registry may
+#  republish, not the content that was reviewed.
+#
+#  THE RESOLUTION IS THE STRUCTURAL ONE RATHER THAN A VERSION BUMP. "Pin a clean revision" cannot be
+#  discharged honestly from inside this repository: nothing here can audit a third party's committed
+#  bundle, and a full-SHA pin of a bundle that still carries the advisory only makes the vulnerable
+#  code reproducible. So every action is gone. Each one is replaced by the pre-installed CLI it wrapped:
+#
+#    * `actions/checkout`      -> `git init` + `git fetch --depth=1 <sha>` + `git checkout FETCH_HEAD`,
+#                                which is what that action performs internally. The credential is
+#                                passed with `git -c` for the single fetch, so - unlike the action -
+#                                it is never written into `.git/config` and never persists on disk.
+#    * `actions/setup-dotnet`  -> the vendor `dotnet-install.sh`, given the version this repository
+#                                already pins in global.json. That script is the same first-party
+#                                channel the action downloads the SDK from, and it verifies the
+#                                archive's published checksum itself.
+#    * `actions/upload-artifact` -> the job summary. There is NO CLI equivalent for the artifact API,
+#                                and this is the one capability genuinely given up rather than
+#                                replaced: the per-package coverage table and the report's own
+#                                measurements are written to the step summary, where a human reads
+#                                them anyway, and the raw Cobertura file stays in the workspace for
+#                                the life of the run. A 14-day artifact retention is worth less than
+#                                removing an action with a critical advisory from every leg.
+#    * the three `docker/*` actions -> `docker login --password-stdin`, `docker buildx create` and
+#                                `docker buildx build`. All three ship with the runner image.
+#
+#  WHAT REPLACED THE THREE UNPINNED THINGS:
+#    * The Python graph is hash-locked. `.github/workflows/requirements/check-jsonschema.txt` names
+#      all fifteen distributions in the closure with `==` and carries the SHA-256 of every file pip may
+#      select, and the install passes `--require-hashes`, which refuses the whole install if any
+#      requirement is unpinned or unhashed.
+#    * The base images are pinned BY DIGEST in all four Dockerfiles, and the `image` job GATES on that
+#      pin still being the digest its tag resolves to. MCR republishes a patch tag when it rebuilds the
+#      OS layer, so drift is the signal that a patched base exists: the leg fails and names the new
+#      digest to adopt. That is the OS-image freshness control, and it is a measurement rather than a
+#      promise.
+#    * Every published image now carries a BuildKit-generated SBOM and a max-mode provenance
+#      attestation, and the leg VERIFIES both are attached after the push rather than assuming the flag
+#      worked. The application dependency graphs are gated too - `dotnet list package --vulnerable
+#      --include-transitive`, `dotnet list package --deprecated --include-transitive` and `npm audit`
+#      all fail the run on any hit. The deprecation gate is the one a green restore cannot substitute
+#      for: NuGet audit raises NU1903 for a published VULNERABILITY only, so a package deprecated by
+#      its author restores silently at every audit level.
+#
+#  WHAT THIS SUPPLY-CHAIN POSTURE DOES NOT DO, stated so nobody reads more into it: it does not run a
+#  CVE scanner against the OS packages inside an image. It pins the base by content, gates on that
+#  content still being current, publishes an SBOM so a scanner OUTSIDE this workflow can do that job
+#  against the exact bits published, and gates the dependency graphs this repository actually declares.
+# ==================================================================================================
+
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  # Manual runs, so the gate can be re-measured without a commit. Nothing here runs on a schedule:
+  # there is no periodic assertion this workflow makes that a push does not.
+  workflow_dispatch:
+
+# Read-only by default, at the floor. The single job that needs more raises it for itself, and only
+# for itself.
+permissions:
+  contents: read
+
+# One in-flight run per ref. A superseded run tells nobody anything useful and holds a runner.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Quieter, faster restores, and no first-run telemetry notice cluttering the log.
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_NOLOGO: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+  # Directory.Build.props switches ContinuousIntegrationBuild on when CI is set, which normalizes the
+  # source paths embedded in every assembly. GitHub Actions sets CI itself; it is restated here so the
+  # behaviour is legible from this file rather than inherited invisibly.
+  CI: 'true'
+  # The single source of truth for the gate. C-H says 80 percent; it is written once, here, and read
+  # by all four service legs so they cannot drift apart.
+  COVERAGE_MINIMUM_LINE_RATE: '0.80'
+
+jobs:
+
+  # ================================================================================================
+  #  THE HYGIENE LEG - the checks that need no toolchain, and the class of drift the .NET legs
+  #  structurally cannot see
+  #
+  #  Not one of the three checks below is about C#, which is why they are a job of their own rather than
+  #  steps bolted onto the solution leg: each runs in seconds, none needs an SDK, and putting them first
+  #  means an obviously malformed tree fails before four service matrices and four image builds spend
+  #  runner minutes on it.
+  #
+  #  1. THE CHARACTERIZATION ROSTER GATE. The fifteen workflow definitions each carry a
+  #     `# yaml-language-server: $schema=./workflow.schema.json` header, and that header is EDITOR-ONLY
+  #     - it makes an IDE underline a mistake and has no effect on anything that runs. So the schema's
+  #     enums, its `additionalProperties: false`, its conditional exemptions, its determinism masks and
+  #     its artifact filename rules do need enforcing by something that actually runs, and that
+  #     something is CharacterizationWorkflowGuardTests in shared/PowerFramework.Contracts.Tests. The
+  #     `solution` job below executes it BY NAME, ahead of the contract suites, precisely so a store
+  #     failure is attributable on the job summary rather than arriving as one red line among several
+  #     hundred.
+  #
+  #     THREE STEPS RUN HERE, IN THIS ORDER, AND EACH DOES SOMETHING THE NEXT CANNOT. The ROSTER is
+  #     asserted with `find` first, because `check-jsonschema` passes VACUOUSLY on an empty file list -
+  #     a glob that matched nothing reports "ok" and proves nothing. Then the SCHEMA is validated
+  #     against all fifteen definitions, from a hash-locked closure installed into a directory. Both
+  #     run on the one leg that has no `needs`, so a malformed definition fails in seconds rather than
+  #     after a restore and a build.
+  #
+  #     AN EXTERNAL VALIDATOR *IS* INSTALLED, AND ITS TWO EARLIER PROBLEMS WERE FIXED RATHER THAN
+  #     TRADED AWAY. The first revision ran `python3 -m pip install --break-system-packages
+  #     'check-jsonschema==0.35.0'`, which MUTATED the runner's system interpreter - the flag says so
+  #     out loud - and pinned one distribution while letting pip resolve fourteen more from whatever
+  #     was current at install time (CWE-1357). Both are addressed at the install step below: the
+  #     closure is `--require-hashes` locked across every transitive requirement, refuses a source
+  #     distribution with `--only-binary :all:`, and is installed `--target` a disposable directory
+  #     reached through PYTHONPATH rather than over the system Python. Its requirements file is the
+  #     inventory for it, and that file states its own scope - Directory.Packages.props governs NuGet
+  #     and has no expression for a pip package, so a second inventory is the honest answer rather than
+  #     a gap.
+  #
+  #     AND IT DOES NOT DUPLICATE THE C# GUARD - the two own different halves. The schema owns
+  #     `additionalProperties: false`, the enums, the conditional exemptions, the required-member sets
+  #     and the artifact filename patterns. The guard owns what no schema validator can express:
+  #     resolving every legacy locator to a real line of a real file, requiring every determinism mask
+  #     to apply to BOTH halves of a pair, checking each workflow's recordings against its declared
+  #     execution status, and failing when the schema grows a member it does not yet cover. An earlier
+  #     revision deleted the invocation on the reasoning that the guard subsumes it; it does not, and
+  #     the deletion left the closure installed and never used, so the job paid for a dependency and
+  #     enforced nothing with it.
+  #
+  #  2. THE WHITESPACE GATE, and the revision it diffs against is the whole point. A bare
+  #     `git diff --check` compares the WORKING TREE with the index and therefore exits 0 on a clean
+  #     checkout no matter what the commits contain, so committed trailing whitespace and a committed
+  #     blank line at EOF both slip through it. Diffing from git's EMPTY TREE to `HEAD` is what makes
+  #     the check see the committed content, because it makes every line of every listed path an
+  #     added line.
+  #
+  #  3. THE TARGET-SCOPE AUDIT, which asserts two invariants rather than a file count and is documented
+  #     in full at its own step below rather than restated here.
+  # ================================================================================================
+  #
+  #  WHY IT IS ITS OWN LEG AND NOT A STEP ON ANOTHER. It needs no SDK, no restore and no cache, so it
+  #  reports in seconds and it reports FIRST - a whitespace diagnostic is worth surfacing before a
+  #  thirty-minute build, not after it. It also has no `needs`, so it still runs when a build leg
+  #  fails.
+  #
+  #  WHY THE EMPTY TREE IS THE BASE. `git diff --check` inspects ADDED lines, so it needs something to
+  #  diff against. Diffing against a base branch would make the gate depend on the event that
+  #  triggered it - a pull request has a merge base, a tag push has none, a first commit on a new
+  #  branch has none either - and a gate that silently checks nothing on some events is worse than no
+  #  gate. `4b825dc6...` is git's well-known EMPTY TREE object, present in every repository without
+  #  being created: diffing from it makes every line of every listed path an added line, so the check
+  #  is over the WHOLE CONTENT and is identical on every event and every checkout depth.
+  #
+  #  WHY THE PATHS ARE ENUMERATED RATHER THAN THE WHOLE REPOSITORY. The legacy tree is the read-only
+  #  behavioural oracle (constraint C-C): ws_objects/**, the root *.pbl / *.pbt / *.pbw / *.pbr /
+  #  *.pbd files, oldversion/125/**, pack/**, res/**, samples/**, sciter_control/** and
+  #  tests/blink|sciter|webview/** are never edited, so flagging whitespace in them would demand
+  #  exactly the edit the constraint forbids. The listed paths are the .NET tree this refactor
+  #  authored, plus the root build files.
+  #
+  #  SIX PATHS ARE HELD OUT, each for the same reason and each recorded here rather than left to be
+  #  inferred:
+  #    * The FIVE pre-existing Chinese documents under docs/ are read-only reference (C-C), so they
+  #      are named as `:(exclude)` pathspecs after `docs` rather than listing the seven authored
+  #      documents individually - that way a document added to docs/ later is checked by default
+  #      instead of being silently unchecked. One of the five does carry trailing whitespace, and it
+  #      stays.
+  #    * README.md is held out by OMISSION - it is simply not among the listed paths, since the root
+  #      is enumerated file by file. It is ONE OF THE TWO UPDATEs in the refactor and its pre-existing
+  #      content is preserved VERBATIM, whitespace included: its first line carries a trailing space.
+  #      A whole-content check would demand editing preserved text to satisfy a style gate, which is
+  #      the wrong trade. The .NET section appended to it is reviewed like any other change.
+  #  Every other listed path is agent-authored in full, which is what makes whole-content the right
+  #  strictness for them.
+  #
+  #  .gitignore IS THE SECOND UPDATE AND IT IS CHECKED, NOT HELD OUT. It gained a committed block
+  #  excluding bin/, obj/, TestResults/ and the npm and Playwright output directories, because those
+  #  were previously excluded only by a per-clone .git/info/exclude that a fresh clone does not carry -
+  #  see docs/BUILD.md 1.6.2 D11. Unlike README.md its pre-existing content is whitespace-clean under
+  #  this exact gate, measured rather than assumed, so listing it costs nothing and closes what would
+  #  otherwise be a target path no gate inspects. That is the direction this banner tells a reader to
+  #  take: add the path, never widen the exclusion list.
+  # ================================================================================================
+  hygiene:
+    name: Characterization roster and source hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # ------------------------------------------------------------------------------------------
+      #  CHECKOUT WITH THE PRE-INSTALLED git CLI, AND NOT WITH actions/checkout
+      #
+      #  Section 9 of the header records why no marketplace action is referenced anywhere in this
+      #  file. These four lines are what that action does internally: initialise an empty repository,
+      #  point it at this run's own repository, fetch exactly the one commit under test at depth 1,
+      #  and check it out detached.
+      #
+      #  THE CREDENTIAL IS SCOPED TO THE SINGLE FETCH. `git -c` sets the header for ONE command only,
+      #  so nothing is written into `.git/config` and nothing survives the step - which is strictly
+      #  tighter than the action, whose persisted credential outlives every later step in the job.
+      #  The token itself is the automatically provisioned, job-scoped, read-only GITHUB_TOKEN; no
+      #  declared secret is used, and no command echoes it.
+      #
+      #  DEPTH 1 IS ENOUGH FOR EVERY GATE IN THIS JOB. The whitespace gate diffs against git's
+      #  well-known EMPTY TREE rather than a base ref, and the scope audit reads `git ls-files`; both
+      #  need the checked-out commit and no history. Fetching by SHA works on every event, including
+      #  a pull request, whose GITHUB_SHA is the merge commit.
+      # ------------------------------------------------------------------------------------------
+      - name: Check out the commit under test with the git CLI
+        env:
+          CHECKOUT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git init --quiet .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "${CHECKOUT_TOKEN}" | base64 -w0)" \
+            fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
+          git checkout --quiet --force FETCH_HEAD
+          test -z "$(git config --local --get-all http.extraheader || true)"
+          echo "checked out ${GITHUB_SHA} at depth 1 with no persisted credential"
+
+      # ------------------------------------------------------------------------------------------
+      #  THE VALIDATOR IS INSTALLED FROM A HASH-LOCKED CLOSURE, NOT FROM A SINGLE PINNED NAME
+      #
+      #  Naming `check-jsonschema==0.35.0` pinned one distribution and let pip resolve fourteen more
+      #  from whatever was current at install time, so the code this job executed was not the code
+      #  anyone reviewed (CWE-1357). `--require-hashes` refuses the ENTIRE install unless every
+      #  requirement - transitive included - is pinned with `==` and carries a matching hash, so the
+      #  lock cannot be half-applied. `--only-binary :all:` additionally refuses to build a source
+      #  distribution, which would run arbitrary setup code from inside this job.
+      #
+      #  INSTALLED INTO A DIRECTORY RATHER THAN OVER THE SYSTEM INTERPRETER. `--break-system-packages`
+      #  wrote into the runner's own Python, where a later step could not tell what it was importing;
+      #  a target directory reached through PYTHONPATH keeps the closure legible and disposable.
+      # ------------------------------------------------------------------------------------------
+      - name: Install the hash-locked schema validator closure
+        run: |
+          set -euo pipefail
+          python3 -m pip install \
+            --require-hashes \
+            --only-binary :all: \
+            --no-warn-script-location \
+            --target "${RUNNER_TEMP}/schema-validator" \
+            --requirement .github/workflows/requirements/check-jsonschema.txt
+          echo "PYTHONPATH=${RUNNER_TEMP}/schema-validator" >> "${GITHUB_ENV}"
+
+      # The roster is asserted BEFORE the schema runs, because `check-jsonschema` passes vacuously on
+      # an empty file list: a glob that matched nothing would report "ok" and prove nothing at all.
+      - name: Assert the expected characterization workflow roster
+        run: |
+          set -euo pipefail
+          expected=15
+          actual=$(find characterization/workflows -maxdepth 1 -name '*.yaml' -type f | wc -l)
+          echo "workflow definitions found: ${actual} (expected ${expected})"
+          if [ "${actual}" -ne "${expected}" ]; then
+            echo "::error::Expected ${expected} characterization workflow definitions under" \
+                 "characterization/workflows/ but found ${actual}. characterization/workflows/README.md" \
+                 "publishes the roster of pairing keys and" \
+                 "shared/PowerFramework.Contracts.Tests/CharacterizationWorkflowGuardTests.cs pins the" \
+                 "same count in ExpectedWorkflowCount; reconcile all three together."
+            exit 1
+          fi
+          test -f characterization/workflows/workflow.schema.json
+
+      # ------------------------------------------------------------------------------------------
+      #  AND THE SCHEMA IS ACTUALLY RUN AGAINST THEM, WHICH IS THE STEP THAT WAS MISSING
+      #
+      #  The closure above was installed and PYTHONPATH was exported, and then nothing invoked the
+      #  validator - so the job carried the cost of a hash-locked dependency and got none of its
+      #  benefit, while three statements in two files described a schema gate that did not run. The
+      #  header for this job says why it belongs HERE rather than only in `solution`: this is the one
+      #  leg with no `needs`, so a malformed definition fails in seconds instead of after a restore
+      #  and a build.
+      #
+      #  IT DOES NOT DUPLICATE THE C# GUARD, AND THE DIVISION IS THE POINT. The schema owns what a
+      #  schema can own and nothing else can: `additionalProperties: false` on every object, the
+      #  enums, the conditional exemptions, the required-member sets and the artifact filename
+      #  patterns. CharacterizationWorkflowGuardTests owns what no schema validator can express -
+      #  resolving every legacy locator to a real line of a real file, requiring each determinism mask
+      #  to apply to BOTH halves of a pair, checking recordings against declared execution status, and
+      #  failing when the schema grows a member it does not cover. Neither is a substitute for the
+      #  other; running only the second was the state this step corrects.
+      #
+      #  REACHED THROUGH THE PYTHONPATH'D CLOSURE via `python3 -m`, never through a `check-jsonschema`
+      #  entry point on PATH: the closure was installed with `--target`, so no console script exists,
+      #  and resolving a bare name from PATH could pick up a different interpreter's copy.
+      # ------------------------------------------------------------------------------------------
+      - name: Validate the characterization workflow definitions against the schema
+        run: |
+          set -euo pipefail
+          python3 -m check_jsonschema \
+            --schemafile characterization/workflows/workflow.schema.json \
+            characterization/workflows/*.yaml
+          echo 'Every characterization workflow definition conforms to workflow.schema.json.'
+
+      # Diffed from git's empty tree to HEAD rather than from the working tree - see this job's header
+      # for why a bare `git diff --check` cannot catch this class at all.
+      - name: Run git diff --check over the .NET target paths
+        env:
+          # git's well-known empty tree. Diffing from it treats every line as added, so the check
+          # covers whole content and does not depend on a base branch existing.
+          EMPTY_TREE: 4b825dc642cb6eb9a060e54bf8d69288fbee4904
+        run: |
+          set -euo pipefail
+
+          if git diff --check "${EMPTY_TREE}" HEAD -- \
+              services \
+              shared \
+              orchestration \
+              characterization \
+              .github \
+              tests/e2e \
+              PowerFramework.slnx \
+              Directory.Build.props \
+              Directory.Packages.props \
+              global.json \
+              .editorconfig \
+              .dockerignore \
+              .gitignore \
+              NOTICE \
+              docs \
+              ':(exclude)docs/README.md' \
+              ':(exclude)docs/Blink交互.md' \
+              ':(exclude)docs/PB多线程绕坑提示.md' \
+              ':(exclude)docs/Sciter交互.md' \
+              ':(exclude)docs/n_cst_dwsvc_columnexp.md' ; then
+            echo 'No trailing whitespace, no blank line at end of file, no missing final newline.'
+          else
+            echo '::error::git diff --check reported a whitespace diagnostic in the .NET target paths.'
+            echo 'Trailing whitespace, a blank line at end of file and a missing final newline are all'
+            echo 'reported above with their file and line. Remove the whitespace; do not widen the'
+            echo 'exclusion list, which exists only for the read-only legacy paths.'
+            exit 1
+          fi
+
+      # ============================================================================================
+      #  THE STRICT-JSON GATE
+      #
+      #  🔴 EVERY COMMITTED JSON ARTIFACT MUST PARSE AS STRICT RFC 8259 JSON, WITH NO CARVE-OUT.
+      #
+      #  The gate exists because comment syntax had been smuggled into six appsettings files against
+      #  each file's own specification - one of them opened with a `//` banner rather than with `{`,
+      #  and 1,009 of its 1,184 lines were comment. RFC 8259 has no comment syntax at all; the .NET
+      #  JSON configuration provider happens to tolerate `//` and `/* */`, and that tolerance is the
+      #  whole trap: the file loads, the service starts, and every OTHER consumer of the same path -
+      #  `jq`, a schema validator, `python3 -m json.tool`, a deployment tool reading a setting - fails
+      #  on it. A tolerated violation is the kind that survives review indefinitely.
+      #
+      #  WHERE THE PROSE WENT, so this gate is not read as a demand to delete documentation. Every
+      #  settings key is annotated on the bound member of its own options type; the logging categories,
+      #  which bind the framework's own LoggerFilterOptions and so have no options type here, are in
+      #  docs/ARCHITECTURE.md 9.9; the type-check flags are in tests/e2e/README.md 9.1.
+      #
+      #  NO EXCEPTION FOR tsconfig.json, AND ITS ABSENCE IS DELIBERATE. TypeScript reads JSONC, so
+      #  comments there are legal - but a gate with one documented exception is a gate the next file
+      #  hides behind, and the choice recorded in tests/e2e/README.md section 9 is a uniform rule over
+      #  a carve-out. Anything genuinely needing comments is not JSON and should not be named .json.
+      # ============================================================================================
+      - name: Assert every committed JSON artifact parses as strict RFC 8259 JSON
+        run: |
+          set -euo pipefail
+
+          # The read-only legacy oracle (C-C) is never edited and is not this gate's subject. It
+          # contains no *.json today; the exclusion is written so that a legacy file appearing later
+          # cannot fail a gate that has no authority over it.
+          legacy='^(ws_objects/|oldversion/|pack/|res/|samples/|sciter_control/|tests/(blink|sciter|webview)/)'
+
+          mapfile -t candidates < <(git ls-files -- '*.json' | grep -Ev "${legacy}" | sort)
+
+          if [ "${#candidates[@]}" -eq 0 ]; then
+            echo '::error::The strict-JSON gate found no committed JSON artifact to check.'
+            echo 'The estate holds settings files, a solution-adjacent global.json and an npm manifest,'
+            echo 'so an empty candidate set means this step stopped measuring rather than that the'
+            echo 'tree is clean.'
+            exit 1
+          fi
+
+          failed=0
+
+          for candidate in "${candidates[@]}"; do
+            if python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' "${candidate}"
+            then
+              printf '  ok      %s\n' "${candidate}"
+            else
+              printf '::error file=%s::%s is not strict RFC 8259 JSON.\n' "${candidate}" "${candidate}"
+              failed=1
+            fi
+          done
+
+          if [ "${failed}" -ne 0 ]; then
+            echo '::error::At least one committed JSON artifact is not strict RFC 8259 JSON.'
+            echo 'The usual cause is comment syntax. JSON has none: move the explanatory note to the'
+            echo 'XML documentation on the options member that binds the key, or to docs/. Do not'
+            echo 'exclude the file from this gate.'
+            exit 1
+          fi
+
+          printf 'All %d committed JSON artifacts parse as strict RFC 8259 JSON.\n' "${#candidates[@]}"
+
+      # ============================================================================================
+      #  THE TARGET-SCOPE AUDIT
+      #
+      #  docs/BUILD.md section 16 is the single MEASUREMENT of the target-file inventory. It measures
+      #  what the tree contains and it does NOT authorize what the tree may contain - scope is
+      #  authorized by the migration plan and by whoever signs off a checkpoint manifest, and section
+      #  16.7 records, as an OPEN item, that the manifest's 338 and the measured total do not yet
+      #  agree. The measurement exists because a count was previously carried in two places that
+      #  disagreed - a manifest declaring 338 targets against a scope containing 520 - which made the
+      #  final file gate unauditable.
+      #
+      #  This step does NOT assert a file COUNT. A count would fail on the next legitimate file and
+      #  would be deleted or bumped without thought, which is how such a divergence arises in the
+      #  first place. It asserts the two INVARIANTS that make the inventory auditable instead:
+      #
+      #    1. No target file lies inside the read-only legacy tree (constraint C-C). Measured, not
+      #       asserted.
+      #    2. Every tracked file outside the legacy tree belongs to one of the inventory's declared
+      #       groups. A new top-level directory nobody added to the inventory shows up here as an
+      #       UNCLASSIFIED path rather than sitting silently outside the documented scope.
+      #
+      #  Both hold whatever the totals become, so this step stays true as the tree grows while still
+      #  catching the thing the finding was about.
+      # ============================================================================================
+      - name: Audit that every tracked file is inside the declared target scope
+        run: |
+          set -euo pipefail
+
+          # The read-only legacy oracle (C-C). Never edited, and never part of the target inventory.
+          legacy='^(ws_objects/|oldversion/|pack/|res/|samples/|sciter_control/|tests/(blink|sciter|webview)/)'
+          legacy_files='^(pfw|pfwx|blink|blinkfast|sciter|sqlite3|sqlite3\.cipher)\.dll$|^pfw\.pack\.pbd$'
+          legacy_proj='\.(pbl|pbt|pbw|pbg|pbr|pbd|sra|srw|sru|srf|srs|srd|srj|srm)$'
+          legacy_root='^(LICENSE|logfile\.md|pfw\.i18n\.xml|\.gitignore|\.gitattributes)$'
+          legacy_docs='^docs/(README|Blink交互|PB多线程绕坑提示|Sciter交互|n_cst_dwsvc_columnexp)\.md$'
+
+          # The declared target groups of docs/BUILD.md section 16.3.
+          groups='^(services/|shared/|orchestration/|characterization/|tests/e2e/|\.github/|docs/|\.config/)'
+          root_targets='^(PowerFramework\.slnx|Directory\.Build\.props|Directory\.Packages\.props|global\.json|\.editorconfig|\.dockerignore|NOTICE|README\.md)$'
+
+          # core.quotePath=false is REQUIRED, not cosmetic: by default `git ls-files` renders a
+          # non-ASCII path as a quoted, backslash-escaped string, so the three Chinese document names
+          # under docs/ arrive as "docs/\344..." - beginning with a quote character - and match none of
+          # the patterns below. Without this the audit reports those three read-only legacy files as
+          # scope creep, which was observed rather than theorised.
+          unclassified=$(git -c core.quotePath=false ls-files \
+            | grep -Ev "${legacy}" \
+            | grep -Ev "${legacy_files}" \
+            | grep -Ev "${legacy_proj}" \
+            | grep -Ev "${legacy_root}" \
+            | grep -Ev "${legacy_docs}" \
+            | grep -Ev "${groups}" \
+            | grep -Ev "${root_targets}" || true)
+
+          if [ -n "${unclassified}" ]; then
+            echo '::error::Tracked files sit outside every group declared by docs/BUILD.md section 16.3.'
+            echo 'Either they are scope creep and should be removed, or they are required and must be'
+            echo 'added to the inventory AND to this audit. Do not simply widen the pattern.'
+            echo "${unclassified}"
+            exit 1
+          fi
+
+          echo 'Every tracked file is either the read-only legacy oracle or a declared target.'
+
+      # ============================================================================================
+      #  THE npm VULNERABILITY POLICY GATE, FOR THE ONE npm GRAPH THIS REPOSITORY DECLARES
+      #
+      #  tests/e2e is the only npm project here, and it carries a committed package-lock.json. This
+      #  gate audits that lock and fails on ANY advisory at any severity - `--audit-level=low` - because
+      #  the enterprise baseline this refactor applies asks for a clean audit rather than a triaged one.
+      #
+      #  `--package-lock-only` AND `--ignore-scripts` TOGETHER ARE WHAT MAKE IT SAFE TO RUN IN THE
+      #  HYGIENE LEG. Nothing is installed, so no package lifecycle script executes in a job that has
+      #  the repository checked out; the audit is computed from the committed lock alone. That also
+      #  keeps this leg toolchain-free, which is the job's whole premise.
+      # ============================================================================================
+      - name: Gate the committed npm lock on vulnerability advisories
+        working-directory: tests/e2e
+        run: |
+          set -euo pipefail
+
+          npm audit --package-lock-only --ignore-scripts --audit-level=low
+
+          echo 'The committed tests/e2e lock carries no advisory at any severity.'
+
+  # ================================================================================================
+  #  THE SOLUTION LEG - the whole tree, and the shared test projects the per-service gate does not
+  #  measure
+  #
+  #  The per-service gate deliberately measures ONLY the four service assemblies (see the `service`
+  #  job), so the six shared libraries and the published contracts project fall outside it. They are
+  #  not thereby unchecked: this job builds every project in the repository solution and runs the
+  #  shared and contracts test suites, which no per-service .slnx enumerates.
+  #
+  #  It does NOT replace the per-service legs and its coverage substitutes for none of theirs. C-I
+  #  requires each service be provably buildable and testable ON ITS OWN from a clean checkout, and a
+  #  root build proves the opposite of that - it proves the tree builds when everything is present.
+  #  Holding a service's coverage number hostage to a shared library's would also be the masking C-H
+  #  forbids, in the other direction; leaving those projects unbuilt and untested would be worse than
+  #  either.
+  # ================================================================================================
+  solution:
+    name: Solution build and shared library tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # The git-CLI checkout, for the reason recorded in section 9 of the header and in full on the
+      # `hygiene` job's own checkout step. Depth 1 is enough: the whitespace gate diffs against the
+      # empty tree and the guards read the checked-out tree, never history.
+      - name: Check out the commit under test with the git CLI
+        env:
+          CHECKOUT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git init --quiet .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "${CHECKOUT_TOKEN}" | base64 -w0)" \
+            fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
+          git checkout --quiet --force FETCH_HEAD
+          test -z "$(git config --local --get-all http.extraheader || true)"
+          echo "checked out ${GITHUB_SHA} at depth 1 with no persisted credential"
+
+      # ------------------------------------------------------------------------------------------
+      #  WHITESPACE HYGIENE, GATED FIRST BECAUSE IT COSTS SECONDS AND NEEDS NO TOOLCHAIN
+      #
+      #  `git diff --check` is the gate, and the interesting part is WHAT IT IS ASKED TO DIFF. A bare
+      #  `git diff --check` compares the working tree against the index, which on a fresh checkout is
+      #  empty by construction and therefore passes unconditionally - a gate that can never fail. A
+      #  diff against a base ref would work on a pull request and say nothing on a push, and would
+      #  need the base fetched.
+      #
+      #  So the diff is taken against the EMPTY TREE, whose object name is the fixed, well-known
+      #  SHA-1 computed below with `git hash-object -t tree /dev/null`. Every tracked line then reads
+      #  as an addition, so `--check` audits the WHOLE owned tree on every event - push, pull request
+      #  and manual run alike - rather than only the lines a particular comparison happens to cover.
+      #  It needs no history beyond the checked-out commit, so the default shallow checkout is enough.
+      #
+      #  THE PATHSPEC IS THE OTHER HALF, AND IT IS A CONSTRAINT RATHER THAN A CONVENIENCE. C-C makes
+      #  the legacy tree read-only and the behavioural oracle: `ws_objects/**` carries 2,846 whitespace
+      #  errors, the legacy browser assets under `tests/blink|sciter|webview` carry 295 and the Sciter
+      #  samples 141. Every one of them is preserved deliberately, so a gate that included them could
+      #  only ever be satisfied by editing files this refactor is forbidden to touch. The pathspec
+      #  therefore names exactly what this refactor OWNS and authored, and `tests/e2e` is listed
+      #  explicitly so that including `tests/` at all cannot pull the three read-only sibling
+      #  directories in with it.
+      #
+      #  README.md IS EXCLUDED, AND THE REASON IS THE SAME CONSTRAINT. It is one of the two pre-existing
+      #  files this refactor updates, and its first line - the legacy heading - carries a trailing space that
+      #  predates this work. The .NET section is appended; the BSD-2-Clause text, its four-condition
+      #  Chinese restatement and the surrounding legacy prose are preserved VERBATIM, which forbids
+      #  reformatting that line. An exclusion that is stated is honest; silently rewriting preserved
+      #  legacy text to satisfy a lint gate would be the behaviour change C-B rules out.
+      #
+      #  .gitignore, THE OTHER UPDATE, IS LISTED RATHER THAN EXCLUDED. Its pre-existing content carries
+      #  no whitespace defect under this gate - measured, not assumed - so the reason README.md is held
+      #  out does not apply to it, and the committed bin/obj block appended to it (docs/BUILD.md 1.6.2
+      #  D11) is agent-authored like every other listed path.
+      # ------------------------------------------------------------------------------------------
+      - name: Whitespace hygiene gate over the owned tree
+        run: |
+          set -euo pipefail
+
+          empty_tree="$(git hash-object -t tree /dev/null)"
+
+          if ! git diff --check "${empty_tree}" HEAD -- \
+            '.dockerignore' \
+            '.editorconfig' \
+            '.github/**' \
+            '.gitignore' \
+            'Directory.Build.props' \
+            'Directory.Packages.props' \
+            'NOTICE' \
+            'PowerFramework.slnx' \
+            'characterization/**' \
+            'docs/ARCHITECTURE.md' \
+            'docs/BUILD.md' \
+            'docs/CONTRACTS.md' \
+            'docs/DEFERRED.md' \
+            'docs/PARITY.md' \
+            'docs/SECRETS.md' \
+            'docs/SERVICE_MAPPING.md' \
+            'global.json' \
+            'orchestration/**' \
+            'services/**' \
+            'shared/**' \
+            'tests/e2e/**' ; then
+            echo '::error::Whitespace defects were found in files this refactor owns. Trailing whitespace, a blank line at end of file, or a space before a tab in an indent. Fix the reported lines; do not widen the exclusion list, and do not edit the read-only legacy tree to satisfy this gate.'
+            exit 1
+          fi
+
+          echo 'No trailing whitespace, end-of-file blank line or space-before-tab defect in the owned tree.'
+
+      # ------------------------------------------------------------------------------------------
+      #  THE SDK IS INSTALLED BY THE VENDOR SCRIPT, NOT BY actions/setup-dotnet
+      #
+      #  Section 9 of the header records why. The version is READ FROM global.json rather than
+      #  restated, exactly as the action's `global-json-file` input did, so the SDK version cannot
+      #  drift from the pin the repository already declares and no version literal appears in this
+      #  file. `dotnet-install.sh` is the same first-party channel the action itself downloads from,
+      #  and it validates the archive against its published checksum before extracting.
+      #
+      #  INSTALLED BESIDE THE WORKSPACE, NOT OVER THE RUNNER'S PRE-INSTALLED SDKs. RUNNER_TEMP is
+      #  ephemeral and per-job, so nothing in the runner image is mutated and the version on PATH is
+      #  unambiguously the pinned one. DOTNET_ROOT is exported for the same reason.
+      # ------------------------------------------------------------------------------------------
+      - name: Install the pinned .NET SDK with the vendor install script
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json; print(json.load(open("global.json"))["sdk"]["version"])')"
+          echo "global.json pins SDK ${version}"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            --output "${RUNNER_TEMP}/dotnet-install.sh" \
+            https://dot.net/v1/dotnet-install.sh
+          bash "${RUNNER_TEMP}/dotnet-install.sh" \
+            --version "${version}" \
+            --install-dir "${RUNNER_TEMP}/dotnet" \
+            --no-path
+          echo "${RUNNER_TEMP}/dotnet" >> "${GITHUB_PATH}"
+          echo "DOTNET_ROOT=${RUNNER_TEMP}/dotnet" >> "${GITHUB_ENV}"
+
+      # This is the audit gate. Warnings are errors repository-wide, so an advisory against any
+      # resolved package fails HERE - which is the behaviour the two pins recorded in section 5 of the
+      # header exist to keep clean. Nothing downstream suppresses it.
+      - name: Restore the repository solution
+        run: dotnet restore PowerFramework.slnx
+
+      # The bare verb, with no restore-skipping or warning-suppressing argument of any kind. The
+      # restore above already had to be warning-clean for the job to reach here, and repeating it is
+      # cheap; a `--no-restore` here would be an argument outside the documented command shape for no
+      # gain. Directory.Build.props also carries a build assertion that fails if any referenced project
+      # output arrives from a configuration other than the one being built, so this step additionally
+      # proves no Release artifact consumes a Debug assembly.
+      - name: Build the repository solution in Release
+        run: dotnet build PowerFramework.slnx -c Release
+
+      # ------------------------------------------------------------------------------------------
+      #  THE TWO DISCOVERY-ARTIFACT GATES, RUN FIRST AND NAMED SEPARATELY
+      #
+      #  WHAT THEY GUARD. Two of this refactor's deliverables are documents that describe the estate
+      #  rather than code that runs against it: docs/SERVICE_MAPPING.md, which is the AAP G8
+      #  full-estate mapping of all 544 objects and the artifact the environment's STEP 0 gate names,
+      #  and characterization/workflows/, which carries the fifteen golden-master definitions and the
+      #  JSON Schema they are written against. Both had nothing checking them. A document that asserts
+      #  its own completeness cannot notice an object appearing under ws_objects/**, a ledger row
+      #  losing its destination, a subtotal drifting away from the rows it summarises, a determinism
+      #  mask applied to only one half of a pair, or a locator citing a legacy line that no longer
+      #  exists - and every one of those leaves a deliverable describing an estate this repository no
+      #  longer has.
+      #
+      #  WHY A SEPARATE STEP RATHER THAN LEAVING IT TO THE STEP BELOW. Both guards live in
+      #  PowerFramework.Contracts.Tests, so the step below already executes them - but a failure there
+      #  arrives inside a run of several hundred contract assertions, where "the mapping no longer
+      #  matches the filesystem" reads as one red line among many. Run first and named for what they
+      #  are, a failure is attributable on the job summary before any contract test has been
+      #  considered, and the ordering means the cheapest, most structural check reports first. The
+      #  duplication costs well under a second.
+      #
+      #  IT NEEDS THE LEGACY TREE, WHICH THE DEFAULT CHECKOUT ALREADY PROVIDES. Both guards read
+      #  ws_objects/** - the mapping guard to inventory it, the characterization guard to resolve
+      #  every locator's file and line bounds. Nothing here is LFS-backed and nothing needs history
+      #  beyond the checked-out commit, so no fetch-depth or LFS option is required. Both guards read
+      #  and never write: C-C makes that tree read-only and reading is what an oracle is for.
+      # ------------------------------------------------------------------------------------------
+      - name: Full-estate mapping and characterization store guards
+        run: |
+          set -euo pipefail
+          dotnet test shared/PowerFramework.Contracts.Tests -c Release \
+            --filter "FullyQualifiedName~FullEstateMappingCompletenessTests|FullyQualifiedName~CharacterizationWorkflowGuardTests"
+
+      # ------------------------------------------------------------------------------------------
+      #  THE DEPENDENCY VULNERABILITY POLICY GATE
+      #
+      #  The restore above already fails on an advisory, because NuGet audit raises NU1903 and warnings
+      #  are errors repository-wide. That is the control; this step is what makes it AUDITABLE. It lists
+      #  every vulnerable package the resolved graph carries - direct and transitive - and fails if the
+      #  list is non-empty, so the run states the finding in its own words rather than leaving a reader
+      #  to infer it from an MSBuild warning code. The two belt-and-braces halves cannot disagree: if
+      #  this step ever reports something the restore did not, the audit configuration is wrong and
+      #  gets fixed rather than this step being relaxed.
+      #
+      #  `--include-transitive` is the whole point. The two mandatory pins in Directory.Packages.props
+      #  exist because TRANSITIVE packages carried the advisories; a direct-only listing would have
+      #  reported nothing on the tree that needed them.
+      # ------------------------------------------------------------------------------------------
+      - name: Gate the resolved NuGet graph on vulnerability advisories
+        run: |
+          set -euo pipefail
+
+          dotnet list PowerFramework.slnx package --vulnerable --include-transitive \
+            > "${RUNNER_TEMP}/vulnerable-packages.txt" 2>&1
+
+          cat "${RUNNER_TEMP}/vulnerable-packages.txt"
+
+          if grep -qiE '(^| )> ' "${RUNNER_TEMP}/vulnerable-packages.txt"; then
+            echo '::error::The resolved NuGet graph carries at least one package with a published' \
+                 'vulnerability advisory, listed above. Pin the affected package in' \
+                 'Directory.Packages.props - never suppress the advisory, and never add NoWarn.'
+            exit 1
+          fi
+
+          echo 'No package in the resolved graph carries a published vulnerability advisory.'
+
+      # ------------------------------------------------------------------------------------------
+      #  THE DEPENDENCY DEPRECATION POLICY GATE
+      #
+      #  A DEPRECATION IS NOT AN ADVISORY, WHICH IS WHY THE GATE ABOVE CANNOT SEE IT. NuGet audit
+      #  raises NU1903 for a published VULNERABILITY only; a package the author has marked deprecated -
+      #  for Legacy, CriticalBugs or Other - restores silently and warning-free at any audit level. So a
+      #  reader of a green restore learned nothing at all about deprecation, and the estate carried a
+      #  package deprecated for CriticalBugs while every other supply-chain control reported clean.
+      #
+      #  IT FAILS THE RUN RATHER THAN WARNING, and the two arguments for that are the same two the
+      #  vulnerability gate makes. A deprecation names a version the author has withdrawn support for,
+      #  and the remediation is a version move recorded in Directory.Packages.props - the same one place
+      #  every other version decision lives. And a gate that only warns is a gate nobody reads.
+      #
+      #  `--include-transitive` for the same reason as above: the deprecation this gate was added for
+      #  was on a DIRECT reference, but nothing makes the next one direct, and a direct-only listing
+      #  would report a clean graph while a transitive package carried the mark.
+      #
+      #  WHEN A DEPRECATION GENUINELY CANNOT BE CLEARED - the alternate the author recommends breaks the
+      #  build, as Microsoft.OpenApi.YamlReader's [3.10.0, ) does - the answer is NOT to relax this
+      #  step. It is to move to the highest version that is not deprecated on the compatible line and to
+      #  record why in the pin's own comment, which is what Directory.Packages.props does for that pair.
+      # ------------------------------------------------------------------------------------------
+      - name: Gate the resolved NuGet graph on upstream deprecations
+        run: |
+          set -euo pipefail
+
+          dotnet list PowerFramework.slnx package --deprecated --include-transitive \
+            > "${RUNNER_TEMP}/deprecated-packages.txt" 2>&1
+
+          cat "${RUNNER_TEMP}/deprecated-packages.txt"
+
+          if grep -qiE '(^| )> ' "${RUNNER_TEMP}/deprecated-packages.txt"; then
+            echo '::error::The resolved NuGet graph carries at least one package the author has' \
+                 'deprecated, listed above. Move the central pin in Directory.Packages.props to a' \
+                 'version that is not deprecated and record the reason in its comment - never relax' \
+                 'this gate, and never suppress the listing.'
+            exit 1
+          fi
+
+          echo 'No package in the resolved graph carries an upstream deprecation.'
+
+      # Named individually rather than discovered, so a project silently dropped from the solution
+      # cannot silently stop being tested. `-c Release` is stated because a bare `dotnet test` builds
+      # Debug even immediately after a Release build; no build-skipping argument is passed, so each
+      # project is proved to build and test from the documented command shape alone.
+      - name: Test the shared libraries, the published contracts and the capture driver
+        run: |
+          set -euo pipefail
+          for project in \
+            shared/PowerFramework.Shared.Kernel.Tests \
+            shared/PowerFramework.Shared.Diagnostics.Tests \
+            shared/PowerFramework.Shared.Eventful.Tests \
+            shared/PowerFramework.Shared.Localization.Tests \
+            shared/PowerFramework.Shared.Containers.Tests \
+            shared/PowerFramework.Contracts.Tests \
+            characterization/tools/PowerFramework.Characterization.Capture.Tests ; do
+            echo "::group::${project}"
+            dotnet test "${project}" -c Release
+            echo "::endgroup::"
+          done
+
+      # ------------------------------------------------------------------------------------------
+      #  THE PAIR-STATE REPORT, RUN AS A GATE.
+      #
+      #  Needs no service, no plan and no credential: it reads the store off disk, establishes which
+      #  half of each pair exists, and exits non-zero when a workflow holds EXACTLY ONE half. That is
+      #  the one state a reader could mistake for a comparison - characterization/README.md section
+      #  3.2 states that a recording whose identifier does not exist on the other side is not a
+      #  partial comparison but no comparison at all, and must not be reported as a pass.
+      #
+      #  A workflow with NEITHER half is not a failure. It is exactly what its declared
+      #  executionStatus says it is, and this gate says so out loud rather than treating an honest
+      #  gap as a defect. The report is printed either way, so the store's real state is visible in
+      #  every build log rather than having to be asked for.
+      # ------------------------------------------------------------------------------------------
+      - name: Report and gate the characterization pair state
+        run: |
+          set -euo pipefail
+
+          dotnet run --project characterization/tools/PowerFramework.Characterization.Capture \
+            -c Release --no-launch-profile -- --pair-state
+
+      # ------------------------------------------------------------------------------------------
+      #  THE DOCUMENTED MIGRATION COMMAND IS EXECUTED, NOT MERELY DOCUMENTED.
+      #
+      #  docs/BUILD.md section 5.6 and orchestration/README.md section 3.4.1 both publish a
+      #  `dotnet ef database update` command as the manual provisioning route. `dotnet ef` is NOT part
+      #  of the SDK - it is a NuGet tool - so before .config/dotnet-tools.json existed neither command
+      #  could be run from a clean checkout at all: `dotnet ef` answered "Could not execute because the
+      #  specified command or file was not found", and a reader had to discover both that a tool
+      #  install was needed and which version to install.
+      #
+      #  This step is what turns that documentation into a claim the build proves. It restores the
+      #  pinned tool, asserts the pin EQUALS the EF Core package pin in Directory.Packages.props - the
+      #  tool and the runtime it generates migrations for must not drift, and a globally installed tool
+      #  is exactly how they do - and then runs the published command verbatim against a throwaway
+      #  database under RUNNER_TEMP.
+      #
+      #  NOTHING PERSISTENT IS TOUCHED. The connection names a file under RUNNER_TEMP, never a volume
+      #  and never a path any characterization capture reads, so this step cannot violate the
+      #  same-volume capture rule. The command is additive and idempotent by construction - it is
+      #  Database.Migrate and nothing else - and it is run TWICE here precisely to prove that: the
+      #  second run must report that the database is already up to date.
+      # ------------------------------------------------------------------------------------------
+      - name: Restore the pinned tool and execute the documented migration command
+        run: |
+          set -euo pipefail
+
+          dotnet tool restore
+
+          tool=$(python3 -c "import json;print(json.load(open('.config/dotnet-tools.json'))['tools']['dotnet-ef']['version'])")
+          packages=$(grep -oP 'Include="Microsoft\.EntityFrameworkCore\.[A-Za-z.]+" Version="\K[^"]+' \
+            Directory.Packages.props | sort -u | tr '\n' ' ')
+
+          echo "dotnet-ef manifest pin : ${tool}"
+          echo "EF Core package pins   : ${packages}"
+
+          if [ "${packages}" != "${tool} " ]; then
+            echo "::error::The dotnet-ef tool pin in .config/dotnet-tools.json (${tool}) does not equal" \
+                 "the single EF Core package version in Directory.Packages.props (${packages}). The tool" \
+                 "and the runtime it generates migrations for must move together; reconcile both files."
+            exit 1
+          fi
+
+          dotnet ef --version
+
+          cd services/persistence-service/PowerFramework.Persistence
+          dotnet build -c Release
+          dotnet ef database update --no-build --configuration Release \
+            -c PowerFrameworkDbContext \
+            --connection "Data Source=${RUNNER_TEMP}/migration-check.db"
+
+          dotnet ef database update --no-build --configuration Release \
+            -c PowerFrameworkDbContext \
+            --connection "Data Source=${RUNNER_TEMP}/migration-check.db" \
+            | tee "${RUNNER_TEMP}/migration-rerun.txt"
+
+          if ! grep -q 'already up to date' "${RUNNER_TEMP}/migration-rerun.txt"; then
+            echo "::error::Re-running the documented migration command did not report the database as" \
+                 "already up to date, so the idempotence docs/BUILD.md section 5.6 claims - and that the" \
+                 "startup provisioning path relies on - does not hold."
+            exit 1
+          fi
+
+  # ================================================================================================
+  #  THE PER-SERVICE LEG - four independent builds, four independent coverage gates
+  #
+  #  Each leg runs the documented per-service command shape, which the attached environment's setup
+  #  instructions make a binding operational constraint (C-L) and which must keep working with no
+  #  extra argument: change into the service directory, restore, build in Release, test with the
+  #  coverage collector. Exactly one .slnx sits in each service directory, which is what lets those
+  #  bare verbs resolve it with no `-p`, `--project` or `-s`, and is what makes each service genuinely
+  #  buildable and testable on its own (C-I).
+  #
+  #  THE LEG ORDER BELOW CARRIES NO MEANING. The legs are independent and run concurrently; ruling (c)
+  #  in section 4 of the header applies - there is no library-list ordering analogue to preserve, so
+  #  nothing may be inferred from the sequence.
+  #
+  #  COVERAGE MEASUREMENT SCOPE, DECIDED ONCE AND IDENTICAL ACROSS ALL FOUR LEGS: the gate measures
+  #  THE SERVICE'S OWN ASSEMBLY, selected from the report, and not the whole report as produced. The
+  #  selection is expressed INLINE, in the gate step below: the collector runs unconfigured, the report
+  #  it produces carries one Cobertura `package` per instrumented assembly, and the gate reads the
+  #  package whose name is this leg's assembly. No settings file exists anywhere in this repository and
+  #  none may be added - a `.runsettings` would be a second file governing this workflow's behaviour
+  #  from outside it, which is exactly what "everything the gate needs is an inline step" rules out.
+  #  The gate prints every other package's rate alongside, so the numbers it did NOT gate on stay
+  #  visible rather than being silently discarded by a collection-time filter.
+  #
+  #  WHY THAT SCOPE AND NOT THE WHOLE REPORT. Each per-service .slnx lists only the application and its
+  #  test project, but the shared libraries and the generated protocol stubs arrive transitively by
+  #  ProjectReference, so the collector instruments those too. Measured, not reasoned about: read on its
+  #  own package every one of the four services sits comfortably above the floor, while the SAME
+  #  gateway-service run read at the report's top level reports several packages and a rate in the
+  #  twenties - because the extra packages are shared and generated code that no gateway test exercises
+  #  and that the lowest of them covers under 3 percent of. A top-level gate would therefore fail all
+  #  four services over code none of them owns, while saying nothing at all about the code they do own.
+  #  Those other projects are not left unchecked: the `solution` job above builds and tests every one.
+  #
+  #  Whichever way the scope is drawn, the gate stays PER SERVICE: it is computed from one service's
+  #  own run and never aggregated with another's.
+  # ================================================================================================
+  service:
+    name: ${{ matrix.service }} build, test and coverage gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    strategy:
+      # Never cancel a sibling leg. See section 2 of the header: cancelling turns three verdicts into
+      # unknowns and lets a second service below the floor hide behind the first.
+      fail-fast: false
+      matrix:
+        include:
+          - service: gateway-service
+            assembly: PowerFramework.Gateway
+          - service: dataservices-service
+            assembly: PowerFramework.DataServices
+          - service: persistence-service
+            assembly: PowerFramework.Persistence
+          - service: security-service
+            assembly: PowerFramework.Security
+
+    steps:
+      # The git-CLI checkout and the vendor SDK install, both for the reason recorded in section 9 of
+      # the header. The rationale for each is stated in full on the `hygiene` and `solution` jobs.
+      - name: Check out the commit under test with the git CLI
+        env:
+          CHECKOUT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git init --quiet .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "${CHECKOUT_TOKEN}" | base64 -w0)" \
+            fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
+          git checkout --quiet --force FETCH_HEAD
+          test -z "$(git config --local --get-all http.extraheader || true)"
+          echo "checked out ${GITHUB_SHA} at depth 1 with no persisted credential"
+
+      - name: Install the pinned .NET SDK with the vendor install script
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json; print(json.load(open("global.json"))["sdk"]["version"])')"
+          echo "global.json pins SDK ${version}"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            --output "${RUNNER_TEMP}/dotnet-install.sh" \
+            https://dot.net/v1/dotnet-install.sh
+          bash "${RUNNER_TEMP}/dotnet-install.sh" \
+            --version "${version}" \
+            --install-dir "${RUNNER_TEMP}/dotnet" \
+            --no-path
+          echo "${RUNNER_TEMP}/dotnet" >> "${GITHUB_PATH}"
+          echo "DOTNET_ROOT=${RUNNER_TEMP}/dotnet" >> "${GITHUB_ENV}"
+
+      # The audit gate for this leg, for the reason given on the solution job's restore step.
+      - name: Restore ${{ matrix.service }}
+        working-directory: services/${{ matrix.service }}
+        run: dotnet restore
+
+      - name: Build ${{ matrix.service }} in Release
+        working-directory: services/${{ matrix.service }}
+        run: dotnet build -c Release
+
+      # `-c Release` is stated because a bare `dotnet test` builds Debug even immediately after a
+      # Release build - the toolchain nuance recorded in section 5 of the header - and coverage
+      # measured against a Debug build is not coverage of the artifact this leg just produced. Nothing
+      # else is added to the documented command shape: no settings file, no build-skipping argument and
+      # no collector configuration. `--results-directory` puts the report at a known root-relative
+      # location per service; the collector still writes it into a GUID-named subdirectory of its own,
+      # which the gate discovers rather than assumes.
+      - name: Test ${{ matrix.service }} with coverage collection
+        working-directory: services/${{ matrix.service }}
+        run: |
+          dotnet test \
+            -c Release \
+            --collect:"XPlat Code Coverage" \
+            --results-directory "${GITHUB_WORKSPACE}/coverage/${{ matrix.service }}"
+
+      # THE GATE, AND THE INLINE SCOPE SELECTION IT PERFORMS. Three things are checked, and the second
+      # and third are what make the first trustworthy rather than merely plausible:
+      #   1. this service's own assembly appears in the report at all - if it does not, the leg measured
+      #      something other than the service it claims to and the number is meaningless;
+      #   2. that assembly's line rate is at or above the floor;
+      #   3. every other package's rate is printed but never gated on, so the shared and generated code
+      #      the `solution` job owns can neither raise nor lower this verdict.
+      # Selecting the package by name IS the measurement-scope filter, expressed here rather than in a
+      # settings file, so the whole gate is legible in one step. The report is located by search rather
+      # than by a hardcoded path, because the collector names its own subdirectory with a fresh GUID
+      # every run. The matrix values reach the script through the environment rather than by template
+      # expansion into its source, so the script cannot be rewritten by what it is asked to measure.
+      #
+      # WHY THIS IS PYTHON, AND WHY THAT IS NOT THE THING SECTION 7 FORBIDS. Cobertura is XML, and a
+      # gate that decides a build must read it with a parser rather than with `grep` - a regular
+      # expression over XML passes on a report it silently misread, which is the one failure mode a
+      # coverage gate must not have. So it uses the interpreter the `ubuntu-latest` image already
+      # provides, and it imports `glob`, `os`, `sys` and `xml.etree.ElementTree` - four standard-library
+      # modules, nothing else. NOTHING IS INSTALLED and nothing is resolved from any package index at
+      # run time, which is the distinction section 7 draws: using a tool the runner ships is not the
+      # same class of act as installing a versioned package that no inventory in this repository can
+      # express. If the runner image ever stopped shipping Python, this step would fail loudly on the
+      # first run rather than degrade, and the fix would be to rewrite the parse - never to install one.
+      - name: Enforce the 80 percent line coverage floor for ${{ matrix.assembly }}
+        env:
+          SERVICE: ${{ matrix.service }}
+          ASSEMBLY: ${{ matrix.assembly }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import glob
+          import os
+          import sys
+          import xml.etree.ElementTree as ElementTree
+
+          service = os.environ['SERVICE']
+          assembly = os.environ['ASSEMBLY']
+          minimum = float(os.environ['COVERAGE_MINIMUM_LINE_RATE'])
+
+          reports = sorted(glob.glob(f'coverage/{service}/**/coverage.cobertura.xml', recursive=True))
+
+          if not reports:
+              sys.exit(
+                  f'::error::{service}: no coverage.cobertura.xml was produced. The coverage gate '
+                  f'cannot be evaluated, which is a structural failure rather than a quality one. '
+                  f'Check that the test project still references coverlet.collector.')
+
+          if len(reports) != 1:
+              sys.exit(
+                  f'::error::{service}: {len(reports)} coverage reports were produced where exactly '
+                  f'one was expected, so it is ambiguous which one the gate should read: {reports}')
+
+          root = ElementTree.parse(reports[0]).getroot()
+          packages = {package.get('name'): package for package in root.iter('package')}
+
+          if assembly not in packages:
+              sys.exit(
+                  f'::error::{service}: the coverage report covers {sorted(packages)} and does not '
+                  f'include {assembly!r} at all, so this leg did not measure the service it claims '
+                  f'to. Check that the test project still references the application project and '
+                  f'that the assembly name has not been renamed.')
+
+          rate = float(packages[assembly].get('line-rate'))
+
+          print(f'{service}: {assembly} line coverage {rate:.2%} '
+                f'against a floor of {minimum:.0%}')
+
+          # Printed, never gated on. These are the shared libraries and the generated protocol stubs
+          # that arrive by ProjectReference; the `solution` job owns them, and holding this service's
+          # verdict to their rate would be exactly the masking C-H forbids, in the other direction.
+          for name in sorted(packages):
+              if name == assembly:
+                  continue
+              print(f'{service}: not gated - {name} line coverage '
+                    f'{float(packages[name].get("line-rate")):.2%}')
+
+          if rate < minimum:
+              sys.exit(
+                  f'::error::{service}: line coverage {rate:.2%} is below the {minimum:.0%} floor '
+                  f'that constraint C-H of the Agent Action Plan requires for every in-scope '
+                  f'service. This gate is evaluated per service, so no other service\'s coverage '
+                  f'can raise it.')
+
+          print(f'{service}: coverage gate PASSED')
+          PYTHON
+
+      # ------------------------------------------------------------------------------------------
+      #  THE EVIDENCE IS PUBLISHED TO THE JOB SUMMARY, NOT TO AN ARTIFACT
+      #
+      #  Section 9 of the header records the trade honestly: `actions/upload-artifact` is the one
+      #  replaced capability with no CLI equivalent, so the 14-day retention is genuinely given up
+      #  rather than reproduced. What a reader actually needs - every package's measured line rate,
+      #  the gated one identified, and the floor - is written here instead, where it appears on the
+      #  run's own summary page without a download.
+      #
+      #  `if: always()` for the same reason the artifact step had it: a FAILING gate still publishes
+      #  the numbers that explain the failure. It is not `continue-on-error` - the gate's own exit
+      #  status still decides the leg - and a missing report is already fatal at the gate step above,
+      #  so the absent-file arm here reports that state rather than inventing a second failure.
+      # ------------------------------------------------------------------------------------------
+      - name: Summarise the ${{ matrix.service }} coverage measurements
+        if: always()
+        env:
+          SERVICE: ${{ matrix.service }}
+          ASSEMBLY: ${{ matrix.assembly }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import glob
+          import os
+          import xml.etree.ElementTree as ElementTree
+
+          service = os.environ['SERVICE']
+          assembly = os.environ['ASSEMBLY']
+          minimum = float(os.environ['COVERAGE_MINIMUM_LINE_RATE'])
+          summary = os.environ['GITHUB_STEP_SUMMARY']
+
+          reports = sorted(glob.glob(f'coverage/{service}/**/coverage.cobertura.xml', recursive=True))
+
+          with open(summary, 'a', encoding='utf-8') as sink:
+              sink.write(f'### {service} coverage\n\n')
+
+              if not reports:
+                  sink.write(
+                      'No `coverage.cobertura.xml` was produced, so there is nothing to report. '
+                      'The gate step above already failed this leg for that reason.\n\n')
+              else:
+                  sink.write(f'Floor: **{minimum:.0%}** line rate, evaluated on `{assembly}` only.\n\n')
+                  sink.write('| Package | Line rate | Gated |\n|---|---:|---|\n')
+
+                  root = ElementTree.parse(reports[0]).getroot()
+
+                  for package in sorted(root.iter('package'), key=lambda item: item.get('name') or ''):
+                      name = package.get('name')
+                      rate = float(package.get('line-rate'))
+                      gated = 'yes' if name == assembly else 'no'
+                      sink.write(f'| `{name}` | {rate:.2%} | {gated} |\n')
+
+                  sink.write(f'\nReport read from `{reports[0]}`, retained in the workspace for this run.\n\n')
+          PYTHON
+
+  # ================================================================================================
+  #  THE IMAGE LEG - exactly one container image per in-scope service per build
+  #
+  #  Four images, four Dockerfiles, no shared image and no combined one. The single fused executable
+  #  that both legacy project objects declare is precisely what this decomposition replaces, so a
+  #  combined artifact here would undo the thing being built. Each Dockerfile owns the multi-stage
+  #  SDK-to-ASP.NET-runtime shape and the non-root user; this job's job is to build it and publish it.
+  #
+  #  One image does not mean one tag. Each build below produces ONE image and gives it several names,
+  #  all of them derived only from CI-provided values, per ruling (a) in section 4 of the header.
+  #
+  #  THE BUILD CONTEXT IS THE REPOSITORY ROOT for every one of them, for the structural reason set out
+  #  in section 6 of the header, and the repository-root .dockerignore is what keeps that context from
+  #  carrying the legacy tree.
+  #
+  #  PUBLISHING USES THE AUTOMATICALLY PROVISIONED TOKEN AND NO DECLARED SECRET. Images go to the
+  #  GitHub container registry authenticated with GITHUB_TOKEN, which is why this job - and only this
+  #  job - raises `packages: write` while the rest of the workflow stays read-only. A push happens only
+  #  for a push event: on a pull request from a fork that token cannot write, so those runs BUILD every
+  #  image, which is the assertion that matters for a change under review, and push none.
+  #
+  #  NO ACTION IS REFERENCED HERE, AND THAT MATTERS MOST IN THIS JOB. Section 9 of the header records
+  #  the whole reasoning; this is the leg it was written for. Two of the actions this job used ran with
+  #  `packages: write` while handling a build context that a pull request makes untrusted, and both
+  #  shipped committed npm bundles carrying critical and high advisories. `docker login`,
+  #  `docker buildx create` and `docker buildx build` all ship with the runner image and do the same
+  #  work with nothing vendored, so the registry credential and the untrusted context are now handled
+  #  only by the Docker CLI itself.
+  #
+  #  THE BASE IMAGES ARE PINNED BY DIGEST IN THE DOCKERFILES AND GATED HERE. A tag is a name a registry
+  #  may republish; a digest is the content that was reviewed. The gate below asks the registry what
+  #  each pinned tag resolves to NOW and fails when it has moved - which is precisely the signal that a
+  #  patched base image exists and should be adopted (CWE-1104). It is a measurement, so it stays true
+  #  as the images are rebuilt upstream.
+  #
+  #  EVERY PUBLISHED IMAGE CARRIES AN SBOM AND A MAX-MODE PROVENANCE ATTESTATION, and the push is
+  #  followed by a step that VERIFIES both arrived. A flag that silently did nothing would be worse
+  #  than no flag, because it would be cited as evidence.
+  #
+  #  It depends on `service`, so an image is only produced for a service whose tests and coverage gate
+  #  have already passed. Publishing an image that failed its own gate would be worse than publishing
+  #  nothing. This is also the least-proven part of the workflow - see section 8 of the header - so
+  #  nothing here is allowed to fail quietly and no later step assumes it succeeded.
+  # ================================================================================================
+  image:
+    name: ${{ matrix.service }} container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: service
+
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # The same four in-scope services, in the same presentational order, carrying no ordering
+        # semantics for the reason given on the `service` job.
+        service:
+          - gateway-service
+          - dataservices-service
+          - persistence-service
+          - security-service
+
+    steps:
+      # The git-CLI checkout, for the reason recorded in section 9 of the header. Stated in full on
+      # the `hygiene` job's own checkout step.
+      - name: Check out the commit under test with the git CLI
+        env:
+          CHECKOUT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git init --quiet .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "${CHECKOUT_TOKEN}" | base64 -w0)" \
+            fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
+          git checkout --quiet --force FETCH_HEAD
+          test -z "$(git config --local --get-all http.extraheader || true)"
+          echo "checked out ${GITHUB_SHA} at depth 1 with no persisted credential"
+
+      # ------------------------------------------------------------------------------------------
+      #  THE BUILDER IS CREATED WITH THE CLI, AND THE CONTAINER DRIVER IS WHAT MAKES ATTESTATION
+      #  POSSIBLE AT ALL. The runner's default builder uses the `docker` driver, which supports
+      #  neither multi-platform output nor attestations; `docker-container` does. `--bootstrap` starts
+      #  it here so a failure to start is attributed to this step rather than to the build.
+      # ------------------------------------------------------------------------------------------
+      - name: Create the buildx builder with the container driver
+        run: |
+          set -euo pipefail
+          docker buildx version
+          docker buildx create \
+            --name powerframework-ci \
+            --driver docker-container \
+            --bootstrap \
+            --use
+          docker buildx inspect powerframework-ci
+
+      # ------------------------------------------------------------------------------------------
+      #  THE BASE-IMAGE DIGEST GATE - THE OS-IMAGE FRESHNESS CONTROL, MEASURED
+      #
+      #  Each Dockerfile pins `FROM …@sha256:…` and records the tag the digest was taken from in an
+      #  adjacent comment. This step reads BOTH out of the Dockerfile - so the assertion cannot drift
+      #  from the file it is about - asks the registry what that tag resolves to now, and fails when
+      #  the two disagree, naming the digest to adopt. MCR republishes a patch tag when it rebuilds the
+      #  OS layer, so a mismatch means a patched base exists and this repository is still building on
+      #  the previous one.
+      #
+      #  IT RUNS BEFORE THE BUILD, so a stale base is refused rather than published and then reported.
+      # ------------------------------------------------------------------------------------------
+      - name: Gate the pinned base-image digests against the registry
+        env:
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+
+          dockerfile="services/${SERVICE}/Dockerfile"
+          test -f "${dockerfile}"
+
+          stale=0
+
+          # One record per pinned base: the tagged reference the digest came from, and the digest the
+          # FROM line actually builds. Both are read out of the Dockerfile itself, so this assertion
+          # cannot drift from the file it is about.
+          while read -r tagged pinned; do
+            current="$(docker buildx imagetools inspect "${tagged}" --format '{{.Manifest.Digest}}')"
+
+            if [ "${pinned}" = "${current}" ]; then
+              echo "${tagged} still resolves to the pinned ${pinned}"
+            else
+              echo "::error::${dockerfile} builds ${tagged} at ${pinned}, but that tag now resolves" \
+                   "to ${current}. The registry has republished it, which for the .NET images means" \
+                   "the OS layer was rebuilt - almost always a security refresh. Review the new image" \
+                   "and re-pin the FROM line to ${current}."
+              stale=1
+            fi
+          done < <(python3 - "${dockerfile}" <<'PYTHON'
+          import re
+          import sys
+
+          text = open(sys.argv[1], encoding='utf-8').read()
+
+          # Dockerfile has no inline comment syntax, so the pair is two adjacent lines:
+          #     # pinned-tag: <repository>:<tag>
+          #     FROM <repository>@sha256:<digest> AS <stage>
+          pattern = re.compile(
+              r'^#[ \t]*pinned-tag:[ \t]*(?P<repository>[^\s:]+):(?P<tag>\S+)[ \t]*\n'
+              r'FROM[ \t]+(?P=repository)@(?P<digest>sha256:[0-9a-f]{64})[ \t]+AS[ \t]+\S+[ \t]*$',
+              re.MULTILINE)
+
+          matches = pattern.findall(text)
+
+          if not matches:
+              sys.exit(
+                  f'::error::{sys.argv[1]} declares no "# pinned-tag: <repository>:<tag>" comment '
+                  f'immediately above a digest-pinned FROM line for the same repository. Both halves '
+                  f'are required and they must be adjacent: the digest is what gets built, and the '
+                  f'tag is what this gate re-resolves.')
+
+          for repository, tag, digest in matches:
+              print(f'{repository}:{tag}', digest)
+          PYTHON
+          )
+
+          if [ "${stale}" -ne 0 ]; then
+            exit 1
+          fi
+
+      # ------------------------------------------------------------------------------------------
+      #  REGISTRY AUTHENTICATION WITH THE CLI. The token arrives on STDIN rather than in argv, so it
+      #  is not visible to another process on the runner, and it is the automatically provisioned
+      #  GITHUB_TOKEN - no declared secret exists in this project. Only a push event authenticates:
+      #  a pull-request run cannot write and does not try.
+      # ------------------------------------------------------------------------------------------
+      - name: Authenticate to the container registry
+        if: github.event_name == 'push'
+        env:
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${REGISTRY_PASSWORD}" \
+            | docker login ghcr.io --username "${REGISTRY_USERNAME}" --password-stdin
+
+      # Every value written here comes from the run itself: the repository, the ref name and the run
+      # number. Nothing is read from the legacy tree and no version is invented - the repository
+      # carries zero Git tags, so there is no version to read.
+      - name: Compute the image reference and its CI-derived tags
+        id: reference
+        env:
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+
+          # A registry reference must be lowercase; a GitHub repository name need not be.
+          repository="$(printf '%s' "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${repository}/${SERVICE}"
+
+          # A container tag admits only [A-Za-z0-9_.-] and may not begin with a dot or a dash, while a
+          # Git ref name may contain a slash and much else. Every character outside the admitted set
+          # becomes a dash, and a disallowed first character is PREFIXED rather than stripped so that
+          # two different refs cannot collapse onto one tag.
+          ref_tag="$(printf '%s' "${GITHUB_REF_NAME}" | tr -c 'A-Za-z0-9_.-' '-')"
+          case "${ref_tag}" in
+            [A-Za-z0-9_]*) ;;
+            *) ref_tag="ref-${ref_tag}" ;;
+          esac
+          ref_tag="${ref_tag:0:100}"
+
+          {
+            echo "image=${image}"
+            echo "ref_tag=${ref_tag}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "${image} will be tagged ${GITHUB_SHA}, ${ref_tag}, ${ref_tag}-${GITHUB_RUN_NUMBER}"
+
+      # ------------------------------------------------------------------------------------------
+      #  THE BUILD, WITH THE CLI AND WITH ATTESTATION
+      #
+      #  The context is the repository root and the Dockerfile is named explicitly, for the structural
+      #  reason set out in section 6 of the header; the orchestration manifest expresses the identical
+      #  context as `..` because it sits one directory down.
+      #
+      #  `--pull` IS NOT AN OPTIMIZATION SWITCH TURNED THE WRONG WAY. A digest-pinned FROM is content
+      #  addressed, so a cached layer under that digest IS the reviewed content - but the SDK stage
+      #  also resolves NuGet, and a reused builder can hold an unrelated stale layer. On a hosted
+      #  runner the builder is fresh, so this costs nothing there and closes the one way a stale local
+      #  layer could substitute for the pinned base on a self-hosted one.
+      #
+      #  ONE IMAGE, THREE NAMES, all of them CI coordinates: the commit that produced it, the ref it
+      #  was produced from, and that ref qualified by the run number so repeated runs of one commit
+      #  stay distinguishable. No `latest` and no semantic version - see ruling (a) in section 4.
+      #
+      #  PUSH ONLY ON A PUSH EVENT. A pull-request run BUILDS every image - the assertion that matters
+      #  for a change under review - and publishes none, because that token cannot write. The two
+      #  paths differ in their exporter for a hard technical reason rather than a stylistic one: the
+      #  `docker` exporter cannot carry attestations at all, so the pull-request path builds to the
+      #  local daemon while the push path exports to the registry WITH an SBOM and a max-mode
+      #  provenance attestation.
+      # ------------------------------------------------------------------------------------------
+      - name: Build the ${{ matrix.service }} image and publish it with attestations
+        env:
+          SERVICE: ${{ matrix.service }}
+          IMAGE: ${{ steps.reference.outputs.image }}
+          REF_TAG: ${{ steps.reference.outputs.ref_tag }}
+          IS_PUSH: ${{ github.event_name == 'push' }}
+        run: |
+          set -euo pipefail
+
+          arguments=(
+            build
+            --file "services/${SERVICE}/Dockerfile"
+            --pull
+            --tag "${IMAGE}:${GITHUB_SHA}"
+            --tag "${IMAGE}:${REF_TAG}"
+            --tag "${IMAGE}:${REF_TAG}-${GITHUB_RUN_NUMBER}"
+            --metadata-file "${RUNNER_TEMP}/${SERVICE}-build-metadata.json"
+          )
+
+          if [ "${IS_PUSH}" = 'true' ]; then
+            arguments+=(
+              --push
+              --attest type=sbom
+              --attest type=provenance,mode=max
+            )
+          else
+            # No attestation is possible on this exporter, so none is claimed. The assertion this path
+            # makes is that the container definition builds.
+            arguments+=(--load)
+          fi
+
+          arguments+=(.)
+
+          docker buildx "${arguments[@]}"
+
+      # ------------------------------------------------------------------------------------------
+      #  THE ATTESTATION IS VERIFIED, NOT ASSUMED
+      #
+      #  A build flag that silently did nothing is worse than an absent flag, because the flag gets
+      #  cited as evidence that an SBOM exists. This step asks the registry for the published
+      #  manifest's attestation set and fails when either the SBOM or the provenance is missing.
+      #  It runs only where a push happened, because that is the only path on which either can exist.
+      # ------------------------------------------------------------------------------------------
+      - name: Verify the published SBOM and provenance attestations
+        if: github.event_name == 'push'
+        env:
+          IMAGE: ${{ steps.reference.outputs.image }}
+        run: |
+          set -euo pipefail
+
+          docker buildx imagetools inspect "${IMAGE}:${GITHUB_SHA}" --format '{{json .Provenance}}' \
+            > "${RUNNER_TEMP}/provenance.json"
+          docker buildx imagetools inspect "${IMAGE}:${GITHUB_SHA}" --format '{{json .SBOM}}' \
+            > "${RUNNER_TEMP}/sbom.json"
+
+          python3 - <<'PYTHON'
+          import json
+          import os
+          import sys
+
+          temporary = os.environ['RUNNER_TEMP']
+          missing = []
+
+          for name in ('provenance', 'sbom'):
+              with open(f'{temporary}/{name}.json', encoding='utf-8') as handle:
+                  text = handle.read().strip()
+
+              if not text or text == 'null' or json.loads(text) in (None, {}, []):
+                  missing.append(name)
+
+          if missing:
+              sys.exit(
+                  f'::error::The published image carries no {" and no ".join(missing)} attestation. '
+                  f'The build asked for both with --attest, so an absent one means the exporter did '
+                  f'not produce it and the supply-chain evidence this leg claims does not exist.')
+
+          print('SBOM and max-mode provenance attestations are both attached to the published image.')
+          PYTHON
+
+  # ================================================================================================
+  #  THE VERDICT - one required status for the whole workflow
+  #
+  #  A branch protection rule can require this single job instead of enumerating every matrix leg,
+  #  which matters because `fail-fast: false` means a failing leg does not stop the others: without
+  #  this job a run could finish with a red leg and still present a green overall picture to anything
+  #  that only watches for completion. That is the same masking C-H forbids, arriving through the
+  #  status API instead of through a coverage number.
+  #
+  #  It inspects the RESULT of each dependency rather than relying on `needs` alone, because a
+  #  cancelled or skipped dependency is not a success and `needs` on its own would let one through.
+  # ================================================================================================
+  ci:
+    name: CI verdict
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs:
+      - hygiene
+      - solution
+      - service
+      - image
+
+    steps:
+      - name: Require every leg to have succeeded
+        env:
+          HYGIENE_RESULT: ${{ needs.hygiene.result }}
+          SOLUTION_RESULT: ${{ needs.solution.result }}
+          SERVICE_RESULT: ${{ needs.service.result }}
+          IMAGE_RESULT: ${{ needs.image.result }}
+        run: |
+          set -euo pipefail
+
+          echo "hygiene=${HYGIENE_RESULT}  solution=${SOLUTION_RESULT}  service=${SERVICE_RESULT}  image=${IMAGE_RESULT}"
+
+          failed=0
+          for pair in \
+            "whitespace hygiene:${HYGIENE_RESULT}" \
+            "solution build:${SOLUTION_RESULT}" \
+            "per-service build, test and coverage gate:${SERVICE_RESULT}" \
+            "container image:${IMAGE_RESULT}" ; do
+            name="${pair%:*}"
+            result="${pair##*:}"
+            if [ "${result}" != "success" ]; then
+              echo "::error::The ${name} leg reported '${result}' rather than 'success'."
+              failed=1
+            fi
+          done
+
+          if [ "${failed}" -ne 0 ]; then
+            exit 1
+          fi
+
+          echo 'Every leg succeeded: schema and hygiene, solution build, four per-service coverage' \
+               'gates, four images.'

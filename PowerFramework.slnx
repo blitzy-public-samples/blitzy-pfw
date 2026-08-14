@@ -1,0 +1,305 @@
+<!--
+  ==================================================================================================
+  PowerFramework.slnx
+  The repository root solution for the .NET 10 tree added to this checkout by the PowerFramework
+  decomposition, Phase 1.
+  ==================================================================================================
+
+  WHAT THIS FILE IS, AND WHAT IT DELIBERATELY IS NOT
+
+  This solution enumerates every buildable project in the refactor so that one developer, or one
+  single pass whole estate build, can restore, build and test all of it from the repository root:
+
+      dotnet restore PowerFramework.slnx
+      dotnet build   PowerFramework.slnx -c Release
+      dotnet test    PowerFramework.slnx
+
+  That is the whole of its purpose. It is a CONVENIENCE VIEW and nothing more.
+
+  It is emphatically NOT the mechanism that makes the four services independently buildable and
+  independently deployable. That mechanism is the four per service solutions, one per service
+  directory:
+
+      services/gateway-service/gateway-service.slnx
+      services/dataservices-service/dataservices-service.slnx
+      services/persistence-service/persistence-service.slnx
+      services/security-service/security-service.slnx
+
+  Those four and this one coexist deliberately, and neither kind supersedes the other. Solution
+  discovery inspects the CURRENT directory only and never walks up, so this file cannot be found by,
+  and cannot interfere with, a bare command issued inside a service directory. A developer who has
+  only ever built one service, from inside that service's own directory, succeeds without this file
+  ever being read.
+
+  Nothing may be arranged so that this file becomes a prerequisite for a single service build, and
+  nothing is: the four per service solutions, the four container definitions and the per service CI
+  jobs each name their own projects directly and never reference this one. A single collapsed
+  solution is a failure mode for this refactor rather than a cautious default, which is why the
+  convenience nature of this file is stated in the same breath as its purpose.
+
+  FORMAT: .slnx, THE XML SOLUTION FORMAT. NEVER A .sln, AND NEVER A .slnf.
+
+  .NET 10 tooling emits .slnx rather than the legacy text .sln format. Measured on the pinned SDK
+  10.0.302 before this file was written: `dotnet new sln` produces a bare `Solution` root element,
+  and adding a project produces a `Project` child carrying a `Path` attribute with forward slash
+  separators, relative to this file's own directory. A solution folder is a `Folder` element
+  wrapping those children, its `Name` carrying both a leading and a trailing slash. The body below
+  follows that shape exactly, because it was generated with the SDK and then annotated rather than
+  hand written.
+
+  A legacy solution FILTER, the .slnf format, is not authored here and must not be - because a
+  filter's project list has to be kept in exact agreement with the solution BY HAND, and every
+  disagreement fails hard in all three verbs. An earlier form of this note said a filter over a
+  .slnx fails with MSB4014; that was measured false on the pinned SDK, where a well formed filter
+  over an existing .slnx restores, builds and tests cleanly. docs/BUILD.md section 2 carries the
+  measurement, the four failing situations and the code's real trigger. The prohibition stands on
+  the maintenance ground, which does not expire the way a tooling defect would.
+  Do not author one, now or as a follow up. To scope a build to a subset of projects, use the per
+  service solution for the service in question, which is precisely why those four exist. There is
+  likewise no .sln file anywhere in this repository, and no second .slnx at this root.
+
+  That finding is recorded in two other places, and all three say the same thing: docs/BUILD.md,
+  which carries the build commands at length, and the repository root .editorconfig, whose MSBuild
+  file section notes that no filter is authored for the format to match. If you are reading this
+  because you were about to add one, all three are telling you not to.
+
+  SCOPE: EXACTLY TWENTY-TWO PROJECTS, WHICH RECONCILES AS 6 PLUS 6 PLUS 4 PLUS 4 PLUS 2
+
+      6   shared libraries under shared/
+      6   sibling test projects, one per shared library
+      4   service applications under services/
+      4   service test projects, one per service
+      2   the characterization capture driver and its test project, under characterization/tools/
+
+  Every path below was verified to resolve against this working tree before being written. A path
+  that does not resolve makes the whole solution unloadable, so the check is not optional. The
+  twenty are also closed under project reference: following every reference of every project listed
+  here reaches only projects that are themselves listed here, so this solution restores and builds
+  its own complete graph with nothing arriving from outside it.
+
+  ALL ELEVEN TEST PROJECTS ARE LOAD BEARING, AND SEVEN OF THEM ARE ONLY REACHABLE FROM HERE
+
+  A test project omitted from a solution is not discovered by a test run against that solution. Its
+  tests then do not execute, no coverage data is produced for the code it covers, and the result
+  presents as a clean pass. That failure mode reads exactly like success, which makes it worse than
+  a broken build.
+
+  This matters most for the six shared test projects and for the capture driver's test project. The
+  shared tree deliberately carries no solution of its own, and neither does characterization/tools,
+  so THIS file is the only solution that enumerates those seven and therefore the only one from which
+  they can be discovered and run. The four service test projects are additionally enumerated by their
+  own per service solution, which is where the per service coverage gate is measured; their presence
+  here is what lets a single root level test run cover the whole estate.
+
+  SOLUTION FOLDERS ARE PRESENTATION ONLY
+
+  The two `Folder` elements exist so the root of a twenty project solution is navigable in an IDE.
+  They carry no build semantics of any kind: they are not compilation units, they do not group
+  configurations, they do not express dependencies, and they impose no ordering. They intentionally
+  mirror the two physical top level directories the refactor adds, shared/ and services/, so the
+  logical view and the on disk layout cannot drift apart.
+
+  ENTRY ORDER CARRIES NO BUILD SEMANTICS EITHER, AND THIS IS WORTH STATING EXPLICITLY
+
+  MSBuild derives the build graph from project references, never from position in a solution. The
+  ordering below is chosen purely for a human reader: folders in the alphabetical order the SDK
+  emits, services in alphabetical order within their folder, and within each pair the subject
+  project immediately before its test project so that a reader can confirm the ten pairings at a
+  glance. Regenerating this file with the SDK would sort every entry strictly alphabetically and so
+  place each test project before its subject. That is harmless, and the pairing below is the
+  deliberate choice.
+
+  This point is emphasised because the legacy system it replaces is the opposite case, and confusing
+  the two would be a real defect rather than a stylistic slip. See the provenance note at the end.
+
+  NOTHING IS CONFIGURED HERE, AND THERE IS NO VERSION
+
+  No MSBuild property, no package version, no target framework, no custom configuration and no
+  custom platform appears in this file. Only the standard Debug and Release configurations are in
+  play, and nothing in the refactor requires any other, so none is declared. Everything else
+  arrives from the repository root by MSBuild directory walk up:
+
+      global.json                 pins the SDK version, roll forward confined to latest feature. The
+                                  version itself is deliberately NOT repeated here - this line carried
+                                  10.0.302 after the pin had moved on, which is the drift this whole
+                                  comment block warns against, committed by the warning itself
+      Directory.Build.props       net10.0, nullable, implicit usings, warnings as errors, and
+                                  central package management turned on
+      Directory.Packages.props    every package version, including the two mandatory security pins
+
+  Restating any of that here would create a second source of truth able to drift a project off a
+  mandatory pin, which is the exact failure central package management exists to prevent.
+
+  No version number appears here either, and none may be added. The repository carries zero Git tags
+  across its entire history, so no release is marked and no version can be inferred from it. The
+  only version facts the repository asserts about itself belong to the legacy PowerBuilder runtime
+  and say nothing about this tree.
+
+  WHAT IS DELIBERATELY ABSENT
+
+  The four deferred capability areas of this refactor appear here in no form whatsoever: no project,
+  no solution folder, no placeholder, no empty test project, and no commented out line reserving a
+  slot for one. They are named and inventoried once, in docs/DEFERRED.md, and this file states their
+  absence without restating their names precisely so that a text search of this file for any of them
+  returns nothing at all, which makes the absence mechanically checkable rather than a matter of
+  reading prose. They are deferred in full, and a solution folder labelled ready for a later phase
+  would itself be a partial implementation of exactly what is deferred. Their only representation
+  anywhere in this tree is four reserved routes in the Gateway application's own routing metadata,
+  and nothing compiles behind those.
+
+  The read only legacy PowerBuilder tree is absent because it is not a buildable unit. It is the
+  behavioural oracle for parity testing and shares this one working directory with the .NET tree, so
+  the exclusion is stated rather than left implicit: no compiled library, target or workspace file,
+  no native binary, and nothing under ws_objects/, oldversion/, pack/, res/, samples/,
+  sciter_control/ or the pre existing browser harness directories inside tests/ is referenced by any
+  path below, and none ever may be.
+
+  One directory the refactor adds is also absent, for the same reason of not being an MSBuild project:
+  the end to end suite under tests/e2e is an npm and Playwright project, driven by its own package
+  manifest.
+
+  The characterization/ tree is PARTLY present, and the split is deliberate. Its recordings, workflow
+  definitions, schema and capture plans are DATA and appear nowhere below. Its two projects under
+  characterization/tools are ordinary MSBuild projects and are listed: the target side capture driver
+  that turns a declared workflow into a normalized recording against a running service, and that
+  driver's own test project. The driver is tooling and is never shipped in a container image, which is
+  why it lives beside the data it drives rather than under services/ - and why it is marked not
+  packable and takes no package reference of any kind.
+
+  LEGACY PROVENANCE: ONE IDEA IS BORROWED, AND ONE MECHANISM IS DELIBERATELY NOT TRANSLATED
+
+  The conceptual ancestor of this file is the PowerBuilder workspace pfw.pbw, which does no more
+  than enumerate its child targets by relative path, index 0 pfw.pbt and index 1 pfwx.pbt, and name
+  a default among them. The borrowed idea is exactly that: one container enumerating many buildable
+  units, carrying no configuration of its own.
+
+  What is NOT translated is the library list. The primary target pfw.pbt declares a single ordered
+  list of 32 libraries, and its ORDER is load bearing there: PowerBuilder has no namespaces and no
+  import statements, every global object lives in one flat namespace, and symbol resolution is
+  decided by that ordering. There is no .slnx analogue and none is needed, because this tree uses
+  explicit namespaces and explicit project references instead. No ordering semantics are encoded
+  below, no build order directive appears, and none may be added.
+
+  The two PowerBuilder build definitions are read as reference for build INTENT only, never
+  translated, because neither is usable. ws_objects/pfw.pbl.src/project.srj declares 29 library
+  entries under COM:Appeon and includes pfw.utility.sqlite.pbl, while
+  ws_objects/pfw.pbl.src/p_pfw.srj declares 28 under COM:Sybase, Inc., omits that library, and
+  embeds developer workstation absolute paths under F:\pfw\ together with the retired library name
+  pfwUtils.pbl. Both declare pfw.utility.imgcodec.pbl, which exists nowhere in the repository, so
+  neither would build as written. This solution is therefore a clean creation, not a translation.
+
+  RULES POSITION
+
+  No user rules were provided for this project: the rules document contains exactly one line saying
+  so. Nothing is invented or back filled from convention in their place. The binding constraints are
+  the enterprise standard baseline together with the refactor's own named constraints, and every
+  decision recorded above cites the concern that drives it.
+-->
+<Solution>
+
+  <!--
+    THE FOUR IN SCOPE SERVICES, EIGHT PROJECTS, PAIRED APPLICATION THEN TESTS.
+
+    Each application project carries its own project references into shared/, so the shared closure
+    arrives through those edges rather than through membership of this folder. No service references
+    another service: they communicate only over the published contracts, across the network, which
+    is what keeps them decomposed rather than collapsed. Ports and transports are documented in
+    docs/ARCHITECTURE.md and are not expressed here, because a solution declares membership only.
+  -->
+  <Folder Name="/services/">
+
+    <!--
+      DataServices, port 5102 carrying REST and gRPC on one endpoint: the DataWindow retrieval,
+      validation and update triple, the 22 event DataWindow chain, and the column expression engine.
+    -->
+    <Project Path="services/dataservices-service/PowerFramework.DataServices/PowerFramework.DataServices.csproj" />
+    <Project Path="services/dataservices-service/PowerFramework.DataServices.Tests/PowerFramework.DataServices.Tests.csproj" />
+
+    <!--
+      Gateway, port 5105: the sole ingress and composition root, and the only place the four
+      reserved routes for the deferred capability areas are declared as routing metadata.
+    -->
+    <Project Path="services/gateway-service/PowerFramework.Gateway/PowerFramework.Gateway.csproj" />
+    <Project Path="services/gateway-service/PowerFramework.Gateway.Tests/PowerFramework.Gateway.Tests.csproj" />
+
+    <!--
+      Persistence, port 5101 carrying REST and gRPC on one endpoint: the only service that generates
+      or executes SQL and the only one holding a storage provider.
+    -->
+    <Project Path="services/persistence-service/PowerFramework.Persistence/PowerFramework.Persistence.csproj" />
+    <Project Path="services/persistence-service/PowerFramework.Persistence.Tests/PowerFramework.Persistence.Tests.csproj" />
+
+    <!--
+      Security, port 5104: the keyed cryptographic surface, and the sole token issuer in the
+      system. Every other service holds verification material only.
+    -->
+    <Project Path="services/security-service/PowerFramework.Security/PowerFramework.Security.csproj" />
+    <Project Path="services/security-service/PowerFramework.Security.Tests/PowerFramework.Security.Tests.csproj" />
+
+  </Folder>
+
+  <!--
+    THE SIX SHARED LIBRARIES AND THEIR SIX TEST PROJECTS, TWELVE PROJECTS, PAIRED SUBJECT THEN TESTS.
+
+    These carry pure behaviour and no input or output. PowerFramework.Contracts is the published
+    boundary, the protocol and OpenAPI definitions plus their generated stubs, and it is the ONLY
+    coupling permitted to cross a service boundary; it carries no behaviour of its own. The shared
+    tree has no solution of its own, so this folder is the only place the six test projects can be
+    discovered from.
+  -->
+  <Folder Name="/shared/">
+
+    <!-- The published cross service boundary definition. -->
+    <Project Path="shared/PowerFramework.Contracts/PowerFramework.Contracts.csproj" />
+    <Project Path="shared/PowerFramework.Contracts.Tests/PowerFramework.Contracts.Tests.csproj" />
+
+    <!-- Ordered map and vector containers, used by both DataServices and Persistence. -->
+    <Project Path="shared/PowerFramework.Shared.Containers/PowerFramework.Shared.Containers.csproj" />
+    <Project Path="shared/PowerFramework.Shared.Containers.Tests/PowerFramework.Shared.Containers.Tests.csproj" />
+
+    <!-- Assertions, the assert payload protocol, stack traces and caller information. -->
+    <Project Path="shared/PowerFramework.Shared.Diagnostics/PowerFramework.Shared.Diagnostics.csproj" />
+    <Project Path="shared/PowerFramework.Shared.Diagnostics.Tests/PowerFramework.Shared.Diagnostics.Tests.csproj" />
+
+    <!-- The event broker, its decomposed subscription topic identity and its tri valued veto. -->
+    <Project Path="shared/PowerFramework.Shared.Eventful/PowerFramework.Shared.Eventful.csproj" />
+    <Project Path="shared/PowerFramework.Shared.Eventful.Tests/PowerFramework.Shared.Eventful.Tests.csproj" />
+
+    <!--
+      The return code algebra with its tri state predicates, the constant catalogue, exceptions
+      and the bit, word, ancestry and formatting primitives. The root of the shared graph.
+    -->
+    <Project Path="shared/PowerFramework.Shared.Kernel/PowerFramework.Shared.Kernel.csproj" />
+    <Project Path="shared/PowerFramework.Shared.Kernel.Tests/PowerFramework.Shared.Kernel.Tests.csproj" />
+
+    <!--
+      Translation providers, categories and the silent passthrough fallback, reached from the
+      DataServices validation path.
+    -->
+    <Project Path="shared/PowerFramework.Shared.Localization/PowerFramework.Shared.Localization.csproj" />
+    <Project Path="shared/PowerFramework.Shared.Localization.Tests/PowerFramework.Shared.Localization.Tests.csproj" />
+
+  </Folder>
+
+  <!--
+    THE CHARACTERIZATION TOOLING, TWO PROJECTS, PAIRED SUBJECT THEN TESTS.
+
+    The target side capture driver and its tests. It is TOOLING, not a service: it ships in no
+    container image, it is marked not packable, and it declares no package reference at all, so
+    nothing arrives in the dependency graph through it. It is listed here for one reason above the
+    others - characterization/tools carries no solution of its own, so this is the only solution from
+    which its test project can be discovered, and a test project no solution enumerates presents as a
+    clean pass while executing nothing.
+
+    It references no service and no shared library. The driver speaks to a RUNNING service over its
+    published HTTP contract, exactly as any other external client does, which is what keeps a capture
+    an observation of the deployed system rather than of an in process object graph.
+  -->
+  <Folder Name="/characterization/">
+
+    <Project Path="characterization/tools/PowerFramework.Characterization.Capture/PowerFramework.Characterization.Capture.csproj" />
+    <Project Path="characterization/tools/PowerFramework.Characterization.Capture.Tests/PowerFramework.Characterization.Capture.Tests.csproj" />
+
+  </Folder>
+
+</Solution>

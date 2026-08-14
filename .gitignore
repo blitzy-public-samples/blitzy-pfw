@@ -13,3 +13,81 @@
 thumbs.db
 !/res/*.zip
 !/samples/*.zip
+
+# ================================================================================================
+#  THE .NET BUILD OUTPUT OF THE MIGRATION TREE.
+#
+#  Everything above this banner is the legacy PowerBuilder repository's own ignore set and is left
+#  exactly as it stands: no pattern is edited, reordered or removed, and the two negations that
+#  re-admit the packaged archives under res/ and samples/ still apply to the patterns above them.
+#  This block is purely additive.
+#
+#  WHY IT IS HERE AT ALL, WHICH IS A CORRECTION. The migration plan records that no .gitignore
+#  change is required. That was true of the legacy tree and is not true of the tree beside it: a
+#  clean clone followed by the documented per-service command - dotnet restore, dotnet build -c
+#  Release, dotnet test - writes bin/ and obj/ under twenty projects and leaves the working tree
+#  DIRTY, which contradicts the requirement that each service build and test independently from a
+#  clean checkout (C-I) and makes `git status` useless as the review instrument it has to be. The
+#  patterns lived only in .git/info/exclude, which is per-clone and is not committed - so the
+#  property held for whoever created that clone and for nobody else.
+#
+#  UNANCHORED AND TRAILING-SLASHED, DELIBERATELY. bin/ and obj/ appear at every project root, so an
+#  anchored pattern would have to be repeated twenty times and would be wrong on the twenty-first.
+#  The trailing slash restricts each to a DIRECTORY, so a source file that happens to be named
+#  bin or obj is unaffected.
+#
+#  NOTHING HERE SUPPRESSES A SOURCE PATH. Neither name is a directory this refactor authors, and the
+#  CI target-scope audit enumerates every tracked file outside the legacy tree, so a source file
+#  hidden by one of these patterns would surface there as a missing member of its declared group.
+# ================================================================================================
+
+bin/
+obj/
+
+# The test host's own result directory. Written by `dotnet test` alongside the coverage report the
+# 80-percent gate is measured from, and never an input to anything.
+TestResults/
+
+# The end-to-end suite's installed closure and run artifacts. The suite's own nested ignore file
+# already covers these for anyone working inside tests/e2e; these entries make the same guarantee
+# hold for a `git status` run from the repository root, which is where the review instrument runs.
+node_modules/
+playwright-report/
+blob-report/
+test-results/
+
+# ================================================================================================
+#  THE POPULATED ENVIRONMENT FILE. THIS IS A SECRETS CONTROL (C-F), NOT HOUSEKEEPING.
+#
+#  WHAT IT PREVENTS, CONCRETELY. The documented bring-up is `cp .env.example .env` followed by
+#  filling that copy in, and what gets filled in is the twelve host PATHS plus - when the operator
+#  adopts the optional issuance identity - `SECURITY_CLIENT_SECRET`, whose value IS a credential.
+#  Without a pattern here the populated copy is an UNTRACKED file that `git status` lists, that
+#  `git add -A` stages without comment, and that a commit then publishes. Every other control this
+#  repository has against committed key material - the CI target-scope audit, the no-credential-in-
+#  settings assertions, the options-pattern injection - operates on files the tree already tracks, so
+#  none of them sees the one file the bring-up instructions tell an operator to create.
+#
+#  THE MITIGATIONS THAT WERE ALREADY IN PLACE WERE PROSE, AND PROSE IS NOT A CONTROL.
+#  orchestration/README.md and .env.example both warn against committing the file and both suggest
+#  adding it to .git/info/exclude. That advice stands and is worth keeping as belt-and-braces, but
+#  .git/info/exclude is PER-CLONE and is not committed - so the protection held for whoever had read
+#  the warning and applied it, and for nobody else. This entry is the committed form of it, and it is
+#  the same correction the .NET build-output block above records for the same reason.
+#
+#  ANCHORED AND EXACT, WHICH IS THE DELIBERATE CHOICE. `/orchestration/.env` names the one path the
+#  documented bring-up creates. A bare `.env` or `**/.env` would additionally hide any future .env
+#  anywhere in the tree, including one a suite legitimately tracks as a FIXTURE - and a pattern that
+#  hides files nobody meant to hide is how a source path goes missing without a diagnostic. The
+#  TEMPLATE is deliberately NOT matched: `orchestration/.env.example` is tracked, is the authoritative
+#  variable inventory, and carries no value for any secret.
+#
+#  THE PER-SERVICE OVERRIDE FORMS ARE MATCHED TOO, because an operator running two stacks on one host
+#  names its file something like `.env.local` and the same exposure applies to it verbatim. The
+#  negation that follows re-admits the template, and it must stay AFTER the wildcard: git applies the
+#  last matching pattern, so reversing the two lines would re-hide the template.
+# ================================================================================================
+
+/orchestration/.env
+/orchestration/.env.*
+!/orchestration/.env.example

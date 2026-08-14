@@ -1,0 +1,217 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ==========================================================================================
+    PowerFramework.Contracts : THE PUBLISHED CROSS-SERVICE BOUNDARY
+    ==========================================================================================
+
+    This project carries NO BEHAVIOUR. It is the boundary definition, not a shared-code back
+    door (AAP 0.4.2.3). It owns no *.cs file of its own: every type it produces is generated at
+    build time by Grpc.Tools from the *.proto files under Proto/, and the REST half of the
+    boundary is the set of OpenAPI documents under OpenApi/.
+
+    WHAT IT PUBLISHES, AND TO WHOM
+      Proto/common.v1.proto        shared messages (RetCode, DwBuffer, ItemStatus, DbError,
+                                   ConflictDetail)
+      Proto/dataservices.v1.proto  C-03 DataWindowService, C-04 ColumnExpressionService
+      Proto/persistence.v1.proto   C-05 Query, C-06 Update, C-07 Command, C-08 Transaction
+      OpenApi/security.v1.yaml     C-01 TokenService, C-02 CryptoService
+      OpenApi/gateway.v1.yaml      C-09 REST ingress, carrying the C-10 health contract
+
+    Consumers reach this project by ProjectReference only. PowerFramework.DataServices and
+    PowerFramework.Persistence take the generated SERVER stubs; PowerFramework.Gateway and
+    PowerFramework.DataServices take the generated CLIENT stubs; PowerFramework.Security serves
+    the OpenAPI-described REST surface; PowerFramework.Contracts.Tests validates the definitions.
+    The path and file name are consequently FROZEN: those projects and the root
+    PowerFramework.slnx name this file exactly as
+    shared/PowerFramework.Contracts/PowerFramework.Contracts.csproj.
+
+    EVERY CONTRACT HERE IS NET NEW, NOT A PORT
+    The legacy PowerFramework is a library with no process of its own, so no contract translates
+    an existing wire format. pfw.pbt declares a single flat ordered LibList of 32 libraries and
+    PowerBuilder resolves one global namespace by that ORDER, which means there are no
+    namespaces, no import statements, no serialization layer and no route table to rewrite
+    (AAP 0.4.5.1). Nothing here is a translation; it is a genuine creation.
+
+    LEGACY BUILD REFERENCES, READ FOR INTENT ONLY (constraint C-C)
+    ws_objects/pfw.pbl.src/project.srj and ws_objects/pfw.pbl.src/p_pfw.srj are the legacy
+    PowerBuilder build definitions. Neither is usable as a template, and their contradictions are
+    verified rather than assumed: 29 PBD lines against 28, COM:Appeon against COM:Sybase, Inc.,
+    only the former lists pfw.utility.sqlite.pbl, the latter embeds developer-workstation paths
+    under F:\pfw\ together with a retired library, and BOTH name pfw.utility.imgcodec.pbl, which
+    exists nowhere in the repository, so neither would build as written (AAP 0.8.6 R5). The .NET
+    build is therefore authored clean and validated by execution. Those files, pfw.pbt and
+    pfwx.pbt are never edited, reformatted or moved, and no item glob below reaches into the
+    read-only legacy tree.
+
+    INHERITED, SO DELIBERATELY NOT RESTATED HERE
+    Directory.Build.props at the repository root supplies TargetFramework net10.0, LangVersion,
+    Nullable, ImplicitUsings, TreatWarningsAsErrors, the .NET analyzers and
+    ManagePackageVersionsCentrally. Directory.Packages.props is the SOLE version authority.
+    Restating any of those would create two places to change one setting and would undermine the
+    directory walk-up inheritance that makes the documented per-service build command work from a
+    clean checkout (AAP 0.3.2.1). Every PackageReference below is consequently VERSIONLESS.
+
+    DELIBERATE ABSENCES, each a constraint rather than an oversight
+      C-A  ZERO ProjectReference. In particular there is no reference to
+           PowerFramework.Shared.Kernel even though Proto/common.v1.proto's RetCode values must
+           equal RetCode.cs's values: that agreement is a review-time invariant with no
+           compile-time edge, and adding the reference would turn a boundary definition into a
+           shared-code path.
+      C-A  No Compile item, no analyzer and no source generator of this project's own. Generated
+           Protobuf and gRPC code lands under obj/ and is compiled automatically.
+      C-B  Exactly THREE package references and nothing else: Grpc.AspNetCore,
+           Microsoft.AspNetCore.OpenApi and Microsoft.OpenApi. Grpc.Tools and Google.Protobuf
+           arrive transitively through the first and must not be referenced explicitly
+           (AAP 0.5.1); Grpc.AspNetCore.Server.Reflection, Swashbuckle.AspNetCore and
+           Scalar.AspNetCore are deliberately excluded (AAP 0.5.3); and the two OpenAPI packages
+           describe the REST half of this same boundary, the Microsoft.OpenApi one being mandatory
+           rather than optional, for the reasons recorded in full alongside the package item group
+           below.
+      C-D  No deferred capability is anticipated here. This project holds no item, property,
+           condition or commented-out placeholder awaiting a Phase-2 service, and no contract
+           definition for one; AAP 0.2.2.2 names the four that are out of scope, and in this
+           system they surface only as Gateway's reserved 501 routes.
+      C-I  Every glob is project-relative with forward slashes and no parent-directory segment,
+           so the project restores identically from its own directory and from the repository
+           root, which is the build context of every service Dockerfile.
+      No secret, key, connection string or token appears here in any form.
+
+    RULES POSITION
+    review_rules returns exactly "No user rules provided.", so no user-specified rule governs
+    this file. The enterprise-standard baseline of AAP 0.7.2 applies in its place and is honoured
+    above: warnings as errors inherited and never relaxed, central package management with no
+    floating version, a clean dependency audit at restore, no secret in source, and explicitly
+    versioned contracts as the only permitted cross-service coupling.
+    ==========================================================================================
+  -->
+
+  <PropertyGroup>
+    <!-- Project-local values only; everything else is inherited from Directory.Build.props. -->
+    <RootNamespace>PowerFramework.Contracts</RootNamespace>
+    <AssemblyName>PowerFramework.Contracts</AssemblyName>
+    <!-- Consumed exclusively by ProjectReference inside this repository, never pushed to a feed. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup Label="Package references : exactly three, versionless">
+
+    <!--
+      gRPC server and client support, and the Grpc.Tools build integration that compiles the
+      Protobuf items below. Grpc.Tools and Google.Protobuf arrive transitively (Google.Protobuf
+      resolves to 3.31.1 because Grpc.AspNetCore 2.83.0 constrains it), so referencing either
+      explicitly would be scope creep against C-B and would risk pinning a conflicting version.
+    -->
+    <PackageReference Include="Grpc.AspNetCore" />
+
+    <!--
+      THE OPENAPI OBJECT MODEL AND ITS ASP.NET CORE INTEGRATION, AND WHY BOTH BELONG HERE.
+
+      This project is the whole published boundary, not the gRPC half of it: alongside the three
+      .proto files it carries OpenApi/gateway.v1.yaml and OpenApi/security.v1.yaml, which are the
+      source of truth for contracts C-01, C-02, C-09 and C-10. Microsoft.AspNetCore.OpenApi is the
+      package those documents are described against, so the boundary project declares it rather than
+      leaving the REST half of its own contract undeclared.
+
+      Microsoft.OpenApi is the MANDATORY companion, and the reason is a security one rather than a
+      compile one (AAP 0.5.2). Left transitive, its version is whichever one
+      Microsoft.AspNetCore.OpenApi names - a floor this repository does not own, and one that has
+      already sat inside the range the high-severity advisory NU1903 covers (every version at or
+      below 2.7.4); warnings are errors repository-wide, so restore fails outright on any version
+      inside it. A DIRECT reference is the mechanism by which central package management substitutes
+      the 2.12.0 pin for that transitive version. Advancing to the 3.x line instead breaks the build
+      with two CS0200 "cannot assign, read only" errors raised inside the SDK's own generated OpenAPI
+      XML-comment support file, because the 10.0.x source generator is compiled against the 2.x
+      object model. 2.12.0, the highest published 2.x, is the only value that is simultaneously
+      non-vulnerable, compatible and free of the upstream deprecation its lock-stepped YAML reader
+      carries at 2.11.0. Never suppress NU1903 and never move this reference to a floating range.
+
+      WHAT THE PAIR DOES NOT DO, stated because it is the argument for removing them.
+      Both flow onward to the four services that reach this project by ProjectReference,
+      including Persistence, which is gRPC-only and publishes no OpenAPI document. Nothing there
+      leans on the inherited reference: Gateway, Security and DataServices each declare
+      Microsoft.AspNetCore.OpenApi and Microsoft.OpenApi DIRECTLY, because the package ships
+      build/Microsoft.AspNetCore.OpenApi.targets and no buildTransitive folder, so the targets that
+      set InterceptorsNamespaces for its XML-comment source generator apply only to a project
+      referencing it directly - a service calling AddOpenApi() on an inherited reference alone fails
+      with CS9137, "the interceptors feature is not enabled in this namespace". The direct reference
+      in each REST service is what makes that work, and the transitive arrival adds no API any
+      service consumes. Persistence gains two unused references and no advisory, because the 2.12.0
+      pin travels with them.
+
+      Versionless, like every PackageReference in this repository: Directory.Packages.props is the
+      only version authority, and a local Version attribute here would defeat the two mandatory
+      security pins it exists to enforce.
+    -->
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="Microsoft.OpenApi" />
+
+  </ItemGroup>
+
+  <ItemGroup Label="Protobuf contracts : the gRPC half of the published boundary">
+
+    <!--
+      ProtoRoot IS THE CONTRACT WITH THE Proto/ FOLDER, so it is stated explicitly instead of
+      being left to Grpc.Tools' default. ProtoRoot is "Proto", therefore imports are BARE FILE
+      NAMES relative to that root: dataservices.v1.proto and persistence.v1.proto both write
+
+          import "common.v1.proto";
+
+      and never "Proto/common.v1.proto". Grpc.Tools' own _Protobuf_SetProtoRoot target defaults
+      the root to the project directory when the metadata is absent, in which case every import
+      would need a Proto/ prefix; the mismatch surfaces as a confusing protoc "file not found".
+      Verified empirically on the pinned SDK with a bare-file-name import across two proto files.
+
+      GrpcServices="Both" is required, not merely convenient: this single project serves the
+      generated SERVER base classes to DataServices (C-03, C-04) and Persistence (C-05 through
+      C-08) AND the generated CLIENT stubs to Gateway and DataServices. Either "Server" or
+      "Client" alone would break half the consumers.
+
+      One item covers the whole folder, nested subdirectories included. Forward slashes keep
+      evaluation identical on Linux, the target operating system, and on Windows. Grpc.Tools
+      leaves EnableDefaultProtobufItems false by default, so this is the only source of Protobuf
+      items and there is no duplicate-item hazard.
+
+      The None Remove serves the same purpose as the one in the OpenAPI group below: the SDK's
+      default None glob also matches these files, and removing them there leaves each .proto
+      carrying the Protobuf build action and nothing else.
+    -->
+    <None Remove="Proto/**/*.proto" />
+    <Protobuf Include="Proto/**/*.proto" ProtoRoot="Proto" GrpcServices="Both" />
+
+  </ItemGroup>
+
+  <ItemGroup Label="OpenAPI contracts : the REST half of the published boundary">
+
+    <!--
+      ITEM TYPE DECISION: EmbeddedResource, chosen over None with CopyToOutputDirectory.
+      These documents are the source of truth for C-01, C-02, C-09 and C-10, so they must never
+      be invisible to the build. Embedding is preferred over copying because
+        1. the documents travel inside PowerFramework.Contracts.dll and therefore survive the
+           multi-stage Dockerfile publish boundary, where a loose copied file can be dropped;
+        2. consumers and PowerFramework.Contracts.Tests read them with no file-path or
+           AppContext.BaseDirectory assumption, on any operating system;
+        3. the specification versions atomically with the assembly that carries it, which is
+           exactly the "explicitly versioned contracts as the only cross-service coupling"
+           baseline of AAP 0.7.2.
+      Logical resource names are the SDK default and therefore deterministic: RootNamespace plus
+      the relative directory with separators replaced by dots. OpenApi/gateway.v1.yaml is read as
+      "PowerFramework.Contracts.OpenApi.gateway.v1.yaml", and Assembly.GetManifestResourceNames
+      on this assembly enumerates the full set. Verified on the pinned SDK by a downstream project
+      reading the document back through GetManifestResourceStream.
+
+      The None Remove is what leaves each document carrying exactly one build action. The SDK's
+      default None glob is <None Include="**/*" /> less source files and .resx, so it already
+      matches OpenApi/**/*.yaml; removing them there first means each document is an
+      EmbeddedResource and nothing else. The rejected alternative, for the record, was
+      <None Include="OpenApi/**/*.yaml" CopyToOutputDirectory="PreserveNewest" />: measured on
+      this toolchain it re-includes what the default glob already carries and leaves a duplicate
+      None item in the evaluated project, and it publishes the document as a loose file that then
+      has to survive the container image boundary intact.
+    -->
+    <None Remove="OpenApi/**/*.yaml" />
+    <EmbeddedResource Include="OpenApi/**/*.yaml" />
+
+  </ItemGroup>
+
+</Project>
